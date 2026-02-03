@@ -191,12 +191,14 @@ pub struct BearerTokenProvider {
 ```
 
 Supports:
+
 - Static tokens (development)
 - Dynamic loading from secret managers
 - Background refresh with configurable interval
 - Token rotation without restart
 
 Secret source format: `provider:path:key`
+
 - `file:/etc/secrets/tokens`
 - `vault:secret/data/auth:bearer_tokens`
 - `aws:prod/auth/tokens:bearer`
