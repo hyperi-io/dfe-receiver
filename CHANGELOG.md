@@ -1,3 +1,10 @@
+## [1.4.7](https://github.com/hypersec-io/dfe-receiver/compare/v1.4.6...v1.4.7) (2026-02-03)
+
+
+### Bug Fixes
+
+* add typos.toml to configure spell checker ([f54e349](https://github.com/hypersec-io/dfe-receiver/commit/f54e3492c665f0018cdfd6eac60baa46278147ec))
+
 ## [1.4.6](https://github.com/hypersec-io/dfe-receiver/compare/v1.4.5...v1.4.6) (2026-02-03)
 
 
