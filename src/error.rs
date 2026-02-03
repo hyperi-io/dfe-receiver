@@ -61,6 +61,10 @@ pub enum Error {
     /// Shutdown requested.
     #[error("shutdown requested")]
     Shutdown,
+
+    /// Secrets management error.
+    #[error("secrets error: {0}")]
+    Secrets(#[from] hs_rustlib::SecretsError),
 }
 
 /// Result type alias for dfe-receiver operations.
