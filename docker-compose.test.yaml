@@ -1,0 +1,72 @@
+# Project:   dfe-receiver
+# File:      docker-compose.test.yaml
+# Purpose:   Test environment with Kafka (Strimzi/KRaft)
+# Language:  Docker Compose
+#
+# License:   LicenseRef-HyperSec-EULA
+# Copyright: (c) 2026 HyperSec
+#
+# Usage:
+#   docker compose -f docker-compose.test.yaml up -d
+#   cargo test --test integration_kafka -- --ignored
+#   docker compose -f docker-compose.test.yaml down -v
+#
+# Note: Uses quay.io/strimzi/kafka in KRaft mode (no Zookeeper required).
+
+services:
+  kafka:
+    image: quay.io/strimzi/kafka:0.44.0-kafka-3.8.1
+    container_name: dfe-receiver-kafka
+    command:
+      - sh
+      - -c
+      - |
+        export CLUSTER_ID=$$(bin/kafka-storage.sh random-uuid) && \
+        bin/kafka-storage.sh format -t $$CLUSTER_ID -c config/kraft/server.properties && \
+        bin/kafka-server-start.sh config/kraft/server.properties \
+          --override advertised.listeners=PLAINTEXT://localhost:9092 \
+          --override listeners=PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093 \
+          --override listener.security.protocol.map=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT \
+          --override inter.broker.listener.name=PLAINTEXT \
+          --override controller.quorum.voters=1@localhost:9093 \
+          --override controller.listener.names=CONTROLLER \
+          --override node.id=1 \
+          --override process.roles=broker,controller \
+          --override log.dirs=/tmp/kraft-combined-logs \
+          --override auto.create.topics.enable=true \
+          --override num.partitions=3 \
+          --override default.replication.factor=1
+    ports:
+      - "9092:9092"
+    environment:
+      LOG_DIR: /tmp/logs
+      KAFKA_HEAP_OPTS: "-Xmx512M -Xms256M"
+    healthcheck:
+      test: ["CMD-SHELL", "bin/kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    networks:
+      - dfe-test
+
+  # Optional: Kafbat UI for debugging
+  kafbat-ui:
+    image: ghcr.io/kafbat/kafka-ui:latest
+    container_name: dfe-receiver-kafbat
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks:
+      - dfe-test
+    profiles:
+      - ui
+
+networks:
+  dfe-test:
+    driver: bridge

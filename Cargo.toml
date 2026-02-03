@@ -1,0 +1,128 @@
+# Project:   dfe-receiver
+# File:      Cargo.toml
+# Purpose:   High-performance HTTP/gRPC receiver for data ingestion
+# Language:  Rust
+#
+# License:   LicenseRef-HyperSec-EULA
+# Copyright: (c) 2026 HyperSec
+
+[package]
+name = "dfe-receiver"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "High-performance HTTP/gRPC receiver for PB/s scale data ingestion"
+license = "LicenseRef-HyperSec-EULA"
+repository = "https://github.com/hypersec-io/dfe-receiver"
+
+[dependencies]
+# HyperSec shared library
+hs-rustlib = { git = "https://github.com/hypersec-io/hs-rustlib", features = [
+    "config",
+    "logger",
+    "metrics",
+    "http-server",
+    "transport-kafka",
+    "spool",
+    "tiered-sink",
+    "runtime",
+    "secrets",
+] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tokio-stream = "0.1"
+futures-core = "0.3"
+
+# JSON (SIMD-accelerated)
+sonic-rs = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# HTTP server
+axum = "0.7"
+bytes = "1"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["timeout", "compression-zstd"] }
+http = "1"
+hyper = { version = "1", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "server-auto", "service"] }
+
+# gRPC server
+tonic = "0.12"
+prost = "0.13"
+
+# Kafka producer
+rdkafka = { version = "0.36", features = ["cmake-build", "ssl", "sasl"] }
+
+# TLS
+rustls = "0.23"
+rustls-pemfile = "2"
+tokio-rustls = "0.26"
+
+# Performance
+rustc-hash = "2"
+compact_str = "0.8"
+parking_lot = "0.12"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+
+# Utilities
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+async-trait = "0.1"
+sysinfo = "0.32"
+
+# Optional allocators
+tikv-jemallocator = { version = "0.6", optional = true }
+mimalloc = { version = "0.1", optional = true }
+
+[build-dependencies]
+tonic-build = "0.12"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+tempfile = "3"
+proptest = "1"
+tokio-test = "0.4"
+reqwest = { version = "0.12", features = ["json"] }
+dotenvy = "0.15"
+
+[features]
+default = []
+jemalloc = ["dep:tikv-jemallocator"]
+mimalloc = ["dep:mimalloc"]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"
+opt-level = 3
+
+[profile.bench]
+lto = "thin"
+codegen-units = 1
+
+[[bench]]
+name = "throughput"
+harness = false
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
