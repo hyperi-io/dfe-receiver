@@ -1,0 +1,163 @@
+# 
+# HyperSec XDR Vector Component Template
+# Purpose: HyperSec Transform Receiver container configuration for setting tags.event.category values
+# Deployment Types: AWS, SaaS
+# Release Date: 2024-03-27
+# CT Build: © HyperSec 2024
+#
+# Required environment variables:
+# - VECTOR_ENRICHMENT_PATH: the path to the maxmind enrichment files
+# - FIELD_SETTER_ITERATION_GROUP: string iterator for the enrichment csv used
+
+enrichment_tables:
+  route_filter_map:
+    type: "file"
+    file:
+      path: "${VECTOR_ENRICHMENT_PATH:?err}/hypersec-receiver-route-filter.csv"
+      encoding:
+        type: "csv"
+    schema:
+      iteration_group: "string"
+      operation: "string"
+      match_field: "string"
+      match_type: "string"
+      match_value: "string"
+      match_extra: "string"
+      set_field: "string"
+      set_value: "string"
+      comment: "string"
+
+transforms:
+  hypersec_receiver_transform_event_category:
+    type: remap
+    inputs: ${HYPERSEC_RECEIVER_TRANSFORM_EVENT_CATEGORY_INPUT:?err}
+    source: |
+      # Early exit for pre-categorised events (saves 90% of processing)
+      if exists(.tags.event.category) && .tags.event.category != "unmatched" && .tags.event.category != "dlq" {
+        # Fast path: minimal processing
+        if !exists(.tags.event.org_id) {
+          if exists(.org_id) {
+            .tags.event.org_id = .org_id
+          } else {
+            .tags.event.org_id = "unknown"
+            .org_id = "unknown"
+          }
+        } else {
+          .org_id = .tags.event.org_id
+        }
+      } else {
+        # Main processing - pure string operations only
+        is_processed = false
+        match_field_path = split("${MATCH_FIELD_PATH:-host}", ".")
+        match_value = get!(., match_field_path)
+        match_value_str = to_string!(match_value)
+
+        # Get all routing rules from table
+        entries, entries_err = find_enrichment_table_records(
+          "route_filter_map",
+          { "iteration_group": "${FIELD_SETTER_ITERATION_GROUP:-default}" },
+          case_sensitive: false
+        )
+
+        if entries_err == null && entries != null {
+          # Process each rule with string operations
+          for_each(entries) -> |_, row| {
+            if !is_processed {
+              match_type = to_string!(row.match_type)
+              match_value_config = to_string!(row.match_value)
+              match_extra = to_string!(row.match_extra)
+              is_match = false
+
+              # String operations for pattern matching
+              if match_type == "exact" {
+                is_match = match_value_str == match_value_config
+              } else if match_type == "starts_with" {
+                is_match = starts_with(match_value_str, match_value_config)
+              } else if match_type == "ends_with" {
+                is_match = ends_with(match_value_str, match_value_config)
+              } else if match_type == "contains" {
+                is_match = contains(match_value_str, match_value_config)
+              } else if match_type == "prefix_and_suffix" {
+                is_match = starts_with(match_value_str, match_value_config) && ends_with(match_value_str, match_extra)
+              } else if match_type == "length_min" {
+                min_len_result, min_len_err = to_int(match_value_config)
+                if min_len_err == null {
+                  is_match = length(match_value_str) >= min_len_result
+                }
+              } else if match_type == "length_max" {
+                max_len_result, max_len_err = to_int(match_value_config)
+                if max_len_err == null {
+                  is_match = length(match_value_str) <= max_len_result
+                }
+              } else if match_type == "length_range" {
+                min_len_result, min_len_err = to_int(match_value_config)
+                max_len_result, max_len_err = to_int(match_extra)
+                if min_len_err == null && max_len_err == null {
+                  len = length(match_value_str)
+                  is_match = len >= min_len_result && len <= max_len_result
+                }
+              } else if match_type == "not_contains" {
+                is_match = !contains(match_value_str, match_value_config)
+              } else if match_type == "not_starts_with" {
+                is_match = !starts_with(match_value_str, match_value_config)
+              } else if match_type == "not_ends_with" {
+                is_match = !ends_with(match_value_str, match_value_config)
+              }
+
+              # Execute operation if match found
+              if is_match {
+                operation = to_string!(row.operation)
+
+                if operation == "route" {
+                  set_field_path = split!(row.set_field, ".")
+                  . = set!(value: ., path: set_field_path, data: row.set_value)
+                  is_processed = true
+                } else if operation == "drop" {
+                  abort
+                } else if operation == "dlq" {
+                  .tags.event.category = "dlq"
+                  .org_id = "dfesystem"
+                  .tags.event.org_id = "dfesystem"
+                  is_processed = true
+                }
+              }
+            }
+          }
+        }
+
+        # Fallback logic for unmatched events
+        if !is_processed {
+          if exists(."@metadata") && exists(."@metadata".event_category) {
+            .tags.event.category = ."@metadata".event_category
+          } else if exists(."@metadata") && exists(."@metadata".beat) {
+            beat_str = to_string!(."@metadata".beat)
+            .tags.event.category = "logs_beats_" + beat_str
+          } else if exists(.tags.event.type) && starts_with(to_string!(.tags.event.type), "event.syslog") {
+            .tags.event.category = "logs_syslog"
+          } else if exists(.tags.event.type) && !exists(.tags.event.category) {
+            .tags.event.category = .tags.event.type
+          } else {
+            .tags.event.category = "unmatched"
+          }
+        }
+
+        # Org ID handling with proper null checks
+        if !exists(.tags.event.org_id) {
+          if exists(.org_id) && .org_id != null {
+            .tags.event.org_id = .org_id
+          } else {
+            .tags.event.org_id = "unknown"
+            .org_id = "unknown"
+          }
+        } else {
+          .org_id = .tags.event.org_id
+        }
+      }
+
+      # String normalisation only if needed
+      if exists(.tags.event.category) {
+        category_str = to_string!(.tags.event.category)
+        if contains(category_str, ".") || contains(category_str, "-") {
+          .tags.event.category = replace(replace(category_str, ".", "_"), "-", "_")
+        }
+      }

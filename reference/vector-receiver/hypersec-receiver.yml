@@ -1,0 +1,178 @@
+# HyperSec Receiver container configuration
+#
+# v1.6    2024-01-03    Merge performant Beats and syslog remap
+#                       Rename stages to align with standard
+# v1.5    2023-11-10    Field mapper update
+# v1.4    2023-10-31    Updated to collapsed customer topics
+# v1.3.2  2023-10-23    _tags -> tags (deperacated XDR 1.1 _tags)
+#                       _customer_uid -> org_id universally now (deperacated XDR 1.x _customer_uid)
+#                       Removal of underscore prefixes from standard schema header
+# v1.3.1  2023-10-16    Kafka MTLS correction
+# v1.3    2023-10-15    MTLS update
+#                       Paramterisation fixes
+#
+# (c) HyperSec 2023
+#
+# Required environment variables
+#
+# VECTOR_DATA_DIR =               the path to put the vector buffer
+# VECTOR_ENRICHMENT_PATH =        the mounted path for the enrichment sources (csv,mmdb)
+# VECTOR_MTLS_PATH =              the path for the pki certificates landed from Secret Manager or Hashicorp Vault for local vector TLS
+# KAFKA_MTLS_PATH =               the path for the pki certificates landed from Secret Manager or Hashicorp Vault for MTLS to Kafka/MSK
+# PROMETHEUS_EXPORTER =           host and port for the Prometheus exporter
+# KAFKA_BROKERS =                 the comma delimited list of hostname:port for kafka brokers
+# FIELD_SETTER_ITERATION_GROUP =  iteration_group value for querying hypersec-receiver-field-setter.csv
+#
+# Offline integration testing /dev notes
+# Ensure manage_etc_hosts: false in /etc/cloud/cloud.cfg
+# /etc/hosts contains
+# 127.0.0.1 localhost receiver.ghostneedle.io collector.ghostneedle.io
+# Execute source vector-dev-env.sh before execution
+# Comment out tls section for 09_kafka if the test cluster has no TLS
+#
+
+data_dir: "${VECTOR_DATA_DIR:?err}"
+
+api:
+  enabled: true
+  address: "0.0.0.0:8686"
+
+
+enrichment_tables:
+  event_category_map:
+    type: "file"
+    file:
+      # This file is copied from S3
+      path: "${VECTOR_ENRICHMENT_PATH:?err}/hypersec-receiver-event-category-map.csv"
+      encoding:
+        type: "csv"
+    schema:
+      iteration_group: "string"
+      match_field: "string"
+      match_field_value: "string"
+      set_field: "string"
+      set_value: "string"
+      comment: "string"
+
+sources:
+  001_internal_metrics:
+    type: internal_metrics
+
+  002_hypercollector:
+    type: vector
+    address: '0.0.0.0:6000'
+    tls:
+      enabled: true
+      # These files sourced from Secrets Manager or Hashicorp Vault
+      # https://docs.aws.amazon.com/secretsmanager/latest/userguide/integrating_csi_driver.html
+      ca_file: "${VECTOR_MTLS_PATH:?err}/vector-receiver-ca.crt"
+      key_file: "${VECTOR_MTLS_PATH:?err}/vector-receiver.key"
+      crt_file: "${VECTOR_MTLS_PATH:?err}/vector-receiver.crt"
+
+transforms:
+  101_route_topic:
+    type: remap
+    inputs:
+      - 002_hypercollector
+    source: |
+      is_mapped = false
+       # Check for remaps in hypersec-receiver-event-category-map csv  
+      category_map = find_enrichment_table_records("event_category_map",
+        {
+          "iteration_group": "${FIELD_SETTER_ITERATION_GROUP:?err}",
+        },
+        case_sensitive: false) ?? []
+      for_each(category_map) -> |_index, key| {
+        if !is_mapped && (get(value: ., path: split!(key.match_field, ".")) ?? "") == key.match_field_value {
+          . = set!(value: ., path: split!(key.set_field, "."), data: key.set_value)
+          is_mapped = true  # Skip further mapping once the first is found
+        }
+      }
+      # Source type specific meta data matching to topic
+      if !is_mapped {
+        if exists(."@metadata".event_category) {
+          # .@metadata.event_category is the default location for source specific sub-maps when adding a custom Beats source
+          .tags.event.category = ."@metadata".event_category
+        } else if exists(."@metadata".beat) {
+          # Generic beats sources
+          .tags.event.category = "logs_beats_"+ to_string(."@metadata".beat) ?? "unknown"
+        } else if exists(.tags.event.type) {
+          if starts_with(to_string!(.tags.event.type),"event.syslog") {
+            # Remap to base syslog if there's no is_mapped
+            .tags.event.category = "logs_syslog"
+          } else {
+            # Fallback to event type
+            .tags.event.category = .tags.event.type
+          }
+        }
+      }
+      # Set the catch-all defaults if .tags.event.org_id or .tags.event.category are not set
+      if !exists(.tags.event.category) {
+        .tags.event.category = "unmatched"
+      }
+      if !exists(.org_id) && !exists(.tags.event.org_id) {
+        .tags.event.org_id = "unknown"
+      }
+      # Flatten any dots to underscores
+      .tags.event.category = replace!(.tags.event.category, ".", "_")
+
+
+sinks:      
+  201_prometheus_exporter:
+    type: prometheus_exporter
+    inputs:
+      - 001_internal_metrics
+    address: "${PROMETHEUS_EXPORTER:-0.0.0.0:9090}"
+
+  202_sink_kafka_aws_saas:
+    type: kafka
+    inputs:
+      - 101_route_topic
+    bootstrap_servers: "${KAFKA_BROKERS:?err}"
+    topic: "{{ tags.event.category }}_land"
+    tls:
+      enabled: true
+      key_file: "${KAFKA_MTLS_PATH:?err}/tls.key"
+      crt_file: "${KAFKA_MTLS_PATH:?err}/tls.crt"
+    encoding:
+      codec: json
+    buffer:
+      max_size: ${VECTOR_BUFFER_SIZE:-524288000}
+      type: disk
+      when_full: block
+    # https://github.com/confluentinc/librdkafka/blob/master/CONFIGURATION.md
+    # queue.buffering defaults are OK with this linger setting
+    librdkafka_options:
+      # -------------------------------------------------------------------------
+      #    High‑throughput batching (≈ 8 MiB target ≤ 10 MiB broker limit)
+      # -------------------------------------------------------------------------
+      batch.size: "8388608"                 # 8 MiB max compressed record‑batch
+      linger.ms: "20"                       # 20 ms fill window; adjust 10‑30 ms
+      batch.num.messages: "10000"           # leave default; included for clarity
+
+      # -------------------------------------------------------------------------
+      #    Reliability & ordering
+      # -------------------------------------------------------------------------
+      acks: "all"                           # durability without big perf hit
+
+      # -------------------------------------------------------------------------
+      #    Local queue & memory guard‑rails
+      # -------------------------------------------------------------------------
+      queue.buffering.max.kbytes: "1048576" # 1 GiB; keeps ~120 batches in flight
+      
+      # -------------------------------------------------------------------------
+      #    Compression & wire efficiency
+      # -------------------------------------------------------------------------
+      compression.type: "zstd"              # or "lz4" if broker < 2.8
+      # (Producer automatically honours broker‑side limits.)
+
+      # -------------------------------------------------------------------------
+      #    TCP & instrumentation
+      # -------------------------------------------------------------------------
+      socket.nagle.disable: "true"
+      statistics.interval.ms: "1000"        # 1 s JSON stats for dashboards
+
+      # -------------------------------------------------------------------------
+      #    Keep requests under the broker ceiling (10 MiB)
+      # -------------------------------------------------------------------------
+      message.max.bytes: "8388608"          # 8 MiB (must ≥ batch.size)

@@ -1,4 +1,4 @@
-# TODO - [Project Name]
+# TODO - dfe-receiver
 
 This is the **single source of truth** for all tasks and progress.
 
@@ -8,8 +8,7 @@ This is the **single source of truth** for all tasks and progress.
 
 Tasks currently being worked on. Only one task should be `[IN PROGRESS]` at a time.
 
-- [ ] [Task description] `[IN PROGRESS]`
-- [ ] [Next task] `[PENDING]`
+_No active tasks_
 
 ---
 
@@ -17,13 +16,7 @@ Tasks currently being worked on. Only one task should be `[IN PROGRESS]` at a ti
 
 When planning complex features, break them down here before starting.
 
-### [Feature/Epic Name]
-
-**Goal:** [What this achieves]
-
-1. [ ] Step 1: [Description]
-2. [ ] Step 2: [Description]
-3. [ ] Step 3: [Description]
+_No features in planning_
 
 ---
 
@@ -31,7 +24,16 @@ When planning complex features, break them down here before starting.
 
 Move tasks here when done. Clear this section at end of session.
 
-- [x] [Completed task]
+- [x] Use hs-rustlib CircuitBreaker in TieredSink (removed redundant implementation)
+- [x] Add `secrets` feature to hs-rustlib dependency
+- [x] Create GitHub repo at hypersec-io/dfe-receiver and push initial commit
+- [x] Add bearer token authentication support
+  - [x] Add BearerConfig to AuthConfig
+  - [x] Create BearerTokenProvider with secret manager integration
+  - [x] Add validate_bearer_auth() for Authorization header
+  - [x] Update auth middleware for bearer mode
+  - [x] Add From<SecretsError> conversion
+  - [x] Add comprehensive tests
 
 ---
 
@@ -41,21 +43,26 @@ Future work, ordered by priority.
 
 ### High Priority
 
-- [ ] [Critical task]
+- [ ] gRPC Vector sink protocol implementation
+- [ ] TLS/mTLS certificate loading from secret manager
+- [ ] Integration tests for bearer auth with real secret providers
 
 ### Medium Priority
 
-- [ ] [Important task]
+- [ ] KEDA scaling metrics endpoint
+- [ ] Disk spillover implementation (currently in-memory only)
+- [ ] Config hot-reload for auth settings
 
 ### Low Priority
 
-- [ ] [Nice-to-have]
+- [ ] Performance benchmarks
+- [ ] Documentation for deployment
 
 ---
 
 ## Blocked
 
-- [ ] [Blocked task] **Blocked by:** [Reason/dependency]
+_None_
 
 ---
 
@@ -77,8 +84,3 @@ This file is the **single source of truth** for tasks and progress.
 - `[IN PROGRESS]` - Currently working on
 - `[BLOCKED]` - Waiting on something
 - `[x]` - Completed (checkbox checked)
-
-**WBS Format:**
-
-When breaking down complex work, use numbered steps under a feature heading.
-Each step should be independently completable and testable.
