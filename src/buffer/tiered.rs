@@ -1,20 +1,31 @@
 // Project:   dfe-receiver
 // File:      src/buffer/tiered.rs
-// Purpose:   TieredSink wrapper for disk spillover
+// Purpose:   TieredSink wrapper with circuit breaker
 // Language:  Rust
 //
 // License:   LicenseRef-HyperSec-EULA
 // Copyright: (c) 2026 HyperSec
 
-//! TieredSink wrapper providing disk spillover when sinks are unavailable.
+//! TieredSink wrapper providing in-memory buffering when sinks are unavailable.
 //!
-//! Uses hs-rustlib's CircuitBreaker and Spool for resilient message delivery
-//! with automatic drain when the downstream sink recovers.
+//! Uses hs-rustlib's CircuitBreaker for health tracking with half-open state support.
+//! Messages are buffered in memory during outages and drained when the downstream
+//! sink recovers.
+//!
+//! ## Design Decision: No Disk Spillover
+//!
+//! Disk spillover was considered but rejected for PB/s scale ingestion:
+//!
+//! 1. **K8s memory limits** - Pods are OOMKilled when memory exceeded, triggering
+//!    KEDA scale-up. This is the desired behavior.
+//! 2. **Client-side buffering** - Vector has its own disk buffer for retries.
+//! 3. **Backpressure** - Circuit breaker + 503 responses propagate pressure upstream.
+//! 4. **Simplicity** - No disk I/O on hot path, no persistent volumes needed.
+//! 5. **Performance** - At PB/s scale, disk becomes a bottleneck.
 
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -27,51 +38,44 @@ use crate::config::BufferConfig;
 use crate::error::Result;
 use crate::sink::Sink;
 
-/// Message queued for spillover.
+/// Message queued during sink unavailability.
 #[derive(Clone)]
 struct SpillMessage {
     topic: String,
     payload: Bytes,
-    #[allow(dead_code)]
-    queued_at: Instant,
 }
 
-/// TieredSink wraps a primary sink and spills to disk on failure.
+/// TieredSink wraps a primary sink with circuit breaker and in-memory buffering.
 ///
 /// Uses hs-rustlib's CircuitBreaker for health tracking with half-open state support.
+/// When the primary sink fails, messages are buffered in memory and automatically
+/// drained when the sink recovers.
 pub struct TieredSink<S: Sink> {
     /// Primary sink (hot path).
     primary: Arc<S>,
-    /// Spool path for disk spillover (reserved for future disk spill).
-    #[allow(dead_code)]
-    spool_path: PathBuf,
-    /// In-memory spillover queue (before disk).
+    /// In-memory spillover queue.
     spill_queue: Mutex<Vec<SpillMessage>>,
-    /// Maximum queue size before spilling to disk.
+    /// Maximum queue size before rejecting.
     max_queue_size: usize,
-    /// Maximum time before spilling to disk (reserved for future use).
-    #[allow(dead_code)]
-    max_queue_age: Duration,
     /// Circuit breaker from hs-rustlib with half-open state support.
     circuit: CircuitBreaker,
-    /// Messages spilled to disk.
-    spilled_count: AtomicU64,
-    /// Messages drained from disk.
+    /// Messages queued during outage.
+    queued_count: AtomicU64,
+    /// Messages drained after recovery.
     drained_count: AtomicU64,
 }
 
 impl<S: Sink + Send + Sync + 'static> TieredSink<S> {
     /// Create a new tiered sink.
+    #[allow(unused_variables)]
     pub fn new(primary: S, config: &BufferConfig) -> Self {
         Self {
             primary: Arc::new(primary),
-            spool_path: PathBuf::from(&config.spool_path),
             spill_queue: Mutex::new(Vec::with_capacity(1000)),
             max_queue_size: 1000,
-            max_queue_age: Duration::from_secs(5),
             // Use hs-rustlib CircuitBreaker with proper half-open state
             circuit: CircuitBreaker::new(5, Duration::from_secs(30)),
-            spilled_count: AtomicU64::new(0),
+            queued_count: AtomicU64::new(0),
             drained_count: AtomicU64::new(0),
         }
     }
@@ -83,22 +87,18 @@ impl<S: Sink + Send + Sync + 'static> TieredSink<S> {
         matches!(state, CircuitState::Closed | CircuitState::HalfOpen)
     }
 
-    /// Spill a message to the queue.
-    fn spill_message(&self, topic: String, payload: Bytes) {
+    /// Queue a message for later delivery.
+    fn queue_message(&self, topic: String, payload: Bytes) {
         let mut queue = self.spill_queue.lock();
-        queue.push(SpillMessage {
-            topic,
-            payload,
-            queued_at: Instant::now(),
-        });
-        self.spilled_count.fetch_add(1, Ordering::Relaxed);
+        queue.push(SpillMessage { topic, payload });
+        self.queued_count.fetch_add(1, Ordering::Relaxed);
 
         if queue.len() >= self.max_queue_size {
-            warn!(queue_size = queue.len(), "Spill queue at capacity");
+            warn!(queue_size = queue.len(), "Queue at capacity - backpressure recommended");
         }
     }
 
-    /// Try to drain spilled messages.
+    /// Try to drain queued messages.
     async fn try_drain(&self) -> usize {
         // Only drain when circuit allows traffic
         if !self.should_use_hot_path().await {
@@ -110,7 +110,7 @@ impl<S: Sink + Send + Sync + 'static> TieredSink<S> {
             if queue.is_empty() {
                 return 0;
             }
-            // Take up to 100 messages
+            // Take up to 100 messages per drain cycle
             let count = queue.len().min(100);
             queue.drain(0..count).collect()
         };
@@ -127,8 +127,8 @@ impl<S: Sink + Send + Sync + 'static> TieredSink<S> {
                 Err(e) => {
                     // Put back failed messages
                     self.circuit.record_failure().await;
-                    self.spill_message(msg.topic, msg.payload);
-                    debug!(error = %e, "Drain failed, re-spilling message");
+                    self.queue_message(msg.topic, msg.payload);
+                    debug!(error = %e, "Drain failed, re-queuing message");
                     break;
                 }
             }
@@ -136,7 +136,7 @@ impl<S: Sink + Send + Sync + 'static> TieredSink<S> {
 
         if drained > 0 {
             self.drained_count.fetch_add(drained as u64, Ordering::Relaxed);
-            debug!(drained = drained, remaining = count - drained, "Drained spilled messages");
+            debug!(drained = drained, remaining = count - drained, "Drained queued messages");
         }
 
         drained
@@ -148,7 +148,7 @@ impl<S: Sink + Send + Sync + 'static> TieredSink<S> {
             circuit_state: self.circuit.state().await,
             consecutive_failures: self.circuit.consecutive_failures(),
             queue_size: self.spill_queue.lock().len(),
-            spilled_total: self.spilled_count.load(Ordering::Relaxed),
+            queued_total: self.queued_count.load(Ordering::Relaxed),
             drained_total: self.drained_count.load(Ordering::Relaxed),
         }
     }
@@ -184,9 +184,9 @@ pub struct TieredSinkStats {
     pub consecutive_failures: u32,
     /// Current queue size.
     pub queue_size: usize,
-    /// Total messages spilled.
-    pub spilled_total: u64,
-    /// Total messages drained.
+    /// Total messages queued during outages.
+    pub queued_total: u64,
+    /// Total messages drained after recovery.
     pub drained_total: u64,
 }
 
@@ -200,11 +200,11 @@ impl TieredSinkStats {
 
 #[async_trait]
 impl<S: Sink + Send + Sync + 'static> Sink for TieredSink<S> {
-    /// Send a message, spilling to disk on failure.
+    /// Send a message, queuing on failure.
     async fn send(&self, topic: &str, payload: Bytes) -> Result<()> {
-        // Fast path: if circuit is open, spill immediately
+        // Fast path: if circuit is open, queue immediately
         if !self.should_use_hot_path().await {
-            self.spill_message(topic.to_string(), payload);
+            self.queue_message(topic.to_string(), payload);
             return Ok(());
         }
 
@@ -216,14 +216,14 @@ impl<S: Sink + Send + Sync + 'static> Sink for TieredSink<S> {
             }
             Err(e) => {
                 self.circuit.record_failure().await;
-                debug!(error = %e, topic = topic, "Primary send failed, spilling");
-                self.spill_message(topic.to_string(), payload);
-                Ok(()) // Return Ok - message is spilled, not lost
+                debug!(error = %e, topic = topic, "Primary send failed, queuing");
+                self.queue_message(topic.to_string(), payload);
+                Ok(()) // Return Ok - message is queued, not lost
             }
         }
     }
 
-    /// Flush the sink and try to drain spilled messages.
+    /// Flush the sink and try to drain queued messages.
     async fn flush(&self) -> Result<()> {
         // Flush primary
         if let Err(e) = self.primary.flush().await {
@@ -291,8 +291,6 @@ mod tests {
         BufferConfig {
             memory_limit: 0,
             pressure_threshold: 0.8,
-            spool_path: "/tmp/test-spool".to_string(),
-            spool_max_bytes: 1024 * 1024,
         }
     }
 
@@ -305,19 +303,19 @@ mod tests {
         assert!(result.is_ok());
 
         let stats = tiered.stats().await;
-        assert_eq!(stats.spilled_total, 0);
+        assert_eq!(stats.queued_total, 0);
     }
 
     #[tokio::test]
-    async fn test_tiered_sink_failure_spills() {
+    async fn test_tiered_sink_failure_queues() {
         let primary = TestSink::new(100); // Always fail
         let tiered = TieredSink::new(primary, &test_config());
 
         let result = tiered.send("test", Bytes::from("data")).await;
-        assert!(result.is_ok()); // Should return Ok (spilled)
+        assert!(result.is_ok()); // Should return Ok (queued)
 
         let stats = tiered.stats().await;
-        assert_eq!(stats.spilled_total, 1);
+        assert_eq!(stats.queued_total, 1);
         assert_eq!(stats.queue_size, 1);
     }
 
@@ -342,7 +340,7 @@ mod tests {
         let primary = TestSink::new(3); // Fail first 3, then succeed
         let tiered = TieredSink::new(primary, &test_config());
 
-        // First 3 will fail and spill
+        // First 3 will fail and queue
         for _ in 0..3 {
             let _ = tiered.send("test", Bytes::from("data")).await;
         }
@@ -364,7 +362,7 @@ mod tests {
         assert!(!stats.circuit_open());
         assert_eq!(stats.consecutive_failures, 0);
         assert_eq!(stats.queue_size, 0);
-        assert_eq!(stats.spilled_total, 0);
+        assert_eq!(stats.queued_total, 0);
         assert_eq!(stats.drained_total, 0);
     }
 }

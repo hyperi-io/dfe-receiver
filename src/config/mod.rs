@@ -182,10 +182,10 @@ pub struct TlsConfig {
     /// Enable TLS.
     pub enabled: bool,
 
-    /// Path to certificate file.
+    /// Path to certificate file (local file path).
     pub cert_file: Option<String>,
 
-    /// Path to private key file.
+    /// Path to private key file (local file path).
     pub key_file: Option<String>,
 
     /// Path to CA certificate for client verification (mTLS).
@@ -193,6 +193,22 @@ pub struct TlsConfig {
 
     /// Client certificate requirement (none, optional, required).
     pub client_auth: String,
+
+    /// Secret source for certificate (overrides cert_file).
+    /// Format: "provider:path:key" (e.g., "vault:secret/tls:cert")
+    pub cert_secret: Option<String>,
+
+    /// Secret source for private key (overrides key_file).
+    /// Format: "provider:path:key" (e.g., "vault:secret/tls:key")
+    pub key_secret: Option<String>,
+
+    /// Secret source for CA certificate (overrides ca_file).
+    /// Format: "provider:path:key" (e.g., "vault:secret/tls:ca")
+    pub ca_secret: Option<String>,
+
+    /// Refresh interval for secrets in seconds.
+    /// Default: 3600 (1 hour)
+    pub refresh_interval_secs: u64,
 }
 
 impl Default for TlsConfig {
@@ -203,6 +219,10 @@ impl Default for TlsConfig {
             key_file: None,
             ca_file: None,
             client_auth: "none".to_string(),
+            cert_secret: None,
+            key_secret: None,
+            ca_secret: None,
+            refresh_interval_secs: 3600,
         }
     }
 }
@@ -578,20 +598,23 @@ impl Default for LoaderConfig {
 }
 
 /// Buffer and memory configuration.
+///
+/// ## Design Decision: No Disk Spillover
+///
+/// Memory-only buffering is used because:
+/// 1. K8s memory limits trigger OOMKill, which triggers KEDA scale-up
+/// 2. Vector clients have their own disk buffers for retries
+/// 3. Circuit breaker + 503 responses propagate backpressure upstream
+/// 4. Disk I/O would bottleneck the hot path at PB/s scale
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BufferConfig {
-    /// Maximum memory for buffers (0 = auto-detect).
+    /// Maximum memory for buffers in bytes (0 = auto-detect 67% of available).
     pub memory_limit: usize,
 
     /// Memory pressure threshold (0.0-1.0).
+    /// When usage exceeds this, backpressure is applied (503 responses).
     pub pressure_threshold: f64,
-
-    /// Path for disk spool.
-    pub spool_path: String,
-
-    /// Maximum spool size in bytes.
-    pub spool_max_bytes: usize,
 }
 
 impl Default for BufferConfig {
@@ -599,8 +622,6 @@ impl Default for BufferConfig {
         Self {
             memory_limit: 0, // Auto-detect
             pressure_threshold: 0.8,
-            spool_path: "/var/spool/dfe-receiver".to_string(),
-            spool_max_bytes: 10 * 1024 * 1024 * 1024, // 10GB
         }
     }
 }

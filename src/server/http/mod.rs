@@ -30,7 +30,7 @@ use crate::error::{Error, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
 use crate::server::auth::{token_auth_middleware, validate_header_auth, AuthState, BearerTokenProvider};
-use crate::server::tls::build_tls_acceptor;
+use crate::server::tls::{build_tls_acceptor, build_tls_acceptor_async, uses_secrets};
 
 /// Create auth state with optional bearer token provider.
 async fn create_auth_state(config: &AuthConfig) -> Result<AuthState> {
@@ -80,8 +80,12 @@ pub async fn run_server(
         auth: auth_state.clone(),
     };
 
-    // Build TLS acceptor if enabled
-    let tls_acceptor = build_tls_acceptor(&config.server.tls)?;
+    // Build TLS acceptor if enabled (use async version if secrets configured)
+    let tls_acceptor = if uses_secrets(&config.server.tls) {
+        build_tls_acceptor_async(&config.server.tls).await?
+    } else {
+        build_tls_acceptor(&config.server.tls)?
+    };
 
     // Build router with auth middleware
     let app = Router::new()
