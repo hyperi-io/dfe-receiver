@@ -1,3 +1,10 @@
+## [1.4.11](https://github.com/hypersec-io/dfe-receiver/compare/v1.4.10...v1.4.11) (2026-02-03)
+
+
+### Bug Fixes
+
+* update benchmark to use sonic_rs::from_slice API ([b02ad26](https://github.com/hypersec-io/dfe-receiver/commit/b02ad261074a1446d5ba7e81e0c5ee02ec305632))
+
 ## [1.4.10](https://github.com/hypersec-io/dfe-receiver/compare/v1.4.9...v1.4.10) (2026-02-03)
 
 
