@@ -31,6 +31,7 @@ hs-rustlib = { version = "1.3", registry = "hypersec", features = [...] }
 ```
 
 **Requirements:**
+
 - hs-rustlib must be published to JFrog Cargo registry first
 - Projects must configure the hypersec registry in `.cargo/config.toml`
 
@@ -63,6 +64,7 @@ For projects that depend on `hs-rustlib`:
 2. **Release:** CI should update Cargo.toml to use registry version before `cargo publish`
 
 The CI workflow should:
+
 1. Parse the git dependency to find the current commit/ref
 2. Map to the published version in JFrog Cargo
 3. Update Cargo.toml temporarily for publishing
@@ -85,6 +87,7 @@ Or use a more sophisticated approach with `toml-cli` or custom script.
 ## Alternative: Binary-only Publishing
 
 If source distribution to JFrog Cargo is not required, the release workflow could:
+
 1. Build the binary
 2. Upload the binary to JFrog Generic repo
 3. Skip `cargo publish`
