@@ -25,11 +25,34 @@ use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
+use crate::config::AuthConfig;
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
-use crate::server::auth::{header_auth_middleware, validate_header_auth, AuthState};
+use crate::server::auth::{token_auth_middleware, validate_header_auth, AuthState, BearerTokenProvider};
 use crate::server::tls::build_tls_acceptor;
+
+/// Create auth state with optional bearer token provider.
+async fn create_auth_state(config: &AuthConfig) -> Result<AuthState> {
+    // Check if bearer auth is configured
+    let has_bearer_tokens = !config.bearer.tokens.is_empty() || config.bearer.secret_source.is_some();
+    let mode = config.mode.to_lowercase();
+
+    if has_bearer_tokens && (mode == "bearer" || mode == "both" || mode == "header") {
+        let provider = BearerTokenProvider::from_config(&config.bearer).await?;
+        let provider = Arc::new(provider);
+
+        // Start background refresh if secret source is configured
+        if let Some(ref source) = config.bearer.secret_source {
+            let refresh_interval = std::time::Duration::from_secs(config.bearer.refresh_interval_secs);
+            provider.clone().start_refresh_task(source.clone(), refresh_interval);
+        }
+
+        Ok(AuthState::with_bearer_provider_arc(config.clone(), provider))
+    } else {
+        Ok(AuthState::new(config.clone()))
+    }
+}
 
 /// Shared state for HTTP handlers.
 #[derive(Clone)]
@@ -47,7 +70,9 @@ pub async fn run_server(
     shutdown: CancellationToken,
 ) -> Result<()> {
     let config = pipeline.config();
-    let auth_state = AuthState::new(config.server.auth.clone());
+
+    // Create auth state with optional bearer token provider
+    let auth_state = create_auth_state(&config.server.auth).await?;
 
     let state = HttpState {
         pipeline,
@@ -65,7 +90,7 @@ pub async fn run_server(
         .route("/health/ready", get(readiness_handler))
         .layer(middleware::from_fn_with_state(
             auth_state,
-            header_auth_middleware,
+            token_auth_middleware,
         ))
         .with_state(state);
 
@@ -215,7 +240,7 @@ async fn readiness_handler(State(state): State<HttpState>) -> StatusCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AcceptedHeader, AuthConfig};
+    use crate::config::{AcceptedHeader, AuthConfig, BearerConfig};
 
     fn test_auth_config() -> AuthConfig {
         AuthConfig {
@@ -224,6 +249,7 @@ mod tests {
                 name: "x-api-key".to_string(),
                 values: vec!["test".to_string()],
             }],
+            bearer: BearerConfig::default(),
             header_name: String::new(),
             header_values: Vec::new(),
         }

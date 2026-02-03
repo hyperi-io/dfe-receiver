@@ -211,12 +211,15 @@ impl Default for TlsConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AuthConfig {
-    /// Auth mode (none, header, mtls, both).
+    /// Auth mode (none, header, bearer, mtls, both).
     pub mode: String,
 
     /// List of accepted headers (any one must match).
     /// Each entry defines a header name and its allowed values.
     pub accepted_headers: Vec<AcceptedHeader>,
+
+    /// Bearer token configuration.
+    pub bearer: BearerConfig,
 
     /// Legacy: Single header name for header-based auth.
     /// Deprecated: Use `accepted_headers` instead.
@@ -227,6 +230,34 @@ pub struct AuthConfig {
     /// Deprecated: Use `accepted_headers` instead.
     #[serde(default)]
     pub header_values: Vec<String>,
+}
+
+/// Bearer token authentication configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BearerConfig {
+    /// Static tokens (for dev/simple deployments).
+    /// In production, use `secret_source` instead.
+    #[serde(default)]
+    pub tokens: Vec<String>,
+
+    /// Secret source for dynamic token loading.
+    /// Format: "provider:path:key" (e.g., "vault:secret/auth:bearer_tokens")
+    pub secret_source: Option<String>,
+
+    /// Token refresh interval in seconds (for secret-sourced tokens).
+    /// Default: 300 (5 minutes)
+    pub refresh_interval_secs: u64,
+}
+
+impl Default for BearerConfig {
+    fn default() -> Self {
+        Self {
+            tokens: Vec::new(),
+            secret_source: None,
+            refresh_interval_secs: 300,
+        }
+    }
 }
 
 /// Defines an accepted authentication header.
@@ -249,6 +280,7 @@ impl Default for AuthConfig {
                 name: "x-hypersec-agent".to_string(),
                 values: vec!["1.0".to_string()],
             }],
+            bearer: BearerConfig::default(),
             // Legacy fields for backwards compatibility
             header_name: String::new(),
             header_values: Vec::new(),
