@@ -1,3 +1,10 @@
+## [1.4.5](https://github.com/hypersec-io/dfe-receiver/compare/v1.4.4...v1.4.5) (2026-02-03)
+
+
+### Bug Fixes
+
+* allow clippy format lints in test modules ([4795e62](https://github.com/hypersec-io/dfe-receiver/commit/4795e62d3dd037679251b757a67a6f85d659ee99))
+
 ## [1.4.4](https://github.com/hypersec-io/dfe-receiver/compare/v1.4.3...v1.4.4) (2026-02-03)
 
 
