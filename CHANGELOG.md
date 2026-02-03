@@ -1,3 +1,10 @@
+# [1.5.0](https://github.com/hypersec-io/dfe-receiver/compare/v1.4.11...v1.5.0) (2026-02-03)
+
+
+### Features
+
+* configure rust feature sets for CI testing ([953248e](https://github.com/hypersec-io/dfe-receiver/commit/953248eaa5680c698fc1d307f027de2073be9840))
+
 ## [1.4.11](https://github.com/hypersec-io/dfe-receiver/compare/v1.4.10...v1.4.11) (2026-02-03)
 
 
