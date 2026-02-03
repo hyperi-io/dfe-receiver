@@ -14,6 +14,7 @@ rust-version = "1.75"
 description = "High-performance HTTP/gRPC receiver for PB/s scale data ingestion"
 license = "LicenseRef-HyperSec-EULA"
 repository = "https://github.com/hypersec-io/dfe-receiver"
+exclude = [".claude/", ".github/", "ai/", "ci/", "docs/", "reference/", "benches/"]
 
 [dependencies]
 # HyperSec shared library (from JFrog Cargo registry)
