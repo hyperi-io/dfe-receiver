@@ -1,3 +1,10 @@
+## [1.4.9](https://github.com/hypersec-io/dfe-receiver/compare/v1.4.8...v1.4.9) (2026-02-03)
+
+
+### Bug Fixes
+
+* update ci submodule for Cargo.toml lint support ([353488d](https://github.com/hypersec-io/dfe-receiver/commit/353488d445d80db6026025e1745d39dc0243df53))
+
 ## [1.4.8](https://github.com/hypersec-io/dfe-receiver/compare/v1.4.7...v1.4.8) (2026-02-03)
 
 
