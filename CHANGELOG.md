@@ -1,3 +1,10 @@
+## [1.4.8](https://github.com/hypersec-io/dfe-receiver/compare/v1.4.7...v1.4.8) (2026-02-03)
+
+
+### Bug Fixes
+
+* configure clippy to allow more pedantic lints during development ([0cdcd12](https://github.com/hypersec-io/dfe-receiver/commit/0cdcd129d7a080d956e8b06e4b7e00c6d9a92541))
+
 ## [1.4.7](https://github.com/hypersec-io/dfe-receiver/compare/v1.4.6...v1.4.7) (2026-02-03)
 
 
