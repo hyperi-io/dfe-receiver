@@ -1,0 +1,24 @@
+# Project:   dfe-receiver
+# File:      typos.toml
+# Purpose:   Typos spell checker configuration
+# License:   LicenseRef-HyperSec-EULA
+# Copyright: (c) 2026 HyperSec
+
+[default.extend-words]
+# Known proper nouns and technical terms
+Hashi = "Hashi"       # HashiCorp
+SME = "SME"           # Subject Matter Expert
+
+[default.extend-identifiers]
+# Identifier names that are valid
+ba = "ba"             # Part of crate/hash names (e.g., libcc-ba9a48f5)
+
+[files]
+# Exclude submodules and generated files
+extend-exclude = [
+    "ai/",
+    "ci/",
+    "target/",
+    "reference/",
+    "*.lock",
+]
