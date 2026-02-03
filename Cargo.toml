@@ -16,8 +16,8 @@ license = "LicenseRef-HyperSec-EULA"
 repository = "https://github.com/hypersec-io/dfe-receiver"
 
 [dependencies]
-# HyperSec shared library
-hs-rustlib = { git = "https://github.com/hypersec-io/hs-rustlib", features = [
+# HyperSec shared library (from JFrog Cargo registry)
+hs-rustlib = { version = "1.3", registry = "hypersec", features = [
     "config",
     "logger",
     "metrics",

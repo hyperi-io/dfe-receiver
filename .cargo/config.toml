@@ -1,0 +1,11 @@
+# Project:   dfe-receiver
+# File:      .cargo/config.toml
+# Purpose:   Cargo registry configuration
+# License:   LicenseRef-HyperSec-EULA
+# Copyright: (c) 2026 HyperSec
+
+[registry]
+global-credential-providers = ["cargo:token"]
+
+[registries.hypersec]
+index = "sparse+https://hypersec.jfrog.io/artifactory/api/cargo/hypersec-cargo-virtual/index/"
