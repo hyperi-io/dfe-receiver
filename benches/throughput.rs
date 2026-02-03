@@ -27,7 +27,7 @@ fn json_validation_benchmark(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("validate", name), &payload, |b, p| {
             b.iter(|| {
                 // Validate JSON is parseable using sonic-rs LazyValue
-                let _ = sonic_rs::LazyValue::from_str(p);
+                let _ = sonic_rs::from_slice::<sonic_rs::LazyValue>(p.as_bytes());
             });
         });
     }
