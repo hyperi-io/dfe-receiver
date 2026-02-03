@@ -16,6 +16,10 @@
 //!
 //! Run with: `cargo test --test security_http`
 
+// Allow unwrap/expect in tests - they're the idiomatic way to fail fast
+#![allow(clippy::unwrap_used)]
+#![allow(clippy::expect_used)]
+
 use std::sync::Arc;
 use std::time::Duration;
 

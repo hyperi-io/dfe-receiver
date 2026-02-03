@@ -22,6 +22,10 @@
 //! - KAFKA_SECURITY_PROTOCOL: Security protocol (optional, e.g., SASL_PLAINTEXT)
 //! - TEST_TOPIC_PREFIX: Prefix for test topics (default: dfe-receiver-test)
 
+// Allow unwrap/expect in tests - they're the idiomatic way to fail fast
+#![allow(clippy::unwrap_used)]
+#![allow(clippy::expect_used)]
+
 use std::sync::Arc;
 use std::time::Duration;
 
