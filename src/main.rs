@@ -18,13 +18,15 @@
 
 #![forbid(unsafe_code)]
 
+// Jemalloc takes priority when enabled (including when both features are enabled via --all-features)
 #[cfg(feature = "jemalloc")]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-#[cfg(feature = "mimalloc")]
+// Mimalloc only when jemalloc is not enabled
+#[cfg(all(feature = "mimalloc", not(feature = "jemalloc")))]
 #[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+static GLOBAL_MIMALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
