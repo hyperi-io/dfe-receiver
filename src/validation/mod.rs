@@ -105,6 +105,8 @@ impl Validator {
 #[cfg(test)]
 #[allow(clippy::uninlined_format_args)]
 #[allow(clippy::format_push_string)]
+#[allow(clippy::single_char_add_str)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
