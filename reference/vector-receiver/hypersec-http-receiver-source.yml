@@ -1,0 +1,41 @@
+# 
+# HyperSec XDR Vector Component Template
+# Purpose:  HyperSec Source Receiver container configuration
+# Deployment Types: AWS, SaaS
+# Release Date: 2024-03-27
+# CT Build: © HyperSec 2024
+#
+# Required environment variables:
+# - VECTOR_DATA_DIR: The directory used for persisting Vector state, such as on-disk buffers, file checkpoints, and more. Please make sure the Vector project has write permissions to this directory.
+# - VECTOR_MTLS_PATH: PKI certificates path for Kafka/MSK MTLS authentication.
+
+
+data_dir: "${VECTOR_DATA_DIR:?err}"
+
+api:
+  enabled: true
+  address: "0.0.0.0:8686"
+
+sources:
+
+
+
+  01_collector:
+    type: http_server
+    address: '0.0.0.0:443'
+    auth:
+      strategy: custom
+      source: |
+        if .headers."x-hypersec-agent" == "${HYPERSEC_AGENT_VERSION:-1.0}" {
+          true
+        } else {
+          false
+        }
+    encoding: json
+    tls:
+      enabled: ${ENABLE_TLS:-true}
+      # These files sourced from Secrets Manager or Hashicorp Vault 
+      # https://docs.aws.amazon.com/secretsmanager/latest/userguide/integrating_csi_driver.html
+      ca_file: "${VECTOR_MTLS_PATH:?err}/vector-receiver-ca.crt"
+      key_file: "${VECTOR_MTLS_PATH:?err}/vector-receiver.key"
+      crt_file: "${VECTOR_MTLS_PATH:?err}/vector-receiver.crt"
