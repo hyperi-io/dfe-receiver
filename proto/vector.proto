@@ -1,0 +1,76 @@
+// Project:   dfe-receiver
+// File:      proto/vector.proto
+// Purpose:   Vector gRPC sink protocol definition
+// Language:  Protocol Buffers
+//
+// License:   LicenseRef-HyperSec-EULA
+// Copyright: (c) 2026 HyperSec
+//
+// Based on Vector's vector.proto for interoperability.
+
+syntax = "proto3";
+
+package vector;
+
+// Vector gRPC sink service.
+// Receives events from Vector's vector sink.
+service Vector {
+    // Push events to the receiver.
+    // This is a streaming RPC where the client sends events
+    // and receives acknowledgments.
+    rpc PushEvents(stream PushEventsRequest) returns (stream PushEventsResponse);
+
+    // Health check endpoint.
+    rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// Request containing events to push.
+message PushEventsRequest {
+    // The events to push, encoded as JSON lines.
+    repeated EventWrapper events = 1;
+}
+
+// Individual event wrapper.
+message EventWrapper {
+    // Event data - typically JSON bytes.
+    bytes log = 1;
+
+    // Optional metric data.
+    bytes metric = 2;
+
+    // Optional trace data.
+    bytes trace = 3;
+}
+
+// Response for pushed events.
+message PushEventsResponse {
+    // Status of the push.
+    PushStatus status = 1;
+
+    // Number of events acknowledged.
+    uint64 events_received = 2;
+}
+
+// Push operation status.
+enum PushStatus {
+    PUSH_STATUS_UNSPECIFIED = 0;
+    PUSH_STATUS_OK = 1;
+    PUSH_STATUS_REJECTED = 2;
+    PUSH_STATUS_UNAVAILABLE = 3;
+}
+
+// Health check request.
+message HealthCheckRequest {}
+
+// Health check response.
+message HealthCheckResponse {
+    // Server status.
+    ServingStatus status = 1;
+}
+
+// Server health status.
+enum ServingStatus {
+    SERVING_STATUS_UNSPECIFIED = 0;
+    SERVING_STATUS_SERVING = 1;
+    SERVING_STATUS_NOT_SERVING = 2;
+}

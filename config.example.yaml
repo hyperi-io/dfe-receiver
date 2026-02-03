@@ -1,0 +1,86 @@
+# dfe-receiver configuration example
+# Copy to config.yaml and customise for your environment
+
+server:
+  bind_address: "0.0.0.0:8080"
+  max_body_size: 10485760  # 10MB
+  request_timeout_ms: 30000
+
+  tls:
+    enabled: false
+    cert_file: "/etc/ssl/receiver.crt"
+    key_file: "/etc/ssl/receiver.key"
+    ca_file: "/etc/ssl/ca.crt"
+    client_auth: "none"  # none, optional, required
+
+  auth:
+    mode: "none"  # none, header, mtls, both
+    header_name: "x-hypersec-agent"
+    header_values:
+      - "1.0"
+      - "2.0"
+
+grpc:
+  enabled: false
+  bind_address: "0.0.0.0:6000"
+
+validation:
+  require_json: true
+  required_fields: []
+  dlq_on_invalid: true
+
+routing:
+  topic_fields:
+    - "tags.event.category"
+    - "event_category"
+  default_topic: "unmatched"
+  topic_suffix: "_land"
+  category_to_topic:
+    auth: "logs_auth"
+    network: "logs_network"
+  dlq:
+    enabled: true
+    topic: "dlq_land"
+
+destinations:
+  default: "kafka"  # kafka or loader
+  rules: []
+  # rules:
+  #   - match_field: "tags.destination"
+  #     match_value: "direct"
+  #     destination: "loader"
+
+kafka:
+  brokers:
+    - "localhost:9092"
+  client_id: "dfe-receiver"
+  sasl:
+    enabled: false
+    mechanism: "SCRAM-SHA-512"
+    username: ""
+    password: ""
+  tls:
+    enabled: false
+    ca_file: "/etc/ssl/kafka-ca.crt"
+  producer:
+    batch_size: 8388608      # 8MiB
+    batch_messages: 10000
+    linger_ms: 20
+    compression: "zstd"
+    acks: "all"
+    retries: 5
+
+loader:
+  address: "dfe-loader:9000"
+  transport: "kafka"  # kafka, zenoh, memory
+  timeout_ms: 5000
+
+buffer:
+  memory_limit: 0  # 0 = auto-detect (67% available)
+  pressure_threshold: 0.8
+  spool_path: "/var/spool/dfe-receiver"
+  spool_max_bytes: 10737418240  # 10GB
+
+metrics:
+  enabled: true
+  address: "0.0.0.0:9090"
