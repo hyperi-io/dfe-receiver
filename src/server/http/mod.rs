@@ -10,27 +10,42 @@
 //!
 //! Handles the primary `/ingest` endpoint for receiving JSON payloads.
 //! Supports TLS termination and mTLS client certificate validation.
+//!
+//! # Security Hardening
+//!
+//! This server is designed for internet-facing deployment with:
+//! - **Early auth rejection**: Authentication checked in middleware before body parsing
+//! - **Request body limits**: Prevents memory exhaustion from large payloads
+//! - **Request timeouts**: Prevents slow loris and connection exhaustion attacks
+//! - **TLS handshake timeout**: Prevents TLS renegotiation attacks
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::middleware;
 use axum::routing::{get, post};
 use axum::Router;
 use tokio::net::TcpListener;
+use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info};
+use tower_http::limit::RequestBodyLimitLayer;
+use tower_http::timeout::TimeoutLayer;
+use tracing::{debug, error, info, warn};
 
 use crate::config::AuthConfig;
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
-use crate::server::auth::{token_auth_middleware, validate_header_auth, AuthState, BearerTokenProvider};
+use crate::server::auth::{token_auth_middleware, AuthState, BearerTokenProvider};
 use crate::server::tls::{build_tls_acceptor, build_tls_acceptor_async, uses_secrets};
+
+/// TLS handshake timeout to prevent slow TLS attacks.
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Create auth state with optional bearer token provider.
 async fn create_auth_state(config: &AuthConfig) -> Result<AuthState> {
@@ -76,7 +91,7 @@ pub async fn run_server(
 
     let state = HttpState {
         pipeline,
-        metrics,
+        metrics: metrics.clone(),
         auth: auth_state.clone(),
     };
 
@@ -87,15 +102,39 @@ pub async fn run_server(
         build_tls_acceptor(&config.server.tls)?
     };
 
-    // Build router with auth middleware
+    // Security configuration
+    let max_body_size = config.server.max_body_size;
+    let request_timeout = Duration::from_millis(config.server.request_timeout_ms);
+
+    info!(
+        max_body_size = max_body_size,
+        request_timeout_ms = config.server.request_timeout_ms,
+        "Security limits configured"
+    );
+
+    // Build router with security layers applied in correct order.
+    //
+    // LAYER ORDER (outermost to innermost, i.e. first to execute):
+    // 1. TimeoutLayer - Reject slow requests early (prevents slow loris)
+    // 2. RequestBodyLimitLayer - Reject oversized bodies before reading (prevents OOM)
+    // 3. Auth middleware - Reject unauthenticated requests before processing
+    // 4. Handler - Only reached by authenticated, properly-sized, timely requests
+    //
+    // This order ensures minimal resource usage for malicious/bot requests.
     let app = Router::new()
         .route("/ingest", post(ingest_handler))
         .route("/health/live", get(liveness_handler))
         .route("/health/ready", get(readiness_handler))
+        // Auth middleware - reject unauthenticated requests early (after body limit check)
         .layer(middleware::from_fn_with_state(
             auth_state,
             token_auth_middleware,
         ))
+        // Body size limit - reject oversized requests before reading body
+        .layer(RequestBodyLimitLayer::new(max_body_size))
+        // Request timeout - reject slow requests (slow loris protection)
+        // Returns 408 Request Timeout for slow clients
+        .layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, request_timeout))
         .with_state(state);
 
     let addr: SocketAddr = addr
@@ -109,7 +148,7 @@ pub async fn run_server(
     match tls_acceptor {
         Some(acceptor) => {
             info!(addr = %addr, tls = true, "HTTP server listening");
-            run_tls_server(listener, app, acceptor, shutdown).await
+            run_tls_server(listener, app, acceptor, shutdown, metrics).await
         }
         None => {
             info!(addr = %addr, tls = false, "HTTP server listening");
@@ -139,6 +178,7 @@ async fn run_tls_server(
     app: Router,
     acceptor: TlsAcceptor,
     shutdown: CancellationToken,
+    metrics: Arc<Metrics>,
 ) -> Result<()> {
     loop {
         tokio::select! {
@@ -158,31 +198,44 @@ async fn run_tls_server(
                 let acceptor = acceptor.clone();
                 let app = app.clone();
                 let shutdown = shutdown.clone();
+                let metrics = metrics.clone();
 
                 tokio::spawn(async move {
-                    match acceptor.accept(stream).await {
-                        Ok(tls_stream) => {
-                            debug!(peer = %peer_addr, "TLS connection established");
+                    // TLS handshake with timeout to prevent slow TLS attacks
+                    let tls_result = timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await;
 
-                            let io = hyper_util::rt::TokioIo::new(tls_stream);
-                            let service = hyper_util::service::TowerToHyperService::new(app);
-
-                            let builder = hyper_util::server::conn::auto::Builder::new(
-                                hyper_util::rt::TokioExecutor::new()
-                            );
-                            let conn = builder.serve_connection_with_upgrades(io, service);
-
-                            tokio::select! {
-                                _ = shutdown.cancelled() => {}
-                                result = conn => {
-                                    if let Err(e) = result {
-                                        debug!(peer = %peer_addr, error = %e, "Connection error");
-                                    }
-                                }
-                            }
+                    let tls_stream = match tls_result {
+                        Ok(Ok(stream)) => stream,
+                        Ok(Err(e)) => {
+                            // Track TLS failure in metrics
+                            metrics.inc_tls_handshake_failure();
+                            debug!(peer = %peer_addr, error = %e, "tls_handshake_failed");
+                            return;
                         }
-                        Err(e) => {
-                            debug!(peer = %peer_addr, error = %e, "TLS handshake failed");
+                        Err(_) => {
+                            // Track TLS timeout in metrics
+                            metrics.inc_tls_handshake_failure();
+                            warn!(peer = %peer_addr, "tls_handshake_timeout");
+                            return;
+                        }
+                    };
+
+                    debug!(peer = %peer_addr, "TLS connection established");
+
+                    let io = hyper_util::rt::TokioIo::new(tls_stream);
+                    let service = hyper_util::service::TowerToHyperService::new(app);
+
+                    let builder = hyper_util::server::conn::auto::Builder::new(
+                        hyper_util::rt::TokioExecutor::new()
+                    );
+                    let conn = builder.serve_connection_with_upgrades(io, service);
+
+                    tokio::select! {
+                        _ = shutdown.cancelled() => {}
+                        result = conn => {
+                            if let Err(e) = result {
+                                debug!(peer = %peer_addr, error = %e, "Connection error");
+                            }
                         }
                     }
                 });
@@ -201,18 +254,14 @@ async fn run_tls_server(
 #[inline]
 async fn ingest_handler(
     State(state): State<HttpState>,
-    headers: HeaderMap,
     body: Bytes,
 ) -> std::result::Result<StatusCode, Error> {
     // Record metrics
     state.metrics.inc_requests_total();
     state.metrics.add_bytes_received(body.len() as u64);
 
-    // Validate auth (belt and suspenders - middleware should have caught this)
-    if let Some(auth_err) = validate_header_auth(&state.auth.config, &headers) {
-        state.metrics.inc_requests_error();
-        return Err(Error::Auth(auth_err.message));
-    }
+    // Note: Auth is validated in middleware layer (token_auth_middleware)
+    // No additional validation here - middleware handles all auth modes
 
     // Process through pipeline
     match state.pipeline.process(body).await {

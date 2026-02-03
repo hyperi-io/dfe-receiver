@@ -279,12 +279,31 @@ impl Drop for BearerTokenProvider {
     }
 }
 
+/// Extract client IP from request headers (respects X-Forwarded-For from trusted proxies).
+///
+/// Returns the first IP from X-Forwarded-For if present, otherwise X-Real-IP.
+fn extract_client_ip(headers: &axum::http::HeaderMap) -> Option<String> {
+    // X-Forwarded-For may contain multiple IPs: "client, proxy1, proxy2"
+    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        if let Some(first_ip) = xff.split(',').next() {
+            return Some(first_ip.trim().to_string());
+        }
+    }
+    // Fallback to X-Real-IP
+    headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from)
+}
+
 /// Token-based authentication middleware.
 ///
 /// Validates authentication based on the configured mode:
 /// - `header`: Static header values
 /// - `bearer`: Bearer tokens (static or from secret manager)
 /// - `both`: Requires both token auth and mTLS
+///
+/// Logs failures at WARN level with structured fields for security monitoring.
 pub async fn token_auth_middleware(
     State(auth): State<AuthState>,
     request: Request<Body>,
@@ -296,6 +315,9 @@ pub async fn token_auth_middleware(
     if !mode.requires_token_auth() {
         return next.run(request).await;
     }
+
+    // Extract client IP for logging (before consuming request)
+    let client_ip = extract_client_ip(request.headers());
 
     // Check authentication based on mode
     let auth_result = match mode {
@@ -316,13 +338,26 @@ pub async fn token_auth_middleware(
 
     match auth_result {
         None => next.run(request).await,
-        Some(err) => err.into_response(),
+        Some(err) => {
+            // Log auth failure with structured fields for security monitoring
+            // This uses WARN level - high enough to be captured in production,
+            // but not ERROR (which would trigger alerts for expected traffic)
+            warn!(
+                client_ip = client_ip.as_deref().unwrap_or("unknown"),
+                auth_mode = ?mode,
+                failure_reason = %err.message,
+                status_code = err.status.as_u16(),
+                "auth_failure"
+            );
+            err.into_response()
+        }
     }
 }
 
 /// Validate bearer token authentication.
 ///
 /// Checks the `Authorization: Bearer <token>` header against valid tokens.
+/// Returns `None` if authentication passes, `Some(AuthError)` on failure.
 #[inline]
 pub fn validate_bearer_auth(auth: &AuthState, headers: &axum::http::HeaderMap) -> Option<AuthError> {
     let Some(ref provider) = auth.bearer_provider else {
@@ -338,7 +373,7 @@ pub fn validate_bearer_auth(auth: &AuthState, headers: &axum::http::HeaderMap) -
     let Some(auth_value) = auth_header else {
         return Some(AuthError {
             status: StatusCode::UNAUTHORIZED,
-            message: "Missing Authorization header".into(),
+            message: "missing_authorization_header".into(),
         });
     };
 
@@ -350,7 +385,7 @@ pub fn validate_bearer_auth(auth: &AuthState, headers: &axum::http::HeaderMap) -
     } else {
         return Some(AuthError {
             status: StatusCode::UNAUTHORIZED,
-            message: "Invalid Authorization header format. Expected 'Bearer <token>'".into(),
+            message: "invalid_bearer_format".into(),
         });
     };
 
@@ -359,10 +394,9 @@ pub fn validate_bearer_auth(auth: &AuthState, headers: &axum::http::HeaderMap) -
         debug!("Bearer token accepted");
         None
     } else {
-        warn!("Invalid bearer token");
         Some(AuthError {
             status: StatusCode::UNAUTHORIZED,
-            message: "Invalid bearer token".into(),
+            message: "invalid_bearer_token".into(),
         })
     }
 }
@@ -397,10 +431,10 @@ pub fn validate_header_auth(config: &AuthConfig, headers: &axum::http::HeaderMap
 
     // If no headers configured, reject
     if accepted.is_empty() {
-        warn!("No accepted headers configured but header auth required");
+        error!("No accepted headers configured but header auth required");
         return Some(AuthError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: "Server misconfigured".into(),
+            message: "server_misconfigured".into(),
         });
     }
 
@@ -415,19 +449,23 @@ pub fn validate_header_auth(config: &AuthConfig, headers: &axum::http::HeaderMap
 
             // Check if value is in allowed list
             if accepted_header.values.contains(&header_value.to_string()) {
-                debug!(header = %accepted_header.name, value = %header_value, "Auth header accepted");
+                debug!(header = %accepted_header.name, "Auth header accepted");
                 return None;
             }
         }
     }
 
-    // No valid header found - log which headers were expected
-    let expected: Vec<_> = accepted.iter().map(|h| h.name.as_str()).collect();
-    warn!(expected_headers = ?expected, "No valid auth header found");
+    // Determine failure reason for metrics/logging
+    // Check if any expected header is present (but with wrong value)
+    let has_header = accepted.iter().any(|h| headers.contains_key(&h.name));
 
     Some(AuthError {
         status: StatusCode::UNAUTHORIZED,
-        message: "Missing or invalid authorization header".into(),
+        message: if has_header {
+            "invalid_header_value".into()
+        } else {
+            "missing_auth_header".into()
+        },
     })
 }
 
@@ -720,7 +758,7 @@ mod tests {
 
         let err = validate_bearer_auth(&auth, &headers);
         assert!(err.is_some());
-        assert!(err.unwrap().message.contains("Missing"));
+        assert_eq!(err.unwrap().message, "missing_authorization_header");
     }
 
     #[test]
@@ -734,7 +772,7 @@ mod tests {
 
         let err = validate_bearer_auth(&auth, &headers);
         assert!(err.is_some());
-        assert!(err.unwrap().message.contains("format"));
+        assert_eq!(err.unwrap().message, "invalid_bearer_format");
     }
 
     #[test]
