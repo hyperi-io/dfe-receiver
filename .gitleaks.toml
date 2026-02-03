@@ -24,12 +24,14 @@ paths = [
 ]
 
 # Regex patterns for known false positives
-# regexes = [
-#     '''YOUR_.*_TOKEN''',
-#     '''your-.*-token''',
-#     '''test-token''',
-#     '''example\.com''',
-# ]
+regexes = [
+    '''YOUR_.*_TOKEN''',
+    '''your-.*-token''',
+    '''your-token''',
+    '''test-token''',
+    '''example\.com''',
+    '''<[A-Z_]+>''',  # Angle bracket placeholders like <YOUR_TOKEN>
+]
 
 # Stopwords - findings containing these are likely false positives
-# stopwords = ["example", "sample", "test", "mock", "fake", "dummy", "placeholder"]
+stopwords = ["example", "sample", "test", "mock", "fake", "dummy", "placeholder"]

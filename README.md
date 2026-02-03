@@ -112,7 +112,7 @@ Accepts JSON payloads for ingestion.
 ```bash
 curl -X POST http://localhost:8080/ingest \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer your-token" \
+  -H "Authorization: Bearer <YOUR_TOKEN>" \
   -d '{"event_type": "login", "user_id": "123"}'
 ```
 
