@@ -79,6 +79,19 @@ Native Rust receiver that:
 - `vault:secret/data/auth:bearer_tokens`
 - `aws:prod/auth/tokens:bearer`
 
+### No Disk Spillover
+
+**Decision:** Use in-memory buffering only, no disk spillover
+**Rationale:** For PB/s scale ingestion:
+
+1. K8s memory limits trigger OOMKill -> KEDA scales up (desired behavior)
+2. Vector clients have their own disk buffer for retries
+3. Circuit breaker + 503 responses propagate backpressure upstream
+4. Disk I/O would bottleneck the hot path at scale
+5. Simpler architecture, no persistent volumes needed
+
+**Alternatives considered:** Disk spillover via hs-rustlib Spool (rejected - adds complexity without benefit when clients handle retries)
+
 ---
 
 ## External Dependencies
