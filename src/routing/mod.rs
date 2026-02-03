@@ -322,4 +322,185 @@ mod tests {
             _ => panic!("expected DLQ route"),
         }
     }
+
+    #[test]
+    fn test_route_with_escaped_string() {
+        let router = Router::new(&default_routing_config(), &default_destinations_config());
+        // JSON with escaped quote in value
+        let payload = Bytes::from(r#"{"event_category": "auth\"test", "data": "test"}"#);
+
+        match router.route(&payload) {
+            RouteResult::Kafka(topic) => assert_eq!(topic, "auth\"test_land"),
+            _ => panic!("expected Kafka route"),
+        }
+    }
+
+    #[test]
+    fn test_route_with_non_string_value_integer() {
+        let router = Router::new(&default_routing_config(), &default_destinations_config());
+        // Category is an integer, not a string - should fall back to default
+        let payload = Bytes::from(r#"{"event_category": 123, "data": "test"}"#);
+
+        match router.route(&payload) {
+            RouteResult::Kafka(topic) => assert_eq!(topic, "unmatched_land"),
+            _ => panic!("expected Kafka route"),
+        }
+    }
+
+    #[test]
+    fn test_route_with_non_string_value_null() {
+        let router = Router::new(&default_routing_config(), &default_destinations_config());
+        // Category is null - key present but value is null, should fall back to default
+        let payload = Bytes::from(r#"{"event_category": null, "data": "test"}"#);
+
+        match router.route(&payload) {
+            RouteResult::Kafka(topic) => assert_eq!(topic, "unmatched_land"),
+            _ => panic!("expected Kafka route"),
+        }
+    }
+
+    #[test]
+    fn test_route_with_non_string_value_boolean() {
+        let router = Router::new(&default_routing_config(), &default_destinations_config());
+        // Category is a boolean - should fall back to default
+        let payload = Bytes::from(r#"{"event_category": true, "data": "test"}"#);
+
+        match router.route(&payload) {
+            RouteResult::Kafka(topic) => assert_eq!(topic, "unmatched_land"),
+            _ => panic!("expected Kafka route"),
+        }
+    }
+
+    #[test]
+    fn test_route_with_non_string_value_object() {
+        let router = Router::new(&default_routing_config(), &default_destinations_config());
+        // Category is an object - should fall back to default
+        let payload = Bytes::from(r#"{"event_category": {"nested": "value"}, "data": "test"}"#);
+
+        match router.route(&payload) {
+            RouteResult::Kafka(topic) => assert_eq!(topic, "unmatched_land"),
+            _ => panic!("expected Kafka route"),
+        }
+    }
+
+    #[test]
+    fn test_route_with_non_string_value_array() {
+        let router = Router::new(&default_routing_config(), &default_destinations_config());
+        // Category is an array - should fall back to default
+        let payload = Bytes::from(r#"{"event_category": ["auth", "network"], "data": "test"}"#);
+
+        match router.route(&payload) {
+            RouteResult::Kafka(topic) => assert_eq!(topic, "unmatched_land"),
+            _ => panic!("expected Kafka route"),
+        }
+    }
+
+    #[test]
+    fn test_route_with_empty_string() {
+        let router = Router::new(&default_routing_config(), &default_destinations_config());
+        // Empty string value - should use empty string as topic
+        let payload = Bytes::from(r#"{"event_category": "", "data": "test"}"#);
+
+        match router.route(&payload) {
+            RouteResult::Kafka(topic) => assert_eq!(topic, "_land"),
+            _ => panic!("expected Kafka route"),
+        }
+    }
+
+    #[test]
+    fn test_route_field_priority() {
+        let router = Router::new(&default_routing_config(), &default_destinations_config());
+        // Both fields present - nested field (tags.event.category) has priority
+        let payload = Bytes::from(
+            r#"{"tags": {"event": {"category": "network"}}, "event_category": "auth"}"#,
+        );
+
+        match router.route(&payload) {
+            RouteResult::Kafka(topic) => assert_eq!(topic, "network_land"),
+            _ => panic!("expected Kafka route"),
+        }
+    }
+
+    #[test]
+    fn test_route_field_priority_fallback() {
+        let router = Router::new(&default_routing_config(), &default_destinations_config());
+        // Only second priority field present
+        let payload = Bytes::from(r#"{"tags": {"other": "data"}, "event_category": "auth"}"#);
+
+        match router.route(&payload) {
+            RouteResult::Kafka(topic) => assert_eq!(topic, "auth_land"),
+            _ => panic!("expected Kafka route"),
+        }
+    }
+
+    #[test]
+    fn test_route_with_unicode() {
+        let router = Router::new(&default_routing_config(), &default_destinations_config());
+        let payload = Bytes::from(r#"{"event_category": "日本語", "data": "test"}"#);
+
+        match router.route(&payload) {
+            RouteResult::Kafka(topic) => assert_eq!(topic, "日本語_land"),
+            _ => panic!("expected Kafka route"),
+        }
+    }
+
+    #[test]
+    fn test_route_with_unicode_escaped() {
+        let router = Router::new(&default_routing_config(), &default_destinations_config());
+        // Unicode escape sequence for "日本語"
+        let payload = Bytes::from(r#"{"event_category": "\u65e5\u672c\u8a9e", "data": "test"}"#);
+
+        match router.route(&payload) {
+            RouteResult::Kafka(topic) => assert_eq!(topic, "日本語_land"),
+            _ => panic!("expected Kafka route"),
+        }
+    }
+
+    #[test]
+    fn test_route_with_whitespace_value() {
+        let router = Router::new(&default_routing_config(), &default_destinations_config());
+        let payload = Bytes::from(r#"{"event_category": "  auth  ", "data": "test"}"#);
+
+        match router.route(&payload) {
+            // Whitespace is preserved
+            RouteResult::Kafka(topic) => assert_eq!(topic, "  auth  _land"),
+            _ => panic!("expected Kafka route"),
+        }
+    }
+
+    #[test]
+    fn test_route_with_special_characters() {
+        let router = Router::new(&default_routing_config(), &default_destinations_config());
+        let payload = Bytes::from(r#"{"event_category": "auth/login", "data": "test"}"#);
+
+        match router.route(&payload) {
+            RouteResult::Kafka(topic) => assert_eq!(topic, "auth/login_land"),
+            _ => panic!("expected Kafka route"),
+        }
+    }
+
+    #[test]
+    fn test_route_nested_field_partial_path() {
+        let router = Router::new(&default_routing_config(), &default_destinations_config());
+        // tags exists but tags.event doesn't - should fall back
+        let payload = Bytes::from(r#"{"tags": {"other": "value"}, "event_category": "auth"}"#);
+
+        match router.route(&payload) {
+            RouteResult::Kafka(topic) => assert_eq!(topic, "auth_land"),
+            _ => panic!("expected Kafka route"),
+        }
+    }
+
+    #[test]
+    fn test_route_nested_field_wrong_type() {
+        let router = Router::new(&default_routing_config(), &default_destinations_config());
+        // tags.event.category exists but tags.event is a string, not an object
+        let payload =
+            Bytes::from(r#"{"tags": {"event": "not_an_object"}, "event_category": "auth"}"#);
+
+        match router.route(&payload) {
+            RouteResult::Kafka(topic) => assert_eq!(topic, "auth_land"),
+            _ => panic!("expected Kafka route"),
+        }
+    }
 }

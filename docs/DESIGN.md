@@ -364,6 +364,239 @@ k6 run --vus 100 --duration 60s load-test.js
 cargo run --release --features dhat-heap
 ```
 
+## Security Architecture
+
+### Deployment Requirements
+
+> **CRITICAL**: dfe-receiver MUST NOT be directly exposed to the public internet.
+> It should always be deployed behind edge protection infrastructure.
+
+The receiver is designed as the **final layer** in a defense-in-depth architecture. Edge infrastructure handles volumetric attacks, bot filtering, and rate limiting, while the receiver focuses on authenticated payload processing.
+
+### Required Deployment Architecture
+
+```mermaid
+flowchart TB
+    subgraph Internet["Public Internet"]
+        Attackers["Attackers / Bots"]
+        Legitimate["Legitimate Clients"]
+    end
+
+    subgraph Edge["Edge Protection Layer"]
+        CDN["CDN / DDoS Protection<br/>(Cloudflare, CloudFront)"]
+        WAF["Web Application Firewall<br/>(OWASP rules)"]
+        RateLimit["Rate Limiting<br/>(per-IP, per-token)"]
+        GeoBlock["Geographic Restrictions<br/>(optional)"]
+    end
+
+    subgraph Internal["Internal Network"]
+        LB["Load Balancer<br/>(K8s Ingress / ALB)"]
+        subgraph Receivers["dfe-receiver Pods"]
+            R1["Receiver Pod 1"]
+            R2["Receiver Pod 2"]
+            R3["Receiver Pod N"]
+        end
+        Kafka["Kafka Cluster"]
+    end
+
+    Attackers --> CDN
+    Legitimate --> CDN
+    CDN --> WAF
+    WAF --> RateLimit
+    RateLimit --> GeoBlock
+    GeoBlock --> LB
+    LB --> R1 & R2 & R3
+    R1 & R2 & R3 --> Kafka
+
+    style Attackers fill:#ff6b6b,color:#fff
+    style CDN fill:#4ecdc4,color:#fff
+    style WAF fill:#4ecdc4,color:#fff
+    style RateLimit fill:#4ecdc4,color:#fff
+    style GeoBlock fill:#4ecdc4,color:#fff
+    style R1 fill:#667eea,color:#fff
+    style R2 fill:#667eea,color:#fff
+    style R3 fill:#667eea,color:#fff
+```
+
+### Security Controls by Layer
+
+```mermaid
+flowchart LR
+    subgraph Edge["Edge Layer<br/>(CDN/WAF)"]
+        E1["DDoS mitigation"]
+        E2["Bot detection"]
+        E3["Rate limiting"]
+        E4["Geo-blocking"]
+        E5["WAF rules"]
+        E6["TLS termination"]
+    end
+
+    subgraph LB["Load Balancer"]
+        L1["Connection limits"]
+        L2["Health checks"]
+        L3["Traffic distribution"]
+    end
+
+    subgraph Receiver["dfe-receiver"]
+        R1["Request timeout<br/>(slow loris)"]
+        R2["Body size limit<br/>(memory DoS)"]
+        R3["TLS handshake timeout<br/>(TLS attacks)"]
+        R4["Auth middleware<br/>(bearer/header/mTLS)"]
+        R5["JSON validation"]
+        R6["Structured logging"]
+    end
+
+    Edge --> LB --> Receiver
+```
+
+### Layer Responsibilities
+
+| Attack Vector | Edge Layer | Load Balancer | dfe-receiver |
+|--------------|------------|---------------|--------------|
+| **DDoS / Volumetric** | Absorbs | - | - |
+| **Bot Traffic** | Blocks | - | - |
+| **Rate Abuse** | Limits | - | - |
+| **Geographic** | Blocks | - | - |
+| **WAF Signatures** | Blocks | - | - |
+| **Connection Exhaustion** | - | Limits | - |
+| **Slow Loris** | - | - | Request timeout |
+| **Memory DoS (large body)** | - | - | Body size limit |
+| **Slow TLS** | - | - | Handshake timeout |
+| **Unauthenticated Access** | - | - | Auth middleware |
+| **Malformed JSON** | - | - | Validation |
+| **Invalid Payloads** | - | - | DLQ routing |
+
+### Request Processing Order
+
+The receiver applies security controls in a specific order to minimize resource usage for malicious requests:
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Timeout as TimeoutLayer
+    participant BodyLimit as RequestBodyLimitLayer
+    participant Auth as Auth Middleware
+    participant Handler as Ingest Handler
+    participant Kafka
+
+    Client->>Timeout: HTTP Request
+
+    alt Request too slow
+        Timeout-->>Client: 408 Request Timeout
+    else Within timeout
+        Timeout->>BodyLimit: Forward request
+    end
+
+    alt Body too large
+        BodyLimit-->>Client: 413 Payload Too Large
+    else Body within limit
+        BodyLimit->>Auth: Forward request
+    end
+
+    alt Auth failed
+        Auth-->>Client: 401 Unauthorized
+    else Auth passed
+        Auth->>Handler: Forward request
+    end
+
+    Handler->>Handler: Validate JSON
+    alt Invalid JSON
+        Handler-->>Client: 400 Bad Request
+    else Valid JSON
+        Handler->>Kafka: Route to topic
+        Handler-->>Client: 202 Accepted
+    end
+```
+
+### Security Configuration
+
+```yaml
+server:
+  # Request limits (applied BEFORE auth to minimize cost)
+  max_body_size: 10485760        # 10MB - reject larger payloads
+  request_timeout_ms: 30000      # 30s - reject slow clients
+
+  tls:
+    enabled: true
+    cert_file: "/etc/ssl/receiver.crt"
+    key_file: "/etc/ssl/receiver.key"
+    ca_file: "/etc/ssl/ca.crt"      # For mTLS
+    client_auth: required            # none, optional, required
+
+  auth:
+    mode: both                       # none, header, bearer, mtls, both
+    accepted_headers:
+      - name: "x-api-key"
+        values: ["production-key-1", "production-key-2"]
+    bearer:
+      secret_source: "vault:secret/data/auth:tokens"
+      refresh_interval_secs: 300     # Hot-reload tokens
+```
+
+### TLS Hardening
+
+The receiver includes TLS hardening for mTLS deployments:
+
+- **Handshake timeout**: 10 seconds (prevents slow TLS attacks)
+- **Modern cipher suites**: Via rustls (no legacy ciphers)
+- **Client certificate validation**: Optional or required mTLS
+- **Certificate refresh**: Supports secret manager integration
+
+### Auth Middleware Order
+
+Authentication is enforced **before** body processing to minimize resource usage:
+
+1. **TimeoutLayer** - Rejects slow requests (slow loris protection)
+2. **RequestBodyLimitLayer** - Rejects oversized requests before reading
+3. **Auth Middleware** - Rejects unauthenticated requests before processing
+4. **Handler** - Only reached by authenticated, properly-sized, timely requests
+
+This order ensures minimal CPU/memory usage for bot scans and unauthenticated probes.
+
+### What NOT to Implement in dfe-receiver
+
+The following are intentionally NOT implemented because edge infrastructure handles them more efficiently:
+
+| Feature | Reason |
+|---------|--------|
+| Rate limiting | Edge layer handles this with dedicated infrastructure |
+| IP allowlist/blocklist | Edge layer or network policy handles this |
+| Connection limits | Kubernetes or load balancer handles this |
+| Access logging | Edge provides this; duplicating wastes resources |
+| Bot detection | WAF/CDN provides sophisticated detection |
+| Geographic blocking | Edge layer handles with IP geolocation |
+
+### Monitoring and Alerting
+
+Key security metrics to monitor:
+
+```yaml
+# Prometheus alerts
+groups:
+  - name: dfe-receiver-security
+    rules:
+      - alert: HighAuthFailureRate
+        expr: rate(dfe_receiver_auth_failures_total[5m]) > 100
+        labels:
+          severity: warning
+        annotations:
+          summary: "High authentication failure rate"
+
+      - alert: HighValidationFailureRate
+        expr: rate(dfe_receiver_validation_failures_total[5m]) > 50
+        labels:
+          severity: warning
+        annotations:
+          summary: "High validation failure rate - check DLQ"
+
+      - alert: RequestTimeoutSpike
+        expr: rate(dfe_receiver_request_timeout_total[5m]) > 10
+        labels:
+          severity: info
+        annotations:
+          summary: "Request timeout spike - possible slow loris attempt"
+```
+
 ## Future Work
 
 - [ ] gRPC Vector sink protocol implementation

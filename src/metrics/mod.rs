@@ -10,8 +10,37 @@
 //!
 //! Exposes counters, gauges, and histograms for monitoring and KEDA scaling.
 //! Includes a compound scaling metric for autoscaling decisions.
+//!
+//! # Security Metrics
+//!
+//! Security-related metrics for alerting on potential attacks:
+//! - `receiver_auth_failures_total` - Authentication failures by reason
+//! - `receiver_validation_failures_total` - Validation failures by reason
+//! - `receiver_request_timeouts_total` - Request timeouts (slow loris indicator)
+//! - `receiver_body_size_rejected_total` - Oversized body rejections
+//! - `receiver_tls_handshake_failures_total` - TLS failures
 
 use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Reason for authentication failure (for metrics labels).
+#[derive(Debug, Clone, Copy)]
+pub enum AuthFailureReason {
+    /// Missing required auth header.
+    MissingHeader,
+    /// Invalid bearer token.
+    InvalidToken,
+    /// Invalid header value.
+    InvalidHeader,
+}
+
+/// Reason for validation failure (for metrics labels).
+#[derive(Debug, Clone, Copy)]
+pub enum ValidationFailureReason {
+    /// Payload is not valid JSON.
+    InvalidJson,
+    /// Required field is missing.
+    MissingField,
+}
 use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
@@ -30,6 +59,18 @@ pub struct Metrics {
     messages_dlq: AtomicU64,
     messages_spilled: AtomicU64,
     messages_drained: AtomicU64,
+
+    // Security counters
+    auth_failures_total: AtomicU64,
+    auth_failures_missing_header: AtomicU64,
+    auth_failures_invalid_token: AtomicU64,
+    auth_failures_invalid_header: AtomicU64,
+    validation_failures_total: AtomicU64,
+    validation_failures_invalid_json: AtomicU64,
+    validation_failures_missing_field: AtomicU64,
+    request_timeouts_total: AtomicU64,
+    body_size_rejected_total: AtomicU64,
+    tls_handshake_failures_total: AtomicU64,
 
     // Gauges
     batch_queue_size: AtomicU64,
@@ -105,6 +146,16 @@ impl Metrics {
             messages_dlq: AtomicU64::new(0),
             messages_spilled: AtomicU64::new(0),
             messages_drained: AtomicU64::new(0),
+            auth_failures_total: AtomicU64::new(0),
+            auth_failures_missing_header: AtomicU64::new(0),
+            auth_failures_invalid_token: AtomicU64::new(0),
+            auth_failures_invalid_header: AtomicU64::new(0),
+            validation_failures_total: AtomicU64::new(0),
+            validation_failures_invalid_json: AtomicU64::new(0),
+            validation_failures_missing_field: AtomicU64::new(0),
+            request_timeouts_total: AtomicU64::new(0),
+            body_size_rejected_total: AtomicU64::new(0),
+            tls_handshake_failures_total: AtomicU64::new(0),
             batch_queue_size: AtomicU64::new(0),
             batch_queue_bytes: AtomicU64::new(0),
             spool_bytes: AtomicU64::new(0),
@@ -218,6 +269,59 @@ impl Metrics {
     pub fn set_memory_usage(&self, used: u64, limit: u64) {
         self.memory_used_bytes.store(used, Ordering::Relaxed);
         self.memory_limit_bytes.store(limit, Ordering::Relaxed);
+    }
+
+    // ==========================================================================
+    // Security metrics
+    // ==========================================================================
+
+    /// Record an auth failure with reason.
+    #[inline]
+    pub fn inc_auth_failure(&self, reason: AuthFailureReason) {
+        self.auth_failures_total.fetch_add(1, Ordering::Relaxed);
+        match reason {
+            AuthFailureReason::MissingHeader => {
+                self.auth_failures_missing_header.fetch_add(1, Ordering::Relaxed);
+            }
+            AuthFailureReason::InvalidToken => {
+                self.auth_failures_invalid_token.fetch_add(1, Ordering::Relaxed);
+            }
+            AuthFailureReason::InvalidHeader => {
+                self.auth_failures_invalid_header.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Record a validation failure with reason.
+    #[inline]
+    pub fn inc_validation_failure(&self, reason: ValidationFailureReason) {
+        self.validation_failures_total.fetch_add(1, Ordering::Relaxed);
+        match reason {
+            ValidationFailureReason::InvalidJson => {
+                self.validation_failures_invalid_json.fetch_add(1, Ordering::Relaxed);
+            }
+            ValidationFailureReason::MissingField => {
+                self.validation_failures_missing_field.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Record a request timeout.
+    #[inline]
+    pub fn inc_request_timeout(&self) {
+        self.request_timeouts_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a body size rejection (413).
+    #[inline]
+    pub fn inc_body_size_rejected(&self) {
+        self.body_size_rejected_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a TLS handshake failure.
+    #[inline]
+    pub fn inc_tls_handshake_failure(&self) {
+        self.tls_handshake_failures_total.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Get batch queue bytes for backpressure calculation.
@@ -400,6 +504,54 @@ impl Metrics {
         output.push_str(&format!(
             "receiver_request_rate_per_second {:.2}\n",
             self.request_rate()
+        ));
+
+        // Security metrics
+        output.push_str("# HELP receiver_auth_failures_total Authentication failures by reason\n");
+        output.push_str("# TYPE receiver_auth_failures_total counter\n");
+        output.push_str(&format!(
+            "receiver_auth_failures_total{{reason=\"missing_header\"}} {}\n",
+            self.auth_failures_missing_header.load(Ordering::Relaxed)
+        ));
+        output.push_str(&format!(
+            "receiver_auth_failures_total{{reason=\"invalid_token\"}} {}\n",
+            self.auth_failures_invalid_token.load(Ordering::Relaxed)
+        ));
+        output.push_str(&format!(
+            "receiver_auth_failures_total{{reason=\"invalid_header\"}} {}\n",
+            self.auth_failures_invalid_header.load(Ordering::Relaxed)
+        ));
+
+        output.push_str("# HELP receiver_validation_failures_total Validation failures by reason\n");
+        output.push_str("# TYPE receiver_validation_failures_total counter\n");
+        output.push_str(&format!(
+            "receiver_validation_failures_total{{reason=\"invalid_json\"}} {}\n",
+            self.validation_failures_invalid_json.load(Ordering::Relaxed)
+        ));
+        output.push_str(&format!(
+            "receiver_validation_failures_total{{reason=\"missing_field\"}} {}\n",
+            self.validation_failures_missing_field.load(Ordering::Relaxed)
+        ));
+
+        output.push_str("# HELP receiver_request_timeouts_total Request timeouts (slow loris indicator)\n");
+        output.push_str("# TYPE receiver_request_timeouts_total counter\n");
+        output.push_str(&format!(
+            "receiver_request_timeouts_total {}\n",
+            self.request_timeouts_total.load(Ordering::Relaxed)
+        ));
+
+        output.push_str("# HELP receiver_body_size_rejected_total Oversized body rejections\n");
+        output.push_str("# TYPE receiver_body_size_rejected_total counter\n");
+        output.push_str(&format!(
+            "receiver_body_size_rejected_total {}\n",
+            self.body_size_rejected_total.load(Ordering::Relaxed)
+        ));
+
+        output.push_str("# HELP receiver_tls_handshake_failures_total TLS handshake failures\n");
+        output.push_str("# TYPE receiver_tls_handshake_failures_total counter\n");
+        output.push_str(&format!(
+            "receiver_tls_handshake_failures_total {}\n",
+            self.tls_handshake_failures_total.load(Ordering::Relaxed)
         ));
 
         output
