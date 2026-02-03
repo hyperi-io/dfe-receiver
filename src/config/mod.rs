@@ -92,7 +92,12 @@ impl Config {
 
         // Add explicit config path if provided
         if let Some(path) = config_path {
-            config_paths.push(PathBuf::from(path).parent().unwrap_or(&PathBuf::from(".")).to_path_buf());
+            config_paths.push(
+                PathBuf::from(path)
+                    .parent()
+                    .unwrap_or(&PathBuf::from("."))
+                    .to_path_buf(),
+            );
         }
 
         // Setup hs-rustlib config with our prefix
@@ -131,12 +136,16 @@ impl Config {
 
         // Validate Kafka config if Kafka destination enabled
         if self.destinations.default == "kafka" && self.kafka.brokers.is_empty() {
-            return Err(Error::Config("kafka.brokers is required when using Kafka destination".into()));
+            return Err(Error::Config(
+                "kafka.brokers is required when using Kafka destination".into(),
+            ));
         }
 
         // Validate buffer config
         if self.buffer.pressure_threshold < 0.0 || self.buffer.pressure_threshold > 1.0 {
-            return Err(Error::Config("buffer.pressure_threshold must be between 0.0 and 1.0".into()));
+            return Err(Error::Config(
+                "buffer.pressure_threshold must be between 0.0 and 1.0".into(),
+            ));
         }
 
         Ok(())

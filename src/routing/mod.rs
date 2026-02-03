@@ -264,7 +264,8 @@ mod tests {
     #[test]
     fn test_route_with_nested_category() {
         let router = Router::new(&default_routing_config(), &default_destinations_config());
-        let payload = Bytes::from(r#"{"tags": {"event": {"category": "network"}}, "data": "test"}"#);
+        let payload =
+            Bytes::from(r#"{"tags": {"event": {"category": "network"}}, "data": "test"}"#);
 
         match router.route(&payload) {
             RouteResult::Kafka(topic) => assert_eq!(topic, "network_land"),
@@ -286,7 +287,9 @@ mod tests {
     #[test]
     fn test_route_with_mapping() {
         let mut routing = default_routing_config();
-        routing.category_to_topic.insert("auth".to_string(), "logs_auth".to_string());
+        routing
+            .category_to_topic
+            .insert("auth".to_string(), "logs_auth".to_string());
 
         let router = Router::new(&routing, &default_destinations_config());
         let payload = Bytes::from(r#"{"event_category": "auth"}"#);

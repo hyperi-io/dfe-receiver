@@ -71,23 +71,14 @@ impl KafkaSink {
         let mut client_config = ClientConfig::new();
 
         // Set brokers
-        client_config.set(
-            "bootstrap.servers",
-            config.brokers.join(","),
-        );
+        client_config.set("bootstrap.servers", config.brokers.join(","));
 
         // Set client ID
         client_config.set("client.id", &config.client_id);
 
         // Producer settings
-        client_config.set(
-            "batch.size",
-            config.producer.batch_size.to_string(),
-        );
-        client_config.set(
-            "linger.ms",
-            config.producer.linger_ms.to_string(),
-        );
+        client_config.set("batch.size", config.producer.batch_size.to_string());
+        client_config.set("linger.ms", config.producer.linger_ms.to_string());
         client_config.set("compression.type", &config.producer.compression);
         client_config.set("acks", &config.producer.acks);
         client_config.set("retries", config.producer.retries.to_string());
@@ -124,9 +115,7 @@ impl KafkaSink {
             }
         }
 
-        let producer: FutureProducer = client_config
-            .create()
-            .map_err(Error::Kafka)?;
+        let producer: FutureProducer = client_config.create().map_err(Error::Kafka)?;
 
         let batch_config = BatchConfig {
             max_bytes: config.producer.batch_size,

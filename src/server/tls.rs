@@ -34,7 +34,12 @@ fn load_certs_from_file(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
 
     certs(&mut reader)
         .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|e| Error::Tls(format!("failed to parse certs from {}: {e}", path.display())))
+        .map_err(|e| {
+            Error::Tls(format!(
+                "failed to parse certs from {}: {e}",
+                path.display()
+            ))
+        })
 }
 
 /// Load certificates from PEM bytes.
@@ -134,9 +139,7 @@ async fn load_from_secret(source: &str) -> Result<Vec<u8>> {
     };
 
     let config = SecretsConfig {
-        sources: [("tls_secret".into(), secret_source)]
-            .into_iter()
-            .collect(),
+        sources: [("tls_secret".into(), secret_source)].into_iter().collect(),
         ..Default::default()
     };
     let secrets = SecretsManager::new(config)?;
@@ -201,7 +204,9 @@ pub fn build_tls_acceptor(config: &TlsConfig) -> Result<Option<TlsAcceptor>> {
 
     // Check for ca_file early if client auth is required
     if client_auth != ClientAuth::None && config.ca_file.is_none() {
-        return Err(Error::Tls("client_auth requires ca_file or ca_secret".into()));
+        return Err(Error::Tls(
+            "client_auth requires ca_file or ca_secret".into(),
+        ));
     }
 
     let certs = load_certs_from_file(Path::new(cert_path))?;

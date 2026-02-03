@@ -38,7 +38,8 @@ fn json_validation_benchmark(c: &mut Criterion) {
 fn field_extraction_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("field_extraction");
 
-    let payload = r#"{"org_id":"test","tags":{"event":{"category":"authentication"}},"data":"value"}"#;
+    let payload =
+        r#"{"org_id":"test","tags":{"event":{"category":"authentication"}},"data":"value"}"#;
 
     group.throughput(Throughput::Bytes(payload.len() as u64));
 
@@ -60,5 +61,9 @@ fn field_extraction_benchmark(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, json_validation_benchmark, field_extraction_benchmark);
+criterion_group!(
+    benches,
+    json_validation_benchmark,
+    field_extraction_benchmark
+);
 criterion_main!(benches);

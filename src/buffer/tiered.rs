@@ -94,7 +94,10 @@ impl<S: Sink + Send + Sync + 'static> TieredSink<S> {
         self.queued_count.fetch_add(1, Ordering::Relaxed);
 
         if queue.len() >= self.max_queue_size {
-            warn!(queue_size = queue.len(), "Queue at capacity - backpressure recommended");
+            warn!(
+                queue_size = queue.len(),
+                "Queue at capacity - backpressure recommended"
+            );
         }
     }
 
@@ -135,8 +138,13 @@ impl<S: Sink + Send + Sync + 'static> TieredSink<S> {
         }
 
         if drained > 0 {
-            self.drained_count.fetch_add(drained as u64, Ordering::Relaxed);
-            debug!(drained = drained, remaining = count - drained, "Drained queued messages");
+            self.drained_count
+                .fetch_add(drained as u64, Ordering::Relaxed);
+            debug!(
+                drained = drained,
+                remaining = count - drained,
+                "Drained queued messages"
+            );
         }
 
         drained

@@ -101,14 +101,19 @@ impl IntoResponse for Error {
             Error::Validation(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             Error::Auth(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),
             Error::Routing(_) => (StatusCode::BAD_REQUEST, "routing error".to_string()),
-            Error::Kafka(_) | Error::Transport(_) => {
-                (StatusCode::SERVICE_UNAVAILABLE, "service unavailable".to_string())
-            }
-            Error::Buffer(_) => {
-                (StatusCode::SERVICE_UNAVAILABLE, "service under pressure".to_string())
-            }
+            Error::Kafka(_) | Error::Transport(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "service unavailable".to_string(),
+            ),
+            Error::Buffer(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "service under pressure".to_string(),
+            ),
             Error::Shutdown => (StatusCode::SERVICE_UNAVAILABLE, "shutting down".to_string()),
-            _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string()),
+            _ => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal error".to_string(),
+            ),
         };
 
         let body = serde_json::json!({

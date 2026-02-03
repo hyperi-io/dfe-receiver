@@ -83,8 +83,7 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     // Initialise logging using hs-rustlib
-    init_logging(&args.log_format, &args.log_level)
-        .context("failed to initialise logging")?;
+    init_logging(&args.log_format, &args.log_level).context("failed to initialise logging")?;
 
     info!(
         environment = ?env,
@@ -92,8 +91,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Load and validate configuration
-    let config = Config::load(args.config.as_deref())
-        .context("failed to load configuration")?;
+    let config = Config::load(args.config.as_deref()).context("failed to load configuration")?;
 
     if let Err(e) = config.validate() {
         error!(error = %e, "configuration validation failed");

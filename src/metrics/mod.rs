@@ -207,7 +207,8 @@ impl Metrics {
     /// Increment messages sent to loader counter.
     #[inline]
     pub fn add_messages_sent_loader(&self, count: u64) {
-        self.messages_sent_loader.fetch_add(count, Ordering::Relaxed);
+        self.messages_sent_loader
+            .fetch_add(count, Ordering::Relaxed);
     }
 
     /// Increment DLQ messages counter.
@@ -281,13 +282,16 @@ impl Metrics {
         self.auth_failures_total.fetch_add(1, Ordering::Relaxed);
         match reason {
             AuthFailureReason::MissingHeader => {
-                self.auth_failures_missing_header.fetch_add(1, Ordering::Relaxed);
+                self.auth_failures_missing_header
+                    .fetch_add(1, Ordering::Relaxed);
             }
             AuthFailureReason::InvalidToken => {
-                self.auth_failures_invalid_token.fetch_add(1, Ordering::Relaxed);
+                self.auth_failures_invalid_token
+                    .fetch_add(1, Ordering::Relaxed);
             }
             AuthFailureReason::InvalidHeader => {
-                self.auth_failures_invalid_header.fetch_add(1, Ordering::Relaxed);
+                self.auth_failures_invalid_header
+                    .fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -295,13 +299,16 @@ impl Metrics {
     /// Record a validation failure with reason.
     #[inline]
     pub fn inc_validation_failure(&self, reason: ValidationFailureReason) {
-        self.validation_failures_total.fetch_add(1, Ordering::Relaxed);
+        self.validation_failures_total
+            .fetch_add(1, Ordering::Relaxed);
         match reason {
             ValidationFailureReason::InvalidJson => {
-                self.validation_failures_invalid_json.fetch_add(1, Ordering::Relaxed);
+                self.validation_failures_invalid_json
+                    .fetch_add(1, Ordering::Relaxed);
             }
             ValidationFailureReason::MissingField => {
-                self.validation_failures_missing_field.fetch_add(1, Ordering::Relaxed);
+                self.validation_failures_missing_field
+                    .fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -315,13 +322,15 @@ impl Metrics {
     /// Record a body size rejection (413).
     #[inline]
     pub fn inc_body_size_rejected(&self) {
-        self.body_size_rejected_total.fetch_add(1, Ordering::Relaxed);
+        self.body_size_rejected_total
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record a TLS handshake failure.
     #[inline]
     pub fn inc_tls_handshake_failure(&self) {
-        self.tls_handshake_failures_total.fetch_add(1, Ordering::Relaxed);
+        self.tls_handshake_failures_total
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Get batch queue bytes for backpressure calculation.
@@ -492,7 +501,9 @@ impl Metrics {
         ));
 
         // KEDA scaling metric
-        output.push_str("# HELP receiver_keda_scaling_metric Compound scaling metric for KEDA (0-100)\n");
+        output.push_str(
+            "# HELP receiver_keda_scaling_metric Compound scaling metric for KEDA (0-100)\n",
+        );
         output.push_str("# TYPE receiver_keda_scaling_metric gauge\n");
         output.push_str(&format!(
             "receiver_keda_scaling_metric {:.2}\n",
@@ -522,18 +533,23 @@ impl Metrics {
             self.auth_failures_invalid_header.load(Ordering::Relaxed)
         ));
 
-        output.push_str("# HELP receiver_validation_failures_total Validation failures by reason\n");
+        output
+            .push_str("# HELP receiver_validation_failures_total Validation failures by reason\n");
         output.push_str("# TYPE receiver_validation_failures_total counter\n");
         output.push_str(&format!(
             "receiver_validation_failures_total{{reason=\"invalid_json\"}} {}\n",
-            self.validation_failures_invalid_json.load(Ordering::Relaxed)
+            self.validation_failures_invalid_json
+                .load(Ordering::Relaxed)
         ));
         output.push_str(&format!(
             "receiver_validation_failures_total{{reason=\"missing_field\"}} {}\n",
-            self.validation_failures_missing_field.load(Ordering::Relaxed)
+            self.validation_failures_missing_field
+                .load(Ordering::Relaxed)
         ));
 
-        output.push_str("# HELP receiver_request_timeouts_total Request timeouts (slow loris indicator)\n");
+        output.push_str(
+            "# HELP receiver_request_timeouts_total Request timeouts (slow loris indicator)\n",
+        );
         output.push_str("# TYPE receiver_request_timeouts_total counter\n");
         output.push_str(&format!(
             "receiver_request_timeouts_total {}\n",
