@@ -120,11 +120,11 @@ jobs:
 
       - name: Verify publish (dry-run)
         if: ${{ inputs.dry_run == true }}
-        run: cargo publish --registry hypersec --dry-run --no-verify
+        run: cargo publish --registry hypersec --dry-run --no-verify --allow-dirty
 
       - name: Publish to Artifactory
         if: ${{ inputs.skip_publish == false && inputs.dry_run == false }}
-        run: cargo publish --registry hypersec --no-verify
+        run: cargo publish --registry hypersec --no-verify --allow-dirty
 
       - name: Create GitHub Release
         if: ${{ github.event_name == 'push' }}
