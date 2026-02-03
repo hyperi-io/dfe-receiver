@@ -35,9 +35,22 @@ jobs:
   release:
     runs-on: buildjet-32vcpu-ubuntu-2204
     steps:
+      - name: Generate token
+        id: token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ steps.token.outputs.token }}
+
+      - name: Configure Git for private repos
+        run: |
+          git config --global url."https://x-access-token:${{ steps.token.outputs.token }}@github.com/".insteadOf "https://github.com/"
 
       - name: Install system dependencies
         run: |
