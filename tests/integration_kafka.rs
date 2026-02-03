@@ -49,7 +49,12 @@ fn test_topic_prefix() -> String {
 
 /// Create a unique test topic name.
 fn test_topic(suffix: &str) -> String {
-    format!("{}-{}-{}", test_topic_prefix(), suffix, uuid::Uuid::new_v4())
+    format!(
+        "{}-{}-{}",
+        test_topic_prefix(),
+        suffix,
+        uuid::Uuid::new_v4()
+    )
 }
 
 /// Check if Kafka is available.
@@ -64,8 +69,8 @@ async fn kafka_available() -> bool {
     // Add SASL if configured
     if let Ok(user) = std::env::var("KAFKA_SASL_USER") {
         if let Ok(password) = std::env::var("KAFKA_SASL_PASSWORD") {
-            let mechanism = std::env::var("KAFKA_SASL_MECHANISM")
-                .unwrap_or_else(|_| "PLAIN".to_string());
+            let mechanism =
+                std::env::var("KAFKA_SASL_MECHANISM").unwrap_or_else(|_| "PLAIN".to_string());
             let protocol = std::env::var("KAFKA_SECURITY_PROTOCOL")
                 .unwrap_or_else(|_| "SASL_PLAINTEXT".to_string());
 
@@ -107,8 +112,8 @@ fn create_producer() -> FutureProducer {
     // Add SASL if configured
     if let Ok(user) = std::env::var("KAFKA_SASL_USER") {
         if let Ok(password) = std::env::var("KAFKA_SASL_PASSWORD") {
-            let mechanism = std::env::var("KAFKA_SASL_MECHANISM")
-                .unwrap_or_else(|_| "PLAIN".to_string());
+            let mechanism =
+                std::env::var("KAFKA_SASL_MECHANISM").unwrap_or_else(|_| "PLAIN".to_string());
             let protocol = std::env::var("KAFKA_SECURITY_PROTOCOL")
                 .unwrap_or_else(|_| "SASL_PLAINTEXT".to_string());
 
@@ -136,8 +141,8 @@ fn create_consumer(group_id: &str) -> StreamConsumer {
     // Add SASL if configured
     if let Ok(user) = std::env::var("KAFKA_SASL_USER") {
         if let Ok(password) = std::env::var("KAFKA_SASL_PASSWORD") {
-            let mechanism = std::env::var("KAFKA_SASL_MECHANISM")
-                .unwrap_or_else(|_| "PLAIN".to_string());
+            let mechanism =
+                std::env::var("KAFKA_SASL_MECHANISM").unwrap_or_else(|_| "PLAIN".to_string());
             let protocol = std::env::var("KAFKA_SECURITY_PROTOCOL")
                 .unwrap_or_else(|_| "SASL_PLAINTEXT".to_string());
 
@@ -233,9 +238,7 @@ async fn test_kafka_batch_send() {
     let producer = create_producer();
     let consumer = create_consumer(&format!("test-group-{}", uuid::Uuid::new_v4()));
 
-    consumer
-        .subscribe(&[&topic])
-        .expect("Failed to subscribe");
+    consumer.subscribe(&[&topic]).expect("Failed to subscribe");
 
     // Send multiple messages - need to own the payloads
     let message_count = 100;
@@ -312,8 +315,8 @@ async fn test_receiver_kafka_sink() {
     // Add SASL if configured
     if let Ok(user) = std::env::var("KAFKA_SASL_USER") {
         if let Ok(password) = std::env::var("KAFKA_SASL_PASSWORD") {
-            let mechanism = std::env::var("KAFKA_SASL_MECHANISM")
-                .unwrap_or_else(|_| "PLAIN".to_string());
+            let mechanism =
+                std::env::var("KAFKA_SASL_MECHANISM").unwrap_or_else(|_| "PLAIN".to_string());
 
             config.sasl = Some(dfe_receiver::config::SaslConfig {
                 enabled: true,
@@ -330,9 +333,7 @@ async fn test_receiver_kafka_sink() {
     // Send messages through the sink
     for i in 0..10 {
         let payload = Bytes::from(format!(r#"{{"event_category":"sink_test","seq":{i}}}"#));
-        sink.send(&topic, payload)
-            .await
-            .expect("Sink send failed");
+        sink.send(&topic, payload).await.expect("Sink send failed");
     }
 
     // Flush to ensure delivery
@@ -384,8 +385,8 @@ async fn test_full_pipeline_to_kafka() {
     // Add SASL if configured
     if let Ok(user) = std::env::var("KAFKA_SASL_USER") {
         if let Ok(password) = std::env::var("KAFKA_SASL_PASSWORD") {
-            let mechanism = std::env::var("KAFKA_SASL_MECHANISM")
-                .unwrap_or_else(|_| "PLAIN".to_string());
+            let mechanism =
+                std::env::var("KAFKA_SASL_MECHANISM").unwrap_or_else(|_| "PLAIN".to_string());
 
             config.kafka.sasl = Some(SaslConfig {
                 enabled: true,
@@ -471,8 +472,8 @@ async fn test_http_to_kafka() {
     // Add SASL if configured
     if let Ok(user) = std::env::var("KAFKA_SASL_USER") {
         if let Ok(password) = std::env::var("KAFKA_SASL_PASSWORD") {
-            let mechanism = std::env::var("KAFKA_SASL_MECHANISM")
-                .unwrap_or_else(|_| "PLAIN".to_string());
+            let mechanism =
+                std::env::var("KAFKA_SASL_MECHANISM").unwrap_or_else(|_| "PLAIN".to_string());
 
             config.kafka.sasl = Some(SaslConfig {
                 enabled: true,
@@ -511,7 +512,8 @@ async fn test_http_to_kafka() {
     let bind_addr = config.server.bind_address.clone();
 
     let server_handle = tokio::spawn(async move {
-        let _ = http::run_server(&bind_addr, server_pipeline, server_metrics, server_shutdown).await;
+        let _ =
+            http::run_server(&bind_addr, server_pipeline, server_metrics, server_shutdown).await;
     });
 
     // Wait for server to start
@@ -591,8 +593,8 @@ async fn test_category_routing() {
     // Add SASL if configured
     if let Ok(user) = std::env::var("KAFKA_SASL_USER") {
         if let Ok(password) = std::env::var("KAFKA_SASL_PASSWORD") {
-            let mechanism = std::env::var("KAFKA_SASL_MECHANISM")
-                .unwrap_or_else(|_| "PLAIN".to_string());
+            let mechanism =
+                std::env::var("KAFKA_SASL_MECHANISM").unwrap_or_else(|_| "PLAIN".to_string());
 
             config.kafka.sasl = Some(SaslConfig {
                 enabled: true,
@@ -608,8 +610,14 @@ async fn test_category_routing() {
     let network_topic = test_topic("network");
     let default_topic = test_topic("default");
 
-    config.routing.category_to_topic.insert("authentication".to_string(), auth_topic.clone());
-    config.routing.category_to_topic.insert("network".to_string(), network_topic.clone());
+    config
+        .routing
+        .category_to_topic
+        .insert("authentication".to_string(), auth_topic.clone());
+    config
+        .routing
+        .category_to_topic
+        .insert("network".to_string(), network_topic.clone());
     config.routing.default_topic = default_topic.clone();
     config.routing.topic_suffix = "".to_string();
     config.routing.topic_fields = vec!["event_category".to_string()];
@@ -619,11 +627,15 @@ async fn test_category_routing() {
 
     // Send messages with different categories
     pipeline
-        .process(Bytes::from(r#"{"event_category":"authentication","user":"alice"}"#))
+        .process(Bytes::from(
+            r#"{"event_category":"authentication","user":"alice"}"#,
+        ))
         .await
         .expect("Process failed");
     pipeline
-        .process(Bytes::from(r#"{"event_category":"network","ip":"10.0.0.1"}"#))
+        .process(Bytes::from(
+            r#"{"event_category":"network","ip":"10.0.0.1"}"#,
+        ))
         .await
         .expect("Process failed");
     pipeline
@@ -676,8 +688,8 @@ async fn test_dlq_routing() {
     // Add SASL if configured
     if let Ok(user) = std::env::var("KAFKA_SASL_USER") {
         if let Ok(password) = std::env::var("KAFKA_SASL_PASSWORD") {
-            let mechanism = std::env::var("KAFKA_SASL_MECHANISM")
-                .unwrap_or_else(|_| "PLAIN".to_string());
+            let mechanism =
+                std::env::var("KAFKA_SASL_MECHANISM").unwrap_or_else(|_| "PLAIN".to_string());
 
             config.kafka.sasl = Some(SaslConfig {
                 enabled: true,
@@ -703,7 +715,9 @@ async fn test_dlq_routing() {
 
     // Send message missing required field - should go to DLQ
     let result = pipeline
-        .process(Bytes::from(r#"{"event_category":"test","data":"no required field"}"#))
+        .process(Bytes::from(
+            r#"{"event_category":"test","data":"no required field"}"#,
+        ))
         .await;
 
     // Should succeed (routed to DLQ)
@@ -716,7 +730,9 @@ async fn test_dlq_routing() {
 
     // Verify message in DLQ
     let consumer = create_consumer(&format!("test-group-{}", uuid::Uuid::new_v4()));
-    consumer.subscribe(&[&dlq_topic]).expect("Failed to subscribe");
+    consumer
+        .subscribe(&[&dlq_topic])
+        .expect("Failed to subscribe");
 
     let result = timeout(Duration::from_secs(10), consumer.recv()).await;
     assert!(result.is_ok(), "Expected message in DLQ: {dlq_topic}");

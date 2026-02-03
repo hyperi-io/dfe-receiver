@@ -57,7 +57,11 @@ impl PipelineState {
 
         // Initialise loader sink with tiered wrapper
         let loader_sink = if config.destinations.default == "loader"
-            || config.destinations.rules.iter().any(|r| r.destination == "loader")
+            || config
+                .destinations
+                .rules
+                .iter()
+                .any(|r| r.destination == "loader")
         {
             let primary = LoaderSink::new(&config.loader, &config.kafka)?;
             Some(Arc::new(TieredSink::new(primary, &config.buffer)))
@@ -221,11 +225,7 @@ pub struct Orchestrator {
 
 impl Orchestrator {
     /// Create a new orchestrator.
-    pub fn new(
-        config: Config,
-        metrics: Arc<Metrics>,
-        shutdown: CancellationToken,
-    ) -> Result<Self> {
+    pub fn new(config: Config, metrics: Arc<Metrics>, shutdown: CancellationToken) -> Result<Self> {
         let state = PipelineState::new(config)?;
 
         Ok(Self {

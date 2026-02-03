@@ -61,9 +61,7 @@ impl LoaderSink {
                 }
             }
 
-            let producer: FutureProducer = client_config
-                .create()
-                .map_err(Error::Kafka)?;
+            let producer: FutureProducer = client_config.create().map_err(Error::Kafka)?;
 
             Some(producer)
         } else {

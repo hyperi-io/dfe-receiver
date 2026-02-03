@@ -93,7 +93,10 @@ impl AuthState {
     }
 
     /// Create auth state with an Arc-wrapped bearer token provider.
-    pub fn with_bearer_provider_arc(config: AuthConfig, provider: Arc<BearerTokenProvider>) -> Self {
+    pub fn with_bearer_provider_arc(
+        config: AuthConfig,
+        provider: Arc<BearerTokenProvider>,
+    ) -> Self {
         Self {
             config: Arc::new(config),
             bearer_provider: Some(provider),
@@ -222,11 +225,7 @@ impl BearerTokenProvider {
     }
 
     /// Start background token refresh task.
-    pub fn start_refresh_task(
-        self: Arc<Self>,
-        source: String,
-        interval: Duration,
-    ) {
+    pub fn start_refresh_task(self: Arc<Self>, source: String, interval: Duration) {
         let mut shutdown_rx = self.shutdown_tx.subscribe();
 
         tokio::spawn(async move {
@@ -359,16 +358,17 @@ pub async fn token_auth_middleware(
 /// Checks the `Authorization: Bearer <token>` header against valid tokens.
 /// Returns `None` if authentication passes, `Some(AuthError)` on failure.
 #[inline]
-pub fn validate_bearer_auth(auth: &AuthState, headers: &axum::http::HeaderMap) -> Option<AuthError> {
+pub fn validate_bearer_auth(
+    auth: &AuthState,
+    headers: &axum::http::HeaderMap,
+) -> Option<AuthError> {
     let Some(ref provider) = auth.bearer_provider else {
         // No bearer provider configured, skip bearer auth
         return None;
     };
 
     // Check for Authorization header
-    let auth_header = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok());
+    let auth_header = headers.get("authorization").and_then(|v| v.to_str().ok());
 
     let Some(auth_value) = auth_header else {
         return Some(AuthError {
@@ -419,7 +419,10 @@ impl IntoResponse for AuthError {
 /// Returns `None` if authentication passes (any accepted header matches).
 /// Returns `Some(AuthError)` if no accepted header is valid.
 #[inline]
-pub fn validate_header_auth(config: &AuthConfig, headers: &axum::http::HeaderMap) -> Option<AuthError> {
+pub fn validate_header_auth(
+    config: &AuthConfig,
+    headers: &axum::http::HeaderMap,
+) -> Option<AuthError> {
     let mode = AuthMode::from_str(&config.mode);
 
     // Skip if auth mode doesn't require headers
@@ -440,7 +443,10 @@ pub fn validate_header_auth(config: &AuthConfig, headers: &axum::http::HeaderMap
 
     // Check each accepted header - any valid one passes
     for accepted_header in &accepted {
-        if let Some(header_value) = headers.get(&accepted_header.name).and_then(|v| v.to_str().ok()) {
+        if let Some(header_value) = headers
+            .get(&accepted_header.name)
+            .and_then(|v| v.to_str().ok())
+        {
             // If values list is empty, any non-empty value is accepted
             if accepted_header.values.is_empty() {
                 debug!(header = %accepted_header.name, "Auth header accepted (any value)");

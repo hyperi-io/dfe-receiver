@@ -50,7 +50,8 @@ const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Create auth state with optional bearer token provider.
 async fn create_auth_state(config: &AuthConfig) -> Result<AuthState> {
     // Check if bearer auth is configured
-    let has_bearer_tokens = !config.bearer.tokens.is_empty() || config.bearer.secret_source.is_some();
+    let has_bearer_tokens =
+        !config.bearer.tokens.is_empty() || config.bearer.secret_source.is_some();
     let mode = config.mode.to_lowercase();
 
     if has_bearer_tokens && (mode == "bearer" || mode == "both" || mode == "header") {
@@ -59,11 +60,17 @@ async fn create_auth_state(config: &AuthConfig) -> Result<AuthState> {
 
         // Start background refresh if secret source is configured
         if let Some(ref source) = config.bearer.secret_source {
-            let refresh_interval = std::time::Duration::from_secs(config.bearer.refresh_interval_secs);
-            provider.clone().start_refresh_task(source.clone(), refresh_interval);
+            let refresh_interval =
+                std::time::Duration::from_secs(config.bearer.refresh_interval_secs);
+            provider
+                .clone()
+                .start_refresh_task(source.clone(), refresh_interval);
         }
 
-        Ok(AuthState::with_bearer_provider_arc(config.clone(), provider))
+        Ok(AuthState::with_bearer_provider_arc(
+            config.clone(),
+            provider,
+        ))
     } else {
         Ok(AuthState::new(config.clone()))
     }
@@ -134,7 +141,10 @@ pub async fn run_server(
         .layer(RequestBodyLimitLayer::new(max_body_size))
         // Request timeout - reject slow requests (slow loris protection)
         // Returns 408 Request Timeout for slow clients
-        .layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, request_timeout))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            request_timeout,
+        ))
         .with_state(state);
 
     let addr: SocketAddr = addr
