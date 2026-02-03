@@ -613,7 +613,7 @@ dependencies = [
 
 [[package]]
 name = "dfe-receiver"
-version = "1.1.0"
+version = "1.4.11"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1026,8 +1026,9 @@ checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
 
 [[package]]
 name = "hs-rustlib"
-version = "1.3.9"
-source = "git+https://github.com/hypersec-io/hs-rustlib#3eb00c2c159fc52d0f36082c96a5c37fa00d3b65"
+version = "1.3.8"
+source = "sparse+https://hypersec.jfrog.io/artifactory/api/cargo/hypersec-cargo-virtual/index/"
+checksum = "2904636270f03fdf9d4e86c5136e5d1eec49b9d60b8a9a6515a3d8d8b7990c54"
 dependencies = [
  "async-trait",
  "axum 0.8.8",

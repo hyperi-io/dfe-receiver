@@ -15,6 +15,15 @@ language: rust
 # runners:
 #   default: ubuntu-latest    # Default runner for all jobs (quality, test, build, publish)
 
+# Rust-specific configuration
+rust:
+  # Feature sets to test (pipe-separated in CI)
+  # Each entry is tested separately for clippy/build/test
+  features:
+    - default             # Default features (no allocator)
+    - jemalloc            # With jemalloc allocator
+    - mimalloc            # With mimalloc allocator
+
 # Quality checks
 quality:
   enabled: true
