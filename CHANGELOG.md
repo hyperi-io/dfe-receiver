@@ -1,3 +1,10 @@
+## [1.4.10](https://github.com/hypersec-io/dfe-receiver/compare/v1.4.9...v1.4.10) (2026-02-03)
+
+
+### Bug Fixes
+
+* allow unwrap/expect in test code ([aeca759](https://github.com/hypersec-io/dfe-receiver/commit/aeca759ac98e4aea0f9bd264bc5d1ca2b51a5ae1))
+
 ## [1.4.9](https://github.com/hypersec-io/dfe-receiver/compare/v1.4.8...v1.4.9) (2026-02-03)
 
 
