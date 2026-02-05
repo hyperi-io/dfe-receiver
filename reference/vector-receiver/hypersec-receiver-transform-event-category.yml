@@ -1,9 +1,10 @@
-# 
-# HyperSec XDR Vector Component Template
-# Purpose: HyperSec Transform Receiver container configuration for setting tags.event.category values
-# Deployment Types: AWS, SaaS
-# Release Date: 2024-03-27
-# CT Build: © HyperSec 2024
+# HyperI Receiver Transform Vector Component Template (legacy reference)
+#
+# License:   FSL-1.1-ALv2
+# Copyright: (c) 2026 HYPERI PTY LIMITED
+#
+# Note: This is a legacy reference file from the Vector-based implementation.
+# The native Rust dfe-receiver replaces this.
 #
 # Required environment variables:
 # - VECTOR_ENRICHMENT_PATH: the path to the maxmind enrichment files

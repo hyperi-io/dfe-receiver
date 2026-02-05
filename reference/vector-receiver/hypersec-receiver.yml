@@ -1,17 +1,10 @@
-# HyperSec Receiver container configuration
+# HyperI Receiver container configuration (legacy Vector reference)
 #
-# v1.6    2024-01-03    Merge performant Beats and syslog remap
-#                       Rename stages to align with standard
-# v1.5    2023-11-10    Field mapper update
-# v1.4    2023-10-31    Updated to collapsed customer topics
-# v1.3.2  2023-10-23    _tags -> tags (deperacated XDR 1.1 _tags)
-#                       _customer_uid -> org_id universally now (deperacated XDR 1.x _customer_uid)
-#                       Removal of underscore prefixes from standard schema header
-# v1.3.1  2023-10-16    Kafka MTLS correction
-# v1.3    2023-10-15    MTLS update
-#                       Paramterisation fixes
+# License:   FSL-1.1-ALv2
+# Copyright: (c) 2026 HYPERI PTY LIMITED
 #
-# (c) HyperSec 2023
+# Note: This is a legacy reference file from the Vector-based implementation.
+# The native Rust dfe-receiver replaces this.
 #
 # Required environment variables
 #
