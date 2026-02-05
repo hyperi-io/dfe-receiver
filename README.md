@@ -180,7 +180,7 @@ Key metrics:
 
 ## Architecture
 
-```
+```text
 HTTP Request (bytes::Bytes)
     |
     +-- Auth middleware (header/bearer/mTLS)
@@ -211,6 +211,9 @@ cargo test --test integration_kafka -- --ignored
 
 ## License
 
-LicenseRef-HyperSec-EULA - See LICENSE file for details.
+This project is licensed under the Functional Source License, Version 1.1,
+Apache 2.0 Future License (FSL-1.1-ALv2). See [LICENSE](LICENSE) for details.
 
-Copyright (c) 2026 HyperSec
+Copyright (c) 2026 HYPERI PTY LIMITED
+
+For commercial licensing options, see [COMMERCIAL.md](COMMERCIAL.md).

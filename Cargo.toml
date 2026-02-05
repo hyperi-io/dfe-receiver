@@ -3,8 +3,8 @@
 # Purpose:   High-performance HTTP/gRPC receiver for data ingestion
 # Language:  Rust
 #
-# License:   LicenseRef-HyperSec-EULA
-# Copyright: (c) 2026 HyperSec
+# License:   FSL-1.1-ALv2
+# Copyright: (c) 2026 HYPERI PTY LIMITED
 
 [package]
 name = "dfe-receiver"
@@ -12,7 +12,7 @@ version = "1.5.0"
 edition = "2021"
 rust-version = "1.75"
 description = "High-performance HTTP/gRPC receiver for PB/s scale data ingestion"
-license = "LicenseRef-HyperSec-EULA"
+license = "FSL-1.1-ALv2"
 repository = "https://github.com/hypersec-io/dfe-receiver"
 exclude = [".claude/", ".github/", "ai/", "ci/", "docs/", "reference/", "benches/"]
 

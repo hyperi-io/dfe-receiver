@@ -3,8 +3,8 @@
 // Purpose:   Configuration loading and validation
 // Language:  Rust
 //
-// License:   LicenseRef-HyperSec-EULA
-// Copyright: (c) 2026 HyperSec
+// License:   FSL-1.1-ALv2
+// Copyright: (c) 2026 HYPERI PTY LIMITED
 
 //! Configuration management using hs-rustlib's 7-layer cascade.
 //!

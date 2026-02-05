@@ -1,9 +1,10 @@
-# 
-# HyperSec XDR Vector Component Template
-# Purpose:  HyperSec Source Receiver container configuration
-# Deployment Types: AWS, SaaS
-# Release Date: 2024-03-27
-# CT Build: © HyperSec 2024
+# HyperI Receiver Vector Component Template (legacy reference)
+#
+# License:   FSL-1.1-ALv2
+# Copyright: (c) 2026 HYPERI PTY LIMITED
+#
+# Note: This is a legacy reference file from the Vector-based implementation.
+# The native Rust dfe-receiver replaces this.
 #
 # Required environment variables:
 # - VECTOR_DATA_DIR: The directory used for persisting Vector state, such as on-disk buffers, file checkpoints, and more. Please make sure the Vector project has write permissions to this directory.

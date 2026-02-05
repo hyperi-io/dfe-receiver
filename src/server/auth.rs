@@ -3,8 +3,8 @@
 // Purpose:   Authentication middleware
 // Language:  Rust
 //
-// License:   LicenseRef-HyperSec-EULA
-// Copyright: (c) 2026 HyperSec
+// License:   FSL-1.1-ALv2
+// Copyright: (c) 2026 HYPERI PTY LIMITED
 
 //! Authentication middleware for header, bearer token, and mTLS validation.
 //!

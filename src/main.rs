@@ -3,8 +3,8 @@
 // Purpose:   CLI entry point and runtime initialisation
 // Language:  Rust
 //
-// License:   LicenseRef-HyperSec-EULA
-// Copyright: (c) 2026 HyperSec
+// License:   FSL-1.1-ALv2
+// Copyright: (c) 2026 HYPERI PTY LIMITED
 
 //! dfe-receiver CLI entry point.
 //!
