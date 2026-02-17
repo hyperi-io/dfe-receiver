@@ -3,8 +3,8 @@
 // Purpose:   Security tests for HTTP server hardening
 // Language:  Rust
 //
-// License:   LicenseRef-HyperSec-EULA
-// Copyright: (c) 2026 HyperSec
+// License:   FSL-1.1-ALv2
+// Copyright: (c) 2026 HYPERI PTY LIMITED
 
 //! Security tests for the HTTP server.
 //!
@@ -496,6 +496,237 @@ async fn test_concurrent_requests() {
         // We don't care about the result, just that it didn't panic
         let _ = result;
     }
+
+    shutdown.cancel();
+}
+
+// =============================================================================
+// File-Based Bearer Auth Tests
+// =============================================================================
+
+/// Test bearer auth with tokens loaded from a file.
+#[tokio::test]
+async fn test_bearer_auth_from_file() {
+    use std::io::Write;
+
+    let port = random_port();
+    let mut config = test_config(port, 10_000, 30_000, "bearer");
+
+    // Write tokens to a temp file
+    let mut token_file = tempfile::NamedTempFile::new().expect("Failed to create temp file");
+    writeln!(token_file, "file-token-abc").expect("Failed to write token");
+    writeln!(token_file, "file-token-def").expect("Failed to write token");
+    token_file.flush().expect("Failed to flush");
+
+    let token_path = token_file.path().to_str().expect("Invalid path").to_string();
+
+    config.server.auth.bearer = BearerConfig {
+        tokens: vec![],
+        secret_source: Some(format!("file:{token_path}")),
+        refresh_interval_secs: 300,
+    };
+
+    let (url, shutdown) = start_test_server(config).await;
+    let client = reqwest::Client::new();
+
+    // Valid file-sourced token should be accepted
+    let response = client
+        .post(format!("{url}/ingest"))
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer file-token-abc")
+        .body(r#"{"test":"data"}"#)
+        .send()
+        .await
+        .expect("Request failed");
+
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    assert!(
+        status.is_success(),
+        "Expected success for file token, got: {} - body: {}",
+        status,
+        body
+    );
+
+    // Second token from file should also work
+    let response = client
+        .post(format!("{url}/ingest"))
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer file-token-def")
+        .body(r#"{"test":"data"}"#)
+        .send()
+        .await
+        .expect("Request failed");
+
+    assert!(
+        response.status().is_success(),
+        "Expected success for second file token, got: {}",
+        response.status()
+    );
+
+    // Invalid token should be rejected
+    let response = client
+        .post(format!("{url}/ingest"))
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer not-in-file")
+        .body(r#"{"test":"data"}"#)
+        .send()
+        .await
+        .expect("Request failed");
+
+    assert_eq!(
+        response.status().as_u16(),
+        401,
+        "Expected 401 for invalid token, got: {}",
+        response.status()
+    );
+
+    shutdown.cancel();
+}
+
+/// Test bearer auth token refresh from file.
+///
+/// Writes an initial token, verifies it works, then overwrites the file
+/// with a new token and waits for refresh.
+#[tokio::test]
+async fn test_bearer_auth_file_refresh() {
+    let port = random_port();
+    let mut config = test_config(port, 10_000, 30_000, "bearer");
+
+    // Write initial token
+    let token_file = tempfile::NamedTempFile::new().expect("Failed to create temp file");
+    let token_path = token_file.path().to_str().expect("Invalid path").to_string();
+
+    std::fs::write(&token_path, "initial-token\n").expect("Failed to write initial token");
+
+    config.server.auth.bearer = BearerConfig {
+        tokens: vec![],
+        secret_source: Some(format!("file:{token_path}")),
+        refresh_interval_secs: 1, // 1 second refresh for testing
+    };
+
+    let (url, shutdown) = start_test_server(config).await;
+    let client = reqwest::Client::new();
+
+    // Initial token should work
+    let response = client
+        .post(format!("{url}/ingest"))
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer initial-token")
+        .body(r#"{"test":"data"}"#)
+        .send()
+        .await
+        .expect("Request failed");
+
+    assert!(
+        response.status().is_success(),
+        "Expected success for initial token, got: {}",
+        response.status()
+    );
+
+    // Overwrite file with new token
+    std::fs::write(&token_path, "refreshed-token\n").expect("Failed to write refreshed token");
+
+    // Wait for refresh (1s interval + generous buffer for CI/slow machines)
+    tokio::time::sleep(Duration::from_millis(5000)).await;
+
+    // New token should work after refresh
+    let response = client
+        .post(format!("{url}/ingest"))
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer refreshed-token")
+        .body(r#"{"test":"data"}"#)
+        .send()
+        .await
+        .expect("Request failed");
+
+    assert!(
+        response.status().is_success(),
+        "Expected success for refreshed token, got: {}",
+        response.status()
+    );
+
+    // Old token should be rejected after refresh
+    let response = client
+        .post(format!("{url}/ingest"))
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer initial-token")
+        .body(r#"{"test":"data"}"#)
+        .send()
+        .await
+        .expect("Request failed");
+
+    assert_eq!(
+        response.status().as_u16(),
+        401,
+        "Expected 401 for old token after refresh, got: {}",
+        response.status()
+    );
+
+    shutdown.cancel();
+}
+
+/// Test bearer auth with comma-separated tokens in file.
+#[tokio::test]
+async fn test_bearer_auth_file_comma_separated() {
+    use std::io::Write;
+
+    let port = random_port();
+    let mut config = test_config(port, 10_000, 30_000, "bearer");
+
+    // Write comma-separated tokens
+    let mut token_file = tempfile::NamedTempFile::new().expect("Failed to create temp file");
+    writeln!(token_file, "token-alpha,token-beta,token-gamma").expect("Failed to write tokens");
+    token_file.flush().expect("Failed to flush");
+
+    let token_path = token_file.path().to_str().expect("Invalid path").to_string();
+
+    config.server.auth.bearer = BearerConfig {
+        tokens: vec![],
+        secret_source: Some(format!("file:{token_path}")),
+        refresh_interval_secs: 300,
+    };
+
+    let (url, shutdown) = start_test_server(config).await;
+    let client = reqwest::Client::new();
+
+    // All three comma-separated tokens should work
+    for token in ["token-alpha", "token-beta", "token-gamma"] {
+        let response = client
+            .post(format!("{url}/ingest"))
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"))
+            .body(r#"{"test":"data"}"#)
+            .send()
+            .await
+            .expect("Request failed");
+
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        assert!(
+            status.is_success(),
+            "Expected success for token '{token}', got: {} - body: {}",
+            status,
+            body
+        );
+    }
+
+    // Token not in file should be rejected
+    let response = client
+        .post(format!("{url}/ingest"))
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer token-delta")
+        .body(r#"{"test":"data"}"#)
+        .send()
+        .await
+        .expect("Request failed");
+
+    assert_eq!(
+        response.status().as_u16(),
+        401,
+        "Expected 401 for token not in file, got: {}",
+        response.status()
+    );
 
     shutdown.cancel();
 }

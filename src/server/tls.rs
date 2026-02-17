@@ -338,6 +338,153 @@ pub fn uses_secrets(config: &TlsConfig) -> bool {
     config.cert_secret.is_some() || config.key_secret.is_some() || config.ca_secret.is_some()
 }
 
+/// Build a tonic `ServerTlsConfig` for the gRPC server.
+///
+/// Loads certificates from files or secret managers and returns
+/// a `ServerTlsConfig` suitable for `tonic::transport::Server::builder().tls_config()`.
+pub async fn build_grpc_tls_config(
+    config: &TlsConfig,
+) -> Result<tonic::transport::ServerTlsConfig> {
+    // Load certificate (secret takes precedence over file)
+    let cert_pem = if let Some(ref secret) = config.cert_secret {
+        info!(source = %secret, "Loading gRPC TLS certificate from secret");
+        load_from_secret(secret).await?
+    } else if let Some(ref path) = config.cert_file {
+        debug!(path = %path, "Loading gRPC TLS certificate from file");
+        std::fs::read(path)
+            .map_err(|e| Error::Tls(format!("failed to read cert file {path}: {e}")))?
+    } else {
+        return Err(Error::Tls(
+            "gRPC TLS enabled but neither cert_file nor cert_secret specified".into(),
+        ));
+    };
+
+    // Load private key (secret takes precedence over file)
+    let key_pem = if let Some(ref secret) = config.key_secret {
+        info!(source = %secret, "Loading gRPC TLS private key from secret");
+        load_from_secret(secret).await?
+    } else if let Some(ref path) = config.key_file {
+        debug!(path = %path, "Loading gRPC TLS private key from file");
+        std::fs::read(path)
+            .map_err(|e| Error::Tls(format!("failed to read key file {path}: {e}")))?
+    } else {
+        return Err(Error::Tls(
+            "gRPC TLS enabled but neither key_file nor key_secret specified".into(),
+        ));
+    };
+
+    let identity = tonic::transport::Identity::from_pem(cert_pem, key_pem);
+    let mut tls_config = tonic::transport::ServerTlsConfig::new().identity(identity);
+
+    // Load CA for client certificate verification (mTLS)
+    let client_auth = ClientAuth::from_str(&config.client_auth);
+    if client_auth != ClientAuth::None {
+        let ca_pem = if let Some(ref secret) = config.ca_secret {
+            info!(source = %secret, "Loading gRPC CA certificate from secret");
+            load_from_secret(secret).await?
+        } else if let Some(ref path) = config.ca_file {
+            debug!(path = %path, "Loading gRPC CA certificate from file");
+            std::fs::read(path)
+                .map_err(|e| Error::Tls(format!("failed to read CA file {path}: {e}")))?
+        } else {
+            return Err(Error::Tls(
+                "gRPC client_auth requires ca_file or ca_secret".into(),
+            ));
+        };
+
+        let ca_cert = tonic::transport::Certificate::from_pem(ca_pem);
+        tls_config = tls_config.client_ca_root(ca_cert);
+    }
+
+    info!("gRPC TLS config built successfully");
+    Ok(tls_config)
+}
+
+/// TLS certificate provider with background hot-reload.
+///
+/// Follows the same pattern as `BearerTokenProvider` in `auth.rs`.
+/// Wraps a `TlsAcceptor` behind a `RwLock` and periodically reloads
+/// certificates from secret managers.
+pub struct TlsCertProvider {
+    acceptor: Arc<parking_lot::RwLock<TlsAcceptor>>,
+    config: TlsConfig,
+    shutdown: tokio_util::sync::CancellationToken,
+}
+
+impl TlsCertProvider {
+    /// Create a new TLS cert provider and perform initial certificate load.
+    pub async fn new(config: TlsConfig) -> Result<Self> {
+        let acceptor = build_tls_acceptor_async(&config)
+            .await?
+            .ok_or_else(|| Error::Tls("TLS provider created but TLS is disabled".into()))?;
+
+        Ok(Self {
+            acceptor: Arc::new(parking_lot::RwLock::new(acceptor)),
+            config,
+            shutdown: tokio_util::sync::CancellationToken::new(),
+        })
+    }
+
+    /// Get the shared acceptor handle for the HTTP server accept loop.
+    ///
+    /// The server clones the `TlsAcceptor` from behind the `RwLock` per connection.
+    /// This is cheap because `TlsAcceptor` wraps `Arc<ServerConfig>`.
+    pub fn acceptor_handle(&self) -> Arc<parking_lot::RwLock<TlsAcceptor>> {
+        self.acceptor.clone()
+    }
+
+    /// Start background certificate refresh task.
+    ///
+    /// Periodically reloads certificates from secret managers and swaps
+    /// the TLS acceptor behind the `RwLock`. Existing connections are unaffected;
+    /// new connections use the updated certificates.
+    pub fn start_refresh_task(&self) {
+        let acceptor = self.acceptor.clone();
+        let config = self.config.clone();
+        let shutdown = self.shutdown.clone();
+        let interval = std::time::Duration::from_secs(config.refresh_interval_secs);
+
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            ticker.tick().await; // Skip immediate tick
+
+            loop {
+                tokio::select! {
+                    _ = shutdown.cancelled() => {
+                        info!("TLS cert refresh task stopping");
+                        break;
+                    }
+                    _ = ticker.tick() => {
+                        match build_tls_acceptor_async(&config).await {
+                            Ok(Some(new_acceptor)) => {
+                                *acceptor.write() = new_acceptor;
+                                info!("TLS certificates refreshed successfully");
+                            }
+                            Ok(None) => {
+                                tracing::error!("TLS refresh returned None (TLS disabled?)");
+                            }
+                            Err(e) => {
+                                tracing::error!(error = %e, "Failed to refresh TLS certificates");
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    /// Shutdown the refresh task.
+    pub fn shutdown(&self) {
+        self.shutdown.cancel();
+    }
+}
+
+impl Drop for TlsCertProvider {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
 /// Information extracted from a validated client certificate.
 #[derive(Debug, Clone)]
 pub struct ClientCertInfo {

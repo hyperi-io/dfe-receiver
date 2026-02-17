@@ -3,8 +3,8 @@
 # Purpose:   Test environment with Kafka (Strimzi/KRaft)
 # Language:  Docker Compose
 #
-# License:   LicenseRef-HyperSec-EULA
-# Copyright: (c) 2026 HyperSec
+# License:   FSL-1.1-ALv2
+# Copyright: (c) 2026 HYPERI PTY LIMITED
 #
 # Usage:
 #   docker compose -f docker-compose.test.yaml up -d

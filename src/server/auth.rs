@@ -193,11 +193,17 @@ impl BearerTokenProvider {
             }
         };
 
-        // Configure secrets manager with this source
+        // Configure secrets manager with this source.
+        // Disable cache so each refresh reads the file fresh — the disk-backed cache
+        // in hyperi-rustlib would otherwise return stale data across SecretsManager instances.
         let config = SecretsConfig {
             sources: [("bearer_tokens".into(), secret_source)]
                 .into_iter()
                 .collect(),
+            cache: hyperi_rustlib::secrets::CacheConfig {
+                enabled: false,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let secrets = SecretsManager::new(config)?;
