@@ -1,3 +1,10 @@
+## [1.6.1](https://github.com/hyperi-io/dfe-receiver/compare/v1.6.0...v1.6.1) (2026-02-17)
+
+
+### Bug Fixes
+
+* use non-approx-constant float in test to satisfy clippy ([d22cfcc](https://github.com/hyperi-io/dfe-receiver/commit/d22cfccca77cb2b6b3fd066683da31f5f73f925b))
+
 # [1.6.0](https://github.com/hyperi-io/dfe-receiver/compare/v1.5.0...v1.6.0) (2026-02-17)
 
 
