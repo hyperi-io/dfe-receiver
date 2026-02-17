@@ -42,9 +42,7 @@ use crate::error::{Error, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
 use crate::server::auth::{token_auth_middleware, AuthState, BearerTokenProvider};
-use crate::server::tls::{
-    build_tls_acceptor, uses_secrets, TlsCertProvider,
-};
+use crate::server::tls::{build_tls_acceptor, uses_secrets, TlsCertProvider};
 
 /// TLS handshake timeout to prevent slow TLS attacks.
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
