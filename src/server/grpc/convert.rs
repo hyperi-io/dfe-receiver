@@ -22,9 +22,10 @@ use super::pb::event;
 
 /// Convert a Vector `EventWrapper` to JSON bytes for the pipeline.
 pub fn event_wrapper_to_json(wrapper: &event::EventWrapper) -> Result<Bytes> {
-    let event = wrapper.event.as_ref().ok_or_else(|| {
-        Error::Validation("empty event wrapper: no log, metric, or trace".into())
-    })?;
+    let event = wrapper
+        .event
+        .as_ref()
+        .ok_or_else(|| Error::Validation("empty event wrapper: no log, metric, or trace".into()))?;
 
     let json_value = match event {
         event::event_wrapper::Event::Log(log) => log_to_json(log),
@@ -163,8 +164,7 @@ fn proto_value_to_json(value: &event::Value) -> serde_json::Value {
         event::value::Kind::Boolean(b) => json!(*b),
         event::value::Kind::Map(map) => fields_map_to_json(&map.fields),
         event::value::Kind::Array(arr) => {
-            let items: Vec<serde_json::Value> =
-                arr.items.iter().map(proto_value_to_json).collect();
+            let items: Vec<serde_json::Value> = arr.items.iter().map(proto_value_to_json).collect();
             serde_json::Value::Array(items)
         }
         event::value::Kind::Null(_) => serde_json::Value::Null,
@@ -231,9 +231,7 @@ mod tests {
         }
     }
 
-    fn make_map_value(
-        fields: std::collections::HashMap<String, event::Value>,
-    ) -> event::Value {
+    fn make_map_value(fields: std::collections::HashMap<String, event::Value>) -> event::Value {
         event::Value {
             kind: Some(event::value::Kind::Map(event::ValueMap { fields })),
         }
@@ -270,9 +268,9 @@ mod tests {
 
     #[test]
     fn test_float_value() {
-        let v = make_float_value(2.718);
+        let v = make_float_value(1.5);
         let json = proto_value_to_json(&v);
-        assert_eq!(json, json!(2.718));
+        assert_eq!(json, json!(1.5));
     }
 
     #[test]
