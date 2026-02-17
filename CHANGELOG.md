@@ -1,3 +1,10 @@
+# [1.6.0](https://github.com/hyperi-io/dfe-receiver/compare/v1.5.0...v1.6.0) (2026-02-17)
+
+
+### Features
+
+* add grpc vector protocol, tls hot-reload, bearer auth tests and rebrand fixes ([c668797](https://github.com/hyperi-io/dfe-receiver/commit/c66879702ff23bc65bd3df19d8c3602b4af774bf))
+
 # [1.5.0](https://github.com/hypersec-io/dfe-receiver/compare/v1.4.11...v1.5.0) (2026-02-03)
 
 
