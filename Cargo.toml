@@ -13,12 +13,13 @@ edition = "2021"
 rust-version = "1.75"
 description = "High-performance HTTP/gRPC receiver for PB/s scale data ingestion"
 license = "FSL-1.1-ALv2"
-repository = "https://github.com/hypersec-io/dfe-receiver"
+repository = "https://github.com/hyperi-io/dfe-receiver"
 exclude = [".claude/", ".github/", "ai/", "ci/", "docs/", "reference/", "benches/"]
 
 [dependencies]
-# HyperSec shared library (from JFrog Cargo registry)
-hs-rustlib = { version = "1.3", registry = "hypersec", features = [
+# HyperI shared library (from JFrog Cargo registry)
+# Note: Package is still named hs-rustlib in registry until rename is published
+hyperi-rustlib = { package = "hs-rustlib", version = "1.3", registry = "hypersec", features = [
     "config",
     "logger",
     "metrics",

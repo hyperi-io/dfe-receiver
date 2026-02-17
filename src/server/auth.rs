@@ -9,13 +9,13 @@
 //! Authentication middleware for header, bearer token, and mTLS validation.
 //!
 //! Supports:
-//! - Static header-based authentication (x-api-key, x-hypersec-agent)
+//! - Static header-based authentication (x-api-key, x-hyperi-agent)
 //! - Bearer token authentication with secret manager integration
 //! - mTLS client certificate validation
 //!
 //! Bearer tokens can be loaded from:
 //! - Static configuration (for dev)
-//! - OpenBao/Vault via hs-rustlib secrets
+//! - OpenBao/Vault via hyperi-rustlib secrets
 //! - AWS Secrets Manager
 //! - File (K8s secrets mounted as files)
 
@@ -170,8 +170,8 @@ impl BearerTokenProvider {
         let path = parts[1];
         let key = parts.get(2).copied();
 
-        // Use hs-rustlib secrets manager
-        use hs_rustlib::secrets::{SecretSource, SecretsConfig, SecretsManager};
+        // Use hyperi-rustlib secrets manager
+        use hyperi_rustlib::secrets::{SecretSource, SecretsConfig, SecretsManager};
 
         // Build the secret source based on provider
         let secret_source = match provider_name {

@@ -83,7 +83,7 @@ dfe-receiver is a high-performance HTTP/gRPC receiver for PB/s scale data ingest
                          │                  │                  │
                ┌─────────▼─────────┐ ┌──────▼──────┐ ┌─────────▼─────────┐
                │   Kafka Sink      │ │ DLQ Sink    │ │  Loader Sink      │
-               │   (rdkafka)       │ │             │ │  (hs-rustlib)     │
+               │   (rdkafka)       │ │             │ │  (hyperi-rustlib)     │
                └─────────┬─────────┘ └─────────────┘ └───────────────────┘
                          │
                ┌─────────▼─────────┐
@@ -174,7 +174,7 @@ Uses rdkafka `FutureProducer` with zstd compression.
 
 Wraps primary sink with resilience:
 
-1. **Circuit Breaker** (hs-rustlib) - Tracks consecutive failures, opens after threshold
+1. **Circuit Breaker** (hyperi-rustlib) - Tracks consecutive failures, opens after threshold
 2. **In-Memory Queue** - Buffers during circuit-open state
 3. **Disk Spool** (planned) - Spillover when memory queue full
 4. **Background Drain** - Retries queued messages when circuit closes
@@ -205,7 +205,7 @@ Secret source format: `provider:path:key`
 
 ## Configuration
 
-7-layer cascade (hs-rustlib pattern):
+7-layer cascade (hyperi-rustlib pattern):
 
 1. Compiled defaults
 2. `/etc/dfe-receiver/config.yaml`
@@ -605,11 +605,11 @@ groups:
 - [ ] Full disk spillover (currently in-memory only)
 - [ ] Config hot-reload for all settings
 - [ ] Expression language for routing rules
-- [ ] Rebranding: hs-rustlib to hyperi-rustlib
+- [ ] Rebranding: hyperi-rustlib to hyperi-rustlib
 
 ## References
 
-- [dfe-loader](https://github.com/hypersec-io/dfe-loader) - Reference implementation patterns
-- [hs-rustlib](https://github.com/hypersec-io/hs-rustlib) - Shared library
+- [dfe-loader](https://github.com/hyperi-io/dfe-loader) - Reference implementation patterns
+- [hyperi-rustlib](https://github.com/hyperi-io/hyperi-rustlib) - Shared library
 - [Vector HTTP sink](https://vector.dev/docs/reference/configuration/sinks/http/)
 - [Vector sink (gRPC)](https://vector.dev/docs/reference/configuration/sinks/vector/)

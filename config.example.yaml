@@ -15,7 +15,7 @@ server:
 
   auth:
     mode: "none"  # none, header, mtls, both
-    header_name: "x-hypersec-agent"
+    header_name: "x-hyperi-agent"
     header_values:
       - "1.0"
       - "2.0"

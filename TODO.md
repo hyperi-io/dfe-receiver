@@ -24,9 +24,9 @@ _No features in planning_
 
 Move tasks here when done. Clear this section at end of session.
 
-- [x] Use hs-rustlib CircuitBreaker in TieredSink (removed redundant implementation)
-- [x] Add `secrets` feature to hs-rustlib dependency
-- [x] Create GitHub repo at hypersec-io/dfe-receiver and push initial commit
+- [x] Use hyperi-rustlib CircuitBreaker in TieredSink (removed redundant implementation)
+- [x] Add `secrets` feature to hyperi-rustlib dependency
+- [x] Create GitHub repo at hyperi-io/dfe-receiver and push initial commit
 - [x] Add bearer token authentication support
   - [x] Add BearerConfig to AuthConfig
   - [x] Create BearerTokenProvider with secret manager integration
