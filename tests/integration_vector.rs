@@ -78,8 +78,7 @@ fn test_config(http_port: u16) -> Config {
 async fn start_http_server(config: Config) -> CancellationToken {
     let metrics = Arc::new(Metrics::new());
     let shutdown = CancellationToken::new();
-    let pipeline =
-        Arc::new(PipelineState::new(config.clone()).expect("Failed to create pipeline"));
+    let pipeline = Arc::new(PipelineState::new(config.clone()).expect("Failed to create pipeline"));
 
     let server_shutdown = shutdown.clone();
     let server_metrics = metrics.clone();
@@ -118,11 +117,8 @@ async fn run_vector_async(config_path: &Path, timeout_secs: u64) -> (bool, Strin
         .expect("Failed to spawn vector binary");
 
     // Wait with timeout
-    let result = tokio::time::timeout(
-        Duration::from_secs(timeout_secs),
-        child.wait_with_output(),
-    )
-    .await;
+    let result =
+        tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output()).await;
 
     match result {
         Ok(Ok(output)) => {
@@ -393,8 +389,7 @@ async fn test_vector_grpc_sink() {
 
     let metrics = Arc::new(Metrics::new());
     let shutdown = CancellationToken::new();
-    let pipeline =
-        Arc::new(PipelineState::new(config.clone()).expect("Failed to create pipeline"));
+    let pipeline = Arc::new(PipelineState::new(config.clone()).expect("Failed to create pipeline"));
 
     // Spawn HTTP server
     let http_shutdown = shutdown.clone();
@@ -508,8 +503,7 @@ async fn test_vector_grpc_tls_sink() {
 
     let metrics = Arc::new(Metrics::new());
     let shutdown = CancellationToken::new();
-    let pipeline =
-        Arc::new(PipelineState::new(config.clone()).expect("Failed to create pipeline"));
+    let pipeline = Arc::new(PipelineState::new(config.clone()).expect("Failed to create pipeline"));
 
     // Spawn HTTP server
     let http_shutdown = shutdown.clone();

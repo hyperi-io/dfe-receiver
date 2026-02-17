@@ -518,7 +518,11 @@ async fn test_bearer_auth_from_file() {
     writeln!(token_file, "file-token-def").expect("Failed to write token");
     token_file.flush().expect("Failed to flush");
 
-    let token_path = token_file.path().to_str().expect("Invalid path").to_string();
+    let token_path = token_file
+        .path()
+        .to_str()
+        .expect("Invalid path")
+        .to_string();
 
     config.server.auth.bearer = BearerConfig {
         tokens: vec![],
@@ -595,7 +599,11 @@ async fn test_bearer_auth_file_refresh() {
 
     // Write initial token
     let token_file = tempfile::NamedTempFile::new().expect("Failed to create temp file");
-    let token_path = token_file.path().to_str().expect("Invalid path").to_string();
+    let token_path = token_file
+        .path()
+        .to_str()
+        .expect("Invalid path")
+        .to_string();
 
     std::fs::write(&token_path, "initial-token\n").expect("Failed to write initial token");
 
@@ -679,7 +687,11 @@ async fn test_bearer_auth_file_comma_separated() {
     writeln!(token_file, "token-alpha,token-beta,token-gamma").expect("Failed to write tokens");
     token_file.flush().expect("Failed to flush");
 
-    let token_path = token_file.path().to_str().expect("Invalid path").to_string();
+    let token_path = token_file
+        .path()
+        .to_str()
+        .expect("Invalid path")
+        .to_string();
 
     config.server.auth.bearer = BearerConfig {
         tokens: vec![],
