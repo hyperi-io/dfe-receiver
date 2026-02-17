@@ -270,9 +270,9 @@ mod tests {
 
     #[test]
     fn test_float_value() {
-        let v = make_float_value(3.14);
+        let v = make_float_value(2.718);
         let json = proto_value_to_json(&v);
-        assert_eq!(json, json!(3.14));
+        assert_eq!(json, json!(2.718));
     }
 
     #[test]
