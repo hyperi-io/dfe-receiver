@@ -14,7 +14,7 @@ enrichment_tables:
   route_filter_map:
     type: "file"
     file:
-      path: "${VECTOR_ENRICHMENT_PATH:?err}/hypersec-receiver-route-filter.csv"
+      path: "${VECTOR_ENRICHMENT_PATH:?err}/hyperi-receiver-route-filter.csv"
       encoding:
         type: "csv"
     schema:
@@ -29,7 +29,7 @@ enrichment_tables:
       comment: "string"
 
 transforms:
-  hypersec_receiver_transform_event_category:
+  hyperi_receiver_transform_event_category:
     type: remap
     inputs: ${HYPERSEC_RECEIVER_TRANSFORM_EVENT_CATEGORY_INPUT:?err}
     source: |

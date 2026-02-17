@@ -27,7 +27,7 @@ sources:
     auth:
       strategy: custom
       source: |
-        if .headers."x-hypersec-agent" == "${HYPERSEC_AGENT_VERSION:-1.0}" {
+        if .headers."x-hyperi-agent" == "${HYPERSEC_AGENT_VERSION:-1.0}" {
           true
         } else {
           false

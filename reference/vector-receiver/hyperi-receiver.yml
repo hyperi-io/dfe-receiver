@@ -14,7 +14,7 @@
 # KAFKA_MTLS_PATH =               the path for the pki certificates landed from Secret Manager or Hashicorp Vault for MTLS to Kafka/MSK
 # PROMETHEUS_EXPORTER =           host and port for the Prometheus exporter
 # KAFKA_BROKERS =                 the comma delimited list of hostname:port for kafka brokers
-# FIELD_SETTER_ITERATION_GROUP =  iteration_group value for querying hypersec-receiver-field-setter.csv
+# FIELD_SETTER_ITERATION_GROUP =  iteration_group value for querying hyperi-receiver-field-setter.csv
 #
 # Offline integration testing /dev notes
 # Ensure manage_etc_hosts: false in /etc/cloud/cloud.cfg
@@ -36,7 +36,7 @@ enrichment_tables:
     type: "file"
     file:
       # This file is copied from S3
-      path: "${VECTOR_ENRICHMENT_PATH:?err}/hypersec-receiver-event-category-map.csv"
+      path: "${VECTOR_ENRICHMENT_PATH:?err}/hyperi-receiver-event-category-map.csv"
       encoding:
         type: "csv"
     schema:
@@ -69,7 +69,7 @@ transforms:
       - 002_hypercollector
     source: |
       is_mapped = false
-       # Check for remaps in hypersec-receiver-event-category-map csv  
+       # Check for remaps in hyperi-receiver-event-category-map csv  
       category_map = find_enrichment_table_records("event_category_map",
         {
           "iteration_group": "${FIELD_SETTER_ITERATION_GROUP:?err}",

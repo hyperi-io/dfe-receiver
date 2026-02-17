@@ -11,7 +11,7 @@
 //! Handles argument parsing, configuration loading, logging initialisation,
 //! and orchestrates the main processing pipeline with graceful shutdown.
 //!
-//! Uses hs-rustlib for:
+//! Uses hyperi-rustlib for:
 //! - Configuration (7-layer cascade)
 //! - Logging (structured JSON/text with masking)
 //! - Metrics (Prometheus with process/container metrics)
@@ -33,8 +33,8 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use clap::Parser;
-use hs_rustlib::env::Environment;
-use hs_rustlib::logger::{self, LogFormat, LoggerOptions};
+use hyperi_rustlib::env::Environment;
+use hyperi_rustlib::logger::{self, LogFormat, LoggerOptions};
 use tokio::signal;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn, Level};
@@ -82,7 +82,7 @@ async fn main() -> anyhow::Result<()> {
     // Parse CLI arguments (with env var fallbacks)
     let args = Args::parse();
 
-    // Initialise logging using hs-rustlib
+    // Initialise logging using hyperi-rustlib
     init_logging(&args.log_format, &args.log_level).context("failed to initialise logging")?;
 
     info!(
@@ -171,7 +171,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Initialise logging using hs-rustlib's logger module.
+/// Initialise logging using hyperi-rustlib's logger module.
 ///
 /// Supports:
 /// - Auto-detection (JSON in containers, text on TTY)

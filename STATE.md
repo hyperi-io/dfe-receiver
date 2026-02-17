@@ -41,7 +41,7 @@ Native Rust receiver that:
 1. **HTTP Server** - axum-based with TLS termination and auth middleware
 2. **gRPC Server** - tonic-based for Vector sink protocol (planned)
 3. **Router** - Zero-copy JSON field extraction for topic routing
-4. **TieredSink** - Disk spillover using hs-rustlib CircuitBreaker
+4. **TieredSink** - Disk spillover using hyperi-rustlib CircuitBreaker
 5. **BearerTokenProvider** - Dynamic token loading from secret managers
 
 ### Tech Stack
@@ -51,16 +51,16 @@ Native Rust receiver that:
 - **gRPC Framework:** tonic 0.12
 - **JSON Processing:** sonic-rs (SIMD)
 - **Kafka:** rdkafka
-- **Shared Library:** hs-rustlib (config, secrets, metrics, tiered-sink)
+- **Shared Library:** hyperi-rustlib (config, secrets, metrics, tiered-sink)
 
 ---
 
 ## Key Decisions
 
-### Use hs-rustlib CircuitBreaker
+### Use hyperi-rustlib CircuitBreaker
 
-**Decision:** Use CircuitBreaker from hs-rustlib instead of custom implementation
-**Rationale:** Reduces code duplication, maintains consistency across HyperSec projects, provides well-tested half-open state support
+**Decision:** Use CircuitBreaker from hyperi-rustlib instead of custom implementation
+**Rationale:** Reduces code duplication, maintains consistency across HyperI projects, provides well-tested half-open state support
 **Alternatives considered:** Custom CircuitBreaker (initially implemented, then removed)
 
 ### Bearer Token Storage
@@ -90,16 +90,16 @@ Native Rust receiver that:
 4. Disk I/O would bottleneck the hot path at scale
 5. Simpler architecture, no persistent volumes needed
 
-**Alternatives considered:** Disk spillover via hs-rustlib Spool (rejected - adds complexity without benefit when clients handle retries)
+**Alternatives considered:** Disk spillover via hyperi-rustlib Spool (rejected - adds complexity without benefit when clients handle retries)
 
 ---
 
 ## External Dependencies
 
-- **hs-rustlib** - Shared library for config, secrets, metrics, tiered-sink
+- **hyperi-rustlib** - Shared library for config, secrets, metrics, tiered-sink
 - **rdkafka** - Kafka producer with batching support
-- **OpenBao/Vault** - Secret management (optional, via hs-rustlib)
-- **AWS Secrets Manager** - Secret management (optional, via hs-rustlib)
+- **OpenBao/Vault** - Secret management (optional, via hyperi-rustlib)
+- **AWS Secrets Manager** - Secret management (optional, via hyperi-rustlib)
 
 ---
 
@@ -112,7 +112,7 @@ Native Rust receiver that:
 
 **External Resources:**
 
-- [hs-rustlib secrets module](/projects/hs-rustlib/src/secrets/) - Secret provider implementations
+- [hyperi-rustlib secrets module](/projects/hyperi-rustlib/src/secrets/) - Secret provider implementations
 - [dfe-loader routing](/projects/dfe-loader/src/routing/) - Reference for zero-copy routing patterns
 
 ---

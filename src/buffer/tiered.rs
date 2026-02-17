@@ -8,7 +8,7 @@
 
 //! TieredSink wrapper providing in-memory buffering when sinks are unavailable.
 //!
-//! Uses hs-rustlib's CircuitBreaker for health tracking with half-open state support.
+//! Uses hyperi-rustlib's CircuitBreaker for health tracking with half-open state support.
 //! Messages are buffered in memory during outages and drained when the downstream
 //! sink recovers.
 //!
@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use hs_rustlib::tiered_sink::{CircuitBreaker, CircuitState};
+use hyperi_rustlib::tiered_sink::{CircuitBreaker, CircuitState};
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -47,7 +47,7 @@ struct SpillMessage {
 
 /// TieredSink wraps a primary sink with circuit breaker and in-memory buffering.
 ///
-/// Uses hs-rustlib's CircuitBreaker for health tracking with half-open state support.
+/// Uses hyperi-rustlib's CircuitBreaker for health tracking with half-open state support.
 /// When the primary sink fails, messages are buffered in memory and automatically
 /// drained when the sink recovers.
 pub struct TieredSink<S: Sink> {
@@ -57,7 +57,7 @@ pub struct TieredSink<S: Sink> {
     spill_queue: Mutex<Vec<SpillMessage>>,
     /// Maximum queue size before rejecting.
     max_queue_size: usize,
-    /// Circuit breaker from hs-rustlib with half-open state support.
+    /// Circuit breaker from hyperi-rustlib with half-open state support.
     circuit: CircuitBreaker,
     /// Messages queued during outage.
     queued_count: AtomicU64,
@@ -73,7 +73,7 @@ impl<S: Sink + Send + Sync + 'static> TieredSink<S> {
             primary: Arc::new(primary),
             spill_queue: Mutex::new(Vec::with_capacity(1000)),
             max_queue_size: 1000,
-            // Use hs-rustlib CircuitBreaker with proper half-open state
+            // Use hyperi-rustlib CircuitBreaker with proper half-open state
             circuit: CircuitBreaker::new(5, Duration::from_secs(30)),
             queued_count: AtomicU64::new(0),
             drained_count: AtomicU64::new(0),

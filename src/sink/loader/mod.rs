@@ -8,7 +8,7 @@
 
 //! dfe-loader transport sink.
 //!
-//! Sends messages directly to dfe-loader via hs-rustlib Kafka transport.
+//! Sends messages directly to dfe-loader via hyperi-rustlib Kafka transport.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;

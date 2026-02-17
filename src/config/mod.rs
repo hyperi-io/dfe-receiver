@@ -6,7 +6,7 @@
 // License:   FSL-1.1-ALv2
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
-//! Configuration management using hs-rustlib's 7-layer cascade.
+//! Configuration management using hyperi-rustlib's 7-layer cascade.
 //!
 //! Priority (highest to lowest):
 //! 1. CLI arguments
@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use hs_rustlib::config::{self, ConfigOptions};
+use hyperi_rustlib::config::{self, ConfigOptions};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
@@ -77,7 +77,7 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Load configuration using hs-rustlib's 7-layer cascade.
+    /// Load configuration using hyperi-rustlib's 7-layer cascade.
     ///
     /// Layers (highest to lowest priority):
     /// 1. CLI arguments (merged separately)
@@ -100,7 +100,7 @@ impl Config {
             );
         }
 
-        // Setup hs-rustlib config with our prefix
+        // Setup hyperi-rustlib config with our prefix
         config::setup(ConfigOptions {
             env_prefix: ENV_PREFIX.to_string(),
             config_paths,
@@ -292,7 +292,7 @@ impl Default for BearerConfig {
 /// Defines an accepted authentication header.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcceptedHeader {
-    /// Header name (e.g., "x-hypersec-agent", "Authorization").
+    /// Header name (e.g., "x-hyperi-agent", "Authorization").
     pub name: String,
 
     /// Allowed values for this header.
@@ -306,7 +306,7 @@ impl Default for AuthConfig {
         Self {
             mode: "none".to_string(),
             accepted_headers: vec![AcceptedHeader {
-                name: "x-hypersec-agent".to_string(),
+                name: "x-hyperi-agent".to_string(),
                 values: vec!["1.0".to_string()],
             }],
             bearer: BearerConfig::default(),

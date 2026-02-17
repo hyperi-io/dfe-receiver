@@ -13,8 +13,8 @@
 pub mod tiered;
 
 pub use tiered::{TieredSink, TieredSinkStats};
-// Re-export CircuitState from hs-rustlib for convenience
-pub use hs_rustlib::tiered_sink::CircuitState;
+// Re-export CircuitState from hyperi-rustlib for convenience
+pub use hyperi_rustlib::tiered_sink::CircuitState;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 

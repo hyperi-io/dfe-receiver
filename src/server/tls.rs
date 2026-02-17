@@ -117,7 +117,7 @@ async fn load_from_secret(source: &str) -> Result<Vec<u8>> {
     let path = parts[1];
     let key = parts.get(2).copied();
 
-    use hs_rustlib::secrets::{SecretSource, SecretsConfig, SecretsManager};
+    use hyperi_rustlib::secrets::{SecretSource, SecretsConfig, SecretsManager};
 
     let secret_source = match provider_name {
         "file" => SecretSource::File {
