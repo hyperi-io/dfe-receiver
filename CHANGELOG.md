@@ -1,3 +1,10 @@
+## [1.6.3](https://github.com/hyperi-io/dfe-receiver/compare/v1.6.2...v1.6.3) (2026-02-17)
+
+
+### Bug Fixes
+
+* use standard runner for release workflow instead of buildjet ([ccdc924](https://github.com/hyperi-io/dfe-receiver/commit/ccdc9248d6c72cd46e51d04b854679127e96e311))
+
 ## [1.6.2](https://github.com/hyperi-io/dfe-receiver/compare/v1.6.1...v1.6.2) (2026-02-17)
 
 
