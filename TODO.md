@@ -34,6 +34,31 @@ Move tasks here when done. Clear this section at end of session.
   - [x] Update auth middleware for bearer mode
   - [x] Add From<SecretsError> conversion
   - [x] Add comprehensive tests
+- [x] Rebrand hyperi-rustlib to hyperi-rustlib across codebase
+- [x] Rebrand x-hypersec-agent to x-hyperi-agent, rename CI/reference configs
+- [x] Fix all license headers to FSL-1.1-ALv2
+- [x] gRPC Vector sink protocol implementation
+  - [x] Rewrite proto/vector.proto to match Vector upstream (unary PushEvents)
+  - [x] Create proto/event.proto with Vector event types
+  - [x] Implement protobuf-to-JSON conversion (src/server/grpc/convert.rs)
+  - [x] Rewrite gRPC handler from streaming to unary
+  - [x] Add TLS support and auth interceptor to gRPC server
+  - [x] Extend GrpcConfig with tls + auth fields
+- [x] TLS/mTLS certificate hot-reload from secret manager
+  - [x] Create TlsCertProvider with background refresh task
+  - [x] Add build_grpc_tls_config() for tonic TLS
+  - [x] Integrate TlsCertProvider into HTTP server accept loop
+- [x] Integration tests for file-based bearer auth
+  - [x] test_bearer_auth_from_file
+  - [x] test_bearer_auth_file_refresh
+  - [x] test_bearer_auth_file_comma_separated
+- [x] Vector integration tests (local vector cmdline + yaml, HTTPS + gRPC)
+  - [x] test_vector_http_sink (plaintext HTTP)
+  - [x] test_vector_https_sink (HTTPS with self-signed cert)
+  - [x] test_vector_grpc_sink (gRPC Vector protocol)
+  - [x] test_vector_grpc_tls_sink (gRPC with TLS)
+  - [x] test_vector_http_bearer_auth (HTTP with bearer token)
+  - Gracefully skips on machines where vector is not installed
 
 ---
 
@@ -43,19 +68,15 @@ Future work, ordered by priority.
 
 ### High Priority
 
-- [ ] gRPC Vector sink protocol implementation
-- [ ] TLS/mTLS certificate loading from secret manager
-- [ ] Integration tests for bearer auth with real secret providers
+- [ ] KEDA scaling metrics endpoint
 
 ### Medium Priority
 
-- [ ] KEDA scaling metrics endpoint
-- [ ] Disk spillover implementation (currently in-memory only)
 - [ ] Config hot-reload for auth settings
+- [ ] Performance benchmarks
 
 ### Low Priority
 
-- [ ] Performance benchmarks
 - [ ] Documentation for deployment
 
 ---

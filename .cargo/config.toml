@@ -7,5 +7,5 @@
 [registry]
 global-credential-providers = ["cargo:token"]
 
-[registries.hypersec]
-index = "sparse+https://hypersec.jfrog.io/artifactory/api/cargo/hypersec-cargo-virtual/index/"
+[registries.hyperi]
+index = "sparse+https://hypersec.jfrog.io/artifactory/api/cargo/hyperi-cargo-virtual/index/"

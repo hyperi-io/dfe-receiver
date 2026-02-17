@@ -19,11 +19,12 @@ pub mod tls;
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::error::Result;
 use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
+use crate::server::auth::AuthMode;
 
 /// Main server that manages HTTP and gRPC endpoints.
 pub struct Server {
@@ -53,13 +54,33 @@ impl Server {
 
         // Start gRPC server if enabled
         let grpc_handle = if config.grpc.enabled {
-            let grpc_addr = config.grpc.bind_address.clone();
+            let grpc_config = config.clone();
             let grpc_state = self.state.clone();
             let grpc_metrics = self.metrics.clone();
             let grpc_shutdown = shutdown.clone();
 
+            // Create auth state for gRPC if auth is configured
+            let grpc_auth = if AuthMode::from_str(&config.grpc.auth.mode) != AuthMode::None {
+                match http::create_auth_state(&config.grpc.auth).await {
+                    Ok(auth) => Some(auth),
+                    Err(e) => {
+                        warn!(error = %e, "Failed to create gRPC auth state, running without auth");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
             Some(tokio::spawn(async move {
-                grpc::run_server(&grpc_addr, grpc_state, grpc_metrics, grpc_shutdown).await
+                grpc::run_server(
+                    &grpc_config,
+                    grpc_state,
+                    grpc_metrics,
+                    grpc_auth,
+                    grpc_shutdown,
+                )
+                .await
             }))
         } else {
             None

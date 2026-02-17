@@ -18,8 +18,7 @@ exclude = [".claude/", ".github/", "ai/", "ci/", "docs/", "reference/", "benches
 
 [dependencies]
 # HyperI shared library (from JFrog Cargo registry)
-# Note: Package is still named hs-rustlib in registry until rename is published
-hyperi-rustlib = { package = "hs-rustlib", version = "1.3", registry = "hypersec", features = [
+hyperi-rustlib = { version = "1.3", registry = "hyperi", features = [
     "config",
     "logger",
     "metrics",
@@ -53,8 +52,9 @@ hyper = { version = "1", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio", "server", "server-auto", "service"] }
 
 # gRPC server
-tonic = "0.12"
+tonic = { version = "0.12", features = ["tls"] }
 prost = "0.13"
+prost-types = "0.13"
 
 # Kafka producer
 rdkafka = { version = "0.36", features = ["cmake-build", "ssl", "sasl"] }
@@ -79,6 +79,9 @@ clap = { version = "4", features = ["derive", "env"] }
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+
+# Encoding
+base64 = "0.22"
 
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }

@@ -12,17 +12,47 @@ server:
     key_file: "/etc/ssl/receiver.key"
     ca_file: "/etc/ssl/ca.crt"
     client_auth: "none"  # none, optional, required
+    # Secret manager sources (override file paths when set)
+    # cert_secret: "vault:secret/tls:cert"
+    # key_secret: "vault:secret/tls:key"
+    # ca_secret: "vault:secret/tls:ca"
+    # refresh_interval_secs: 3600  # Hot-reload interval (1 hour)
 
   auth:
-    mode: "none"  # none, header, mtls, both
+    mode: "none"  # none, header, bearer, mtls, both
     header_name: "x-hyperi-agent"
     header_values:
       - "1.0"
       - "2.0"
+    # Bearer token auth (for mode: bearer or both)
+    # bearer:
+    #   tokens:
+    #     - "static-token-for-dev"
+    #   secret_source: "file:/etc/secrets/bearer-tokens"  # or vault:secret/auth:tokens
+    #   refresh_interval_secs: 300
 
 grpc:
   enabled: false
   bind_address: "0.0.0.0:6000"
+
+  # gRPC TLS (same options as HTTP TLS)
+  tls:
+    enabled: false
+    cert_file: "/etc/ssl/grpc-receiver.crt"
+    key_file: "/etc/ssl/grpc-receiver.key"
+    # ca_file: "/etc/ssl/ca.crt"        # For mTLS
+    # client_auth: "none"               # none, optional, required
+    # cert_secret: "vault:secret/tls:cert"  # Load from secret manager
+    # key_secret: "vault:secret/tls:key"
+    # refresh_interval_secs: 3600       # Hot-reload interval (1 hour)
+
+  # gRPC auth (same options as HTTP auth)
+  auth:
+    mode: "none"  # none, bearer
+    # bearer:
+    #   tokens: []
+    #   secret_source: "file:/etc/secrets/grpc-tokens"
+    #   refresh_interval_secs: 300
 
 validation:
   require_json: true

@@ -347,6 +347,12 @@ pub struct GrpcConfig {
 
     /// Bind address for gRPC.
     pub bind_address: String,
+
+    /// TLS configuration for gRPC server.
+    pub tls: TlsConfig,
+
+    /// Authentication configuration for gRPC server.
+    pub auth: AuthConfig,
 }
 
 impl Default for GrpcConfig {
@@ -354,6 +360,11 @@ impl Default for GrpcConfig {
         Self {
             enabled: false,
             bind_address: "0.0.0.0:6000".to_string(),
+            tls: TlsConfig::default(),
+            auth: AuthConfig {
+                mode: "none".to_string(),
+                ..AuthConfig::default()
+            },
         }
     }
 }

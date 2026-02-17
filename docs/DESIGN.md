@@ -605,7 +605,7 @@ groups:
 - [ ] Full disk spillover (currently in-memory only)
 - [ ] Config hot-reload for all settings
 - [ ] Expression language for routing rules
-- [ ] Rebranding: hyperi-rustlib to hyperi-rustlib
+- [x] Rebranding: hyperi-rustlib to hyperi-rustlib
 
 ## References
 
