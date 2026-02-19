@@ -33,16 +33,18 @@ Native Rust receiver that:
 1. Receives JSON data over HTTP(S) and gRPC from Vector sinks and other sources
 2. Validates JSON format and optional required fields
 3. Routes to Kafka topics OR direct to dfe-loader based on configurable expressions
-4. Batches messages (10K / 8MiB / 20ms) with disk spillover
+4. Batches messages (10K / 8MiB / 20ms) with in-memory buffering
 5. Supports header auth, bearer tokens, and mTLS authentication
 
 ### Key Components
 
 1. **HTTP Server** - axum-based with TLS termination and auth middleware
-2. **gRPC Server** - tonic-based for Vector sink protocol (planned)
-3. **Router** - Zero-copy JSON field extraction for topic routing
-4. **TieredSink** - Disk spillover using hyperi-rustlib CircuitBreaker
-5. **BearerTokenProvider** - Dynamic token loading from secret managers
+2. **gRPC Server** - tonic-based Vector sink protocol with protobuf-to-JSON conversion
+3. **OTLP Server** - gRPC (port 4317) + HTTP (port 4318) for OpenTelemetry logs/metrics/traces
+4. **Router** - Zero-copy JSON field extraction for topic routing
+5. **TieredSink** - In-memory buffering with hyperi-rustlib CircuitBreaker
+6. **BearerTokenProvider** - Dynamic token loading from secret managers
+7. **ProtocolHandler trait** - Pluggable protocol handler abstraction (`src/server/traits.rs`)
 
 ### Tech Stack
 
@@ -78,6 +80,31 @@ Native Rust receiver that:
 - `file:/etc/secrets/tokens`
 - `vault:secret/data/auth:bearer_tokens`
 - `aws:prod/auth/tokens:bearer`
+
+### Disable hyperi-rustlib Secrets Cache for Token Refresh
+
+**Decision:** Disable disk-persistent cache when loading bearer tokens via `SecretsManager`
+**Rationale:** hyperi-rustlib v1.4.3 caches secrets to `~/.cache/hyperi-rustlib/secrets/` with 3600s TTL. Even new `SecretsManager` instances check this shared disk cache, returning stale data during token refresh. Setting `CacheConfig { enabled: false }` ensures each refresh reads the source fresh.
+**Impact:** `BearerTokenProvider::load_from_secret()` in `src/server/auth.rs`
+
+### Pluggable Protocol Handlers (ProtocolHandler Trait)
+
+**Decision:** Define a `ProtocolHandler` trait in `src/server/traits.rs` that all protocol servers implement
+**Rationale:** Enables adding new protocols (OTLP, Prometheus RW, Syslog, etc.) without modifying server orchestration. Each handler is independently enabled via config and spawned concurrently.
+**Interface:** `name()`, `bind_address()`, `start(shutdown)`, `is_healthy()`
+
+### OTLP Dual-Mode Conversion (Approach C)
+
+**Decision:** OTLP conversion supports two modes -- `hyperdx` (default) and `generic`
+**Rationale:** HyperDX mode produces JSON matching the OTel ClickHouse exporter schema (`otel_logs`, `otel_traces`, `otel_metrics_*` tables), allowing dfe-receiver to replace the Go OTel Collector in the HyperDX stack. Generic mode produces a normalised JSON envelope for custom pipeline routing.
+**Config:** `otlp.mode: "hyperdx"` or `otlp.mode: "generic"`
+**Routing:** Logs -> `otel_logs_land`, Traces -> `otel_traces_land`, Metrics -> `otel_metrics_land`
+
+### Vendored OTLP Protos
+
+**Decision:** Vendor opentelemetry-proto v1.5.0 files into `proto/opentelemetry/` and compile with tonic-build
+**Rationale:** Avoids pulling in the full `opentelemetry-proto` crate which depends on the entire OTel SDK (opentelemetry, opentelemetry_sdk, etc.). Vendoring keeps the dependency tree minimal and matches the existing Vector proto pattern.
+**Alternatives considered:** `opentelemetry-proto` crate (rejected -- brings in full OTel SDK as transitive deps)
 
 ### No Disk Spillover
 

@@ -16,6 +16,11 @@ license = "FSL-1.1-ALv2"
 repository = "https://github.com/hyperi-io/dfe-receiver"
 exclude = [".claude/", ".github/", "ai/", "ci/", "docs/", "reference/", "benches/"]
 
+[lib]
+name = "dfe_receiver"
+path = "src/lib.rs"
+doctest = false
+
 [dependencies]
 # HyperI shared library (from JFrog Cargo registry)
 hyperi-rustlib = { version = "1.3", registry = "hyperi", features = [

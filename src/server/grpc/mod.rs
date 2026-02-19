@@ -28,7 +28,9 @@ use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
-use crate::server::auth::{validate_bearer_auth, AuthState};
+use crate::server::auth::{validate_bearer_auth, AuthMode, AuthState};
+use crate::server::http::create_auth_state;
+use crate::server::traits::ProtocolHandler;
 
 // Include generated proto code.
 // The `event` package types and `vector` package service.
@@ -127,6 +129,59 @@ fn make_auth_interceptor(
         }
 
         Ok(req)
+    }
+}
+
+/// gRPC/Vector protocol handler wrapping the existing tonic server.
+pub struct GrpcVectorHandler {
+    config: Config,
+    pipeline: Arc<PipelineState>,
+    metrics: Arc<Metrics>,
+}
+
+impl GrpcVectorHandler {
+    /// Create a new gRPC/Vector handler.
+    pub fn new(config: Config, pipeline: Arc<PipelineState>, metrics: Arc<Metrics>) -> Self {
+        Self {
+            config,
+            pipeline,
+            metrics,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ProtocolHandler for GrpcVectorHandler {
+    fn name(&self) -> &'static str {
+        "grpc-vector"
+    }
+
+    fn bind_address(&self) -> &str {
+        &self.config.grpc.bind_address
+    }
+
+    async fn start(&self, shutdown: CancellationToken) -> Result<()> {
+        // Create auth state for gRPC if auth is configured
+        let auth_state = if AuthMode::from_str(&self.config.grpc.auth.mode) != AuthMode::None {
+            match create_auth_state(&self.config.grpc.auth).await {
+                Ok(auth) => Some(auth),
+                Err(e) => {
+                    warn!(error = %e, "Failed to create gRPC auth state, running without auth");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        run_server(
+            &self.config,
+            self.pipeline.clone(),
+            self.metrics.clone(),
+            auth_state,
+            shutdown,
+        )
+        .await
     }
 }
 
