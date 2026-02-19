@@ -15,18 +15,15 @@ language: rust
 # runners:
 #   default: ubuntu-latest    # Default runner for all jobs (quality, test, build, publish)
 
-# Rust-specific configuration
-rust:
-  # Feature sets to test (pipe-separated in CI)
-  # Each entry is tested separately for clippy/build/test
-  features:
-    - default             # Default features (no allocator)
-    - jemalloc            # With jemalloc allocator
-    - mimalloc            # With mimalloc allocator
-
 # Quality checks
 quality:
   enabled: true
+  # Rust: test specific feature sets (avoids --all-features conflicts with mutually exclusive features)
+  rust:
+    features:
+      - "default"             # Default features (no allocator)
+      - "default,jemalloc"    # With jemalloc allocator
+      - "default,mimalloc"    # With mimalloc allocator
 
 # Testing
 test:
@@ -37,11 +34,16 @@ test:
 # Building
 build:
   enabled: true
+  type: app                # Build binaries (not just crate)
   strategies:
     - native
+  rust:
+    targets:
+      - x86_64-unknown-linux-gnu
+      - aarch64-unknown-linux-gnu
 
 # Publishing (on release)
 publish:
   enabled: true
-  # binaries: both         # Binary publish destination: artifactory, github, both
+  binaries: both           # Binary publish destination: artifactory, github, both
   # binaries_repo: hyperi-binaries  # JFrog Generic repo for binaries

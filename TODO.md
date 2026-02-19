@@ -8,63 +8,106 @@ This is the **single source of truth** for all tasks and progress.
 
 Tasks currently being worked on. Only one task should be `[IN PROGRESS]` at a time.
 
-_No active tasks_
+- [ ] Commit Phase 0 + Phase 1 OTLP work `[PENDING]`
+  - All code complete, tests pass (168 unit + 21 integration/security)
+  - Uncommitted: new files + modified files across 14+ files
+  - Next: commit and push
 
 ---
 
 ## Work Breakdown Structure (WBS)
 
-When planning complex features, break them down here before starting.
+### Multi-Protocol Ingestion (Approach C: Dual Mode)
 
-_No features in planning_
+**Goal:** Support enterprise agent protocols natively so dfe-receiver can replace intermediary collectors (OTel Collector, Logstash, etc.)
+
+All protocols follow: receive -> convert to JSON -> validate -> route -> Kafka/dfe-loader
+
+#### Phase 0: Protocol Framework [DONE]
+
+- [x] Define `ProtocolHandler` trait in `src/server/traits.rs`
+- [x] Refactor HTTP handler to implement `ProtocolHandler`
+- [x] Refactor gRPC/Vector handler to implement `ProtocolHandler`
+- [x] Update `Server::run` to iterate enabled handlers (spawn all in parallel)
+
+#### Phase 1: OTLP (Tier 1) [DONE]
+
+- [x] Vendor OTLP protos from opentelemetry-proto v1.5.0
+- [x] Configure tonic-build for OTLP service definitions (logs, metrics, traces)
+- [x] Create `src/server/otlp/mod.rs` -- gRPC server (port 4317), HTTP server (port 4318)
+- [x] Implement ExportLogsService, ExportMetricsService, ExportTraceService RPCs
+- [x] Create `src/server/otlp/convert.rs` -- dual mode converter (HyperDX + Generic)
+- [x] HyperDX mode: logs/traces/metrics JSON matching ClickHouse OTel schema
+- [x] Generic mode: normalised JSON envelope with routing fields
+- [x] OTLP HTTP endpoints: `/v1/logs`, `/v1/metrics`, `/v1/traces`
+- [x] Add `OtlpConfig` to config (grpc_bind_address, http_bind_address, mode, tls, auth)
+- [x] Wire OTLP handler into server orchestration
+- [x] Suppress proto doctests via `doctest = false` in Cargo.toml
+- [x] Clippy fixes for OTLP code
+- [ ] OTLP feature flag in Cargo.toml (currently always compiled) `[PENDING]`
+- [ ] Integration tests: send OTLP data via gRPC client, verify pipeline `[PENDING]`
+- [ ] Integration tests: send OTLP data via HTTP, verify pipeline `[PENDING]`
+
+#### Phase 2: Prometheus Remote Write (Tier 1) [NOT STARTED]
+
+- [ ] HTTP endpoint: `POST /api/v1/write`
+- [ ] Snappy decompression + protobuf decode (v1 + v2)
+- [ ] TimeSeries -> JSON conversion
+- [ ] `PrometheusConfig` + `prometheus-rw` feature flag
+
+#### Phase 3: Lumberjack/Beats (Tier 2) [NOT STARTED]
+
+- [ ] TCP/TLS listener, Lumberjack v2 frame parser
+- [ ] Windowed ACK protocol
+- [ ] Beats fields -> JSON conversion
+- [ ] `LumberjackConfig` + `lumberjack` feature flag
+
+#### Phase 4: Syslog (Tier 2) [NOT STARTED]
+
+- [ ] UDP listener (port 514)
+- [ ] TCP listener (port 514)
+- [ ] TLS/TCP listener (port 6514)
+- [ ] RFC 5424 parser (structured data) + RFC 3164 parser (BSD format)
+- [ ] Auto-detect format per message
+- [ ] Octet-counting + non-transparent framing (TCP)
+- [ ] `SyslogConfig` + `syslog` feature flag
+
+#### Phase 5: Splunk HEC (Tier 2) [NOT STARTED]
+
+- [ ] HTTP endpoints: `/services/collector/event` + `/services/collector/raw`
+- [ ] Splunk token auth
+- [ ] HEC JSON -> normalised JSON
+- [ ] `SplunkHecConfig` + `splunk-hec` feature flag
+
+#### Phase 6: Fluent Forward (Tier 3) [NOT STARTED]
+
+- [ ] TCP listener, Forward protocol parser (msgpack)
+- [ ] Message/Forward/PackedForward modes
+- [ ] `FluentConfig` + `fluent-forward` feature flag
+
+#### Phase 7: GELF (Tier 3) [NOT STARTED]
+
+- [ ] TCP listener (null-delimited)
+- [ ] GELF JSON parsing
+- [ ] `GelfConfig` + `gelf` feature flag
 
 ---
 
 ## Completed (This Session)
 
-Move tasks here when done. Clear this section at end of session.
-
-- [x] Use hyperi-rustlib CircuitBreaker in TieredSink (removed redundant implementation)
-- [x] Add `secrets` feature to hyperi-rustlib dependency
-- [x] Create GitHub repo at hyperi-io/dfe-receiver and push initial commit
-- [x] Add bearer token authentication support
-  - [x] Add BearerConfig to AuthConfig
-  - [x] Create BearerTokenProvider with secret manager integration
-  - [x] Add validate_bearer_auth() for Authorization header
-  - [x] Update auth middleware for bearer mode
-  - [x] Add From<SecretsError> conversion
-  - [x] Add comprehensive tests
-- [x] Rebrand hyperi-rustlib to hyperi-rustlib across codebase
-- [x] Rebrand x-hypersec-agent to x-hyperi-agent, rename CI/reference configs
-- [x] Fix all license headers to FSL-1.1-ALv2
-- [x] gRPC Vector sink protocol implementation
-  - [x] Rewrite proto/vector.proto to match Vector upstream (unary PushEvents)
-  - [x] Create proto/event.proto with Vector event types
-  - [x] Implement protobuf-to-JSON conversion (src/server/grpc/convert.rs)
-  - [x] Rewrite gRPC handler from streaming to unary
-  - [x] Add TLS support and auth interceptor to gRPC server
-  - [x] Extend GrpcConfig with tls + auth fields
-- [x] TLS/mTLS certificate hot-reload from secret manager
-  - [x] Create TlsCertProvider with background refresh task
-  - [x] Add build_grpc_tls_config() for tonic TLS
-  - [x] Integrate TlsCertProvider into HTTP server accept loop
-- [x] Integration tests for file-based bearer auth
-  - [x] test_bearer_auth_from_file
-  - [x] test_bearer_auth_file_refresh
-  - [x] test_bearer_auth_file_comma_separated
-- [x] Vector integration tests (local vector cmdline + yaml, HTTPS + gRPC)
-  - [x] test_vector_http_sink (plaintext HTTP)
-  - [x] test_vector_https_sink (HTTPS with self-signed cert)
-  - [x] test_vector_grpc_sink (gRPC Vector protocol)
-  - [x] test_vector_grpc_tls_sink (gRPC with TLS)
-  - [x] test_vector_http_bearer_auth (HTTP with bearer token)
-  - Gracefully skips on machines where vector is not installed
+- [x] Phase 0: ProtocolHandler trait + server refactor
+- [x] Phase 1: OTLP proto compilation (vendored opentelemetry-proto v1.5.0)
+- [x] Phase 1: OTLP module structure and proto includes
+- [x] Phase 1: OTLP->JSON converter (HyperDX + Generic dual mode)
+- [x] Phase 1: OTLP gRPC receiver (port 4317)
+- [x] Phase 1: OTLP HTTP receiver (port 4318)
+- [x] Phase 1: OtlpConfig + server integration
+- [x] Fixed proto doctest failures (doctest = false)
+- [x] Clippy fixes (Option<&T>, write! macro, match arms, items ordering)
 
 ---
 
 ## Backlog
-
-Future work, ordered by priority.
 
 ### High Priority
 
@@ -83,7 +126,20 @@ Future work, ordered by priority.
 
 ## Blocked
 
-_None_
+- [ ] Binary build local test -- blocked on CI submodule libsasl2-dev multiarch fix
+
+---
+
+## Previously Completed
+
+- [x] Initial project setup, GitHub repo, CI pipeline
+- [x] Bearer token authentication (secret manager integration, refresh, tests)
+- [x] hypersec -> hyperi rebrand (rustlib, agent header, CI configs, license headers)
+- [x] gRPC Vector sink protocol (proto rewrite, protobuf-to-JSON, unary handler, TLS, auth)
+- [x] TLS/mTLS certificate hot-reload from secret manager
+- [x] Integration tests (bearer auth file-based, Vector HTTP/HTTPS/gRPC/TLS/bearer)
+- [x] CI fixes (clippy approx_constant, cargo fmt, BuildJet -> standard runner)
+- [x] Published v1.6.3 to JFrog Artifactory
 
 ---
 

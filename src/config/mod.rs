@@ -38,6 +38,9 @@ pub struct Config {
     /// gRPC server configuration.
     pub grpc: GrpcConfig,
 
+    /// OTLP receiver configuration.
+    pub otlp: OtlpConfig,
+
     /// Validation rules.
     pub validation: ValidationConfig,
 
@@ -65,6 +68,7 @@ impl Default for Config {
         Self {
             server: ServerConfig::default(),
             grpc: GrpcConfig::default(),
+            otlp: OtlpConfig::default(),
             validation: ValidationConfig::default(),
             routing: RoutingConfig::default(),
             destinations: DestinationsConfig::default(),
@@ -360,6 +364,49 @@ impl Default for GrpcConfig {
         Self {
             enabled: false,
             bind_address: "0.0.0.0:6000".to_string(),
+            tls: TlsConfig::default(),
+            auth: AuthConfig {
+                mode: "none".to_string(),
+                ..AuthConfig::default()
+            },
+        }
+    }
+}
+
+/// OTLP (OpenTelemetry Protocol) receiver configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OtlpConfig {
+    /// Enable OTLP receiver.
+    pub enabled: bool,
+
+    /// Bind address for OTLP gRPC (standard port 4317).
+    pub grpc_bind_address: String,
+
+    /// Bind address for OTLP HTTP (standard port 4318).
+    pub http_bind_address: String,
+
+    /// Conversion mode: "hyperdx" (default) or "generic".
+    ///
+    /// - `hyperdx`: JSON matching the OTel ClickHouse exporter schema
+    ///   for direct HyperDX compatibility.
+    /// - `generic`: Normalised JSON envelope with routing fields.
+    pub mode: String,
+
+    /// TLS configuration for OTLP endpoints.
+    pub tls: TlsConfig,
+
+    /// Authentication configuration for OTLP endpoints.
+    pub auth: AuthConfig,
+}
+
+impl Default for OtlpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            grpc_bind_address: "0.0.0.0:4317".to_string(),
+            http_bind_address: "0.0.0.0:4318".to_string(),
+            mode: "hyperdx".to_string(),
             tls: TlsConfig::default(),
             auth: AuthConfig {
                 mode: "none".to_string(),

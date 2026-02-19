@@ -43,9 +43,49 @@ use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
 use crate::server::auth::{token_auth_middleware, AuthState, BearerTokenProvider};
 use crate::server::tls::{build_tls_acceptor, uses_secrets, TlsCertProvider};
+use crate::server::traits::ProtocolHandler;
 
 /// TLS handshake timeout to prevent slow TLS attacks.
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// HTTP protocol handler wrapping the existing axum server.
+pub struct HttpHandler {
+    bind_address: String,
+    pipeline: Arc<PipelineState>,
+    metrics: Arc<Metrics>,
+}
+
+impl HttpHandler {
+    /// Create a new HTTP handler.
+    pub fn new(bind_address: String, pipeline: Arc<PipelineState>, metrics: Arc<Metrics>) -> Self {
+        Self {
+            bind_address,
+            pipeline,
+            metrics,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ProtocolHandler for HttpHandler {
+    fn name(&self) -> &'static str {
+        "http"
+    }
+
+    fn bind_address(&self) -> &str {
+        &self.bind_address
+    }
+
+    async fn start(&self, shutdown: CancellationToken) -> Result<()> {
+        run_server(
+            &self.bind_address,
+            self.pipeline.clone(),
+            self.metrics.clone(),
+            shutdown,
+        )
+        .await
+    }
+}
 
 /// Create auth state with optional bearer token provider.
 pub async fn create_auth_state(config: &AuthConfig) -> Result<AuthState> {
