@@ -1,3 +1,10 @@
+# [1.7.0](https://github.com/hyperi-io/dfe-receiver/compare/v1.6.3...v1.7.0) (2026-02-19)
+
+
+### Features
+
+* add OTLP protocol support with dual-mode conversion ([38d98cb](https://github.com/hyperi-io/dfe-receiver/commit/38d98cb90e66fdc11af4f363f905651fda9a3eb0))
+
 ## [1.6.3](https://github.com/hyperi-io/dfe-receiver/compare/v1.6.2...v1.6.3) (2026-02-17)
 
 
