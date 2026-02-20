@@ -15,6 +15,8 @@ pub mod auth;
 pub mod grpc;
 pub mod http;
 pub mod otlp;
+#[cfg(feature = "plugins")]
+pub mod plugins;
 pub mod tls;
 pub mod traits;
 
@@ -71,6 +73,24 @@ impl Server {
                 self.state.clone(),
                 self.metrics.clone(),
             )));
+        }
+
+        // External plugins (if plugins feature enabled)
+        #[cfg(feature = "plugins")]
+        {
+            if !config.plugins.plugins.is_empty() || config.plugins.directory.is_some() {
+                match plugins::load_plugins(&config.plugins, &self.state, &self.metrics) {
+                    Ok(plugin_handlers) => {
+                        for handler in plugin_handlers {
+                            handlers.push(handler);
+                        }
+                    }
+                    Err(e) => {
+                        error!(error = %e, "Failed to load plugins");
+                        // Don't fail startup -- core protocols still work
+                    }
+                }
+            }
         }
 
         handlers

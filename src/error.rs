@@ -65,6 +65,11 @@ pub enum Error {
     /// Secrets management error.
     #[error("secrets error: {0}")]
     Secrets(#[from] hyperi_rustlib::SecretsError),
+
+    /// Plugin loading or runtime error.
+    #[cfg(feature = "plugins")]
+    #[error("plugin error: {0}")]
+    Plugin(String),
 }
 
 /// Result type alias for dfe-receiver operations.
