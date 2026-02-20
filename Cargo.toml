@@ -98,6 +98,10 @@ sysinfo = "0.32"
 tikv-jemallocator = { version = "0.6", optional = true }
 mimalloc = { version = "0.1", optional = true }
 
+# Plugin system (optional)
+dfe-plugin-loader = { version = "0.1.0", path = "../dfe-plugin-loader", optional = true }
+dfe-protocol-sdk = { version = "0.1.0", path = "../dfe-protocol-sdk", optional = true }
+
 [build-dependencies]
 tonic-build = "0.12"
 
@@ -113,6 +117,7 @@ dotenvy = "0.15"
 default = []
 jemalloc = ["dep:tikv-jemallocator"]
 mimalloc = ["dep:mimalloc"]
+plugins = ["dep:dfe-plugin-loader", "dep:dfe-protocol-sdk"]
 
 [profile.release]
 lto = "thin"

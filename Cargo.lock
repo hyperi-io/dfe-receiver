@@ -612,8 +612,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "dfe-plugin-loader"
+version = "0.1.0"
+dependencies = [
+ "dfe-protocol-sdk",
+ "libloading",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
+name = "dfe-protocol-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "dfe-protocol-sdk"
+version = "0.1.0"
+dependencies = [
+ "dfe-protocol-macros",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "dfe-receiver"
-version = "1.6.2"
+version = "1.6.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -624,6 +653,8 @@ dependencies = [
  "clap",
  "compact_str",
  "criterion",
+ "dfe-plugin-loader",
+ "dfe-protocol-sdk",
  "dotenvy",
  "futures-core",
  "http",
@@ -1523,6 +1554,16 @@ name = "libc"
 version = "0.2.182"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6800badb6cb2082ffd7b6a67e6125bb39f18782f793520caee8cb8846be06112"
+
+[[package]]
+name = "libloading"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+dependencies = [
+ "cfg-if",
+ "windows-link 0.2.1",
+]
 
 [[package]]
 name = "libmimalloc-sys"
