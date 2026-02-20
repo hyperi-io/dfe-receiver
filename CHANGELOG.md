@@ -1,3 +1,10 @@
+# [1.8.0](https://github.com/hyperi-io/dfe-receiver/compare/v1.7.0...v1.8.0) (2026-02-20)
+
+
+### Features
+
+* add dynamic plugin system with C ABI loader ([521849c](https://github.com/hyperi-io/dfe-receiver/commit/521849cdce12346712bf756f31772cbad9cbfd37))
+
 # [1.7.0](https://github.com/hyperi-io/dfe-receiver/compare/v1.6.3...v1.7.0) (2026-02-19)
 
 
