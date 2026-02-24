@@ -10,6 +10,7 @@ Thumbs.db
 .env.*.local
 *.log
 target/
+.deps/
 dist/
 dist-bin/
 build/

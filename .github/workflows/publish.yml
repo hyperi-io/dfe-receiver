@@ -62,12 +62,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: hyperi-io/dfe-plugin-loader
-          path: ../dfe-plugin-loader
+          path: .deps/dfe-plugin-loader
           token: ${{ steps.token.outputs.token }}
       - uses: actions/checkout@v4
         with:
           repository: hyperi-io/dfe-protocol-sdk
-          path: ../dfe-protocol-sdk
+          path: .deps/dfe-protocol-sdk
           token: ${{ steps.token.outputs.token }}
       - uses: ./ci/actions/jobs/build
         with:
@@ -101,12 +101,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: hyperi-io/dfe-plugin-loader
-          path: ../dfe-plugin-loader
+          path: .deps/dfe-plugin-loader
           token: ${{ steps.token.outputs.token }}
       - uses: actions/checkout@v4
         with:
           repository: hyperi-io/dfe-protocol-sdk
-          path: ../dfe-protocol-sdk
+          path: .deps/dfe-protocol-sdk
           token: ${{ steps.token.outputs.token }}
       - uses: ./ci/actions/jobs/publish
         with:
