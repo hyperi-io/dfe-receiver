@@ -1,3 +1,10 @@
+## [1.8.4](https://github.com/hyperi-io/dfe-receiver/compare/v1.8.3...v1.8.4) (2026-02-24)
+
+
+### Bug Fixes
+
+* Checkout the proper repos instead of stubs ([f22608c](https://github.com/hyperi-io/dfe-receiver/commit/f22608c39abaa09e35903c84e73e90d096627186))
+
 ## [1.8.3](https://github.com/hyperi-io/dfe-receiver/compare/v1.8.2...v1.8.3) (2026-02-24)
 
 
