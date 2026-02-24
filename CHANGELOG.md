@@ -1,3 +1,10 @@
+## [1.8.6](https://github.com/hyperi-io/dfe-receiver/compare/v1.8.5...v1.8.6) (2026-02-24)
+
+
+### Bug Fixes
+
+* Update the version constraint ([5c456c7](https://github.com/hyperi-io/dfe-receiver/commit/5c456c79e86f326aea1b0446e6c5f00f5d421f6c))
+
 ## [1.8.5](https://github.com/hyperi-io/dfe-receiver/compare/v1.8.4...v1.8.5) (2026-02-24)
 
 
