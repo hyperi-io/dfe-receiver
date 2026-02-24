@@ -1,3 +1,10 @@
+## [1.8.5](https://github.com/hyperi-io/dfe-receiver/compare/v1.8.4...v1.8.5) (2026-02-24)
+
+
+### Bug Fixes
+
+* Using symlinks for dependency repos ([9733c12](https://github.com/hyperi-io/dfe-receiver/commit/9733c12eb73472c5c332acbabaf7531fb118920e))
+
 ## [1.8.4](https://github.com/hyperi-io/dfe-receiver/compare/v1.8.3...v1.8.4) (2026-02-24)
 
 
