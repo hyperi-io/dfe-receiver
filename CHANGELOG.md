@@ -1,3 +1,10 @@
+## [1.8.1](https://github.com/hyperi-io/dfe-receiver/compare/v1.8.0...v1.8.1) (2026-02-24)
+
+
+### Bug Fixes
+
+* Allow explicit config file specification for config ([2c68d5c](https://github.com/hyperi-io/dfe-receiver/commit/2c68d5ca3fc94c1fa61064b13e1f6af8b214d249))
+
 # [1.8.0](https://github.com/hyperi-io/dfe-receiver/compare/v1.7.0...v1.8.0) (2026-02-20)
 
 
