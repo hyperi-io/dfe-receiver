@@ -1,3 +1,10 @@
+## [1.8.3](https://github.com/hyperi-io/dfe-receiver/compare/v1.8.2...v1.8.3) (2026-02-24)
+
+
+### Bug Fixes
+
+* More stub crates needed ([01f345e](https://github.com/hyperi-io/dfe-receiver/commit/01f345e516c09bd5f21508c9405f37af1bc14013))
+
 ## [1.8.2](https://github.com/hyperi-io/dfe-receiver/compare/v1.8.1...v1.8.2) (2026-02-24)
 
 
