@@ -101,6 +101,16 @@ jobs:
           fetch-depth: 0
           submodules: recursive
           token: ${{ steps.token.outputs.token }}
+      - name: Create plugin stub crates
+        run: |
+          for crate in dfe-plugin-loader dfe-protocol-sdk; do
+            mkdir -p "../${crate}/src"
+            echo '[package]' > "../${crate}/Cargo.toml"
+            echo "name = \"${crate}\"" >> "../${crate}/Cargo.toml"
+            echo 'version = "0.1.0"' >> "../${crate}/Cargo.toml"
+            echo 'edition = "2021"' >> "../${crate}/Cargo.toml"
+            touch "../${crate}/src/lib.rs"
+          done
       - uses: ./ci/actions/jobs/quality
         with:
           language: rust
@@ -130,6 +140,16 @@ jobs:
           fetch-depth: 0
           submodules: recursive
           token: ${{ steps.token.outputs.token }}
+      - name: Create plugin stub crates
+        run: |
+          for crate in dfe-plugin-loader dfe-protocol-sdk; do
+            mkdir -p "../${crate}/src"
+            echo '[package]' > "../${crate}/Cargo.toml"
+            echo "name = \"${crate}\"" >> "../${crate}/Cargo.toml"
+            echo 'version = "0.1.0"' >> "../${crate}/Cargo.toml"
+            echo 'edition = "2021"' >> "../${crate}/Cargo.toml"
+            touch "../${crate}/src/lib.rs"
+          done
       - uses: ./ci/actions/jobs/test
         with:
           language: rust
