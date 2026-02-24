@@ -1,3 +1,10 @@
+## [1.8.2](https://github.com/hyperi-io/dfe-receiver/compare/v1.8.1...v1.8.2) (2026-02-24)
+
+
+### Bug Fixes
+
+* Create stub crates for Cargo to work ([213baff](https://github.com/hyperi-io/dfe-receiver/commit/213baffedbbb1b1dbd153541eda55cd12ca6e495))
+
 ## [1.8.1](https://github.com/hyperi-io/dfe-receiver/compare/v1.8.0...v1.8.1) (2026-02-24)
 
 
