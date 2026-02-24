@@ -18,7 +18,6 @@
 //! 7. Hard-coded defaults
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use hyperi_rustlib::config::{self, ConfigOptions};
 use serde::{Deserialize, Serialize};
@@ -98,22 +97,15 @@ impl Config {
     /// 6. defaults.yaml
     /// 7. Hard-coded defaults
     pub fn load(config_path: Option<&str>) -> Result<Self> {
-        let mut config_paths = Vec::new();
-
-        // Add explicit config path if provided
+        // If an explicit config file is provided, load it directly
         if let Some(path) = config_path {
-            config_paths.push(
-                PathBuf::from(path)
-                    .parent()
-                    .unwrap_or(&PathBuf::from("."))
-                    .to_path_buf(),
-            );
+            return Self::load_from_file(path);
         }
 
-        // Setup hyperi-rustlib config with our prefix
+        // Otherwise, use hyperi-rustlib's 7-layer cascade
         config::setup(ConfigOptions {
             env_prefix: ENV_PREFIX.to_string(),
-            config_paths,
+            config_paths: Vec::new(),
             load_dotenv: true,
             ..Default::default()
         })
