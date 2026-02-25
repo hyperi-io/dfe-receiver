@@ -29,17 +29,20 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 static GLOBAL_MIMALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use clap::Parser;
+use hyperi_rustlib::config::reloader::{ConfigReloader, ReloaderConfig};
 use hyperi_rustlib::env::Environment;
 use hyperi_rustlib::logger::{self, LogFormat, LoggerOptions};
 use tokio::signal;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn, Level};
 
-use dfe_receiver::config::Config;
+use dfe_receiver::config::{reload_config, Config};
 use dfe_receiver::metrics::Metrics;
 use dfe_receiver::pipeline::Orchestrator;
 use dfe_receiver::server::Server;
@@ -141,36 +144,61 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Create and run the pipeline orchestrator
-    let orchestrator = Orchestrator::new(config, metrics.clone(), shutdown_token.clone())?;
+    let orchestrator = Orchestrator::new(config.clone(), metrics.clone(), shutdown_token.clone())?;
 
-    // Spawn SIGHUP handler for config reload
-    let reload_state = orchestrator.state();
-    let reload_config_path = args.config.clone();
-    tokio::spawn(async move {
-        let mut sighup = match signal::unix::signal(signal::unix::SignalKind::hangup()) {
-            Ok(s) => s,
-            Err(e) => {
-                warn!(error = %e, "Failed to register SIGHUP handler");
-                return;
-            }
+    // Start config hot-reload (SIGHUP + periodic + file polling via rustlib ConfigReloader)
+    {
+        let config_path_str = config.config_path.clone();
+        let shared_config = orchestrator.shared_config();
+        let reload_state = orchestrator.state();
+
+        let reloader_config = ReloaderConfig {
+            config_path: config.config_path.as_ref().map(PathBuf::from),
+            poll_interval: Duration::from_secs(config.config_reload_secs.max(5)),
+            periodic_interval: if config.config_reload_secs > 0 {
+                Duration::from_secs(config.config_reload_secs)
+            } else {
+                Duration::ZERO
+            },
+            debounce: Duration::from_millis(500),
+            enable_sighup: true,
         };
-        loop {
-            sighup.recv().await;
-            info!("Received SIGHUP, reloading configuration");
-            match Config::load(reload_config_path.as_deref()) {
-                Ok(new_config) => {
-                    if let Err(e) = new_config.validate() {
-                        error!(error = %e, "Config reload validation failed, keeping current config");
-                        continue;
-                    }
-                    if let Err(e) = reload_state.reload_config(new_config) {
-                        error!(error = %e, "Config reload failed");
-                    }
-                }
-                Err(e) => error!(error = %e, "Config reload parse failed"),
+
+        let reloader = ConfigReloader::new(
+            reloader_config,
+            shared_config.clone(),
+            move || {
+                reload_config_from_path(config_path_str.as_deref())
+            },
+            |cfg| {
+                cfg.validate().map_err(|e| {
+                    Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+                })
+            },
+        );
+
+        let _handle = reloader.start();
+
+        // Subscribe to config changes and rebuild pipeline components
+        // (ConfigReloader updates SharedConfig; this task rebuilds Router/Validator)
+        let mut config_rx = shared_config.subscribe();
+        tokio::spawn(async move {
+            while config_rx.changed().await.is_ok() {
+                let new_config = reload_state.config();
+                reload_state.rebuild_components(&new_config);
+                info!(version = *config_rx.borrow(), "Pipeline components rebuilt after config reload");
             }
+        });
+
+        if config.config_reload_secs > 0 {
+            info!(
+                interval_secs = config.config_reload_secs,
+                "Config hot-reload enabled (SIGHUP + periodic + file polling)"
+            );
+        } else {
+            info!("Config hot-reload enabled (SIGHUP + file polling)");
         }
-    });
+    }
 
     // Create HTTP/gRPC server
     let server = Server::new(orchestrator.state(), metrics.clone());
@@ -238,6 +266,19 @@ fn init_logging(format: &str, level: &str) -> anyhow::Result<()> {
     .map_err(|e| anyhow::anyhow!("logger setup failed: {e}"))?;
 
     Ok(())
+}
+
+/// Reload configuration from the original config path.
+///
+/// Wraps `reload_config` with the error type expected by `ConfigReloader`.
+fn reload_config_from_path(
+    config_path: Option<&str>,
+) -> std::result::Result<Config, Box<dyn std::error::Error + Send + Sync>> {
+    let placeholder = Config {
+        config_path: config_path.map(String::from),
+        ..Config::default()
+    };
+    reload_config(&placeholder).map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
 }
 
 /// Run the Prometheus metrics HTTP server.

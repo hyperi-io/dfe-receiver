@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::buffer::{BufferManager, MemoryPressure, TieredSink};
-use crate::config::Config;
+use crate::config::{Config, SharedConfig};
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
 use crate::routing::{RouteResult, Router};
@@ -31,7 +31,7 @@ use crate::validation::{ValidationResult, Validator};
 
 /// Shared pipeline state accessible from handlers.
 pub struct PipelineState {
-    config: Arc<RwLock<Config>>,
+    shared_config: SharedConfig,
     validator: RwLock<Validator>,
     router: RwLock<Router>,
     kafka_sink: Option<Arc<TieredSink<KafkaSink>>>,
@@ -42,7 +42,8 @@ pub struct PipelineState {
 
 impl PipelineState {
     /// Create new pipeline state.
-    pub fn new(config: Config) -> Result<Self> {
+    pub fn new(shared_config: SharedConfig) -> Result<Self> {
+        let config = shared_config.get();
         let validator = Validator::new(config.validation.clone());
         let router = Router::new(
             &config.routing,
@@ -74,7 +75,7 @@ impl PipelineState {
         };
 
         Ok(Self {
-            config: Arc::new(RwLock::new(config)),
+            shared_config,
             validator: RwLock::new(validator),
             router: RwLock::new(router),
             kafka_sink,
@@ -86,7 +87,12 @@ impl PipelineState {
 
     /// Get the current configuration.
     pub fn config(&self) -> Config {
-        self.config.read().clone()
+        self.shared_config.get()
+    }
+
+    /// Get the shared config handle.
+    pub fn shared_config(&self) -> SharedConfig {
+        self.shared_config.clone()
     }
 
     /// Check if the pipeline is ready to receive requests.
@@ -152,7 +158,7 @@ impl PipelineState {
     /// Check if enrichment (timestamp injection, source rules) is enabled.
     #[inline]
     fn enrichment_enabled(&self) -> bool {
-        self.config.read().server.auth.include_common_header
+        self.shared_config.with(|c| c.server.auth.include_common_header)
     }
 
     /// Inject `_timestamp_receiver` into a validated JSON object payload.
@@ -268,9 +274,25 @@ impl PipelineState {
 
     /// Reload configuration, rebuilding router and validator.
     ///
-    /// Called on SIGHUP. Sinks are not rebuilt (Kafka/loader connections
-    /// are long-lived and should not be disrupted).
+    /// Called on SIGHUP or periodic reload. Sinks are not rebuilt
+    /// (Kafka/loader connections are long-lived and should not be disrupted).
     pub fn reload_config(&self, new_config: Config) -> Result<()> {
+        self.rebuild_components(&new_config);
+
+        // Update shared config (bumps version, notifies subscribers)
+        self.shared_config.update(new_config);
+
+        let version = self.shared_config.version();
+        info!(version, "Configuration reloaded successfully");
+        Ok(())
+    }
+
+    /// Rebuild mutable pipeline components from new configuration.
+    ///
+    /// Called by the config change subscriber when `SharedConfig` is updated
+    /// externally (e.g., by `ConfigReloader`). Does NOT update `SharedConfig`
+    /// itself — that's already been done by the caller.
+    pub fn rebuild_components(&self, new_config: &Config) {
         let new_router = Router::new(
             &new_config.routing,
             &new_config.destinations,
@@ -280,16 +302,13 @@ impl PipelineState {
 
         *self.router.write() = new_router;
         *self.validator.write() = new_validator;
-        *self.config.write() = new_config;
-
-        info!("Configuration reloaded successfully");
-        Ok(())
     }
 }
 
 /// Main pipeline orchestrator.
 pub struct Orchestrator {
     state: Arc<PipelineState>,
+    shared_config: SharedConfig,
     #[allow(dead_code)]
     metrics: Arc<Metrics>,
     shutdown: CancellationToken,
@@ -298,10 +317,12 @@ pub struct Orchestrator {
 impl Orchestrator {
     /// Create a new orchestrator.
     pub fn new(config: Config, metrics: Arc<Metrics>, shutdown: CancellationToken) -> Result<Self> {
-        let state = PipelineState::new(config)?;
+        let shared_config = SharedConfig::new(config);
+        let state = PipelineState::new(shared_config.clone())?;
 
         Ok(Self {
             state: Arc::new(state),
+            shared_config,
             metrics,
             shutdown,
         })
@@ -310,6 +331,11 @@ impl Orchestrator {
     /// Get shared pipeline state.
     pub fn state(&self) -> Arc<PipelineState> {
         Arc::clone(&self.state)
+    }
+
+    /// Get shared config handle.
+    pub fn shared_config(&self) -> SharedConfig {
+        self.shared_config.clone()
     }
 
     /// Run the orchestrator (background tasks).
@@ -359,10 +385,18 @@ mod tests {
         config
     }
 
+    fn test_state() -> PipelineState {
+        let config = test_config();
+        PipelineState::new(SharedConfig::new(config)).unwrap()
+    }
+
+    fn test_state_with(config: Config) -> PipelineState {
+        PipelineState::new(SharedConfig::new(config)).unwrap()
+    }
+
     #[tokio::test]
     async fn test_pipeline_validation_reject() {
-        let config = test_config();
-        let state = PipelineState::new(config).unwrap();
+        let state = test_state();
 
         // Invalid JSON with dlq_on_invalid=true goes to DLQ (success since it's routed)
         let result = state.process(Bytes::from("not json")).await;
@@ -372,8 +406,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pipeline_valid_json() {
-        let config = test_config();
-        let state = PipelineState::new(config).unwrap();
+        let state = test_state();
 
         let valid_json = Bytes::from(r#"{"test": "data"}"#);
         let result = state.process(valid_json).await;
@@ -382,9 +415,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pipeline_ready_check() {
-        let config = test_config();
-        let state = PipelineState::new(config).unwrap();
-
+        let state = test_state();
         assert!(state.is_ready());
     }
 
@@ -394,7 +425,7 @@ mod tests {
         config.buffer.memory_limit = 1000;
         config.buffer.pressure_threshold = 0.8;
 
-        let state = PipelineState::new(config).unwrap();
+        let state = test_state_with(config);
 
         // Should start without pressure
         assert!(!state.should_apply_backpressure());
@@ -403,8 +434,7 @@ mod tests {
 
     #[test]
     fn test_enrich_payload_injects_timestamp() {
-        let config = test_config();
-        let state = PipelineState::new(config).unwrap();
+        let state = test_state();
 
         let payload = Bytes::from(r#"{"key": "value"}"#);
         let enriched = state.enrich_payload(payload);
@@ -419,8 +449,7 @@ mod tests {
 
     #[test]
     fn test_enrich_payload_empty_object() {
-        let config = test_config();
-        let state = PipelineState::new(config).unwrap();
+        let state = test_state();
 
         let payload = Bytes::from(r#"{}"#);
         let enriched = state.enrich_payload(payload);
@@ -433,16 +462,80 @@ mod tests {
     fn test_enrichment_disabled() {
         let mut config = test_config();
         config.server.auth.include_common_header = false;
-        let state = PipelineState::new(config).unwrap();
+        let state = test_state_with(config);
 
         assert!(!state.enrichment_enabled());
     }
 
     #[test]
     fn test_enrichment_enabled_by_default() {
-        let config = test_config();
-        let state = PipelineState::new(config).unwrap();
+        let state = test_state();
+        assert!(state.enrichment_enabled());
+    }
+
+    #[test]
+    fn test_reload_config_updates_version() {
+        let state = test_state();
+        assert_eq!(state.shared_config().version(), 0);
+
+        let mut new_config = test_config();
+        new_config.routing.default_source = "reloaded".to_string();
+        state.reload_config(new_config).unwrap();
+
+        assert_eq!(state.shared_config().version(), 1);
+        assert_eq!(state.config().routing.default_source, "reloaded");
+    }
+
+    #[test]
+    fn test_reload_config_toggles_enrichment() {
+        let state = test_state();
+        assert!(state.enrichment_enabled());
+
+        // Disable enrichment via reload
+        let mut new_config = test_config();
+        new_config.server.auth.include_common_header = false;
+        state.reload_config(new_config).unwrap();
+
+        assert!(!state.enrichment_enabled());
+
+        // Re-enable via another reload
+        let mut re_enable = test_config();
+        re_enable.server.auth.include_common_header = true;
+        state.reload_config(re_enable).unwrap();
 
         assert!(state.enrichment_enabled());
+    }
+
+    #[tokio::test]
+    async fn test_reload_config_while_processing() {
+        let state = Arc::new(test_state());
+
+        // Process a message before reload
+        let result = state.process(Bytes::from(r#"{"a": 1}"#)).await;
+        assert!(result.is_ok());
+
+        // Reload config with different default source
+        let mut new_config = test_config();
+        new_config.routing.default_source = "updated".to_string();
+        state.reload_config(new_config).unwrap();
+
+        // Process a message after reload — should still work
+        let result = state.process(Bytes::from(r#"{"b": 2}"#)).await;
+        assert!(result.is_ok());
+
+        // Verify config actually changed
+        assert_eq!(state.config().routing.default_source, "updated");
+    }
+
+    #[tokio::test]
+    async fn test_reload_config_subscriber_notified() {
+        let state = test_state();
+        let mut rx = state.shared_config().subscribe();
+
+        let new_config = test_config();
+        state.reload_config(new_config).unwrap();
+
+        rx.changed().await.expect("should receive notification");
+        assert_eq!(*rx.borrow(), 1);
     }
 }

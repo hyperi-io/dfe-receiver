@@ -625,10 +625,10 @@ dependencies = [
  "criterion",
  "dotenvy",
  "futures-core",
- "hs-rustlib",
  "http",
  "hyper",
  "hyper-util",
+ "hyperi-rustlib",
  "mimalloc",
  "parking_lot",
  "proptest",
@@ -640,7 +640,7 @@ dependencies = [
  "rustls-pemfile",
  "serde",
  "serde_json",
- "serde_yaml",
+ "serde_yaml_ng",
  "sonic-rs",
  "sysinfo 0.32.1",
  "tempfile",
@@ -1025,43 +1025,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
 
 [[package]]
-name = "hs-rustlib"
-version = "1.3.8"
-source = "sparse+https://hypersec.jfrog.io/artifactory/api/cargo/hypersec-cargo-virtual/index/"
-checksum = "2904636270f03fdf9d4e86c5136e5d1eec49b9d60b8a9a6515a3d8d8b7990c54"
-dependencies = [
- "async-trait",
- "axum 0.8.8",
- "base64",
- "chrono",
- "dirs",
- "dotenvy",
- "figment",
- "lz4_flex",
- "metrics",
- "metrics-exporter-prometheus",
- "owo-colors",
- "parking_lot",
- "rdkafka 0.38.0",
- "rmp-serde",
- "serde",
- "serde_json",
- "serde_yaml_ng",
- "snap",
- "sysinfo 0.37.2",
- "thiserror",
- "tokio",
- "toml",
- "tower 0.5.3",
- "tower-http",
- "tower-resilience",
- "tracing",
- "tracing-subscriber",
- "yaque",
- "zstd",
-]
-
-[[package]]
 name = "http"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1198,6 +1161,41 @@ dependencies = [
  "tower-service",
  "tracing",
  "windows-registry",
+]
+
+[[package]]
+name = "hyperi-rustlib"
+version = "1.4.3"
+dependencies = [
+ "async-trait",
+ "axum 0.8.8",
+ "base64",
+ "chrono",
+ "dirs",
+ "dotenvy",
+ "figment",
+ "lz4_flex",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "owo-colors",
+ "parking_lot",
+ "rdkafka 0.38.0",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "snap",
+ "sysinfo 0.37.2",
+ "thiserror",
+ "tokio",
+ "toml",
+ "tower 0.5.3",
+ "tower-http",
+ "tower-resilience",
+ "tracing",
+ "tracing-subscriber",
+ "yaque",
+ "zstd",
 ]
 
 [[package]]

@@ -17,11 +17,16 @@
 //! 6. defaults.yaml
 //! 7. Hard-coded defaults
 
+mod shared;
+
+pub use shared::SharedConfig;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 use hyperi_rustlib::config::{self, ConfigOptions};
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 use crate::error::{Error, Result};
 
@@ -64,6 +69,14 @@ pub struct Config {
 
     /// Metrics configuration.
     pub metrics: MetricsConfig,
+
+    /// Periodic config reload interval in seconds (0 = disabled, SIGHUP only).
+    #[serde(default)]
+    pub config_reload_secs: u64,
+
+    /// Path to the config file (set by loader, not deserialized).
+    #[serde(skip)]
+    pub config_path: Option<String>,
 }
 
 impl Default for Config {
@@ -78,21 +91,21 @@ impl Default for Config {
             loader: LoaderConfig::default(),
             buffer: BufferConfig::default(),
             metrics: MetricsConfig::default(),
+            config_reload_secs: 0,
+            config_path: None,
         }
     }
 }
 
 impl Config {
-    /// Load configuration using hyperi-rustlib's 7-layer cascade.
+    /// Load configuration with cascade: CLI → ENV → .env → file → defaults
     ///
-    /// Layers (highest to lowest priority):
-    /// 1. CLI arguments (merged separately)
-    /// 2. Environment variables (DFE_RECEIVER_*)
-    /// 3. .env file
-    /// 4. settings.{env}.yaml
-    /// 5. settings.yaml
-    /// 6. defaults.yaml
-    /// 7. Hard-coded defaults
+    /// Priority (highest to lowest):
+    /// 1. CLI arguments (handled by caller, merged after)
+    /// 2. Environment variables (DFE_RECEIVER_ prefix)
+    /// 3. .env file (loaded by dotenvy via hyperi-rustlib)
+    /// 4. Config file (YAML)
+    /// 5. Hard-coded defaults
     pub fn load(config_path: Option<&str>) -> Result<Self> {
         let mut config_paths = Vec::new();
 
@@ -106,7 +119,7 @@ impl Config {
             );
         }
 
-        // Setup hyperi-rustlib config with our prefix
+        // Setup hyperi-rustlib config (dotenv loading, file cascade)
         config::setup(ConfigOptions {
             env_prefix: ENV_PREFIX.to_string(),
             config_paths,
@@ -119,7 +132,13 @@ impl Config {
         let cfg = config::get();
 
         // Try to unmarshal the full config, falling back to defaults
-        let config: Config = cfg.unmarshal().unwrap_or_default();
+        let mut config: Config = cfg.unmarshal().unwrap_or_default();
+
+        // Store config path for reload support
+        config.config_path = config_path.map(String::from);
+
+        // Apply flat env var overrides (DFE_RECEIVER_*)
+        apply_env_overrides(&mut config);
 
         Ok(config)
     }
@@ -129,7 +148,9 @@ impl Config {
         let content = std::fs::read_to_string(path)
             .map_err(|e| Error::Config(format!("failed to read config file: {e}")))?;
 
-        let config: Config = serde_yaml::from_str(&content)?;
+        let mut config: Config = serde_yaml_ng::from_str(&content)?;
+        config.config_path = Some(path.to_string());
+        apply_env_overrides(&mut config);
         Ok(config)
     }
 
@@ -155,6 +176,133 @@ impl Config {
         }
 
         Ok(())
+    }
+}
+
+/// Reload configuration from the same source.
+///
+/// Re-runs the full cascade (file + env overrides + validate) using
+/// the original config path. Used for hot-reload via SIGHUP or periodic timer.
+pub fn reload_config(current: &Config) -> Result<Config> {
+    Config::load(current.config_path.as_deref())
+}
+
+/// Read an env var with the DFE_RECEIVER_ prefix.
+fn env_var(name: &str) -> std::result::Result<String, std::env::VarError> {
+    std::env::var(format!("DFE_RECEIVER_{name}"))
+}
+
+/// Apply flat environment variable overrides (DFE_RECEIVER_* prefix).
+///
+/// Provides operator-friendly flat env vars alongside rustlib's nested `__` cascade.
+/// Flat overrides take final priority (applied after rustlib config merge).
+fn apply_env_overrides(config: &mut Config) {
+    // Server
+    if let Ok(v) = env_var("BIND_ADDRESS") {
+        config.server.bind_address = v;
+        debug!("Override: server.bind_address from env");
+    }
+    if let Ok(v) = env_var("MAX_BODY_SIZE") {
+        if let Ok(n) = v.parse() {
+            config.server.max_body_size = n;
+            debug!("Override: server.max_body_size from env");
+        }
+    }
+    if let Ok(v) = env_var("REQUEST_TIMEOUT_MS") {
+        if let Ok(n) = v.parse() {
+            config.server.request_timeout_ms = n;
+            debug!("Override: server.request_timeout_ms from env");
+        }
+    }
+
+    // Common header / enrichment toggle
+    if let Ok(v) = env_var("COMMON_HEADER") {
+        config.server.auth.include_common_header =
+            matches!(v.to_lowercase().as_str(), "true" | "1" | "yes");
+        debug!("Override: include_common_header from env");
+    }
+
+    // Kafka
+    if let Ok(v) = env_var("KAFKA_BROKERS") {
+        config.kafka.brokers = v.split(',').map(|s| s.trim().to_string()).collect();
+        debug!("Override: kafka.brokers from env");
+    }
+    if let Ok(v) = env_var("KAFKA_CLIENT_ID") {
+        config.kafka.client_id = v;
+        debug!("Override: kafka.client_id from env");
+    }
+    if let Ok(v) = env_var("KAFKA_SASL_MECHANISM") {
+        let sasl = config.kafka.sasl.get_or_insert_with(|| SaslConfig {
+            enabled: true,
+            mechanism: String::new(),
+            username: String::new(),
+            password: String::new(),
+        });
+        sasl.mechanism = v;
+        sasl.enabled = true;
+        debug!("Override: kafka.sasl.mechanism from env");
+    }
+    if let Ok(v) = env_var("KAFKA_SECURITY_PROTOCOL") {
+        config.kafka.tls.enabled = v.to_uppercase().contains("SSL");
+        debug!("Override: kafka.tls from env (protocol={v})");
+    }
+    if let Ok(v) = env_var("KAFKA_SASL_USER") {
+        let sasl = config.kafka.sasl.get_or_insert_with(|| SaslConfig {
+            enabled: true,
+            mechanism: String::new(),
+            username: String::new(),
+            password: String::new(),
+        });
+        sasl.username = v;
+        debug!("Override: kafka.sasl.username from env");
+    }
+    if let Ok(v) = env_var("KAFKA_SASL_PASSWORD") {
+        let sasl = config.kafka.sasl.get_or_insert_with(|| SaslConfig {
+            enabled: true,
+            mechanism: String::new(),
+            username: String::new(),
+            password: String::new(),
+        });
+        sasl.password = v;
+        debug!("Override: kafka.sasl.password from env (redacted)");
+    }
+
+    // Routing
+    if let Ok(v) = env_var("DEFAULT_SOURCE") {
+        config.routing.default_source = v;
+        debug!("Override: routing.default_source from env");
+    }
+    if let Ok(v) = env_var("TOPIC_SUFFIX") {
+        config.routing.topic_suffix = v;
+        debug!("Override: routing.topic_suffix from env");
+    }
+
+    // Buffer / memory
+    if let Ok(v) = env_var("MEMORY_LIMIT") {
+        if let Ok(n) = v.parse() {
+            config.buffer.memory_limit = n;
+            debug!("Override: buffer.memory_limit from env");
+        }
+    }
+    if let Ok(v) = env_var("PRESSURE_THRESHOLD") {
+        if let Ok(n) = v.parse() {
+            config.buffer.pressure_threshold = n;
+            debug!("Override: buffer.pressure_threshold from env");
+        }
+    }
+
+    // Metrics
+    if let Ok(v) = env_var("METRICS_ADDRESS") {
+        config.metrics.address = v;
+        debug!("Override: metrics.address from env");
+    }
+
+    // Config reload
+    if let Ok(v) = env_var("CONFIG_RELOAD_SECS") {
+        if let Ok(n) = v.parse() {
+            config.config_reload_secs = n;
+            debug!("Override: config_reload_secs from env");
+        }
     }
 }
 
@@ -759,5 +907,208 @@ mod tests {
         let mut config = Config::default();
         config.buffer.pressure_threshold = 1.5;
         assert!(config.validate().is_err());
+    }
+
+    // -- env override tests --
+    // Each test sets env vars, runs apply_env_overrides on a default config,
+    // then cleans up. Tests are serial-safe because they use unique var names.
+
+    fn with_env<F: FnOnce()>(vars: &[(&str, &str)], f: F) {
+        for (k, v) in vars {
+            std::env::set_var(k, v);
+        }
+        f();
+        for (k, _) in vars {
+            std::env::remove_var(k);
+        }
+    }
+
+    #[test]
+    fn test_env_override_bind_address() {
+        with_env(&[("DFE_RECEIVER_BIND_ADDRESS", "127.0.0.1:9999")], || {
+            let mut config = Config::default();
+            apply_env_overrides(&mut config);
+            assert_eq!(config.server.bind_address, "127.0.0.1:9999");
+        });
+    }
+
+    #[test]
+    fn test_env_override_max_body_size() {
+        with_env(&[("DFE_RECEIVER_MAX_BODY_SIZE", "5242880")], || {
+            let mut config = Config::default();
+            apply_env_overrides(&mut config);
+            assert_eq!(config.server.max_body_size, 5_242_880);
+        });
+    }
+
+    #[test]
+    fn test_env_override_request_timeout_ms() {
+        with_env(&[("DFE_RECEIVER_REQUEST_TIMEOUT_MS", "60000")], || {
+            let mut config = Config::default();
+            apply_env_overrides(&mut config);
+            assert_eq!(config.server.request_timeout_ms, 60_000);
+        });
+    }
+
+    #[test]
+    fn test_env_override_common_header() {
+        // Test true
+        with_env(&[("DFE_RECEIVER_COMMON_HEADER", "true")], || {
+            let mut config = Config::default();
+            config.server.auth.include_common_header = false;
+            apply_env_overrides(&mut config);
+            assert!(config.server.auth.include_common_header);
+        });
+
+        // Test false
+        with_env(&[("DFE_RECEIVER_COMMON_HEADER", "false")], || {
+            let mut config = Config::default();
+            apply_env_overrides(&mut config);
+            assert!(!config.server.auth.include_common_header);
+        });
+    }
+
+    #[test]
+    fn test_env_override_kafka_brokers() {
+        with_env(
+            &[("DFE_RECEIVER_KAFKA_BROKERS", "broker1:9092, broker2:9092")],
+            || {
+                let mut config = Config::default();
+                apply_env_overrides(&mut config);
+                assert_eq!(
+                    config.kafka.brokers,
+                    vec!["broker1:9092".to_string(), "broker2:9092".to_string()]
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn test_env_override_kafka_client_id() {
+        with_env(&[("DFE_RECEIVER_KAFKA_CLIENT_ID", "my-receiver")], || {
+            let mut config = Config::default();
+            apply_env_overrides(&mut config);
+            assert_eq!(config.kafka.client_id, "my-receiver");
+        });
+    }
+
+    #[test]
+    fn test_env_override_kafka_sasl() {
+        with_env(
+            &[
+                ("DFE_RECEIVER_KAFKA_SASL_MECHANISM", "SCRAM-SHA-512"),
+                ("DFE_RECEIVER_KAFKA_SASL_USER", "admin"),
+                ("DFE_RECEIVER_KAFKA_SASL_PASSWORD", "secret"),
+            ],
+            || {
+                let mut config = Config::default();
+                apply_env_overrides(&mut config);
+                let sasl = config.kafka.sasl.unwrap();
+                assert!(sasl.enabled);
+                assert_eq!(sasl.mechanism, "SCRAM-SHA-512");
+                assert_eq!(sasl.username, "admin");
+                assert_eq!(sasl.password, "secret");
+            },
+        );
+    }
+
+    #[test]
+    fn test_env_override_kafka_security_protocol() {
+        // SSL variant
+        with_env(
+            &[("DFE_RECEIVER_KAFKA_SECURITY_PROTOCOL", "SASL_SSL")],
+            || {
+                let mut config = Config::default();
+                apply_env_overrides(&mut config);
+                assert!(config.kafka.tls.enabled);
+            },
+        );
+        // PLAINTEXT variant
+        with_env(
+            &[("DFE_RECEIVER_KAFKA_SECURITY_PROTOCOL", "PLAINTEXT")],
+            || {
+                let mut config = Config::default();
+                apply_env_overrides(&mut config);
+                assert!(!config.kafka.tls.enabled);
+            },
+        );
+    }
+
+    #[test]
+    fn test_env_override_default_source() {
+        with_env(&[("DFE_RECEIVER_DEFAULT_SOURCE", "firewall")], || {
+            let mut config = Config::default();
+            apply_env_overrides(&mut config);
+            assert_eq!(config.routing.default_source, "firewall");
+        });
+    }
+
+    #[test]
+    fn test_env_override_topic_suffix() {
+        with_env(&[("DFE_RECEIVER_TOPIC_SUFFIX", "_raw")], || {
+            let mut config = Config::default();
+            apply_env_overrides(&mut config);
+            assert_eq!(config.routing.topic_suffix, "_raw");
+        });
+    }
+
+    #[test]
+    fn test_env_override_memory_limit() {
+        with_env(&[("DFE_RECEIVER_MEMORY_LIMIT", "1073741824")], || {
+            let mut config = Config::default();
+            apply_env_overrides(&mut config);
+            assert_eq!(config.buffer.memory_limit, 1_073_741_824);
+        });
+    }
+
+    #[test]
+    fn test_env_override_pressure_threshold() {
+        with_env(&[("DFE_RECEIVER_PRESSURE_THRESHOLD", "0.9")], || {
+            let mut config = Config::default();
+            apply_env_overrides(&mut config);
+            assert!((config.buffer.pressure_threshold - 0.9).abs() < f64::EPSILON);
+        });
+    }
+
+    #[test]
+    fn test_env_override_metrics_address() {
+        with_env(
+            &[("DFE_RECEIVER_METRICS_ADDRESS", "0.0.0.0:8888")],
+            || {
+                let mut config = Config::default();
+                apply_env_overrides(&mut config);
+                assert_eq!(config.metrics.address, "0.0.0.0:8888");
+            },
+        );
+    }
+
+    #[test]
+    fn test_env_override_config_reload_secs() {
+        with_env(&[("DFE_RECEIVER_CONFIG_RELOAD_SECS", "60")], || {
+            let mut config = Config::default();
+            apply_env_overrides(&mut config);
+            assert_eq!(config.config_reload_secs, 60);
+        });
+    }
+
+    #[test]
+    fn test_env_override_invalid_number_ignored() {
+        with_env(&[("DFE_RECEIVER_MAX_BODY_SIZE", "not_a_number")], || {
+            let mut config = Config::default();
+            let original_size = config.server.max_body_size;
+            apply_env_overrides(&mut config);
+            assert_eq!(config.server.max_body_size, original_size);
+        });
+    }
+
+    #[test]
+    fn test_env_override_no_vars_set() {
+        let mut config = Config::default();
+        let original = config.clone();
+        apply_env_overrides(&mut config);
+        assert_eq!(config.server.bind_address, original.server.bind_address);
+        assert_eq!(config.kafka.brokers, original.kafka.brokers);
+        assert_eq!(config.routing.default_source, original.routing.default_source);
+        assert_eq!(config.config_reload_secs, original.config_reload_secs);
     }
 }

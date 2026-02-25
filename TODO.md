@@ -51,6 +51,18 @@ Future work, ordered by priority.
 
 ### Medium Priority
 
+- [ ] **Vector.dev embedded receiver module** — [DISCUSSION]
+  - Supply a `vector.yaml` config file with a commonly-configured sink targeting the core dfe-receiver JSON processor
+  - Artefacts: vector.yaml template/reference config
+  - Investigate linking/embedding the Vector binary as a Rust library (not subprocess)
+    - Vector is not officially designed as an embeddable library ([Discussion #19776](https://github.com/vectordotdev/vector/discussions/19776))
+    - Individual crates (`vector-core`, `vector-lib`, `vrl`) may be usable as git dependencies
+    - Extensive feature flags allow selective compilation of only needed components
+  - Licensing: Vector is [MPL-2.0](https://github.com/vectordotdev/vector/blob/master/LICENSE), dfe-receiver is FSL-1.1-ALv2
+    - MPL-2.0 file-level copyleft allows combining with non-MPL code in a larger work
+    - MPL-licensed source files must remain available under MPL-2.0
+    - No formal compatibility declaration between MPL-2.0 and FSL-1.1 exists — legal review needed
+  - See discussion notes below
 - [ ] KEDA scaling metrics endpoint
 - [ ] Disk spillover implementation (currently in-memory only)
 - [ ] Config hot-reload for auth settings
