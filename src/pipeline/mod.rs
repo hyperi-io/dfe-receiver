@@ -32,8 +32,8 @@ use crate::validation::{ValidationResult, Validator};
 /// Shared pipeline state accessible from handlers.
 pub struct PipelineState {
     config: Arc<RwLock<Config>>,
-    validator: Validator,
-    router: Router,
+    validator: RwLock<Validator>,
+    router: RwLock<Router>,
     kafka_sink: Option<Arc<TieredSink<KafkaSink>>>,
     loader_sink: Option<Arc<TieredSink<LoaderSink>>>,
     buffer_manager: Arc<BufferManager>,
@@ -44,7 +44,11 @@ impl PipelineState {
     /// Create new pipeline state.
     pub fn new(config: Config) -> Result<Self> {
         let validator = Validator::new(config.validation.clone());
-        let router = Router::new(&config.routing, &config.destinations);
+        let router = Router::new(
+            &config.routing,
+            &config.destinations,
+            config.server.auth.include_common_header,
+        );
         let buffer_manager = Arc::new(BufferManager::new(&config.buffer));
 
         // Initialise Kafka sink with tiered wrapper if brokers configured
@@ -71,8 +75,8 @@ impl PipelineState {
 
         Ok(Self {
             config: Arc::new(RwLock::new(config)),
-            validator,
-            router,
+            validator: RwLock::new(validator),
+            router: RwLock::new(router),
             kafka_sink,
             loader_sink,
             buffer_manager,
@@ -145,11 +149,51 @@ impl PipelineState {
         result
     }
 
+    /// Check if enrichment (timestamp injection, source rules) is enabled.
+    #[inline]
+    fn enrichment_enabled(&self) -> bool {
+        self.config.read().server.auth.include_common_header
+    }
+
+    /// Inject `_timestamp_receiver` into a validated JSON object payload.
+    ///
+    /// Performs byte-level append before the closing `}` to avoid a full
+    /// JSON parse/rewrite on the hot path.
+    #[inline]
+    fn enrich_payload(&self, payload: Bytes) -> Bytes {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+
+        let raw = payload.as_ref();
+        let Some(insert_pos) = raw.iter().rposition(|&b| b == b'}') else {
+            return payload;
+        };
+
+        let mut buf = Vec::with_capacity(raw.len() + 40);
+        buf.extend_from_slice(&raw[..insert_pos]);
+
+        // Add comma if there's content before the closing brace (not empty object)
+        if let Some(pos) = raw[..insert_pos]
+            .iter()
+            .rposition(|b| !b.is_ascii_whitespace())
+        {
+            if raw[pos] != b'{' {
+                buf.push(b',');
+            }
+        }
+        buf.extend_from_slice(format!("\"_timestamp_receiver\":{now_ms}").as_bytes());
+        buf.extend_from_slice(&raw[insert_pos..]);
+        Bytes::from(buf)
+    }
+
     /// Inner processing logic (after backpressure check).
     #[inline]
     async fn process_inner(&self, payload: Bytes) -> Result<()> {
-        // Validate
-        match self.validator.validate(&payload) {
+        // Validate (read guard dropped before any .await)
+        let validation = self.validator.read().validate(&payload);
+        match validation {
             ValidationResult::Valid => {}
             ValidationResult::Dlq(reason) => {
                 debug!(reason = %reason, "Message validation failed, routing to DLQ");
@@ -160,8 +204,16 @@ impl PipelineState {
             }
         }
 
-        // Route
-        match self.router.route(&payload) {
+        // Enrich (only when common header / enrichment enabled)
+        let payload = if self.enrichment_enabled() {
+            self.enrich_payload(payload)
+        } else {
+            payload
+        };
+
+        // Route (read guard dropped before any .await)
+        let route = self.router.read().route(&payload);
+        match route {
             RouteResult::Kafka(topic) => {
                 self.send_to_kafka(&topic, payload).await?;
             }
@@ -199,7 +251,7 @@ impl PipelineState {
     /// Send message to DLQ.
     #[inline]
     async fn send_to_dlq(&self, payload: &Bytes, _reason: &str) -> Result<()> {
-        let dlq_route = self.router.route_dlq(_reason);
+        let dlq_route = { self.router.read().route_dlq(_reason) };
 
         match dlq_route {
             RouteResult::Dlq(topic) | RouteResult::Kafka(topic) => {
@@ -212,6 +264,26 @@ impl PipelineState {
     /// Get buffer manager for external access.
     pub fn buffer_manager(&self) -> &Arc<BufferManager> {
         &self.buffer_manager
+    }
+
+    /// Reload configuration, rebuilding router and validator.
+    ///
+    /// Called on SIGHUP. Sinks are not rebuilt (Kafka/loader connections
+    /// are long-lived and should not be disrupted).
+    pub fn reload_config(&self, new_config: Config) -> Result<()> {
+        let new_router = Router::new(
+            &new_config.routing,
+            &new_config.destinations,
+            new_config.server.auth.include_common_header,
+        );
+        let new_validator = Validator::new(new_config.validation.clone());
+
+        *self.router.write() = new_router;
+        *self.validator.write() = new_validator;
+        *self.config.write() = new_config;
+
+        info!("Configuration reloaded successfully");
+        Ok(())
     }
 }
 
@@ -327,5 +399,50 @@ mod tests {
         // Should start without pressure
         assert!(!state.should_apply_backpressure());
         assert_eq!(state.memory_pressure(), MemoryPressure::Low);
+    }
+
+    #[test]
+    fn test_enrich_payload_injects_timestamp() {
+        let config = test_config();
+        let state = PipelineState::new(config).unwrap();
+
+        let payload = Bytes::from(r#"{"key": "value"}"#);
+        let enriched = state.enrich_payload(payload);
+        let enriched_str = std::str::from_utf8(&enriched).unwrap();
+
+        assert!(enriched_str.contains("\"_timestamp_receiver\":"));
+        // Verify it's still valid JSON
+        let parsed: serde_json::Value = serde_json::from_slice(&enriched).unwrap();
+        assert!(parsed.get("_timestamp_receiver").is_some());
+        assert_eq!(parsed.get("key").unwrap(), "value");
+    }
+
+    #[test]
+    fn test_enrich_payload_empty_object() {
+        let config = test_config();
+        let state = PipelineState::new(config).unwrap();
+
+        let payload = Bytes::from(r#"{}"#);
+        let enriched = state.enrich_payload(payload);
+
+        let parsed: serde_json::Value = serde_json::from_slice(&enriched).unwrap();
+        assert!(parsed.get("_timestamp_receiver").is_some());
+    }
+
+    #[test]
+    fn test_enrichment_disabled() {
+        let mut config = test_config();
+        config.server.auth.include_common_header = false;
+        let state = PipelineState::new(config).unwrap();
+
+        assert!(!state.enrichment_enabled());
+    }
+
+    #[test]
+    fn test_enrichment_enabled_by_default() {
+        let config = test_config();
+        let state = PipelineState::new(config).unwrap();
+
+        assert!(state.enrichment_enabled());
     }
 }

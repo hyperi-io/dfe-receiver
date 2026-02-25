@@ -19,10 +19,12 @@ dfe-receiver is a high-performance HTTP/gRPC receiver for PB/s scale data ingest
    - Route invalid data to DLQ or reject with error
 
 3. **Routing**
-   - Route to Kafka topics based on JSON field values
-   - Support category-to-topic mapping
+   - Route to Kafka topics using configurable source rules (first match wins)
+   - Rule modes: `key_present`, `key_value_set`, `key_value_use`
+   - Source-to-topic remapping and default source ("dfe")
+   - Legacy compat mode for `tags.event.category` / `event_category`
    - Support direct routing to dfe-loader
-   - Configurable default topic for unmatched data
+   - `_timestamp_receiver` enrichment (epoch ms injection)
 
 4. **Authentication**
    - Header-based authentication (static values)
@@ -112,7 +114,7 @@ async fn ingest_handler(body: Bytes) -> StatusCode {
 
 - `bytes::Bytes` for payload (reference-counted, no copy on clone)
 - `Cow<str>` for extracted fields (borrow when no escaping needed)
-- `FxHashMap` for category lookups (faster than std HashMap)
+- `FxHashMap` for source-to-topic lookups (faster than std HashMap)
 - Pre-allocated batch vectors
 
 ### Minimal Allocations
@@ -144,19 +146,20 @@ async fn ingest_handler(body: Bytes) -> StatusCode {
 
 ### Router
 
-Pattern from dfe-loader:
+Source-rule-based routing (first match wins):
 
 ```rust
-pub fn route(&self, payload: &[u8]) -> RouteResult {
-    // Extract category field (zero-copy)
-    let category = extract_field_cow(payload, &self.topic_fields)?;
+pub fn route(&self, payload: &Bytes) -> RouteResult {
+    // Evaluate source rules (zero-copy field extraction)
+    let source = self.evaluate_source(payload)
+        .unwrap_or_else(|| self.default_source.clone());
 
-    // Lookup destination
-    let topic = self.category_to_topic
-        .get(category.as_ref())
-        .unwrap_or(&self.default_topic);
+    // Optional source-to-topic remapping
+    let topic = self.source_to_topic
+        .get(&source)
+        .unwrap_or(&source);
 
-    RouteResult { topic, destination }
+    RouteResult::Kafka(format!("{topic}{}", self.topic_suffix))
 }
 ```
 
@@ -236,12 +239,14 @@ validation:
   dlq_on_invalid: true
 
 routing:
-  topic_fields: ["event.category", "event_type"]
-  default_topic: "unmatched"
+  source_rules:
+    - field: "_source"
+      mode: "key_value_use"
+  default_source: "dfe"
   topic_suffix: "_land"
-  category_to_topic:
-    auth: "logs_auth"
-    network: "logs_network"
+  legacy_compat: false
+  # source_to_topic:
+  #   auth: "logs_auth"
   dlq:
     enabled: true
     topic: "dlq_land"
@@ -603,9 +608,10 @@ groups:
 
 - [ ] gRPC Vector sink protocol implementation
 - [ ] Full disk spillover (currently in-memory only)
-- [ ] Config hot-reload for all settings
-- [ ] Expression language for routing rules
-- [ ] Rebranding: hyperi-rustlib to hyperi-rustlib
+- [x] Config hot-reload via SIGHUP (routing, validation, enrichment)
+- [x] Source-rule-based routing (key_present, key_value_set, key_value_use)
+- [x] `_timestamp_receiver` enrichment
+- [x] Rebranding: hs-rustlib to hyperi-rustlib
 
 ## References
 

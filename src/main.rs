@@ -50,19 +50,19 @@ use dfe_receiver::server::Server;
 #[command(version, about, long_about = None)]
 struct Args {
     /// Path to configuration file.
-    #[arg(short, long, env = "RECEIVER_CONFIG")]
+    #[arg(short, long, env = "DFE_RECEIVER_CONFIG")]
     config: Option<String>,
 
     /// Log level (trace, debug, info, warn, error).
-    #[arg(long, env = "RECEIVER_LOG_LEVEL", default_value = "info")]
+    #[arg(long, env = "DFE_RECEIVER_LOG_LEVEL", default_value = "info")]
     log_level: String,
 
     /// Log format (json, text, auto).
-    #[arg(long, env = "RECEIVER_LOG_FORMAT", default_value = "auto")]
+    #[arg(long, env = "DFE_RECEIVER_LOG_FORMAT", default_value = "auto")]
     log_format: String,
 
     /// Metrics server address.
-    #[arg(long, env = "RECEIVER_METRICS_ADDR", default_value = "0.0.0.0:9090")]
+    #[arg(long, env = "DFE_RECEIVER_METRICS_ADDR", default_value = "0.0.0.0:9090")]
     metrics_addr: String,
 
     /// Validate configuration and exit.
@@ -142,6 +142,35 @@ async fn main() -> anyhow::Result<()> {
 
     // Create and run the pipeline orchestrator
     let orchestrator = Orchestrator::new(config, metrics.clone(), shutdown_token.clone())?;
+
+    // Spawn SIGHUP handler for config reload
+    let reload_state = orchestrator.state();
+    let reload_config_path = args.config.clone();
+    tokio::spawn(async move {
+        let mut sighup = match signal::unix::signal(signal::unix::SignalKind::hangup()) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "Failed to register SIGHUP handler");
+                return;
+            }
+        };
+        loop {
+            sighup.recv().await;
+            info!("Received SIGHUP, reloading configuration");
+            match Config::load(reload_config_path.as_deref()) {
+                Ok(new_config) => {
+                    if let Err(e) = new_config.validate() {
+                        error!(error = %e, "Config reload validation failed, keeping current config");
+                        continue;
+                    }
+                    if let Err(e) = reload_state.reload_config(new_config) {
+                        error!(error = %e, "Config reload failed");
+                    }
+                }
+                Err(e) => error!(error = %e, "Config reload parse failed"),
+            }
+        }
+    });
 
     // Create HTTP/gRPC server
     let server = Server::new(orchestrator.state(), metrics.clone());

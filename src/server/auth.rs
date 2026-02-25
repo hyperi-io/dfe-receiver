@@ -489,6 +489,7 @@ mod tests {
                 values: vec!["valid-key".to_string(), "another-key".to_string()],
             }],
             bearer: BearerConfig::default(),
+            include_common_header: false,
             header_name: String::new(),
             header_values: Vec::new(),
         }
@@ -512,6 +513,7 @@ mod tests {
                 },
             ],
             bearer: BearerConfig::default(),
+            include_common_header: false,
             header_name: String::new(),
             header_values: Vec::new(),
         }
@@ -526,6 +528,7 @@ mod tests {
                 secret_source: None,
                 refresh_interval_secs: 300,
             },
+            include_common_header: false,
             header_name: String::new(),
             header_values: Vec::new(),
         }
@@ -657,6 +660,7 @@ mod tests {
             mode: "header".to_string(),
             accepted_headers: vec![],
             bearer: BearerConfig::default(),
+            include_common_header: false,
             header_name: "x-legacy-header".to_string(),
             header_values: vec!["legacy-value".to_string()],
         };
@@ -676,6 +680,7 @@ mod tests {
                 values: vec!["new-value".to_string()],
             }],
             bearer: BearerConfig::default(),
+            include_common_header: false,
             header_name: "x-legacy-header".to_string(),
             header_values: vec!["legacy-value".to_string()],
         };
@@ -791,5 +796,43 @@ mod tests {
 
         // No provider configured, should skip bearer auth
         assert!(validate_bearer_auth(&auth, &headers).is_none());
+    }
+
+    // Common header tests
+
+    #[test]
+    fn test_include_common_header_default() {
+        let config = AuthConfig::default();
+        assert!(config.include_common_header);
+        let effective = config.effective_headers();
+        assert_eq!(effective.len(), 1);
+        assert_eq!(effective[0].name, "x-hyperi-agent");
+        assert_eq!(effective[0].values, vec!["1.0"]);
+    }
+
+    #[test]
+    fn test_include_common_header_disabled() {
+        let config = AuthConfig {
+            include_common_header: false,
+            ..AuthConfig::default()
+        };
+        let effective = config.effective_headers();
+        assert!(effective.is_empty());
+    }
+
+    #[test]
+    fn test_include_common_header_not_duplicated() {
+        let config = AuthConfig {
+            include_common_header: true,
+            accepted_headers: vec![AcceptedHeader {
+                name: "x-hyperi-agent".to_string(),
+                values: vec!["2.0".to_string()],
+            }],
+            ..AuthConfig::default()
+        };
+        let effective = config.effective_headers();
+        // Should not add a second x-hyperi-agent
+        assert_eq!(effective.len(), 1);
+        assert_eq!(effective[0].values, vec!["2.0"]);
     }
 }

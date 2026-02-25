@@ -313,6 +313,7 @@ mod tests {
                 values: vec!["test".to_string()],
             }],
             bearer: BearerConfig::default(),
+            include_common_header: false,
             header_name: String::new(),
             header_values: Vec::new(),
         }
