@@ -17,7 +17,7 @@ use bytes::Bytes;
 use rustc_hash::FxHashMap;
 use sonic_rs::{get_from_slice, JsonValueTrait, LazyValue};
 
-use crate::config::{DestinationsConfig, RoutingConfig};
+use crate::config::{DestinationsConfig, RoutingConfig, SourceRule};
 
 /// Routing result with destination and topic.
 #[derive(Debug, Clone, PartialEq)]
@@ -32,14 +32,14 @@ pub enum RouteResult {
 
 /// Router for determining message destinations and topics.
 pub struct Router {
-    /// Fields to check for topic (priority order).
-    topic_fields: Vec<String>,
-    /// Default topic.
-    default_topic: String,
+    /// Source rules (first match wins).
+    source_rules: Vec<SourceRule>,
+    /// Default source when no rule matches.
+    default_source: String,
     /// Topic suffix (e.g., "_land").
     topic_suffix: String,
-    /// Category to topic mapping.
-    category_to_topic: FxHashMap<String, String>,
+    /// Source-to-topic remapping.
+    source_to_topic: FxHashMap<String, String>,
     /// DLQ topic.
     dlq_topic: String,
     /// DLQ enabled.
@@ -48,6 +48,8 @@ pub struct Router {
     default_destination: String,
     /// Destination routing rules.
     destination_rules: Vec<DestinationRule>,
+    /// Whether enrichment (source rules) is enabled.
+    enrichment_enabled: bool,
 }
 
 /// Internal destination rule representation.
@@ -59,10 +61,14 @@ struct DestinationRule {
 
 impl Router {
     /// Create a new router from configuration.
-    pub fn new(routing: &RoutingConfig, destinations: &DestinationsConfig) -> Self {
+    pub fn new(
+        routing: &RoutingConfig,
+        destinations: &DestinationsConfig,
+        enrichment_enabled: bool,
+    ) -> Self {
         // Convert HashMap to FxHashMap for faster lookups
-        let category_to_topic: FxHashMap<String, String> = routing
-            .category_to_topic
+        let source_to_topic: FxHashMap<String, String> = routing
+            .source_to_topic
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
@@ -79,14 +85,15 @@ impl Router {
             .collect();
 
         Self {
-            topic_fields: routing.topic_fields.clone(),
-            default_topic: routing.default_topic.clone(),
+            source_rules: routing.effective_source_rules(),
+            default_source: routing.default_source.clone(),
             topic_suffix: routing.topic_suffix.clone(),
-            category_to_topic,
+            source_to_topic,
             dlq_topic: routing.dlq.topic.clone(),
             dlq_enabled: routing.dlq.enabled,
             default_destination: destinations.default.clone(),
             destination_rules,
+            enrichment_enabled,
         }
     }
 
@@ -115,7 +122,7 @@ impl Router {
             RouteResult::Dlq(self.dlq_topic.clone())
         } else {
             // Fall back to default topic if DLQ disabled
-            RouteResult::Kafka(format!("{}{}", self.default_topic, self.topic_suffix))
+            RouteResult::Kafka(format!("{}{}", self.default_source, self.topic_suffix))
         }
     }
 
@@ -132,26 +139,53 @@ impl Router {
         &self.default_destination
     }
 
-    /// Extract the topic from the payload.
+    /// Evaluate source rules against the payload (first match wins).
+    ///
+    /// Returns `None` when enrichment is disabled or no rule matches.
+    #[inline]
+    fn evaluate_source(&self, payload: &Bytes) -> Option<String> {
+        if !self.enrichment_enabled {
+            return None;
+        }
+        for rule in &self.source_rules {
+            match rule.mode.as_str() {
+                "key_present" => {
+                    if self.extract_field_cow(payload, &rule.field).is_some() {
+                        return rule.source.clone();
+                    }
+                }
+                "key_value_set" => {
+                    if let (Some(val), Some(match_val)) =
+                        (self.extract_field_cow(payload, &rule.field), &rule.match_value)
+                    {
+                        if val.as_ref() == match_val.as_str() {
+                            return rule.source.clone();
+                        }
+                    }
+                }
+                "key_value_use" => {
+                    if let Some(val) = self.extract_field_cow(payload, &rule.field) {
+                        return Some(val.into_owned());
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Extract the topic from the payload using source rules.
     #[inline]
     fn extract_topic(&self, payload: &Bytes) -> String {
-        // Try each topic field in priority order
-        let category = self
-            .topic_fields
-            .iter()
-            .find_map(|field| self.extract_field_cow(payload, field));
+        let source = self
+            .evaluate_source(payload)
+            .unwrap_or_else(|| self.default_source.clone());
 
-        let category = match category {
-            Some(cat) => cat,
-            None => return format!("{}{}", self.default_topic, self.topic_suffix),
-        };
-
-        // Check category to topic mapping
         let topic = self
-            .category_to_topic
-            .get(category.as_ref())
+            .source_to_topic
+            .get(&source)
             .map(String::as_str)
-            .unwrap_or(category.as_ref());
+            .unwrap_or(&source);
 
         format!("{topic}{}", self.topic_suffix)
     }
@@ -205,17 +239,15 @@ impl Router {
 impl Default for Router {
     fn default() -> Self {
         Self {
-            topic_fields: vec![
-                "tags.event.category".to_string(),
-                "event_category".to_string(),
-            ],
-            default_topic: "unmatched".to_string(),
+            source_rules: vec![],
+            default_source: "dfe".to_string(),
             topic_suffix: "_land".to_string(),
-            category_to_topic: FxHashMap::default(),
+            source_to_topic: FxHashMap::default(),
             dlq_topic: "dlq_land".to_string(),
             dlq_enabled: true,
             default_destination: "kafka".to_string(),
             destination_rules: vec![],
+            enrichment_enabled: true,
         }
     }
 }
@@ -224,22 +256,27 @@ impl Default for Router {
 #[allow(clippy::uninlined_format_args)]
 mod tests {
     use super::*;
-    use crate::config::{DestinationRule as ConfigRule, DlqConfig};
+    use crate::config::{DestinationRule as ConfigRule, DlqConfig, SourceRule};
     use std::collections::HashMap;
 
     fn default_routing_config() -> RoutingConfig {
         RoutingConfig {
-            topic_fields: vec![
-                "tags.event.category".to_string(),
-                "event_category".to_string(),
-            ],
-            default_topic: "unmatched".to_string(),
+            source_rules: vec![],
+            default_source: "dfe".to_string(),
             topic_suffix: "_land".to_string(),
-            category_to_topic: HashMap::new(),
+            source_to_topic: HashMap::new(),
+            legacy_compat: false,
             dlq: DlqConfig {
                 enabled: true,
                 topic: "dlq_land".to_string(),
             },
+        }
+    }
+
+    fn legacy_routing_config() -> RoutingConfig {
+        RoutingConfig {
+            legacy_compat: true,
+            ..default_routing_config()
         }
     }
 
@@ -250,9 +287,229 @@ mod tests {
         }
     }
 
+    // --- No rules (default source) ---
+
     #[test]
-    fn test_route_with_category() {
-        let router = Router::new(&default_routing_config(), &default_destinations_config());
+    fn test_no_rules_uses_default() {
+        let router = Router::new(&default_routing_config(), &default_destinations_config(), true);
+        let payload = Bytes::from(r#"{"data": "test"}"#);
+
+        match router.route(&payload) {
+            RouteResult::Kafka(topic) => assert_eq!(topic, "dfe_land"),
+            _ => panic!("expected Kafka route"),
+        }
+    }
+
+    // --- key_value_use: if field exists, use its value as source ---
+
+    #[test]
+    fn test_source_rule_key_value_use() {
+        let routing = RoutingConfig {
+            source_rules: vec![SourceRule {
+                field: "_source".to_string(),
+                mode: "key_value_use".to_string(),
+                match_value: None,
+                source: None,
+            }],
+            ..default_routing_config()
+        };
+        let router = Router::new(&routing, &default_destinations_config(), true);
+        let payload = Bytes::from(r#"{"_source": "auth", "data": "test"}"#);
+
+        match router.route(&payload) {
+            RouteResult::Kafka(topic) => assert_eq!(topic, "auth_land"),
+            _ => panic!("expected Kafka route"),
+        }
+    }
+
+    #[test]
+    fn test_source_rule_key_value_use_missing_field() {
+        let routing = RoutingConfig {
+            source_rules: vec![SourceRule {
+                field: "_source".to_string(),
+                mode: "key_value_use".to_string(),
+                match_value: None,
+                source: None,
+            }],
+            ..default_routing_config()
+        };
+        let router = Router::new(&routing, &default_destinations_config(), true);
+        let payload = Bytes::from(r#"{"data": "test"}"#);
+
+        match router.route(&payload) {
+            RouteResult::Kafka(topic) => assert_eq!(topic, "dfe_land"),
+            _ => panic!("expected Kafka route"),
+        }
+    }
+
+    // --- key_present: if field exists, use configured source ---
+
+    #[test]
+    fn test_source_rule_key_present() {
+        let routing = RoutingConfig {
+            source_rules: vec![SourceRule {
+                field: "host".to_string(),
+                mode: "key_present".to_string(),
+                match_value: None,
+                source: Some("firewall".to_string()),
+            }],
+            ..default_routing_config()
+        };
+        let router = Router::new(&routing, &default_destinations_config(), true);
+        let payload = Bytes::from(r#"{"host": "fw-1", "data": "test"}"#);
+
+        match router.route(&payload) {
+            RouteResult::Kafka(topic) => assert_eq!(topic, "firewall_land"),
+            _ => panic!("expected Kafka route"),
+        }
+    }
+
+    #[test]
+    fn test_source_rule_key_present_missing() {
+        let routing = RoutingConfig {
+            source_rules: vec![SourceRule {
+                field: "host".to_string(),
+                mode: "key_present".to_string(),
+                match_value: None,
+                source: Some("firewall".to_string()),
+            }],
+            ..default_routing_config()
+        };
+        let router = Router::new(&routing, &default_destinations_config(), true);
+        let payload = Bytes::from(r#"{"data": "test"}"#);
+
+        match router.route(&payload) {
+            RouteResult::Kafka(topic) => assert_eq!(topic, "dfe_land"),
+            _ => panic!("expected Kafka route"),
+        }
+    }
+
+    // --- key_value_set: if field == match_value, use configured source ---
+
+    #[test]
+    fn test_source_rule_key_value_set() {
+        let routing = RoutingConfig {
+            source_rules: vec![SourceRule {
+                field: "type".to_string(),
+                mode: "key_value_set".to_string(),
+                match_value: Some("syslog".to_string()),
+                source: Some("logs_syslog".to_string()),
+            }],
+            ..default_routing_config()
+        };
+        let router = Router::new(&routing, &default_destinations_config(), true);
+        let payload = Bytes::from(r#"{"type": "syslog", "data": "test"}"#);
+
+        match router.route(&payload) {
+            RouteResult::Kafka(topic) => assert_eq!(topic, "logs_syslog_land"),
+            _ => panic!("expected Kafka route"),
+        }
+    }
+
+    #[test]
+    fn test_source_rule_key_value_set_no_match() {
+        let routing = RoutingConfig {
+            source_rules: vec![SourceRule {
+                field: "type".to_string(),
+                mode: "key_value_set".to_string(),
+                match_value: Some("syslog".to_string()),
+                source: Some("logs_syslog".to_string()),
+            }],
+            ..default_routing_config()
+        };
+        let router = Router::new(&routing, &default_destinations_config(), true);
+        let payload = Bytes::from(r#"{"type": "netflow", "data": "test"}"#);
+
+        match router.route(&payload) {
+            RouteResult::Kafka(topic) => assert_eq!(topic, "dfe_land"),
+            _ => panic!("expected Kafka route"),
+        }
+    }
+
+    // --- First match wins ---
+
+    #[test]
+    fn test_source_rules_first_match_wins() {
+        let routing = RoutingConfig {
+            source_rules: vec![
+                SourceRule {
+                    field: "priority_source".to_string(),
+                    mode: "key_value_use".to_string(),
+                    match_value: None,
+                    source: None,
+                },
+                SourceRule {
+                    field: "_source".to_string(),
+                    mode: "key_value_use".to_string(),
+                    match_value: None,
+                    source: None,
+                },
+            ],
+            ..default_routing_config()
+        };
+        let router = Router::new(&routing, &default_destinations_config(), true);
+        let payload =
+            Bytes::from(r#"{"priority_source": "high", "_source": "auth", "data": "test"}"#);
+
+        match router.route(&payload) {
+            RouteResult::Kafka(topic) => assert_eq!(topic, "high_land"),
+            _ => panic!("expected Kafka route"),
+        }
+    }
+
+    // --- Enrichment disabled ---
+
+    #[test]
+    fn test_source_rules_disabled_when_no_common_header() {
+        let routing = RoutingConfig {
+            source_rules: vec![SourceRule {
+                field: "_source".to_string(),
+                mode: "key_value_use".to_string(),
+                match_value: None,
+                source: None,
+            }],
+            ..default_routing_config()
+        };
+        // enrichment_enabled = false
+        let router = Router::new(&routing, &default_destinations_config(), false);
+        let payload = Bytes::from(r#"{"_source": "auth", "data": "test"}"#);
+
+        match router.route(&payload) {
+            RouteResult::Kafka(topic) => assert_eq!(topic, "dfe_land"),
+            _ => panic!("expected Kafka route"),
+        }
+    }
+
+    // --- source_to_topic remapping ---
+
+    #[test]
+    fn test_source_to_topic_remapping() {
+        let routing = RoutingConfig {
+            source_rules: vec![SourceRule {
+                field: "_source".to_string(),
+                mode: "key_value_use".to_string(),
+                match_value: None,
+                source: None,
+            }],
+            source_to_topic: [("auth".to_string(), "logs_auth".to_string())]
+                .into_iter()
+                .collect(),
+            ..default_routing_config()
+        };
+        let router = Router::new(&routing, &default_destinations_config(), true);
+        let payload = Bytes::from(r#"{"_source": "auth"}"#);
+
+        match router.route(&payload) {
+            RouteResult::Kafka(topic) => assert_eq!(topic, "logs_auth_land"),
+            _ => panic!("expected Kafka route"),
+        }
+    }
+
+    // --- Legacy compat ---
+
+    #[test]
+    fn test_legacy_compat_enabled() {
+        let router = Router::new(&legacy_routing_config(), &default_destinations_config(), true);
         let payload = Bytes::from(r#"{"event_category": "auth", "data": "test"}"#);
 
         match router.route(&payload) {
@@ -262,8 +519,8 @@ mod tests {
     }
 
     #[test]
-    fn test_route_with_nested_category() {
-        let router = Router::new(&default_routing_config(), &default_destinations_config());
+    fn test_legacy_compat_nested_field() {
+        let router = Router::new(&legacy_routing_config(), &default_destinations_config(), true);
         let payload =
             Bytes::from(r#"{"tags": {"event": {"category": "network"}}, "data": "test"}"#);
 
@@ -274,31 +531,32 @@ mod tests {
     }
 
     #[test]
-    fn test_route_default_topic() {
-        let router = Router::new(&default_routing_config(), &default_destinations_config());
-        let payload = Bytes::from(r#"{"data": "test"}"#);
+    fn test_legacy_compat_disabled() {
+        let router = Router::new(&default_routing_config(), &default_destinations_config(), true);
+        let payload = Bytes::from(r#"{"event_category": "auth", "data": "test"}"#);
 
+        // No rules, no legacy compat → default source
         match router.route(&payload) {
-            RouteResult::Kafka(topic) => assert_eq!(topic, "unmatched_land"),
+            RouteResult::Kafka(topic) => assert_eq!(topic, "dfe_land"),
             _ => panic!("expected Kafka route"),
         }
     }
 
     #[test]
-    fn test_route_with_mapping() {
-        let mut routing = default_routing_config();
-        routing
-            .category_to_topic
-            .insert("auth".to_string(), "logs_auth".to_string());
-
-        let router = Router::new(&routing, &default_destinations_config());
-        let payload = Bytes::from(r#"{"event_category": "auth"}"#);
+    fn test_legacy_compat_field_priority() {
+        let router = Router::new(&legacy_routing_config(), &default_destinations_config(), true);
+        // Both legacy fields present - tags.event.category has priority (first rule)
+        let payload = Bytes::from(
+            r#"{"tags": {"event": {"category": "network"}}, "event_category": "auth"}"#,
+        );
 
         match router.route(&payload) {
-            RouteResult::Kafka(topic) => assert_eq!(topic, "logs_auth_land"),
+            RouteResult::Kafka(topic) => assert_eq!(topic, "network_land"),
             _ => panic!("expected Kafka route"),
         }
     }
+
+    // --- Destination rules ---
 
     #[test]
     fn test_route_to_loader() {
@@ -311,15 +569,17 @@ mod tests {
             }],
         };
 
-        let router = Router::new(&default_routing_config(), &destinations);
+        let router = Router::new(&default_routing_config(), &destinations, true);
         let payload = Bytes::from(r#"{"destination": "direct", "data": "test"}"#);
 
         assert_eq!(router.route(&payload), RouteResult::Loader);
     }
 
+    // --- DLQ ---
+
     #[test]
     fn test_route_dlq() {
-        let router = Router::new(&default_routing_config(), &default_destinations_config());
+        let router = Router::new(&default_routing_config(), &default_destinations_config(), true);
 
         match router.route_dlq("test error") {
             RouteResult::Dlq(topic) => assert_eq!(topic, "dlq_land"),
@@ -328,9 +588,36 @@ mod tests {
     }
 
     #[test]
+    fn test_route_dlq_disabled_fallback() {
+        let routing = RoutingConfig {
+            dlq: DlqConfig {
+                enabled: false,
+                topic: "dlq_land".to_string(),
+            },
+            ..default_routing_config()
+        };
+        let router = Router::new(&routing, &default_destinations_config(), true);
+
+        match router.route_dlq("test error") {
+            RouteResult::Kafka(topic) => assert_eq!(topic, "dfe_land"),
+            _ => panic!("expected Kafka fallback"),
+        }
+    }
+
+    // --- Edge cases ---
+
+    #[test]
     fn test_route_with_escaped_string() {
-        let router = Router::new(&default_routing_config(), &default_destinations_config());
-        // JSON with escaped quote in value
+        let routing = RoutingConfig {
+            source_rules: vec![SourceRule {
+                field: "event_category".to_string(),
+                mode: "key_value_use".to_string(),
+                match_value: None,
+                source: None,
+            }],
+            ..default_routing_config()
+        };
+        let router = Router::new(&routing, &default_destinations_config(), true);
         let payload = Bytes::from(r#"{"event_category": "auth\"test", "data": "test"}"#);
 
         match router.route(&payload) {
@@ -340,107 +627,46 @@ mod tests {
     }
 
     #[test]
-    fn test_route_with_non_string_value_integer() {
-        let router = Router::new(&default_routing_config(), &default_destinations_config());
-        // Category is an integer, not a string - should fall back to default
-        let payload = Bytes::from(r#"{"event_category": 123, "data": "test"}"#);
-
-        match router.route(&payload) {
-            RouteResult::Kafka(topic) => assert_eq!(topic, "unmatched_land"),
-            _ => panic!("expected Kafka route"),
-        }
-    }
-
-    #[test]
-    fn test_route_with_non_string_value_null() {
-        let router = Router::new(&default_routing_config(), &default_destinations_config());
-        // Category is null - key present but value is null, should fall back to default
-        let payload = Bytes::from(r#"{"event_category": null, "data": "test"}"#);
-
-        match router.route(&payload) {
-            RouteResult::Kafka(topic) => assert_eq!(topic, "unmatched_land"),
-            _ => panic!("expected Kafka route"),
-        }
-    }
-
-    #[test]
-    fn test_route_with_non_string_value_boolean() {
-        let router = Router::new(&default_routing_config(), &default_destinations_config());
-        // Category is a boolean - should fall back to default
-        let payload = Bytes::from(r#"{"event_category": true, "data": "test"}"#);
-
-        match router.route(&payload) {
-            RouteResult::Kafka(topic) => assert_eq!(topic, "unmatched_land"),
-            _ => panic!("expected Kafka route"),
-        }
-    }
-
-    #[test]
-    fn test_route_with_non_string_value_object() {
-        let router = Router::new(&default_routing_config(), &default_destinations_config());
-        // Category is an object - should fall back to default
-        let payload = Bytes::from(r#"{"event_category": {"nested": "value"}, "data": "test"}"#);
-
-        match router.route(&payload) {
-            RouteResult::Kafka(topic) => assert_eq!(topic, "unmatched_land"),
-            _ => panic!("expected Kafka route"),
-        }
-    }
-
-    #[test]
-    fn test_route_with_non_string_value_array() {
-        let router = Router::new(&default_routing_config(), &default_destinations_config());
-        // Category is an array - should fall back to default
-        let payload = Bytes::from(r#"{"event_category": ["auth", "network"], "data": "test"}"#);
-
-        match router.route(&payload) {
-            RouteResult::Kafka(topic) => assert_eq!(topic, "unmatched_land"),
-            _ => panic!("expected Kafka route"),
-        }
-    }
-
-    #[test]
-    fn test_route_with_empty_string() {
-        let router = Router::new(&default_routing_config(), &default_destinations_config());
-        // Empty string value - should use empty string as topic
-        let payload = Bytes::from(r#"{"event_category": "", "data": "test"}"#);
-
-        match router.route(&payload) {
-            RouteResult::Kafka(topic) => assert_eq!(topic, "_land"),
-            _ => panic!("expected Kafka route"),
-        }
-    }
-
-    #[test]
-    fn test_route_field_priority() {
-        let router = Router::new(&default_routing_config(), &default_destinations_config());
-        // Both fields present - nested field (tags.event.category) has priority
-        let payload = Bytes::from(
-            r#"{"tags": {"event": {"category": "network"}}, "event_category": "auth"}"#,
-        );
-
-        match router.route(&payload) {
-            RouteResult::Kafka(topic) => assert_eq!(topic, "network_land"),
-            _ => panic!("expected Kafka route"),
-        }
-    }
-
-    #[test]
-    fn test_route_field_priority_fallback() {
-        let router = Router::new(&default_routing_config(), &default_destinations_config());
-        // Only second priority field present
-        let payload = Bytes::from(r#"{"tags": {"other": "data"}, "event_category": "auth"}"#);
-
-        match router.route(&payload) {
-            RouteResult::Kafka(topic) => assert_eq!(topic, "auth_land"),
-            _ => panic!("expected Kafka route"),
+    fn test_route_with_non_string_value() {
+        let routing = RoutingConfig {
+            source_rules: vec![SourceRule {
+                field: "event_category".to_string(),
+                mode: "key_value_use".to_string(),
+                match_value: None,
+                source: None,
+            }],
+            ..default_routing_config()
+        };
+        let router = Router::new(&routing, &default_destinations_config(), true);
+        // Integer, null, boolean, object, array - all should fall back to default
+        for payload_str in [
+            r#"{"event_category": 123}"#,
+            r#"{"event_category": null}"#,
+            r#"{"event_category": true}"#,
+            r#"{"event_category": {"nested": "v"}}"#,
+            r#"{"event_category": ["auth"]}"#,
+        ] {
+            let payload = Bytes::from(payload_str);
+            match router.route(&payload) {
+                RouteResult::Kafka(topic) => assert_eq!(topic, "dfe_land", "for payload: {payload_str}"),
+                _ => panic!("expected Kafka route for payload: {payload_str}"),
+            }
         }
     }
 
     #[test]
     fn test_route_with_unicode() {
-        let router = Router::new(&default_routing_config(), &default_destinations_config());
-        let payload = Bytes::from(r#"{"event_category": "日本語", "data": "test"}"#);
+        let routing = RoutingConfig {
+            source_rules: vec![SourceRule {
+                field: "event_category".to_string(),
+                mode: "key_value_use".to_string(),
+                match_value: None,
+                source: None,
+            }],
+            ..default_routing_config()
+        };
+        let router = Router::new(&routing, &default_destinations_config(), true);
+        let payload = Bytes::from(r#"{"event_category": "日本語"}"#);
 
         match router.route(&payload) {
             RouteResult::Kafka(topic) => assert_eq!(topic, "日本語_land"),
@@ -450,9 +676,17 @@ mod tests {
 
     #[test]
     fn test_route_with_unicode_escaped() {
-        let router = Router::new(&default_routing_config(), &default_destinations_config());
-        // Unicode escape sequence for "日本語"
-        let payload = Bytes::from(r#"{"event_category": "\u65e5\u672c\u8a9e", "data": "test"}"#);
+        let routing = RoutingConfig {
+            source_rules: vec![SourceRule {
+                field: "event_category".to_string(),
+                mode: "key_value_use".to_string(),
+                match_value: None,
+                source: None,
+            }],
+            ..default_routing_config()
+        };
+        let router = Router::new(&routing, &default_destinations_config(), true);
+        let payload = Bytes::from(r#"{"event_category": "\u65e5\u672c\u8a9e"}"#);
 
         match router.route(&payload) {
             RouteResult::Kafka(topic) => assert_eq!(topic, "日本語_land"),
@@ -461,46 +695,14 @@ mod tests {
     }
 
     #[test]
-    fn test_route_with_whitespace_value() {
-        let router = Router::new(&default_routing_config(), &default_destinations_config());
-        let payload = Bytes::from(r#"{"event_category": "  auth  ", "data": "test"}"#);
-
-        match router.route(&payload) {
-            // Whitespace is preserved
-            RouteResult::Kafka(topic) => assert_eq!(topic, "  auth  _land"),
-            _ => panic!("expected Kafka route"),
-        }
-    }
-
-    #[test]
-    fn test_route_with_special_characters() {
-        let router = Router::new(&default_routing_config(), &default_destinations_config());
-        let payload = Bytes::from(r#"{"event_category": "auth/login", "data": "test"}"#);
-
-        match router.route(&payload) {
-            RouteResult::Kafka(topic) => assert_eq!(topic, "auth/login_land"),
-            _ => panic!("expected Kafka route"),
-        }
-    }
-
-    #[test]
     fn test_route_nested_field_partial_path() {
-        let router = Router::new(&default_routing_config(), &default_destinations_config());
-        // tags exists but tags.event doesn't - should fall back
+        let routing = RoutingConfig {
+            legacy_compat: true,
+            ..default_routing_config()
+        };
+        let router = Router::new(&routing, &default_destinations_config(), true);
+        // tags exists but tags.event doesn't - should fall back to event_category
         let payload = Bytes::from(r#"{"tags": {"other": "value"}, "event_category": "auth"}"#);
-
-        match router.route(&payload) {
-            RouteResult::Kafka(topic) => assert_eq!(topic, "auth_land"),
-            _ => panic!("expected Kafka route"),
-        }
-    }
-
-    #[test]
-    fn test_route_nested_field_wrong_type() {
-        let router = Router::new(&default_routing_config(), &default_destinations_config());
-        // tags.event.category exists but tags.event is a string, not an object
-        let payload =
-            Bytes::from(r#"{"tags": {"event": "not_an_object"}, "event_category": "auth"}"#);
 
         match router.route(&payload) {
             RouteResult::Kafka(topic) => assert_eq!(topic, "auth_land"),

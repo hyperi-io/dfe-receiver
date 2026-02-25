@@ -1,5 +1,9 @@
 # dfe-receiver configuration example
 # Copy to config.yaml and customise for your environment
+#
+# Environment variables: DFE_RECEIVER_* prefix
+# Nesting: DFE_RECEIVER_SERVER__BIND_ADDRESS=0.0.0.0:8080
+# Config reload: send SIGHUP to reload routing/validation/enrichment
 
 server:
   bind_address: "0.0.0.0:8080"
@@ -14,11 +18,17 @@ server:
     client_auth: "none"  # none, optional, required
 
   auth:
-    mode: "none"  # none, header, mtls, both
-    header_name: "x-hyperi-agent"
-    header_values:
-      - "1.0"
-      - "2.0"
+    mode: "none"  # none, header, bearer, mtls, both
+    # Include the common x-hyperi-agent header in accepted headers.
+    # Also gates source rule evaluation and _timestamp_receiver enrichment.
+    include_common_header: true
+    accepted_headers:
+      - name: "x-api-key"
+        values: ["my-api-key"]
+    bearer:
+      tokens: []
+      # secret_source: "vault:secret/data/auth:bearer_tokens"
+      refresh_interval_secs: 300
 
 grpc:
   enabled: false
@@ -30,14 +40,19 @@ validation:
   dlq_on_invalid: true
 
 routing:
-  topic_fields:
-    - "tags.event.category"
-    - "event_category"
-  default_topic: "unmatched"
+  # Source rules (first match wins). Only evaluated when include_common_header is true.
+  # Modes:
+  #   key_present:   if field exists → _source = <source>
+  #   key_value_set: if field == match_value → _source = <source>
+  #   key_value_use: if field exists → _source = <field value>
+  source_rules:
+    - field: "_source"
+      mode: "key_value_use"       # use the value of _source as the source
+  default_source: "dfe"
   topic_suffix: "_land"
-  category_to_topic:
-    auth: "logs_auth"
-    network: "logs_network"
+  legacy_compat: false  # also check tags.event.category / event_category
+  # source_to_topic:
+  #   auth: "logs_auth"
   dlq:
     enabled: true
     topic: "dlq_land"

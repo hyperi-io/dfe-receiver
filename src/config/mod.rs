@@ -10,7 +10,7 @@
 //!
 //! Priority (highest to lowest):
 //! 1. CLI arguments
-//! 2. Environment variables (RECEIVER_*)
+//! 2. Environment variables (DFE_RECEIVER_*)
 //! 3. .env file
 //! 4. settings.{env}.yaml
 //! 5. settings.yaml
@@ -26,7 +26,13 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 
 /// Environment variable prefix for configuration.
-pub const ENV_PREFIX: &str = "RECEIVER";
+pub const ENV_PREFIX: &str = "DFE_RECEIVER";
+
+/// Common header name injected when `include_common_header` is enabled.
+pub const COMMON_HEADER_NAME: &str = "x-hyperi-agent";
+
+/// Common header value for the injected header.
+pub const COMMON_HEADER_VALUE: &str = "1.0";
 
 /// Main configuration struct.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,7 +87,7 @@ impl Config {
     ///
     /// Layers (highest to lowest priority):
     /// 1. CLI arguments (merged separately)
-    /// 2. Environment variables (RECEIVER_*)
+    /// 2. Environment variables (DFE_RECEIVER_*)
     /// 3. .env file
     /// 4. settings.{env}.yaml
     /// 5. settings.yaml
@@ -250,6 +256,12 @@ pub struct AuthConfig {
     /// Bearer token configuration.
     pub bearer: BearerConfig,
 
+    /// Include the common `x-hyperi-agent` header in accepted headers.
+    /// Also gates source rule evaluation and timestamp enrichment.
+    /// Default: true
+    #[serde(default = "default_true")]
+    pub include_common_header: bool,
+
     /// Legacy: Single header name for header-based auth.
     /// Deprecated: Use `accepted_headers` instead.
     #[serde(default)]
@@ -259,6 +271,10 @@ pub struct AuthConfig {
     /// Deprecated: Use `accepted_headers` instead.
     #[serde(default)]
     pub header_values: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Bearer token authentication configuration.
@@ -305,11 +321,9 @@ impl Default for AuthConfig {
     fn default() -> Self {
         Self {
             mode: "none".to_string(),
-            accepted_headers: vec![AcceptedHeader {
-                name: "x-hyperi-agent".to_string(),
-                values: vec!["1.0".to_string()],
-            }],
+            accepted_headers: vec![],
             bearer: BearerConfig::default(),
+            include_common_header: true,
             // Legacy fields for backwards compatibility
             header_name: String::new(),
             header_values: Vec::new(),
@@ -318,13 +332,23 @@ impl Default for AuthConfig {
 }
 
 impl AuthConfig {
-    /// Get effective accepted headers (merges legacy config if present).
+    /// Get effective accepted headers (merges common + legacy headers).
     pub fn effective_headers(&self) -> Vec<AcceptedHeader> {
         let mut headers = self.accepted_headers.clone();
 
+        // Inject common header if enabled and not already present
+        if self.include_common_header {
+            let already_exists = headers.iter().any(|h| h.name == COMMON_HEADER_NAME);
+            if !already_exists {
+                headers.push(AcceptedHeader {
+                    name: COMMON_HEADER_NAME.to_string(),
+                    values: vec![COMMON_HEADER_VALUE.to_string()],
+                });
+            }
+        }
+
         // Add legacy header if configured and not empty
         if !self.header_name.is_empty() {
-            // Check if already in accepted_headers
             let already_exists = headers.iter().any(|h| h.name == self.header_name);
             if !already_exists {
                 headers.push(AcceptedHeader {
@@ -382,21 +406,52 @@ impl Default for ValidationConfig {
     }
 }
 
+/// Rule for determining `_source` value from JSON payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceRule {
+    /// JSON field path (dot notation for nested, e.g., "tags.event.category").
+    pub field: String,
+
+    /// Match mode: "key_present", "key_value_set", "key_value_use".
+    ///
+    /// - `key_present`: if field exists → `_source = source`
+    /// - `key_value_set`: if field value == `match_value` → `_source = source`
+    /// - `key_value_use`: if field exists → `_source = <field value>`
+    pub mode: String,
+
+    /// Value to match against (for `key_value_set` mode only).
+    #[serde(default)]
+    pub match_value: Option<String>,
+
+    /// Source value to set (for `key_present` and `key_value_set` modes).
+    /// Ignored for `key_value_use` (uses the field value directly).
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
 /// Routing configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RoutingConfig {
-    /// Fields to check for topic name (priority order).
-    pub topic_fields: Vec<String>,
+    /// Rules for determining `_source` value (first match wins).
+    /// Only evaluated when `include_common_header` is true.
+    #[serde(default)]
+    pub source_rules: Vec<SourceRule>,
 
-    /// Default topic if no field matches.
-    pub default_topic: String,
+    /// Default source when no rule matches.
+    pub default_source: String,
 
-    /// Suffix to append to topic names.
+    /// Suffix appended to source to form topic name.
     pub topic_suffix: String,
 
-    /// Category to topic mapping.
-    pub category_to_topic: HashMap<String, String>,
+    /// Source-to-topic remapping (optional).
+    #[serde(default)]
+    pub source_to_topic: HashMap<String, String>,
+
+    /// Enable pre-2.2 compatibility.
+    /// Appends `key_value_use` rules for `tags.event.category` and `event_category`.
+    #[serde(default)]
+    pub legacy_compat: bool,
 
     /// DLQ configuration.
     pub dlq: DlqConfig,
@@ -405,15 +460,33 @@ pub struct RoutingConfig {
 impl Default for RoutingConfig {
     fn default() -> Self {
         Self {
-            topic_fields: vec![
-                "tags.event.category".to_string(),
-                "event_category".to_string(),
-            ],
-            default_topic: "unmatched".to_string(),
+            source_rules: vec![],
+            default_source: "dfe".to_string(),
             topic_suffix: "_land".to_string(),
-            category_to_topic: HashMap::new(),
+            source_to_topic: HashMap::new(),
+            legacy_compat: false,
             dlq: DlqConfig::default(),
         }
+    }
+}
+
+impl RoutingConfig {
+    /// Get effective source rules, appending legacy compat rules if enabled.
+    pub fn effective_source_rules(&self) -> Vec<SourceRule> {
+        let mut rules = self.source_rules.clone();
+        if self.legacy_compat {
+            for field in &["tags.event.category", "event_category"] {
+                if !rules.iter().any(|r| r.field == *field) {
+                    rules.push(SourceRule {
+                        field: field.to_string(),
+                        mode: "key_value_use".to_string(),
+                        match_value: None,
+                        source: None,
+                    });
+                }
+            }
+        }
+        rules
     }
 }
 

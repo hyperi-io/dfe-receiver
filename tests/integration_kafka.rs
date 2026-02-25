@@ -403,7 +403,7 @@ async fn test_full_pipeline_to_kafka() {
 
     // Configure routing to use test topic
     let topic = test_topic("pipeline");
-    config.routing.default_topic = topic.clone();
+    config.routing.default_source = topic.clone();
     config.routing.topic_suffix = "".to_string(); // No suffix for test
 
     // Use small batch settings for tests to send immediately
@@ -490,7 +490,7 @@ async fn test_http_to_kafka() {
 
     // Configure routing
     let topic = test_topic("http");
-    config.routing.default_topic = topic.clone();
+    config.routing.default_source = topic.clone();
     config.routing.topic_suffix = "".to_string();
 
     // Use small batch settings for tests to send immediately
@@ -616,15 +616,20 @@ async fn test_category_routing() {
 
     config
         .routing
-        .category_to_topic
+        .source_to_topic
         .insert("authentication".to_string(), auth_topic.clone());
     config
         .routing
-        .category_to_topic
+        .source_to_topic
         .insert("network".to_string(), network_topic.clone());
-    config.routing.default_topic = default_topic.clone();
+    config.routing.default_source = default_topic.clone();
     config.routing.topic_suffix = "".to_string();
-    config.routing.topic_fields = vec!["event_category".to_string()];
+    config.routing.source_rules = vec![dfe_receiver::config::SourceRule {
+        field: "event_category".to_string(),
+        mode: "key_value_use".to_string(),
+        match_value: None,
+        source: None,
+    }];
 
     // Create pipeline
     let pipeline = PipelineState::new(config).expect("Failed to create pipeline");
