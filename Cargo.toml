@@ -99,8 +99,8 @@ tikv-jemallocator = { version = "0.6", optional = true }
 mimalloc = { version = "0.1", optional = true }
 
 # Plugin system (optional)
-dfe-plugin-loader = { version = "1.0.0", path = ".deps/dfe-plugin-loader", optional = true }
-dfe-protocol-sdk = { version = "1.0.0", path = ".deps/dfe-protocol-sdk", optional = true }
+dfe-plugin-loader = { version = "1.0.3", registry = "hyperi", optional = true }
+dfe-protocol-sdk = { version = "1.0.1", registry = "hyperi", optional = true }
 
 [build-dependencies]
 tonic-build = "0.12"
