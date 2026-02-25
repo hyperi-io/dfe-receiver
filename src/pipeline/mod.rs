@@ -234,6 +234,38 @@ impl PipelineState {
         Ok(())
     }
 
+    /// Process a message, sending directly to a specific Kafka topic.
+    ///
+    /// Skips routing but still applies validation and backpressure.
+    /// Used by external plugins that handle their own protocol-to-topic mapping.
+    #[inline]
+    pub async fn process_to_topic(&self, payload: Bytes, topic: &str) -> Result<()> {
+        // Check for backpressure
+        if self.should_apply_backpressure() {
+            warn!("Memory pressure high, applying backpressure");
+            return Err(Error::Buffer("server under memory pressure".into()));
+        }
+
+        // Track memory
+        let payload_size = payload.len() as u64;
+        self.buffer_manager.add_bytes(payload_size);
+
+        // Validate
+        let result = match self.validator.validate(&payload) {
+            ValidationResult::Valid => self.send_to_kafka(topic, payload).await,
+            ValidationResult::Dlq(reason) => {
+                debug!(reason = %reason, "Message validation failed, routing to DLQ");
+                self.send_to_dlq(&payload, &reason).await
+            }
+            ValidationResult::Reject(reason) => Err(Error::Validation(reason)),
+        };
+
+        // Release memory tracking on completion
+        self.buffer_manager.remove_bytes(payload_size);
+
+        result
+    }
+
     /// Send message to Kafka.
     #[inline]
     async fn send_to_kafka(&self, topic: &str, payload: Bytes) -> Result<()> {

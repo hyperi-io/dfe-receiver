@@ -1,6 +1,6 @@
 // Project:   dfe-receiver
 // File:      src/server/grpc/mod.rs
-// Purpose:   gRPC server using tonic
+// Purpose:   gRPC server using tonic (Vector-compatible protocol)
 // Language:  Rust
 //
 // License:   FSL-1.1-ALv2
@@ -8,34 +8,43 @@
 
 //! gRPC server implementation using tonic.
 //!
-//! Handles the Vector gRPC sink protocol for receiving events.
+//! Implements Vector's gRPC sink protocol for receiving events.
+//! The protocol uses unary RPCs (not streaming) matching Vector's upstream
+//! definition at `proto/vector/vector.proto`.
+//!
+//! Events arrive as protobuf `EventWrapper` messages and are converted
+//! to JSON bytes for the processing pipeline.
+
+pub mod convert;
 
 use std::net::SocketAddr;
-use std::pin::Pin;
 use std::sync::Arc;
 
-use bytes::Bytes;
-use futures_core::Stream;
-use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
-use tonic::{Request, Response, Status, Streaming};
-use tracing::{debug, info, warn};
+use tonic::{Request, Response, Status};
+use tracing::{info, warn};
 
+use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
+use crate::server::auth::{validate_bearer_auth, AuthMode, AuthState};
+use crate::server::http::create_auth_state;
+use crate::server::traits::ProtocolHandler;
 
-// Include generated proto code
+// Include generated proto code.
+// The `event` package types and `vector` package service.
 pub mod pb {
-    tonic::include_proto!("vector");
+    pub mod event {
+        tonic::include_proto!("event");
+    }
+    pub mod vector {
+        tonic::include_proto!("vector");
+    }
 }
 
-use pb::vector_server::{Vector, VectorServer};
-use pb::{
-    EventWrapper, HealthCheckRequest, HealthCheckResponse, PushEventsRequest, PushEventsResponse,
-    PushStatus, ServingStatus,
-};
+use pb::vector::vector_server::{Vector, VectorServer};
+use pb::vector::{HealthCheckRequest, HealthCheckResponse, PushEventsRequest, PushEventsResponse};
 
 /// gRPC service implementation.
 pub struct VectorService {
@@ -48,99 +57,36 @@ impl VectorService {
     pub fn new(pipeline: Arc<PipelineState>, metrics: Arc<Metrics>) -> Self {
         Self { pipeline, metrics }
     }
-
-    /// Process a single event (reserved for future use).
-    #[allow(dead_code)]
-    async fn process_event(&self, event: &EventWrapper) -> std::result::Result<(), Status> {
-        // Prefer log data, fall back to metric/trace
-        let data = if !event.log.is_empty() {
-            &event.log
-        } else if !event.metric.is_empty() {
-            &event.metric
-        } else if !event.trace.is_empty() {
-            &event.trace
-        } else {
-            return Err(Status::invalid_argument("empty event"));
-        };
-
-        let payload = Bytes::copy_from_slice(data);
-
-        self.pipeline
-            .process(payload)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))
-    }
 }
 
 #[tonic::async_trait]
 impl Vector for VectorService {
-    type PushEventsStream =
-        Pin<Box<dyn Stream<Item = std::result::Result<PushEventsResponse, Status>> + Send>>;
-
-    /// Handle streaming push of events from Vector.
+    /// Handle unary push of events from Vector.
+    ///
+    /// Receives a batch of events, converts each from protobuf to JSON,
+    /// and processes through the pipeline.
     async fn push_events(
         &self,
-        request: Request<Streaming<PushEventsRequest>>,
-    ) -> std::result::Result<Response<Self::PushEventsStream>, Status> {
-        let mut stream = request.into_inner();
-        let (tx, rx) = mpsc::channel(128);
+        request: Request<PushEventsRequest>,
+    ) -> std::result::Result<Response<PushEventsResponse>, Status> {
+        let req = request.into_inner();
+        self.metrics.inc_requests_total();
 
-        let pipeline = self.pipeline.clone();
-        let metrics = self.metrics.clone();
+        for event in &req.events {
+            let json_bytes = convert::event_wrapper_to_json(event)
+                .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
-        tokio::spawn(async move {
-            while let Ok(Some(req)) = stream.message().await {
-                let mut events_received = 0u64;
-                let mut status = PushStatus::Ok;
+            self.metrics.add_bytes_received(json_bytes.len() as u64);
 
-                metrics.inc_requests_total();
-
-                for event in &req.events {
-                    // Get event data
-                    let data = if !event.log.is_empty() {
-                        &event.log
-                    } else if !event.metric.is_empty() {
-                        &event.metric
-                    } else if !event.trace.is_empty() {
-                        &event.trace
-                    } else {
-                        continue;
-                    };
-
-                    metrics.add_bytes_received(data.len() as u64);
-
-                    let payload = Bytes::copy_from_slice(data);
-
-                    match pipeline.process(payload).await {
-                        Ok(()) => {
-                            events_received += 1;
-                        }
-                        Err(e) => {
-                            warn!(error = %e, "Failed to process gRPC event");
-                            status = PushStatus::Rejected;
-                            metrics.inc_requests_error();
-                        }
-                    }
-                }
-
-                if events_received > 0 {
-                    metrics.inc_requests_success();
-                }
-
-                let response = PushEventsResponse {
-                    status: status.into(),
-                    events_received,
-                };
-
-                if tx.send(Ok(response)).await.is_err() {
-                    debug!("gRPC client disconnected");
-                    break;
-                }
+            if let Err(e) = self.pipeline.process(json_bytes).await {
+                warn!(error = %e, "Failed to process gRPC event");
+                self.metrics.inc_requests_error();
+                return Err(Status::internal(e.to_string()));
             }
-        });
+        }
 
-        let output_stream = ReceiverStream::new(rx);
-        Ok(Response::new(Box::pin(output_stream)))
+        self.metrics.inc_requests_success();
+        Ok(Response::new(PushEventsResponse {}))
     }
 
     /// Health check endpoint.
@@ -149,9 +95,9 @@ impl Vector for VectorService {
         _request: Request<HealthCheckRequest>,
     ) -> std::result::Result<Response<HealthCheckResponse>, Status> {
         let status = if self.pipeline.is_ready() {
-            ServingStatus::Serving
+            pb::vector::ServingStatus::Serving
         } else {
-            ServingStatus::NotServing
+            pb::vector::ServingStatus::NotServing
         };
 
         Ok(Response::new(HealthCheckResponse {
@@ -160,23 +106,129 @@ impl Vector for VectorService {
     }
 }
 
-/// Run the gRPC server.
-pub async fn run_server(
-    addr: &str,
+/// Create a tonic auth interceptor from the shared `AuthState`.
+///
+/// Extracts the `authorization` metadata key from gRPC requests and
+/// validates against the bearer token provider.
+fn make_auth_interceptor(
+    auth: AuthState,
+) -> impl Fn(Request<()>) -> std::result::Result<Request<()>, Status> + Clone {
+    move |req: Request<()>| {
+        // Build an HTTP header map from gRPC metadata for reuse of validate_bearer_auth
+        let mut headers = axum::http::HeaderMap::new();
+        if let Some(auth_value) = req.metadata().get("authorization") {
+            if let Ok(s) = auth_value.to_str() {
+                if let Ok(hv) = axum::http::HeaderValue::from_str(s) {
+                    headers.insert("authorization", hv);
+                }
+            }
+        }
+
+        if let Some(err) = validate_bearer_auth(&auth, &headers) {
+            return Err(Status::unauthenticated(err.message));
+        }
+
+        Ok(req)
+    }
+}
+
+/// gRPC/Vector protocol handler wrapping the existing tonic server.
+pub struct GrpcVectorHandler {
+    config: Config,
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
+}
+
+impl GrpcVectorHandler {
+    /// Create a new gRPC/Vector handler.
+    pub fn new(config: Config, pipeline: Arc<PipelineState>, metrics: Arc<Metrics>) -> Self {
+        Self {
+            config,
+            pipeline,
+            metrics,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ProtocolHandler for GrpcVectorHandler {
+    fn name(&self) -> &'static str {
+        "grpc-vector"
+    }
+
+    fn bind_address(&self) -> &str {
+        &self.config.grpc.bind_address
+    }
+
+    async fn start(&self, shutdown: CancellationToken) -> Result<()> {
+        // Create auth state for gRPC if auth is configured
+        let auth_state = if AuthMode::from_str(&self.config.grpc.auth.mode) != AuthMode::None {
+            match create_auth_state(&self.config.grpc.auth).await {
+                Ok(auth) => Some(auth),
+                Err(e) => {
+                    warn!(error = %e, "Failed to create gRPC auth state, running without auth");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        run_server(
+            &self.config,
+            self.pipeline.clone(),
+            self.metrics.clone(),
+            auth_state,
+            shutdown,
+        )
+        .await
+    }
+}
+
+/// Run the gRPC server with optional TLS and auth.
+pub async fn run_server(
+    config: &Config,
+    pipeline: Arc<PipelineState>,
+    metrics: Arc<Metrics>,
+    auth_state: Option<AuthState>,
     shutdown: CancellationToken,
 ) -> Result<()> {
-    let addr: SocketAddr = addr
+    let addr: SocketAddr = config
+        .grpc
+        .bind_address
         .parse()
         .map_err(|e| Error::Config(format!("invalid gRPC bind address: {e}")))?;
 
     let service = VectorService::new(pipeline, metrics);
 
+    // Build TLS config if enabled
+    let tls_config = if config.grpc.tls.enabled {
+        let identity = super::tls::build_grpc_tls_config(&config.grpc.tls).await?;
+        Some(identity)
+    } else {
+        None
+    };
+
+    let mut builder = tonic::transport::Server::builder();
+
+    // Apply TLS
+    if let Some(tls) = tls_config {
+        builder = builder
+            .tls_config(tls)
+            .map_err(|e| Error::Tls(format!("gRPC TLS config error: {e}")))?;
+    }
+
+    // Apply auth interceptor or use plain service
+    let router = if let Some(auth) = auth_state {
+        let interceptor = make_auth_interceptor(auth);
+        builder.add_service(VectorServer::with_interceptor(service, interceptor))
+    } else {
+        builder.add_service(VectorServer::new(service))
+    };
+
     info!(addr = %addr, "gRPC server listening");
 
-    tonic::transport::Server::builder()
-        .add_service(VectorServer::new(service))
+    router
         .serve_with_shutdown(addr, shutdown.cancelled_owned())
         .await
         .map_err(|e| Error::Server(format!("gRPC server error: {e}")))?;
@@ -186,22 +238,13 @@ pub async fn run_server(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_push_status_values() {
-        // Verify proto enum values
-        assert_eq!(PushStatus::Unspecified as i32, 0);
-        assert_eq!(PushStatus::Ok as i32, 1);
-        assert_eq!(PushStatus::Rejected as i32, 2);
-        assert_eq!(PushStatus::Unavailable as i32, 3);
-    }
-
-    #[test]
     fn test_serving_status_values() {
-        assert_eq!(ServingStatus::Unspecified as i32, 0);
-        assert_eq!(ServingStatus::Serving as i32, 1);
-        assert_eq!(ServingStatus::NotServing as i32, 2);
+        assert_eq!(pb::vector::ServingStatus::Serving as i32, 0);
+        assert_eq!(pb::vector::ServingStatus::NotServing as i32, 1);
     }
 }

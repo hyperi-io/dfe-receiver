@@ -1,8 +1,8 @@
 # Project:   dfe-receiver
 # File:      typos.toml
 # Purpose:   Typos spell checker configuration
-# License:   LicenseRef-HyperSec-EULA
-# Copyright: (c) 2026 HyperSec
+# License:   FSL-1.1-ALv2
+# Copyright: (c) 2026 HYPERI PTY LIMITED
 
 [default.extend-words]
 # Known proper nouns and technical terms

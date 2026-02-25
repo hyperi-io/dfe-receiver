@@ -9,6 +9,7 @@ Thumbs.db
 .env.local
 .env.*.local
 *.log
+target/
 dist/
 dist-bin/
 build/

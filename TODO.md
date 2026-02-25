@@ -8,75 +8,140 @@ This is the **single source of truth** for all tasks and progress.
 
 Tasks currently being worked on. Only one task should be `[IN PROGRESS]` at a time.
 
-- [ ] Merge `feat/source-routing-enrichment` branch to main (pending review)
+None currently.
 
 ---
 
 ## Work Breakdown Structure (WBS)
 
-When planning complex features, break them down here before starting.
+### Multi-Protocol Ingestion (Approach C: Dual Mode)
 
-_No features in planning_
+**Goal:** Support enterprise agent protocols natively so dfe-receiver can replace intermediary collectors (OTel Collector, Logstash, etc.)
+
+All protocols follow: receive -> convert to JSON -> validate -> route -> Kafka/dfe-loader
+
+#### Phase 0: Protocol Framework [DONE]
+
+- [x] Define `ProtocolHandler` trait in `src/server/traits.rs`
+- [x] Refactor HTTP handler to implement `ProtocolHandler`
+- [x] Refactor gRPC/Vector handler to implement `ProtocolHandler`
+- [x] Update `Server::run` to iterate enabled handlers (spawn all in parallel)
+
+#### Phase 1: OTLP (Tier 1) [DONE]
+
+- [x] Vendor OTLP protos from opentelemetry-proto v1.5.0
+- [x] Configure tonic-build for OTLP service definitions (logs, metrics, traces)
+- [x] Create `src/server/otlp/mod.rs` -- gRPC server (port 4317), HTTP server (port 4318)
+- [x] Implement ExportLogsService, ExportMetricsService, ExportTraceService RPCs
+- [x] Create `src/server/otlp/convert.rs` -- dual mode converter (HyperDX + Generic)
+- [x] HyperDX mode: logs/traces/metrics JSON matching ClickHouse OTel schema
+- [x] Generic mode: normalised JSON envelope with routing fields
+- [x] OTLP HTTP endpoints: `/v1/logs`, `/v1/metrics`, `/v1/traces`
+- [x] Add `OtlpConfig` to config (grpc_bind_address, http_bind_address, mode, tls, auth)
+- [x] Wire OTLP handler into server orchestration
+- [x] Suppress proto doctests via `doctest = false` in Cargo.toml
+- [x] Clippy fixes for OTLP code
+- [ ] OTLP feature flag in Cargo.toml (currently always compiled) `[PENDING]`
+- [ ] Integration tests: send OTLP data via gRPC client, verify pipeline `[PENDING]`
+- [ ] Integration tests: send OTLP data via HTTP, verify pipeline `[PENDING]`
+
+#### Phase 2: Prometheus Remote Write (Tier 1) [NOT STARTED]
+
+- [ ] HTTP endpoint: `POST /api/v1/write`
+- [ ] Snappy decompression + protobuf decode (v1 + v2)
+- [ ] TimeSeries -> JSON conversion
+- [ ] `PrometheusConfig` + `prometheus-rw` feature flag
+
+#### Phase 3: Lumberjack/Beats (Tier 2) [NOT STARTED]
+
+- [ ] TCP/TLS listener, Lumberjack v2 frame parser
+- [ ] Windowed ACK protocol
+- [ ] Beats fields -> JSON conversion
+- [ ] `LumberjackConfig` + `lumberjack` feature flag
+
+#### Phase 4: Syslog (Tier 2) [NOT STARTED]
+
+- [ ] UDP listener (port 514)
+- [ ] TCP listener (port 514)
+- [ ] TLS/TCP listener (port 6514)
+- [ ] RFC 5424 parser (structured data) + RFC 3164 parser (BSD format)
+- [ ] Auto-detect format per message
+- [ ] Octet-counting + non-transparent framing (TCP)
+- [ ] `SyslogConfig` + `syslog` feature flag
+
+#### Phase 5: Splunk HEC (Tier 2) [NOT STARTED]
+
+- [ ] HTTP endpoints: `/services/collector/event` + `/services/collector/raw`
+- [ ] Splunk token auth
+- [ ] HEC JSON -> normalised JSON
+- [ ] `SplunkHecConfig` + `splunk-hec` feature flag
+
+#### Phase 6: Fluent Forward (Tier 3) [NOT STARTED]
+
+- [ ] TCP listener, Forward protocol parser (msgpack)
+- [ ] Message/Forward/PackedForward modes
+- [ ] `FluentConfig` + `fluent-forward` feature flag
+
+#### Phase 7: GELF (Tier 3) [NOT STARTED]
+
+- [ ] TCP listener (null-delimited)
+- [ ] GELF JSON parsing
+- [ ] `GelfConfig` + `gelf` feature flag
 
 ---
 
 ## Completed (This Session)
 
-Move tasks here when done. Clear this section at end of session.
-
-- [x] Rebrand hs-rustlib/hypersec → hyperi-rustlib/hyperi (branch `chore/rebrand-hyperi`, merged to main)
-- [x] Rename env prefix `RECEIVER_` → `DFE_RECEIVER_` for all config env vars
-- [x] Add `include_common_header` bool to AuthConfig (default true), gates enrichment
-- [x] Implement rule-based `_source` routing (key_present, key_value_set, key_value_use)
-  - [x] New `SourceRule` struct, `RoutingConfig` rewrite
-  - [x] `Router` rewrite with `evaluate_source()` method
-  - [x] Legacy compat mode for `tags.event.category` / `event_category`
-  - [x] Default source "dfe" (was "unmatched"), source-to-topic remapping
-- [x] Inject `_timestamp_receiver` (epoch ms) into JSON payload on hot path
-- [x] Config hot-reload via SIGHUP (Router/Validator wrapped in RwLock)
-- [x] CI runner default changed to `arc-runner-16cpu`
-- [x] Updated config.example.yaml, docs/DESIGN.md
+- [x] Phase 0: ProtocolHandler trait + server refactor
+- [x] Phase 1: OTLP proto compilation (vendored opentelemetry-proto v1.5.0)
+- [x] Phase 1: OTLP module structure and proto includes
+- [x] Phase 1: OTLP->JSON converter (HyperDX + Generic dual mode)
+- [x] Phase 1: OTLP gRPC receiver (port 4317)
+- [x] Phase 1: OTLP HTTP receiver (port 4318)
+- [x] Phase 1: OtlpConfig + server integration
+- [x] Fixed proto doctest failures (doctest = false)
+- [x] Clippy fixes (Option<&T>, write! macro, match arms, items ordering)
+- [x] SharedConfig, env overrides, config reload, serde_yaml_ng migration
+- [x] Source-rule routing, timestamp enrichment
+- [x] Vector agent module scope (DESIGN.md)
 
 ---
 
 ## Backlog
 
-Future work, ordered by priority.
-
 ### High Priority
 
-- [ ] gRPC Vector sink protocol implementation
-- [ ] TLS/mTLS certificate loading from secret manager
-- [ ] Integration tests for bearer auth with real secret providers
+- [ ] KEDA scaling metrics endpoint
 
 ### Medium Priority
 
-- [ ] **Vector.dev embedded receiver module** — [DISCUSSION]
-  - Supply a `vector.yaml` config file with a commonly-configured sink targeting the core dfe-receiver JSON processor
-  - Artefacts: vector.yaml template/reference config
-  - Investigate linking/embedding the Vector binary as a Rust library (not subprocess)
-    - Vector is not officially designed as an embeddable library ([Discussion #19776](https://github.com/vectordotdev/vector/discussions/19776))
-    - Individual crates (`vector-core`, `vector-lib`, `vrl`) may be usable as git dependencies
-    - Extensive feature flags allow selective compilation of only needed components
-  - Licensing: Vector is [MPL-2.0](https://github.com/vectordotdev/vector/blob/master/LICENSE), dfe-receiver is FSL-1.1-ALv2
-    - MPL-2.0 file-level copyleft allows combining with non-MPL code in a larger work
-    - MPL-licensed source files must remain available under MPL-2.0
-    - No formal compatibility declaration between MPL-2.0 and FSL-1.1 exists — legal review needed
-  - See discussion notes below
-- [ ] KEDA scaling metrics endpoint
+- [ ] **Vector.dev agent module** — managed subprocess, auto-download, n-1 updates, cgroup memory isolation (see DESIGN.md)
 - [ ] Disk spillover implementation (currently in-memory only)
 - [ ] Config hot-reload for auth settings
+- [ ] Performance benchmarks
 
 ### Low Priority
 
-- [ ] Performance benchmarks
 - [ ] Documentation for deployment
 
 ---
 
 ## Blocked
 
-_None_
+- [ ] Binary build local test -- blocked on CI submodule libsasl2-dev multiarch fix
+
+---
+
+## Previously Completed
+
+- [x] Initial project setup, GitHub repo, CI pipeline
+- [x] Bearer token authentication (secret manager integration, refresh, tests)
+- [x] hypersec -> hyperi rebrand (rustlib, agent header, CI configs, license headers)
+- [x] gRPC Vector sink protocol (proto rewrite, protobuf-to-JSON, unary handler, TLS, auth)
+- [x] TLS/mTLS certificate hot-reload from secret manager
+- [x] Integration tests (bearer auth file-based, Vector HTTP/HTTPS/gRPC/TLS/bearer)
+- [x] CI fixes (clippy approx_constant, cargo fmt, BuildJet -> standard runner)
+- [x] Published v1.6.3 to JFrog Artifactory
 
 ---
 

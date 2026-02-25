@@ -22,7 +22,6 @@ mod shared;
 pub use shared::SharedConfig;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use hyperi_rustlib::config::{self, ConfigOptions};
 use serde::{Deserialize, Serialize};
@@ -48,6 +47,9 @@ pub struct Config {
 
     /// gRPC server configuration.
     pub grpc: GrpcConfig,
+
+    /// OTLP receiver configuration.
+    pub otlp: OtlpConfig,
 
     /// Validation rules.
     pub validation: ValidationConfig,
@@ -77,6 +79,10 @@ pub struct Config {
     /// Path to the config file (set by loader, not deserialized).
     #[serde(skip)]
     pub config_path: Option<String>,
+
+    /// External protocol plugins.
+    #[cfg(feature = "plugins")]
+    pub plugins: PluginsConfig,
 }
 
 impl Default for Config {
@@ -84,6 +90,7 @@ impl Default for Config {
         Self {
             server: ServerConfig::default(),
             grpc: GrpcConfig::default(),
+            otlp: OtlpConfig::default(),
             validation: ValidationConfig::default(),
             routing: RoutingConfig::default(),
             destinations: DestinationsConfig::default(),
@@ -93,6 +100,8 @@ impl Default for Config {
             metrics: MetricsConfig::default(),
             config_reload_secs: 0,
             config_path: None,
+            #[cfg(feature = "plugins")]
+            plugins: PluginsConfig::default(),
         }
     }
 }
@@ -107,22 +116,15 @@ impl Config {
     /// 4. Config file (YAML)
     /// 5. Hard-coded defaults
     pub fn load(config_path: Option<&str>) -> Result<Self> {
-        let mut config_paths = Vec::new();
-
-        // Add explicit config path if provided
+        // If an explicit config file is provided, load it directly
         if let Some(path) = config_path {
-            config_paths.push(
-                PathBuf::from(path)
-                    .parent()
-                    .unwrap_or(&PathBuf::from("."))
-                    .to_path_buf(),
-            );
+            return Self::load_from_file(path);
         }
 
-        // Setup hyperi-rustlib config (dotenv loading, file cascade)
+        // Otherwise, use hyperi-rustlib's 7-layer cascade
         config::setup(ConfigOptions {
             env_prefix: ENV_PREFIX.to_string(),
-            config_paths,
+            config_paths: Vec::new(),
             load_dotenv: true,
             ..Default::default()
         })
@@ -519,6 +521,12 @@ pub struct GrpcConfig {
 
     /// Bind address for gRPC.
     pub bind_address: String,
+
+    /// TLS configuration for gRPC server.
+    pub tls: TlsConfig,
+
+    /// Authentication configuration for gRPC server.
+    pub auth: AuthConfig,
 }
 
 impl Default for GrpcConfig {
@@ -526,6 +534,54 @@ impl Default for GrpcConfig {
         Self {
             enabled: false,
             bind_address: "0.0.0.0:6000".to_string(),
+            tls: TlsConfig::default(),
+            auth: AuthConfig {
+                mode: "none".to_string(),
+                ..AuthConfig::default()
+            },
+        }
+    }
+}
+
+/// OTLP (OpenTelemetry Protocol) receiver configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OtlpConfig {
+    /// Enable OTLP receiver.
+    pub enabled: bool,
+
+    /// Bind address for OTLP gRPC (standard port 4317).
+    pub grpc_bind_address: String,
+
+    /// Bind address for OTLP HTTP (standard port 4318).
+    pub http_bind_address: String,
+
+    /// Conversion mode: "hyperdx" (default) or "generic".
+    ///
+    /// - `hyperdx`: JSON matching the OTel ClickHouse exporter schema
+    ///   for direct HyperDX compatibility.
+    /// - `generic`: Normalised JSON envelope with routing fields.
+    pub mode: String,
+
+    /// TLS configuration for OTLP endpoints.
+    pub tls: TlsConfig,
+
+    /// Authentication configuration for OTLP endpoints.
+    pub auth: AuthConfig,
+}
+
+impl Default for OtlpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            grpc_bind_address: "0.0.0.0:4317".to_string(),
+            http_bind_address: "0.0.0.0:4318".to_string(),
+            mode: "hyperdx".to_string(),
+            tls: TlsConfig::default(),
+            auth: AuthConfig {
+                mode: "none".to_string(),
+                ..AuthConfig::default()
+            },
         }
     }
 }
@@ -872,6 +928,71 @@ impl Default for MetricsConfig {
         Self {
             enabled: true,
             address: "0.0.0.0:9090".to_string(),
+        }
+    }
+}
+
+/// External protocol plugin configuration.
+///
+/// Plugins are loaded as shared libraries (.so files) at startup.
+/// Each plugin implements the dfe-protocol-sdk's `ProtocolPlugin` trait
+/// and is loaded via the C ABI interface.
+///
+/// ## Configuration
+///
+/// ```yaml
+/// plugins:
+///   directory: "/opt/dfe/plugins"   # optional: auto-discover .so files
+///   syslog:
+///     path: "/opt/dfe/plugins/libdfe_receiver_plugin_syslog.so"
+///     bind_address: "0.0.0.0:514"
+///     topic: "syslog_land"
+/// ```
+///
+/// The map key (e.g. `syslog`) is the plugin's logical name, used in
+/// logs, metrics, and health checks. The `path` field is consumed by
+/// the loader; all other fields are passed as JSON to the plugin's
+/// `create()` function.
+///
+/// Environment variable overrides work naturally:
+/// `RECEIVER_PLUGINS_SYSLOG_BIND_ADDRESS=0.0.0.0:1514`
+#[cfg(feature = "plugins")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PluginsConfig {
+    /// Directory to scan for plugin .so files (optional).
+    /// All `.so` files in this directory will be loaded with default config.
+    pub directory: Option<String>,
+
+    /// Named plugin entries. Each key is the plugin's logical name.
+    /// The entry must contain a `path` field; all other fields are
+    /// passed through as config JSON to the plugin.
+    #[serde(flatten)]
+    pub plugins: HashMap<String, PluginEntry>,
+}
+
+/// A single plugin entry specifying the .so path and its configuration.
+///
+/// The `path` field is consumed by the loader. All other fields are
+/// collected via `#[serde(flatten)]` and passed as JSON to the plugin.
+#[cfg(feature = "plugins")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginEntry {
+    /// Path to the .so file.
+    pub path: String,
+
+    /// All remaining fields are plugin-specific configuration,
+    /// passed as JSON to the plugin's `create()` function.
+    #[serde(flatten)]
+    pub config: serde_json::Map<String, serde_json::Value>,
+}
+
+#[cfg(feature = "plugins")]
+impl Default for PluginsConfig {
+    fn default() -> Self {
+        Self {
+            directory: None,
+            plugins: HashMap::new(),
         }
     }
 }

@@ -1,3 +1,94 @@
+## [1.8.7](https://github.com/hyperi-io/dfe-receiver/compare/v1.8.6...v1.8.7) (2026-02-25)
+
+
+### Bug Fixes
+
+* Use new version of plugin loader and no need for deps dir ([73ab50c](https://github.com/hyperi-io/dfe-receiver/commit/73ab50caed325e66198c0966ea66df00bbac80c4))
+
+## [1.8.6](https://github.com/hyperi-io/dfe-receiver/compare/v1.8.5...v1.8.6) (2026-02-24)
+
+
+### Bug Fixes
+
+* Update the version constraint ([5c456c7](https://github.com/hyperi-io/dfe-receiver/commit/5c456c79e86f326aea1b0446e6c5f00f5d421f6c))
+
+## [1.8.5](https://github.com/hyperi-io/dfe-receiver/compare/v1.8.4...v1.8.5) (2026-02-24)
+
+
+### Bug Fixes
+
+* Using symlinks for dependency repos ([9733c12](https://github.com/hyperi-io/dfe-receiver/commit/9733c12eb73472c5c332acbabaf7531fb118920e))
+
+## [1.8.4](https://github.com/hyperi-io/dfe-receiver/compare/v1.8.3...v1.8.4) (2026-02-24)
+
+
+### Bug Fixes
+
+* Checkout the proper repos instead of stubs ([f22608c](https://github.com/hyperi-io/dfe-receiver/commit/f22608c39abaa09e35903c84e73e90d096627186))
+
+## [1.8.3](https://github.com/hyperi-io/dfe-receiver/compare/v1.8.2...v1.8.3) (2026-02-24)
+
+
+### Bug Fixes
+
+* More stub crates needed ([01f345e](https://github.com/hyperi-io/dfe-receiver/commit/01f345e516c09bd5f21508c9405f37af1bc14013))
+
+## [1.8.2](https://github.com/hyperi-io/dfe-receiver/compare/v1.8.1...v1.8.2) (2026-02-24)
+
+
+### Bug Fixes
+
+* Create stub crates for Cargo to work ([213baff](https://github.com/hyperi-io/dfe-receiver/commit/213baffedbbb1b1dbd153541eda55cd12ca6e495))
+
+## [1.8.1](https://github.com/hyperi-io/dfe-receiver/compare/v1.8.0...v1.8.1) (2026-02-24)
+
+
+### Bug Fixes
+
+* Allow explicit config file specification for config ([2c68d5c](https://github.com/hyperi-io/dfe-receiver/commit/2c68d5ca3fc94c1fa61064b13e1f6af8b214d249))
+
+# [1.8.0](https://github.com/hyperi-io/dfe-receiver/compare/v1.7.0...v1.8.0) (2026-02-20)
+
+
+### Features
+
+* add dynamic plugin system with C ABI loader ([521849c](https://github.com/hyperi-io/dfe-receiver/commit/521849cdce12346712bf756f31772cbad9cbfd37))
+
+# [1.7.0](https://github.com/hyperi-io/dfe-receiver/compare/v1.6.3...v1.7.0) (2026-02-19)
+
+
+### Features
+
+* add OTLP protocol support with dual-mode conversion ([38d98cb](https://github.com/hyperi-io/dfe-receiver/commit/38d98cb90e66fdc11af4f363f905651fda9a3eb0))
+
+## [1.6.3](https://github.com/hyperi-io/dfe-receiver/compare/v1.6.2...v1.6.3) (2026-02-17)
+
+
+### Bug Fixes
+
+* use standard runner for release workflow instead of buildjet ([ccdc924](https://github.com/hyperi-io/dfe-receiver/commit/ccdc9248d6c72cd46e51d04b854679127e96e311))
+
+## [1.6.2](https://github.com/hyperi-io/dfe-receiver/compare/v1.6.1...v1.6.2) (2026-02-17)
+
+
+### Bug Fixes
+
+* resolve clippy approx_constant and cargo fmt issues ([03a6887](https://github.com/hyperi-io/dfe-receiver/commit/03a688778a70a5a548aba9512b1138eebec0ac5e))
+
+## [1.6.1](https://github.com/hyperi-io/dfe-receiver/compare/v1.6.0...v1.6.1) (2026-02-17)
+
+
+### Bug Fixes
+
+* use non-approx-constant float in test to satisfy clippy ([d22cfcc](https://github.com/hyperi-io/dfe-receiver/commit/d22cfccca77cb2b6b3fd066683da31f5f73f925b))
+
+# [1.6.0](https://github.com/hyperi-io/dfe-receiver/compare/v1.5.0...v1.6.0) (2026-02-17)
+
+
+### Features
+
+* add grpc vector protocol, tls hot-reload, bearer auth tests and rebrand fixes ([c668797](https://github.com/hyperi-io/dfe-receiver/commit/c66879702ff23bc65bd3df19d8c3602b4af774bf))
+
 # [1.5.0](https://github.com/hypersec-io/dfe-receiver/compare/v1.4.11...v1.5.0) (2026-02-03)
 
 
