@@ -1,3 +1,10 @@
+## [1.8.7](https://github.com/hyperi-io/dfe-receiver/compare/v1.8.6...v1.8.7) (2026-02-25)
+
+
+### Bug Fixes
+
+* Use new version of plugin loader and no need for deps dir ([73ab50c](https://github.com/hyperi-io/dfe-receiver/commit/73ab50caed325e66198c0966ea66df00bbac80c4))
+
 ## [1.8.6](https://github.com/hyperi-io/dfe-receiver/compare/v1.8.5...v1.8.6) (2026-02-24)
 
 
