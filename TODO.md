@@ -8,7 +8,7 @@ This is the **single source of truth** for all tasks and progress.
 
 Tasks currently being worked on. Only one task should be `[IN PROGRESS]` at a time.
 
-_No active tasks_
+- [ ] Merge `feat/source-routing-enrichment` branch to main (pending review)
 
 ---
 
@@ -24,16 +24,18 @@ _No features in planning_
 
 Move tasks here when done. Clear this section at end of session.
 
-- [x] Use hyperi-rustlib CircuitBreaker in TieredSink (removed redundant implementation)
-- [x] Add `secrets` feature to hyperi-rustlib dependency
-- [x] Create GitHub repo at hyperi-io/dfe-receiver and push initial commit
-- [x] Add bearer token authentication support
-  - [x] Add BearerConfig to AuthConfig
-  - [x] Create BearerTokenProvider with secret manager integration
-  - [x] Add validate_bearer_auth() for Authorization header
-  - [x] Update auth middleware for bearer mode
-  - [x] Add From<SecretsError> conversion
-  - [x] Add comprehensive tests
+- [x] Rebrand hs-rustlib/hypersec → hyperi-rustlib/hyperi (branch `chore/rebrand-hyperi`, merged to main)
+- [x] Rename env prefix `RECEIVER_` → `DFE_RECEIVER_` for all config env vars
+- [x] Add `include_common_header` bool to AuthConfig (default true), gates enrichment
+- [x] Implement rule-based `_source` routing (key_present, key_value_set, key_value_use)
+  - [x] New `SourceRule` struct, `RoutingConfig` rewrite
+  - [x] `Router` rewrite with `evaluate_source()` method
+  - [x] Legacy compat mode for `tags.event.category` / `event_category`
+  - [x] Default source "dfe" (was "unmatched"), source-to-topic remapping
+- [x] Inject `_timestamp_receiver` (epoch ms) into JSON payload on hot path
+- [x] Config hot-reload via SIGHUP (Router/Validator wrapped in RwLock)
+- [x] CI runner default changed to `arc-runner-16cpu`
+- [x] Updated config.example.yaml, docs/DESIGN.md
 
 ---
 
