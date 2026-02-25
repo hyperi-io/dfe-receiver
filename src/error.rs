@@ -82,8 +82,8 @@ impl From<&str> for Error {
     }
 }
 
-impl From<serde_yaml::Error> for Error {
-    fn from(err: serde_yaml::Error) -> Self {
+impl From<serde_yaml_ng::Error> for Error {
+    fn from(err: serde_yaml_ng::Error) -> Self {
         Error::Config(format!("YAML parse error: {err}"))
     }
 }

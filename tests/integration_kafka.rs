@@ -368,7 +368,7 @@ async fn test_receiver_kafka_sink() {
 #[tokio::test]
 #[ignore = "requires Kafka - run with --ignored"]
 async fn test_full_pipeline_to_kafka() {
-    use dfe_receiver::config::{Config, SaslConfig};
+    use dfe_receiver::config::{Config, SaslConfig, SharedConfig};
     use dfe_receiver::pipeline::PipelineState;
 
     if !kafka_available().await {
@@ -411,7 +411,7 @@ async fn test_full_pipeline_to_kafka() {
     config.kafka.producer.linger_ms = 0;
 
     // Create pipeline
-    let pipeline = PipelineState::new(config).expect("Failed to create pipeline");
+    let pipeline = PipelineState::new(SharedConfig::new(config)).expect("Failed to create pipeline");
 
     // Send messages through pipeline
     for i in 0..5 {
@@ -576,7 +576,7 @@ async fn test_http_to_kafka() {
 #[tokio::test]
 #[ignore = "requires Kafka - run with --ignored"]
 async fn test_category_routing() {
-    use dfe_receiver::config::{Config, SaslConfig};
+    use dfe_receiver::config::{Config, SaslConfig, SharedConfig};
     use dfe_receiver::pipeline::PipelineState;
 
     if !kafka_available().await {
@@ -632,7 +632,7 @@ async fn test_category_routing() {
     }];
 
     // Create pipeline
-    let pipeline = PipelineState::new(config).expect("Failed to create pipeline");
+    let pipeline = PipelineState::new(SharedConfig::new(config)).expect("Failed to create pipeline");
 
     // Send messages with different categories
     pipeline
@@ -676,7 +676,7 @@ async fn test_category_routing() {
 #[tokio::test]
 #[ignore = "requires Kafka - run with --ignored"]
 async fn test_dlq_routing() {
-    use dfe_receiver::config::{Config, SaslConfig};
+    use dfe_receiver::config::{Config, SaslConfig, SharedConfig};
     use dfe_receiver::pipeline::PipelineState;
 
     if !kafka_available().await {
@@ -720,7 +720,7 @@ async fn test_dlq_routing() {
     config.validation.dlq_on_invalid = true;
 
     // Create pipeline
-    let pipeline = PipelineState::new(config).expect("Failed to create pipeline");
+    let pipeline = PipelineState::new(SharedConfig::new(config)).expect("Failed to create pipeline");
 
     // Send message missing required field - should go to DLQ
     let result = pipeline

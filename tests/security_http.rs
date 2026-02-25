@@ -23,7 +23,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use dfe_receiver::config::{AcceptedHeader, BearerConfig, Config};
+use dfe_receiver::config::{AcceptedHeader, BearerConfig, Config, SharedConfig};
 use dfe_receiver::metrics::Metrics;
 use dfe_receiver::pipeline::PipelineState;
 use dfe_receiver::server::http;
@@ -60,7 +60,7 @@ async fn start_test_server(config: Config) -> (String, CancellationToken) {
 
     let metrics = Arc::new(Metrics::new());
     let shutdown = CancellationToken::new();
-    let pipeline = Arc::new(PipelineState::new(config.clone()).expect("Failed to create pipeline"));
+    let pipeline = Arc::new(PipelineState::new(SharedConfig::new(config.clone())).expect("Failed to create pipeline"));
 
     let server_shutdown = shutdown.clone();
     let server_metrics = metrics.clone();

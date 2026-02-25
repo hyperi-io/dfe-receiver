@@ -17,10 +17,15 @@ repository = "https://github.com/hyperi-io/dfe-receiver"
 exclude = [".claude/", ".github/", "ai/", "ci/", "docs/", "reference/", "benches/"]
 
 [dependencies]
-# HyperI shared library (from JFrog Cargo registry)
-# Note: Package is still named hs-rustlib in registry until rename is published
-hyperi-rustlib = { package = "hs-rustlib", version = "1.3", registry = "hypersec", features = [
+# HyperI shared library
+# TODO: Switch back to registry after publishing config-reload feature
+# hyperi-rustlib = { version = ">=1.5", registry = "hyperi", features = [
+#     "config", "config-reload", "logger", "metrics", "http-server",
+#     "transport-kafka", "spool", "tiered-sink", "runtime", "secrets",
+# ] }
+hyperi-rustlib = { path = "../hyperi-rustlib", features = [
     "config",
+    "config-reload",
     "logger",
     "metrics",
     "http-server",
@@ -41,7 +46,7 @@ futures-core = "0.3"
 sonic-rs = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yaml = "0.9"
+serde_yaml_ng = "0.10"
 
 # HTTP server
 axum = "0.7"
