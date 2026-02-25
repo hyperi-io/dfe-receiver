@@ -42,13 +42,53 @@ use crate::error::{Error, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
 use crate::server::auth::{token_auth_middleware, AuthState, BearerTokenProvider};
-use crate::server::tls::{build_tls_acceptor, build_tls_acceptor_async, uses_secrets};
+use crate::server::tls::{build_tls_acceptor, uses_secrets, TlsCertProvider};
+use crate::server::traits::ProtocolHandler;
 
 /// TLS handshake timeout to prevent slow TLS attacks.
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// HTTP protocol handler wrapping the existing axum server.
+pub struct HttpHandler {
+    bind_address: String,
+    pipeline: Arc<PipelineState>,
+    metrics: Arc<Metrics>,
+}
+
+impl HttpHandler {
+    /// Create a new HTTP handler.
+    pub fn new(bind_address: String, pipeline: Arc<PipelineState>, metrics: Arc<Metrics>) -> Self {
+        Self {
+            bind_address,
+            pipeline,
+            metrics,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ProtocolHandler for HttpHandler {
+    fn name(&self) -> &'static str {
+        "http"
+    }
+
+    fn bind_address(&self) -> &str {
+        &self.bind_address
+    }
+
+    async fn start(&self, shutdown: CancellationToken) -> Result<()> {
+        run_server(
+            &self.bind_address,
+            self.pipeline.clone(),
+            self.metrics.clone(),
+            shutdown,
+        )
+        .await
+    }
+}
+
 /// Create auth state with optional bearer token provider.
-async fn create_auth_state(config: &AuthConfig) -> Result<AuthState> {
+pub async fn create_auth_state(config: &AuthConfig) -> Result<AuthState> {
     // Check if bearer auth is configured
     let has_bearer_tokens =
         !config.bearer.tokens.is_empty() || config.bearer.secret_source.is_some();
@@ -102,9 +142,18 @@ pub async fn run_server(
         auth: auth_state.clone(),
     };
 
-    // Build TLS acceptor if enabled (use async version if secrets configured)
-    let tls_acceptor = if uses_secrets(&config.server.tls) {
-        build_tls_acceptor_async(&config.server.tls).await?
+    // Build TLS: use TlsCertProvider with hot-reload if secrets configured,
+    // otherwise one-shot load
+    let tls_provider = if config.server.tls.enabled && uses_secrets(&config.server.tls) {
+        let provider = TlsCertProvider::new(config.server.tls.clone()).await?;
+        provider.start_refresh_task();
+        Some(provider)
+    } else {
+        None
+    };
+
+    let tls_acceptor = if tls_provider.is_some() {
+        None // Handled by provider below
     } else {
         build_tls_acceptor(&config.server.tls)?
     };
@@ -155,15 +204,19 @@ pub async fn run_server(
         .await
         .map_err(|e| Error::Server(format!("failed to bind: {e}")))?;
 
-    match tls_acceptor {
-        Some(acceptor) => {
-            info!(addr = %addr, tls = true, "HTTP server listening");
-            run_tls_server(listener, app, acceptor, shutdown, metrics).await
-        }
-        None => {
-            info!(addr = %addr, tls = false, "HTTP server listening");
-            run_plain_server(listener, app, shutdown).await
-        }
+    if let Some(ref provider) = tls_provider {
+        // Hot-reloadable TLS via TlsCertProvider
+        let acceptor_handle = provider.acceptor_handle();
+        info!(addr = %addr, tls = true, hot_reload = true, "HTTP server listening");
+        run_tls_server(listener, app, acceptor_handle, shutdown, metrics).await
+    } else if let Some(acceptor) = tls_acceptor {
+        // Static TLS (no secrets, no hot-reload)
+        let acceptor_handle = Arc::new(parking_lot::RwLock::new(acceptor));
+        info!(addr = %addr, tls = true, hot_reload = false, "HTTP server listening");
+        run_tls_server(listener, app, acceptor_handle, shutdown, metrics).await
+    } else {
+        info!(addr = %addr, tls = false, "HTTP server listening");
+        run_plain_server(listener, app, shutdown).await
     }
 }
 
@@ -183,10 +236,13 @@ async fn run_plain_server(
 }
 
 /// Run HTTP server with TLS.
+///
+/// Accepts an `Arc<RwLock<TlsAcceptor>>` to support hot-reload of certificates.
+/// The RwLock read is held only to clone the acceptor (cheap - wraps Arc<ServerConfig>).
 async fn run_tls_server(
     listener: TcpListener,
     app: Router,
-    acceptor: TlsAcceptor,
+    acceptor: Arc<parking_lot::RwLock<TlsAcceptor>>,
     shutdown: CancellationToken,
     metrics: Arc<Metrics>,
 ) -> Result<()> {
@@ -205,7 +261,7 @@ async fn run_tls_server(
                     }
                 };
 
-                let acceptor = acceptor.clone();
+                let acceptor = acceptor.read().clone();
                 let app = app.clone();
                 let shutdown = shutdown.clone();
                 let metrics = metrics.clone();

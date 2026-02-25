@@ -1,31 +1,39 @@
 // Project:   dfe-receiver
 // File:      src/server/mod.rs
-// Purpose:   HTTP and gRPC server management
+// Purpose:   Protocol handler orchestration
 // Language:  Rust
 //
 // License:   FSL-1.1-ALv2
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
-//! HTTP and gRPC server management.
+//! Protocol handler orchestration.
 //!
-//! Provides the main server that handles incoming requests via HTTP (axum)
-//! and optionally gRPC (tonic) for Vector sink protocol.
+//! Manages pluggable protocol handlers (HTTP, gRPC/Vector, OTLP, etc.).
+//! All enabled handlers are spawned in parallel and monitored for health.
 
 pub mod auth;
 pub mod grpc;
 pub mod http;
+pub mod otlp;
+#[cfg(feature = "plugins")]
+pub mod plugins;
 pub mod tls;
+pub mod traits;
 
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{error, info};
 
 use crate::error::Result;
 use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
+use crate::server::grpc::GrpcVectorHandler;
+use crate::server::http::HttpHandler;
+use crate::server::otlp::OtlpHandler;
+use crate::server::traits::ProtocolHandler;
 
-/// Main server that manages HTTP and gRPC endpoints.
+/// Main server that manages protocol handlers.
 pub struct Server {
     state: Arc<PipelineState>,
     metrics: Arc<Metrics>,
@@ -37,40 +45,90 @@ impl Server {
         Self { state, metrics }
     }
 
-    /// Run the server until shutdown is signalled.
-    pub async fn run(&self, shutdown: CancellationToken) -> Result<()> {
+    /// Collect all enabled protocol handlers based on configuration.
+    fn build_handlers(&self) -> Vec<Box<dyn ProtocolHandler>> {
         let config = self.state.config();
+        let mut handlers: Vec<Box<dyn ProtocolHandler>> = Vec::new();
 
-        // Start HTTP server
-        let http_addr = config.server.bind_address.clone();
-        let http_state = self.state.clone();
-        let http_metrics = self.metrics.clone();
-        let http_shutdown = shutdown.clone();
+        // HTTP handler (always enabled)
+        handlers.push(Box::new(HttpHandler::new(
+            config.server.bind_address.clone(),
+            self.state.clone(),
+            self.metrics.clone(),
+        )));
 
-        let http_handle = tokio::spawn(async move {
-            http::run_server(&http_addr, http_state, http_metrics, http_shutdown).await
-        });
+        // gRPC/Vector handler (if enabled)
+        if config.grpc.enabled {
+            handlers.push(Box::new(GrpcVectorHandler::new(
+                config.clone(),
+                self.state.clone(),
+                self.metrics.clone(),
+            )));
+        }
 
-        // Start gRPC server if enabled
-        let grpc_handle = if config.grpc.enabled {
-            let grpc_addr = config.grpc.bind_address.clone();
-            let grpc_state = self.state.clone();
-            let grpc_metrics = self.metrics.clone();
-            let grpc_shutdown = shutdown.clone();
+        // OTLP handler (if enabled)
+        if config.otlp.enabled {
+            handlers.push(Box::new(OtlpHandler::new(
+                config.otlp.clone(),
+                self.state.clone(),
+                self.metrics.clone(),
+            )));
+        }
 
-            Some(tokio::spawn(async move {
-                grpc::run_server(&grpc_addr, grpc_state, grpc_metrics, grpc_shutdown).await
-            }))
-        } else {
-            None
-        };
+        // External plugins (if plugins feature enabled)
+        #[cfg(feature = "plugins")]
+        {
+            if !config.plugins.plugins.is_empty() || config.plugins.directory.is_some() {
+                match plugins::load_plugins(&config.plugins, &self.state, &self.metrics) {
+                    Ok(plugin_handlers) => {
+                        for handler in plugin_handlers {
+                            handlers.push(handler);
+                        }
+                    }
+                    Err(e) => {
+                        error!(error = %e, "Failed to load plugins");
+                        // Don't fail startup -- core protocols still work
+                    }
+                }
+            }
+        }
+
+        handlers
+    }
+
+    /// Run all enabled protocol handlers until shutdown is signalled.
+    pub async fn run(&self, shutdown: CancellationToken) -> Result<()> {
+        let handlers = self.build_handlers();
+
+        // Log enabled handlers
+        for handler in &handlers {
+            info!(
+                handler = handler.name(),
+                bind = handler.bind_address(),
+                "Protocol handler enabled"
+            );
+        }
+
+        // Spawn all handlers concurrently
+        let mut handles = Vec::with_capacity(handlers.len());
+        for handler in handlers {
+            let handler_shutdown = shutdown.clone();
+            let name = handler.name();
+
+            let handle = tokio::spawn(async move {
+                if let Err(e) = handler.start(handler_shutdown).await {
+                    error!(handler = name, error = %e, "Protocol handler failed");
+                }
+            });
+
+            handles.push(handle);
+        }
 
         // Wait for shutdown
         shutdown.cancelled().await;
 
-        // Wait for servers to finish
-        let _ = http_handle.await;
-        if let Some(handle) = grpc_handle {
+        // Wait for all handlers to finish
+        for handle in handles {
             let _ = handle.await;
         }
 

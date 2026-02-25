@@ -31,7 +31,7 @@ enrichment_tables:
 transforms:
   hyperi_receiver_transform_event_category:
     type: remap
-    inputs: ${HYPERSEC_RECEIVER_TRANSFORM_EVENT_CATEGORY_INPUT:?err}
+    inputs: ${HYPERI_RECEIVER_TRANSFORM_EVENT_CATEGORY_INPUT:?err}
     source: |
       # Early exit for pre-categorised events (saves 90% of processing)
       if exists(.tags.event.category) && .tags.event.category != "unmatched" && .tags.event.category != "dlq" {

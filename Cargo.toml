@@ -8,7 +8,7 @@
 
 [package]
 name = "dfe-receiver"
-version = "1.5.0"
+version = "1.8.7"
 edition = "2021"
 rust-version = "1.75"
 description = "High-performance HTTP/gRPC receiver for PB/s scale data ingestion"
@@ -16,14 +16,14 @@ license = "FSL-1.1-ALv2"
 repository = "https://github.com/hyperi-io/dfe-receiver"
 exclude = [".claude/", ".github/", "ai/", "ci/", "docs/", "reference/", "benches/"]
 
+[lib]
+name = "dfe_receiver"
+path = "src/lib.rs"
+doctest = false
+
 [dependencies]
-# HyperI shared library
-# TODO: Switch back to registry after publishing config-reload feature
-# hyperi-rustlib = { version = ">=1.5", registry = "hyperi", features = [
-#     "config", "config-reload", "logger", "metrics", "http-server",
-#     "transport-kafka", "spool", "tiered-sink", "runtime", "secrets",
-# ] }
-hyperi-rustlib = { path = "../hyperi-rustlib", features = [
+# HyperI shared library (from JFrog Cargo registry)
+hyperi-rustlib = { version = ">=1.5", registry = "hyperi", features = [
     "config",
     "config-reload",
     "logger",
@@ -58,8 +58,9 @@ hyper = { version = "1", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio", "server", "server-auto", "service"] }
 
 # gRPC server
-tonic = "0.12"
+tonic = { version = "0.12", features = ["tls"] }
 prost = "0.13"
+prost-types = "0.13"
 
 # Kafka producer
 rdkafka = { version = "0.36", features = ["cmake-build", "ssl", "sasl"] }
@@ -85,6 +86,9 @@ clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 
+# Encoding
+base64 = "0.22"
+
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
@@ -94,6 +98,10 @@ sysinfo = "0.32"
 # Optional allocators
 tikv-jemallocator = { version = "0.6", optional = true }
 mimalloc = { version = "0.1", optional = true }
+
+# Plugin system (optional)
+dfe-plugin-loader = { version = "1.0.3", registry = "hyperi", optional = true }
+dfe-protocol-sdk = { version = "1.0.1", registry = "hyperi", optional = true }
 
 [build-dependencies]
 tonic-build = "0.12"
@@ -110,6 +118,7 @@ dotenvy = "0.15"
 default = []
 jemalloc = ["dep:tikv-jemallocator"]
 mimalloc = ["dep:mimalloc"]
+plugins = ["dep:dfe-plugin-loader", "dep:dfe-protocol-sdk"]
 
 [profile.release]
 lto = "thin"
