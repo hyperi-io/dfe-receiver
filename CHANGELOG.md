@@ -1,3 +1,11 @@
+# [1.9.0](https://github.com/hyperi-io/dfe-receiver/compare/v1.8.7...v1.9.0) (2026-02-25)
+
+
+### Features
+
+* SharedConfig, env overrides, config reload, serde_yaml_ng migration ([a9fbd8f](https://github.com/hyperi-io/dfe-receiver/commit/a9fbd8f74a040481140439d0fefc6f0d8615e65d))
+* source-rule routing, timestamp enrichment, config refresh ([0fe325a](https://github.com/hyperi-io/dfe-receiver/commit/0fe325ab215570e5c5b63dacfe1611df01f9889d))
+
 ## [1.8.7](https://github.com/hyperi-io/dfe-receiver/compare/v1.8.6...v1.8.7) (2026-02-25)
 
 
