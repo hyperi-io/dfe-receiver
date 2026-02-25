@@ -8,7 +8,10 @@ This is the **single source of truth** for all tasks and progress.
 
 Tasks currently being worked on. Only one task should be `[IN PROGRESS]` at a time.
 
-None currently.
+- [ ] Update Cargo.lock for hyperi-rustlib >=1.5 `[BLOCKED]`
+  - Current state: Cargo.toml uses `version = ">=1.5"` with `config-reload` feature; merge to main complete and pushed
+  - Next: Run `cargo update -p hyperi-rustlib` once rustlib >=1.5 is published to JFrog
+  - Blockers: hyperi-rustlib >=1.5 not yet published (only 1.4.3 available); CI build will fail until resolved
 
 ---
 
@@ -104,6 +107,8 @@ All protocols follow: receive -> convert to JSON -> validate -> route -> Kafka/d
 - [x] SharedConfig, env overrides, config reload, serde_yaml_ng migration
 - [x] Source-rule routing, timestamp enrichment
 - [x] Vector agent module scope (DESIGN.md)
+- [x] Merged origin/main (OTLP, plugins, CI) with source-routing-enrichment branch
+- [x] Resolved all merge conflicts (config/mod.rs, Cargo.toml, TODO.md, config.example.yaml, DESIGN.md, Cargo.lock)
 
 ---
 
