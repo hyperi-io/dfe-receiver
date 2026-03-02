@@ -1,3 +1,10 @@
+## [1.9.1](https://github.com/hyperi-io/dfe-receiver/compare/v1.9.0...v1.9.1) (2026-03-02)
+
+
+### Bug Fixes
+
+* update rustlib to v1.8.1, update ci/ai submodules, fix RwLock access ([a338d25](https://github.com/hyperi-io/dfe-receiver/commit/a338d2561a8679de31923afc84e82bfba28bec90))
+
 # [1.9.0](https://github.com/hyperi-io/dfe-receiver/compare/v1.8.7...v1.9.0) (2026-02-25)
 
 
