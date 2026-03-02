@@ -267,10 +267,7 @@ mod tests {
             topic_suffix: "_land".to_string(),
             source_to_topic: HashMap::new(),
             legacy_compat: false,
-            dlq: DlqConfig {
-                enabled: true,
-                topic: "dlq_land".to_string(),
-            },
+            dlq: DlqConfig::default(),
         }
     }
 
@@ -617,7 +614,7 @@ mod tests {
         let routing = RoutingConfig {
             dlq: DlqConfig {
                 enabled: false,
-                topic: "dlq_land".to_string(),
+                ..DlqConfig::default()
             },
             ..default_routing_config()
         };

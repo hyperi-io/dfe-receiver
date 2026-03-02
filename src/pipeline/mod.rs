@@ -20,6 +20,8 @@ use parking_lot::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
+use hyperi_rustlib::dlq::{Dlq, DlqEntry};
+
 use crate::buffer::{BufferManager, MemoryPressure, TieredSink};
 use crate::config::{Config, SharedConfig};
 use crate::error::{Error, Result};
@@ -38,6 +40,7 @@ pub struct PipelineState {
     kafka_sink: Option<Arc<TieredSink<KafkaSink>>>,
     loader_sink: Option<Arc<TieredSink<LoaderSink>>>,
     buffer_manager: Arc<BufferManager>,
+    dlq: Option<Arc<Dlq>>,
     ready: AtomicBool,
 }
 
@@ -75,6 +78,25 @@ impl PipelineState {
             None
         };
 
+        // DLQ (unified rustlib module — cascade: Kafka primary, file fallback)
+        let dlq = if config.routing.dlq.enabled {
+            let dlq_config = config.routing.dlq.to_rustlib_config();
+            let kafka_config = config.kafka.to_rustlib_kafka_config();
+            match Dlq::with_kafka(&dlq_config, "receiver", &kafka_config) {
+                Ok(d) => {
+                    info!(mode = ?dlq_config.mode, "DLQ enabled");
+                    Some(Arc::new(d))
+                }
+                Err(e) => {
+                    warn!(error = %e, "Failed to create DLQ, disabled");
+                    None
+                }
+            }
+        } else {
+            debug!("DLQ disabled by config");
+            None
+        };
+
         Ok(Self {
             shared_config,
             validator: RwLock::new(validator),
@@ -82,6 +104,7 @@ impl PipelineState {
             kafka_sink,
             loader_sink,
             buffer_manager,
+            dlq,
             ready: AtomicBool::new(true),
         })
     }
@@ -288,16 +311,24 @@ impl PipelineState {
         sink.send("", payload).await
     }
 
-    /// Send message to DLQ.
+    /// Send message to DLQ via unified rustlib module (cascade: Kafka → file).
     #[inline]
-    async fn send_to_dlq(&self, payload: &Bytes, _reason: &str) -> Result<()> {
-        let dlq_route = { self.router.read().route_dlq(_reason) };
-
-        match dlq_route {
-            RouteResult::Dlq(topic) | RouteResult::Kafka(topic) => {
-                self.send_to_kafka(&topic, payload.clone()).await
+    async fn send_to_dlq(&self, payload: &Bytes, reason: &str) -> Result<()> {
+        if let Some(ref dlq) = self.dlq {
+            let entry = DlqEntry::new("receiver", reason, payload.to_vec());
+            dlq.send(entry)
+                .await
+                .map_err(|e| Error::Config(format!("DLQ send failed: {e}")))?;
+            Ok(())
+        } else {
+            // Fallback: route through Kafka sink (legacy behaviour)
+            let dlq_route = { self.router.read().route_dlq(reason) };
+            match dlq_route {
+                RouteResult::Dlq(topic) | RouteResult::Kafka(topic) => {
+                    self.send_to_kafka(&topic, payload.clone()).await
+                }
+                RouteResult::Loader => self.send_to_loader(payload.clone()).await,
             }
-            RouteResult::Loader => self.send_to_loader(payload.clone()).await,
         }
     }
 

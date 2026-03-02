@@ -23,13 +23,14 @@ doctest = false
 
 [dependencies]
 # HyperI shared library (from JFrog Cargo registry)
-hyperi-rustlib = { version = ">=1.5", registry = "hyperi", features = [
+hyperi-rustlib = { version = ">=1.10.0", registry = "hyperi", features = [
     "config",
     "config-reload",
     "logger",
     "metrics",
     "http-server",
     "transport-kafka",
+    "dlq-kafka",
     "spool",
     "tiered-sink",
     "runtime",
