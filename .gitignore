@@ -37,3 +37,4 @@ coverage-html/
 coverage.lcov
 .cargo/
 !.cargo/config.toml
+.tmp/

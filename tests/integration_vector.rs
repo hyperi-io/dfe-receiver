@@ -6,16 +6,16 @@
 // License:   FSL-1.1-ALv2
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
-//! Integration tests that use the locally installed Vector binary.
+//! Integration tests that use the Vector binary.
 //!
 //! These tests start a dfe-receiver server and run Vector as a subprocess
-//! configured to send events to the receiver. Tests gracefully skip on
-//! machines where Vector is not installed.
+//! configured to send events to the receiver. The Vector binary is
+//! auto-downloaded and cached by `scripts/fetch-vector.sh` on first run.
 //!
 //! Run with: `cargo test --test integration_vector`
 //!
 //! Requirements:
-//! - `vector` binary in PATH (v0.30+)
+//! - `gh` or `jq` + `curl` (for auto-downloading Vector)
 //! - `openssl` binary in PATH (for HTTPS/TLS test cert generation)
 
 // Allow unwrap/expect in tests - they're the idiomatic way to fail fast
@@ -23,9 +23,9 @@
 #![allow(clippy::expect_used)]
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use dfe_receiver::config::{Config, SharedConfig};
@@ -39,13 +39,47 @@ fn install_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
-/// Check if the `vector` binary is available on this machine.
-fn vector_available() -> bool {
-    Command::new("vector")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+/// Resolve the path to the Vector binary (cached via fetch-vector.sh or system PATH).
+///
+/// Runs the fetch script once per test binary via `OnceLock`. If the script fails
+/// (offline, no `jq`, etc.), falls back to `vector` in PATH.
+fn vector_binary_path() -> Option<&'static PathBuf> {
+    static VECTOR_BIN: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+    VECTOR_BIN
+        .get_or_init(|| {
+            let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+            let fetch_script = repo_root.join("scripts/fetch-vector.sh");
+
+            if fetch_script.exists() {
+                if let Ok(output) = Command::new("bash").arg(&fetch_script).output() {
+                    if output.status.success() {
+                        let path = String::from_utf8_lossy(&output.stdout)
+                            .trim()
+                            .lines()
+                            .last()
+                            .unwrap_or("")
+                            .to_string();
+                        let binary = PathBuf::from(&path);
+                        if binary.exists() {
+                            return Some(binary);
+                        }
+                    } else {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        eprintln!("fetch-vector.sh failed: {stderr}");
+                    }
+                }
+            }
+
+            // Fall back to system PATH
+            Command::new("vector")
+                .arg("--version")
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|_| PathBuf::from("vector"))
+        })
+        .as_ref()
 }
 
 /// Check if `openssl` is available (needed for TLS cert generation).
@@ -107,8 +141,12 @@ fn write_vector_config(path: &Path, config_yaml: &str) {
 ///
 /// Uses `tokio::process::Command` so we don't block the async runtime.
 /// Returns (exit_status_success, stderr_output).
-async fn run_vector_async(config_path: &Path, timeout_secs: u64) -> (bool, String) {
-    let child = tokio::process::Command::new("vector")
+async fn run_vector_async(
+    vector_bin: &Path,
+    config_path: &Path,
+    timeout_secs: u64,
+) -> (bool, String) {
+    let child = tokio::process::Command::new(vector_bin)
         .arg("--config")
         .arg(config_path)
         .arg("--quiet")
@@ -140,8 +178,8 @@ async fn run_vector_async(config_path: &Path, timeout_secs: u64) -> (bool, Strin
 }
 
 /// Validate a Vector config file. Panics if validation fails.
-fn validate_vector_config(config_path: &Path) {
-    let output = Command::new("vector")
+fn validate_vector_config(vector_bin: &Path, config_path: &Path) {
+    let output = Command::new(vector_bin)
         .arg("validate")
         .arg("--no-environment")
         .arg("--config-yaml")
@@ -222,10 +260,10 @@ fn assert_no_vector_errors(stderr: &str) {
 /// without errors.
 #[tokio::test]
 async fn test_vector_http_sink() {
-    if !vector_available() {
-        eprintln!("Skipping test: vector binary not found in PATH");
+    let vector_bin = if let Some(path) = vector_binary_path() { path } else {
+        eprintln!("Skipping test: vector binary not available");
         return;
-    }
+    };
 
     let port = random_port();
     let config = test_config(port);
@@ -265,9 +303,9 @@ sinks:
     );
 
     write_vector_config(&config_path, &vector_config);
-    validate_vector_config(&config_path);
+    validate_vector_config(vector_bin, &config_path);
 
-    let (success, stderr) = run_vector_async(&config_path, 30).await;
+    let (success, stderr) = run_vector_async(vector_bin, &config_path, 30).await;
 
     if !success {
         eprintln!("Vector stderr: {stderr}");
@@ -289,10 +327,10 @@ sinks:
 async fn test_vector_https_sink() {
     install_crypto_provider();
 
-    if !vector_available() {
-        eprintln!("Skipping test: vector binary not found in PATH");
+    let vector_bin = if let Some(path) = vector_binary_path() { path } else {
+        eprintln!("Skipping test: vector binary not available");
         return;
-    }
+    };
 
     if !openssl_available() {
         eprintln!("Skipping test: openssl binary not found in PATH");
@@ -348,9 +386,9 @@ sinks:
     );
 
     write_vector_config(&config_path, &vector_config);
-    validate_vector_config(&config_path);
+    validate_vector_config(vector_bin, &config_path);
 
-    let (success, stderr) = run_vector_async(&config_path, 30).await;
+    let (success, stderr) = run_vector_async(vector_bin, &config_path, 30).await;
 
     if !success {
         eprintln!("Vector stderr: {stderr}");
@@ -370,10 +408,10 @@ sinks:
 /// at the gRPC endpoint, and verifies clean delivery.
 #[tokio::test]
 async fn test_vector_grpc_sink() {
-    if !vector_available() {
-        eprintln!("Skipping test: vector binary not found in PATH");
+    let vector_bin = if let Some(path) = vector_binary_path() { path } else {
+        eprintln!("Skipping test: vector binary not available");
         return;
-    }
+    };
 
     let http_port = random_port();
     let grpc_port = random_port();
@@ -451,9 +489,9 @@ sinks:
     );
 
     write_vector_config(&config_path, &vector_config);
-    validate_vector_config(&config_path);
+    validate_vector_config(vector_bin, &config_path);
 
-    let (success, stderr) = run_vector_async(&config_path, 30).await;
+    let (success, stderr) = run_vector_async(vector_bin, &config_path, 30).await;
 
     if !success {
         eprintln!("Vector stderr: {stderr}");
@@ -475,10 +513,10 @@ sinks:
 async fn test_vector_grpc_tls_sink() {
     install_crypto_provider();
 
-    if !vector_available() {
-        eprintln!("Skipping test: vector binary not found in PATH");
+    let vector_bin = if let Some(path) = vector_binary_path() { path } else {
+        eprintln!("Skipping test: vector binary not available");
         return;
-    }
+    };
 
     if !openssl_available() {
         eprintln!("Skipping test: openssl binary not found in PATH");
@@ -572,9 +610,9 @@ sinks:
     );
 
     write_vector_config(&config_path, &vector_config);
-    validate_vector_config(&config_path);
+    validate_vector_config(vector_bin, &config_path);
 
-    let (success, stderr) = run_vector_async(&config_path, 15).await;
+    let (success, stderr) = run_vector_async(vector_bin, &config_path, 15).await;
 
     if !success {
         eprintln!("Vector stderr: {stderr}");
@@ -597,10 +635,10 @@ sinks:
 async fn test_vector_http_bearer_auth() {
     use dfe_receiver::config::BearerConfig;
 
-    if !vector_available() {
-        eprintln!("Skipping test: vector binary not found in PATH");
+    let vector_bin = if let Some(path) = vector_binary_path() { path } else {
+        eprintln!("Skipping test: vector binary not available");
         return;
-    }
+    };
 
     let port = random_port();
     let mut config = test_config(port);
@@ -649,9 +687,9 @@ sinks:
     );
 
     write_vector_config(&config_path, &vector_config);
-    validate_vector_config(&config_path);
+    validate_vector_config(vector_bin, &config_path);
 
-    let (success, stderr) = run_vector_async(&config_path, 30).await;
+    let (success, stderr) = run_vector_async(vector_bin, &config_path, 30).await;
 
     if !success {
         eprintln!("Vector stderr: {stderr}");
