@@ -719,16 +719,100 @@ pub struct DlqConfig {
     /// Enable DLQ.
     pub enabled: bool,
 
-    /// DLQ topic name.
+    /// Backend mode: cascade (default), fan_out, file_only, kafka_only.
+    pub mode: String,
+
+    /// DLQ topic name (used as common_topic for Kafka backend).
     pub topic: String,
+
+    /// Topic suffix for per-table routing.
+    pub topic_suffix: String,
+
+    /// File backend settings.
+    pub file_enabled: bool,
+    pub file_path: String,
+
+    /// Kafka backend settings.
+    pub kafka_enabled: bool,
 }
 
 impl Default for DlqConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            mode: "cascade".to_string(),
             topic: "dlq_land".to_string(),
+            topic_suffix: ".dlq".to_string(),
+            file_enabled: true,
+            file_path: "/var/spool/dfe/dlq".to_string(),
+            kafka_enabled: true,
         }
+    }
+}
+
+impl DlqConfig {
+    /// Convert to rustlib DlqConfig for the unified DLQ module.
+    pub fn to_rustlib_config(&self) -> hyperi_rustlib::dlq::DlqConfig {
+        use hyperi_rustlib::dlq::{DlqMode, FileDlqConfig, KafkaDlqConfig};
+
+        let mode = match self.mode.as_str() {
+            "fan_out" => DlqMode::FanOut,
+            "file_only" => DlqMode::FileOnly,
+            "kafka_only" => DlqMode::KafkaOnly,
+            _ => DlqMode::Cascade,
+        };
+
+        hyperi_rustlib::dlq::DlqConfig {
+            enabled: self.enabled,
+            mode,
+            file: FileDlqConfig {
+                enabled: self.file_enabled,
+                path: self.file_path.clone().into(),
+                ..FileDlqConfig::default()
+            },
+            kafka: KafkaDlqConfig {
+                enabled: self.kafka_enabled,
+                topic_suffix: self.topic_suffix.clone(),
+                common_topic: self.topic.clone(),
+                ..KafkaDlqConfig::default()
+            },
+        }
+    }
+}
+
+impl KafkaConfig {
+    /// Convert to rustlib transport KafkaConfig for DLQ producer.
+    pub fn to_rustlib_kafka_config(&self) -> hyperi_rustlib::transport::KafkaConfig {
+        let mut config = hyperi_rustlib::transport::KafkaConfig {
+            brokers: self.brokers.clone(),
+            client_id: format!("{}-dlq", self.client_id),
+            ..Default::default()
+        };
+
+        // SASL
+        if let Some(ref sasl) = self.sasl {
+            if sasl.enabled {
+                let protocol = if self.tls.enabled {
+                    "sasl_ssl"
+                } else {
+                    "sasl_plaintext"
+                };
+                config.security_protocol = protocol.to_string();
+                config.sasl_mechanism = Some(sasl.mechanism.to_uppercase());
+                config.sasl_username = Some(sasl.username.clone());
+                config.sasl_password = Some(sasl.password.clone());
+            }
+        }
+
+        // TLS
+        if self.tls.enabled && self.sasl.as_ref().map_or(true, |s| !s.enabled) {
+            config.security_protocol = "ssl".to_string();
+        }
+        config.ssl_ca_location = self.tls.ca_file.clone();
+        config.ssl_certificate_location = self.tls.cert_file.clone();
+        config.ssl_key_location = self.tls.key_file.clone();
+
+        config
     }
 }
 
