@@ -1,3 +1,10 @@
+## [1.9.4](https://github.com/hyperi-io/dfe-receiver/compare/v1.9.3...v1.9.4) (2026-03-02)
+
+
+### Bug Fixes
+
+* replace hard-coded DLQ routing with unified rustlib dlq module ([13c46a2](https://github.com/hyperi-io/dfe-receiver/commit/13c46a218855ba0f9c8070847ea99f1fff7e921e))
+
 ## [1.9.3](https://github.com/hyperi-io/dfe-receiver/compare/v1.9.2...v1.9.3) (2026-03-02)
 
 
