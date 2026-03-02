@@ -29,3 +29,11 @@ venv/
 htmlcov/
 .mypy_cache/
 .ruff_cache/
+**/*.rs.bk
+*.pdb
+*.profraw
+*.profdata
+coverage-html/
+coverage.lcov
+.cargo/
+!.cargo/config.toml

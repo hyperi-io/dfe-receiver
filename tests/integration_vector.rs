@@ -28,7 +28,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
-use dfe_receiver::config::Config;
+use dfe_receiver::config::{Config, SharedConfig};
 use dfe_receiver::metrics::Metrics;
 use dfe_receiver::pipeline::PipelineState;
 use dfe_receiver::server::http;
@@ -78,7 +78,7 @@ fn test_config(http_port: u16) -> Config {
 async fn start_http_server(config: Config) -> CancellationToken {
     let metrics = Arc::new(Metrics::new());
     let shutdown = CancellationToken::new();
-    let pipeline = Arc::new(PipelineState::new(config.clone()).expect("Failed to create pipeline"));
+    let pipeline = Arc::new(PipelineState::new(SharedConfig::new(config.clone())).expect("Failed to create pipeline"));
 
     let server_shutdown = shutdown.clone();
     let server_metrics = metrics.clone();
@@ -389,7 +389,7 @@ async fn test_vector_grpc_sink() {
 
     let metrics = Arc::new(Metrics::new());
     let shutdown = CancellationToken::new();
-    let pipeline = Arc::new(PipelineState::new(config.clone()).expect("Failed to create pipeline"));
+    let pipeline = Arc::new(PipelineState::new(SharedConfig::new(config.clone())).expect("Failed to create pipeline"));
 
     // Spawn HTTP server
     let http_shutdown = shutdown.clone();
@@ -503,7 +503,7 @@ async fn test_vector_grpc_tls_sink() {
 
     let metrics = Arc::new(Metrics::new());
     let shutdown = CancellationToken::new();
-    let pipeline = Arc::new(PipelineState::new(config.clone()).expect("Failed to create pipeline"));
+    let pipeline = Arc::new(PipelineState::new(SharedConfig::new(config.clone())).expect("Failed to create pipeline"));
 
     // Spawn HTTP server
     let http_shutdown = shutdown.clone();

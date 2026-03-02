@@ -251,7 +251,7 @@ impl PipelineState {
         self.buffer_manager.add_bytes(payload_size);
 
         // Validate
-        let result = match self.validator.validate(&payload) {
+        let result = match self.validator.read().validate(&payload) {
             ValidationResult::Valid => self.send_to_kafka(topic, payload).await,
             ValidationResult::Dlq(reason) => {
                 debug!(reason = %reason, "Message validation failed, routing to DLQ");
