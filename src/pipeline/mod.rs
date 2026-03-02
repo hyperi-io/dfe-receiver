@@ -158,7 +158,8 @@ impl PipelineState {
     /// Check if enrichment (timestamp injection, source rules) is enabled.
     #[inline]
     fn enrichment_enabled(&self) -> bool {
-        self.shared_config.with(|c| c.server.auth.include_common_header)
+        self.shared_config
+            .with(|c| c.server.auth.include_common_header)
     }
 
     /// Inject `_timestamp_receiver` into a validated JSON object payload.

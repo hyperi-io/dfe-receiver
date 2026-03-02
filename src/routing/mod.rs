@@ -155,9 +155,10 @@ impl Router {
                     }
                 }
                 "key_value_set" => {
-                    if let (Some(val), Some(match_val)) =
-                        (self.extract_field_cow(payload, &rule.field), &rule.match_value)
-                    {
+                    if let (Some(val), Some(match_val)) = (
+                        self.extract_field_cow(payload, &rule.field),
+                        &rule.match_value,
+                    ) {
                         if val.as_ref() == match_val.as_str() {
                             return rule.source.clone();
                         }
@@ -291,7 +292,11 @@ mod tests {
 
     #[test]
     fn test_no_rules_uses_default() {
-        let router = Router::new(&default_routing_config(), &default_destinations_config(), true);
+        let router = Router::new(
+            &default_routing_config(),
+            &default_destinations_config(),
+            true,
+        );
         let payload = Bytes::from(r#"{"data": "test"}"#);
 
         match router.route(&payload) {
@@ -509,7 +514,11 @@ mod tests {
 
     #[test]
     fn test_legacy_compat_enabled() {
-        let router = Router::new(&legacy_routing_config(), &default_destinations_config(), true);
+        let router = Router::new(
+            &legacy_routing_config(),
+            &default_destinations_config(),
+            true,
+        );
         let payload = Bytes::from(r#"{"event_category": "auth", "data": "test"}"#);
 
         match router.route(&payload) {
@@ -520,7 +529,11 @@ mod tests {
 
     #[test]
     fn test_legacy_compat_nested_field() {
-        let router = Router::new(&legacy_routing_config(), &default_destinations_config(), true);
+        let router = Router::new(
+            &legacy_routing_config(),
+            &default_destinations_config(),
+            true,
+        );
         let payload =
             Bytes::from(r#"{"tags": {"event": {"category": "network"}}, "data": "test"}"#);
 
@@ -532,7 +545,11 @@ mod tests {
 
     #[test]
     fn test_legacy_compat_disabled() {
-        let router = Router::new(&default_routing_config(), &default_destinations_config(), true);
+        let router = Router::new(
+            &default_routing_config(),
+            &default_destinations_config(),
+            true,
+        );
         let payload = Bytes::from(r#"{"event_category": "auth", "data": "test"}"#);
 
         // No rules, no legacy compat → default source
@@ -544,7 +561,11 @@ mod tests {
 
     #[test]
     fn test_legacy_compat_field_priority() {
-        let router = Router::new(&legacy_routing_config(), &default_destinations_config(), true);
+        let router = Router::new(
+            &legacy_routing_config(),
+            &default_destinations_config(),
+            true,
+        );
         // Both legacy fields present - tags.event.category has priority (first rule)
         let payload = Bytes::from(
             r#"{"tags": {"event": {"category": "network"}}, "event_category": "auth"}"#,
@@ -579,7 +600,11 @@ mod tests {
 
     #[test]
     fn test_route_dlq() {
-        let router = Router::new(&default_routing_config(), &default_destinations_config(), true);
+        let router = Router::new(
+            &default_routing_config(),
+            &default_destinations_config(),
+            true,
+        );
 
         match router.route_dlq("test error") {
             RouteResult::Dlq(topic) => assert_eq!(topic, "dlq_land"),
@@ -648,7 +673,9 @@ mod tests {
         ] {
             let payload = Bytes::from(payload_str);
             match router.route(&payload) {
-                RouteResult::Kafka(topic) => assert_eq!(topic, "dfe_land", "for payload: {payload_str}"),
+                RouteResult::Kafka(topic) => {
+                    assert_eq!(topic, "dfe_land", "for payload: {payload_str}")
+                }
                 _ => panic!("expected Kafka route for payload: {payload_str}"),
             }
         }

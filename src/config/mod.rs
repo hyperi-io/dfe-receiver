@@ -1193,14 +1193,11 @@ mod tests {
 
     #[test]
     fn test_env_override_metrics_address() {
-        with_env(
-            &[("DFE_RECEIVER_METRICS_ADDRESS", "0.0.0.0:8888")],
-            || {
-                let mut config = Config::default();
-                apply_env_overrides(&mut config);
-                assert_eq!(config.metrics.address, "0.0.0.0:8888");
-            },
-        );
+        with_env(&[("DFE_RECEIVER_METRICS_ADDRESS", "0.0.0.0:8888")], || {
+            let mut config = Config::default();
+            apply_env_overrides(&mut config);
+            assert_eq!(config.metrics.address, "0.0.0.0:8888");
+        });
     }
 
     #[test]
@@ -1229,7 +1226,10 @@ mod tests {
         apply_env_overrides(&mut config);
         assert_eq!(config.server.bind_address, original.server.bind_address);
         assert_eq!(config.kafka.brokers, original.kafka.brokers);
-        assert_eq!(config.routing.default_source, original.routing.default_source);
+        assert_eq!(
+            config.routing.default_source,
+            original.routing.default_source
+        );
         assert_eq!(config.config_reload_secs, original.config_reload_secs);
     }
 }

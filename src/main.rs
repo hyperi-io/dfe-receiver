@@ -65,7 +65,11 @@ struct Args {
     log_format: String,
 
     /// Metrics server address.
-    #[arg(long, env = "DFE_RECEIVER_METRICS_ADDR", default_value = "0.0.0.0:9090")]
+    #[arg(
+        long,
+        env = "DFE_RECEIVER_METRICS_ADDR",
+        default_value = "0.0.0.0:9090"
+    )]
     metrics_addr: String,
 
     /// Validate configuration and exit.
@@ -167,13 +171,10 @@ async fn main() -> anyhow::Result<()> {
         let reloader = ConfigReloader::new(
             reloader_config,
             shared_config.clone(),
-            move || {
-                reload_config_from_path(config_path_str.as_deref())
-            },
+            move || reload_config_from_path(config_path_str.as_deref()),
             |cfg| {
-                cfg.validate().map_err(|e| {
-                    Box::new(e) as Box<dyn std::error::Error + Send + Sync>
-                })
+                cfg.validate()
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
             },
         );
 
@@ -186,7 +187,10 @@ async fn main() -> anyhow::Result<()> {
             while config_rx.changed().await.is_ok() {
                 let new_config = reload_state.config();
                 reload_state.rebuild_components(&new_config);
-                info!(version = *config_rx.borrow(), "Pipeline components rebuilt after config reload");
+                info!(
+                    version = *config_rx.borrow(),
+                    "Pipeline components rebuilt after config reload"
+                );
             }
         });
 

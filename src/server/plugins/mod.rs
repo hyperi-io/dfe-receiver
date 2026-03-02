@@ -252,12 +252,11 @@ impl ProtocolHandler for PluginHandler {
             .map_err(|e| Error::Plugin(format!("join task error: {e}")))?;
 
         // Handle thread panic
-        let plugin_result = join_result
-            .map_err(|_| Error::Plugin(format!("plugin '{name}' thread panicked")))?;
+        let plugin_result =
+            join_result.map_err(|_| Error::Plugin(format!("plugin '{name}' thread panicked")))?;
 
         // Handle plugin start error
-        plugin_result
-            .map_err(|e| Error::Plugin(format!("plugin '{name}' failed: {e}")))?;
+        plugin_result.map_err(|e| Error::Plugin(format!("plugin '{name}' failed: {e}")))?;
 
         Ok(())
     }
