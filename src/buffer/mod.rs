@@ -101,6 +101,12 @@ impl BufferManager {
         self.total_bytes.load(Ordering::Relaxed)
     }
 
+    /// Get configured memory limit.
+    #[inline]
+    pub fn memory_limit(&self) -> u64 {
+        self.memory_limit
+    }
+
     /// Update pressure state.
     #[inline]
     fn update_pressure(&self, total: u64) {
