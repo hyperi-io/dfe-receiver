@@ -1,3 +1,10 @@
+## [1.9.2](https://github.com/hyperi-io/dfe-receiver/compare/v1.9.1...v1.9.2) (2026-03-02)
+
+
+### Bug Fixes
+
+* cargo fmt formatting ([8d0c8ff](https://github.com/hyperi-io/dfe-receiver/commit/8d0c8ffb86ed2cab4a2a1ebfc300a8dbb195339e))
+
 ## [1.9.1](https://github.com/hyperi-io/dfe-receiver/compare/v1.9.0...v1.9.1) (2026-03-02)
 
 
