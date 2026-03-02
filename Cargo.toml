@@ -34,6 +34,7 @@ hyperi-rustlib = { version = ">=1.5", registry = "hyperi", features = [
     "tiered-sink",
     "runtime",
     "secrets",
+    "scaling",
 ] }
 
 # Async runtime

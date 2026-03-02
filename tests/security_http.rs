@@ -58,7 +58,7 @@ async fn start_test_server(config: Config) -> (String, CancellationToken) {
         .and_then(|p| p.parse::<u16>().ok())
         .unwrap_or(8080);
 
-    let metrics = Arc::new(Metrics::new());
+    let metrics = Arc::new(Metrics::default());
     let shutdown = CancellationToken::new();
     let pipeline = Arc::new(
         PipelineState::new(SharedConfig::new(config.clone())).expect("Failed to create pipeline"),

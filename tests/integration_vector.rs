@@ -110,7 +110,7 @@ fn test_config(http_port: u16) -> Config {
 
 /// Start a test HTTP server and return the shutdown token.
 async fn start_http_server(config: Config) -> CancellationToken {
-    let metrics = Arc::new(Metrics::new());
+    let metrics = Arc::new(Metrics::default());
     let shutdown = CancellationToken::new();
     let pipeline = Arc::new(
         PipelineState::new(SharedConfig::new(config.clone())).expect("Failed to create pipeline"),
@@ -427,7 +427,7 @@ async fn test_vector_grpc_sink() {
     config.grpc.enabled = true;
     config.grpc.bind_address = format!("127.0.0.1:{grpc_port}");
 
-    let metrics = Arc::new(Metrics::new());
+    let metrics = Arc::new(Metrics::default());
     let shutdown = CancellationToken::new();
     let pipeline = Arc::new(
         PipelineState::new(SharedConfig::new(config.clone())).expect("Failed to create pipeline"),
@@ -543,7 +543,7 @@ async fn test_vector_grpc_tls_sink() {
     config.grpc.tls.cert_file = Some(cert_path.to_str().unwrap().to_string());
     config.grpc.tls.key_file = Some(key_path.to_str().unwrap().to_string());
 
-    let metrics = Arc::new(Metrics::new());
+    let metrics = Arc::new(Metrics::default());
     let shutdown = CancellationToken::new();
     let pipeline = Arc::new(
         PipelineState::new(SharedConfig::new(config.clone())).expect("Failed to create pipeline"),
