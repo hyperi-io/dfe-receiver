@@ -20,7 +20,7 @@
 //! - `receiver_body_size_rejected_total` - Oversized body rejections
 //! - `receiver_tls_handshake_failures_total` - TLS failures
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
 /// Reason for authentication failure (for metrics labels).
 #[derive(Debug, Clone, Copy)]
@@ -80,6 +80,10 @@ pub struct Metrics {
     active_connections: AtomicU64,
     memory_used_bytes: AtomicU64,
     memory_limit_bytes: AtomicU64,
+
+    // Circuit breaker state (0=Closed, 1=Open, 2=HalfOpen)
+    circuit_state: AtomicU8,
+    circuit_consecutive_failures: AtomicU64,
 
     // Rate tracking for KEDA
     rate_window: RwLock<RateWindow>,
@@ -163,6 +167,8 @@ impl Metrics {
             active_connections: AtomicU64::new(0),
             memory_used_bytes: AtomicU64::new(0),
             memory_limit_bytes: AtomicU64::new(0),
+            circuit_state: AtomicU8::new(0),
+            circuit_consecutive_failures: AtomicU64::new(0),
             rate_window: RwLock::new(RateWindow::new(Duration::from_secs(60))),
         }
     }
@@ -333,10 +339,65 @@ impl Metrics {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    // ==========================================================================
+    // Gauge getters (for pipeline metric updates)
+    // ==========================================================================
+
+    /// Get batch queue size.
+    #[inline]
+    pub fn get_batch_queue_size(&self) -> u64 {
+        self.batch_queue_size.load(Ordering::Relaxed)
+    }
+
     /// Get batch queue bytes for backpressure calculation.
     #[inline]
     pub fn get_batch_queue_bytes(&self) -> u64 {
         self.batch_queue_bytes.load(Ordering::Relaxed)
+    }
+
+    /// Get spilled messages counter.
+    #[inline]
+    pub fn get_messages_spilled(&self) -> u64 {
+        self.messages_spilled.load(Ordering::Relaxed)
+    }
+
+    /// Get drained messages counter.
+    #[inline]
+    pub fn get_messages_drained(&self) -> u64 {
+        self.messages_drained.load(Ordering::Relaxed)
+    }
+
+    // ==========================================================================
+    // Circuit breaker metrics
+    // ==========================================================================
+
+    /// Set circuit breaker state. 0=Closed, 1=Open, 2=HalfOpen.
+    #[inline]
+    pub fn set_circuit_state(&self, state: crate::buffer::CircuitState, failures: u32) {
+        let code = match state {
+            crate::buffer::CircuitState::Closed => 0,
+            crate::buffer::CircuitState::Open => 1,
+            crate::buffer::CircuitState::HalfOpen => 2,
+        };
+        self.circuit_state.store(code, Ordering::Relaxed);
+        self.circuit_consecutive_failures
+            .store(failures as u64, Ordering::Relaxed);
+    }
+
+    /// Check if circuit breaker is open (sink down).
+    #[inline]
+    pub fn is_circuit_open(&self) -> bool {
+        self.circuit_state.load(Ordering::Relaxed) == 1
+    }
+
+    /// Get circuit breaker state as string.
+    fn circuit_state_str(&self) -> &'static str {
+        match self.circuit_state.load(Ordering::Relaxed) {
+            0 => "closed",
+            1 => "open",
+            2 => "half_open",
+            _ => "unknown",
+        }
     }
 
     /// Get request rate per second.
@@ -344,18 +405,21 @@ impl Metrics {
         self.rate_window.read().rate_per_second()
     }
 
-    /// Calculate compound KEDA scaling metric.
+    // ==========================================================================
+    // KEDA composite scaling metric
+    // ==========================================================================
+
+    /// Calculate gated KEDA scaling metric.
     ///
-    /// Returns a value from 0.0-100.0 representing load:
-    /// - 0-25: Low load, scale down
-    /// - 25-50: Normal load
-    /// - 50-75: Medium load
-    /// - 75-100: High load, scale up
+    /// Returns 0.0-100.0. Uses gated logic:
+    /// - Circuit breaker open → 0 (don't scale; sink is down, more pods won't help)
+    /// - Memory pressure high → 100 (scale immediately; about to OOM)
+    /// - Otherwise → weighted composite of queue depth, request rate, memory, connections
     pub fn keda_scaling_metric(&self) -> f64 {
-        let queue_size = self.batch_queue_size.load(Ordering::Relaxed) as f64;
-        let spool_messages = self.spool_messages.load(Ordering::Relaxed) as f64;
-        let active_conns = self.active_connections.load(Ordering::Relaxed) as f64;
-        let rate = self.request_rate();
+        // Gate: circuit breaker open — sink is down, scaling won't help
+        if self.is_circuit_open() {
+            return 0.0;
+        }
 
         let memory_used = self.memory_used_bytes.load(Ordering::Relaxed) as f64;
         let memory_limit = self.memory_limit_bytes.load(Ordering::Relaxed) as f64;
@@ -365,14 +429,24 @@ impl Metrics {
             0.0
         };
 
-        // Weighted components (tuned for PB/s scale)
-        let queue_score = (queue_size / 10_000.0).min(1.0) * 25.0; // 10K queue = 25%
-        let spool_score = (spool_messages / 1_000.0).min(1.0) * 20.0; // 1K spilled = 20%
-        let conn_score = (active_conns / 1_000.0).min(1.0) * 15.0; // 1K conns = 15%
-        let rate_score = (rate / 100_000.0).min(1.0) * 25.0; // 100K/s = 25%
-        let memory_score = memory_ratio * 15.0; // 100% memory = 15%
+        // Gate: high memory pressure — scale immediately before OOM
+        if memory_ratio >= 0.8 {
+            return 100.0;
+        }
 
-        (queue_score + spool_score + conn_score + rate_score + memory_score).min(100.0)
+        let queue_size = self.batch_queue_size.load(Ordering::Relaxed) as f64;
+        let active_conns = self.active_connections.load(Ordering::Relaxed) as f64;
+        let rate = self.request_rate();
+        let spilled = self.messages_spilled.load(Ordering::Relaxed) as f64;
+
+        // Weighted composite (tuned for PB/s scale ingestion)
+        let rate_score = (rate / 100_000.0).min(1.0) * 30.0; // 100K req/s = 30%
+        let queue_score = (queue_size / 10_000.0).min(1.0) * 25.0; // 10K queued = 25%
+        let memory_score = memory_ratio * 25.0; // Linear memory = 25%
+        let conn_score = (active_conns / 1_000.0).min(1.0) * 10.0; // 1K conns = 10%
+        let spill_score = (spilled / 1_000.0).min(1.0) * 10.0; // 1K spilled = 10%
+
+        (rate_score + queue_score + memory_score + conn_score + spill_score).min(100.0)
     }
 
     /// Render metrics in Prometheus format.
@@ -500,9 +574,27 @@ impl Metrics {
             self.memory_limit_bytes.load(Ordering::Relaxed)
         ));
 
+        // Circuit breaker
+        output.push_str(
+            "# HELP receiver_circuit_breaker_state Circuit breaker state (0=closed, 1=open, 2=half_open)\n",
+        );
+        output.push_str("# TYPE receiver_circuit_breaker_state gauge\n");
+        output.push_str(&format!(
+            "receiver_circuit_breaker_state{{state=\"{}\"}} {}\n",
+            self.circuit_state_str(),
+            self.circuit_state.load(Ordering::Relaxed)
+        ));
+
+        output.push_str("# HELP receiver_circuit_breaker_failures Consecutive sink failures\n");
+        output.push_str("# TYPE receiver_circuit_breaker_failures gauge\n");
+        output.push_str(&format!(
+            "receiver_circuit_breaker_failures {}\n",
+            self.circuit_consecutive_failures.load(Ordering::Relaxed)
+        ));
+
         // KEDA scaling metric
         output.push_str(
-            "# HELP receiver_keda_scaling_metric Compound scaling metric for KEDA (0-100)\n",
+            "# HELP receiver_keda_scaling_metric Gated scaling metric for KEDA (0-100)\n",
         );
         output.push_str("# TYPE receiver_keda_scaling_metric gauge\n");
         output.push_str(&format!(

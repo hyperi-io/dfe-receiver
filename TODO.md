@@ -122,7 +122,12 @@ All protocols follow: receive -> convert to JSON -> validate -> route -> Kafka/d
   3. [ ] Update ci submodule to v1.59.0+
   4. [ ] Update publish workflow for container inputs
   5. [ ] Test: trigger release, verify `ghcr.io/hyperi-io/dfe-receiver`
-- [ ] KEDA scaling metrics endpoint
+- [ ] KEDA scaling metrics endpoint — expose backpressure metrics for KEDA ScaledObject
+  - CPU utilisation (process-level)
+  - Consumer group lag (Kafka topic lag via rdkafka stats)
+  - In-memory buffer saturation (TieredSink queue depth / capacity)
+  - Circuit breaker state (open/closed/half-open)
+  - Endpoint: `/metrics/keda` or Prometheus `/metrics` with KEDA-compatible labels
 
 ### Medium Priority
 

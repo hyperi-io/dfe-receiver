@@ -13,6 +13,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use parking_lot::RwLock;
@@ -305,6 +306,34 @@ impl PipelineState {
         &self.buffer_manager
     }
 
+    /// Snapshot pipeline state into metrics gauges.
+    ///
+    /// Called every second by the orchestrator. Samples buffer manager and
+    /// tiered sink stats without touching the hot path.
+    pub async fn update_metrics(&self, metrics: &Metrics) {
+        // Memory usage
+        metrics.set_memory_usage(
+            self.buffer_manager.total_bytes(),
+            self.buffer_manager.memory_limit(),
+        );
+
+        // Kafka sink stats
+        let mut total_queue = 0u64;
+        if let Some(ref kafka) = self.kafka_sink {
+            let stats = kafka.stats().await;
+            total_queue += stats.queue_size as u64;
+            metrics.set_circuit_state(stats.circuit_state, stats.consecutive_failures);
+        }
+
+        // Loader sink stats
+        if let Some(ref loader) = self.loader_sink {
+            let stats = loader.stats().await;
+            total_queue += stats.queue_size as u64;
+        }
+
+        metrics.set_batch_queue_size(total_queue);
+    }
+
     /// Reload configuration, rebuilding router and validator.
     ///
     /// Called on SIGHUP or periodic reload. Sinks are not rebuilt
@@ -342,7 +371,6 @@ impl PipelineState {
 pub struct Orchestrator {
     state: Arc<PipelineState>,
     shared_config: SharedConfig,
-    #[allow(dead_code)]
     metrics: Arc<Metrics>,
     shutdown: CancellationToken,
 }
@@ -382,6 +410,22 @@ impl Orchestrator {
         if let Some(ref loader) = self.state.loader_sink {
             loader.clone().start_drain_task(self.shutdown.clone());
         }
+
+        // Periodic metrics update (1s interval)
+        let metrics_state = Arc::clone(&self.state);
+        let metrics_ref = Arc::clone(&self.metrics);
+        let metrics_shutdown = self.shutdown.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        metrics_state.update_metrics(&metrics_ref).await;
+                    }
+                    _ = metrics_shutdown.cancelled() => break,
+                }
+            }
+        });
 
         // Wait for shutdown
         self.shutdown.cancelled().await;
