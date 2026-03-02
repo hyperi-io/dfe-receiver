@@ -1,3 +1,12 @@
+## [1.9.3](https://github.com/hyperi-io/dfe-receiver/compare/v1.9.2...v1.9.3) (2026-03-02)
+
+
+### Bug Fixes
+
+* auto-download vector binary for integration tests ([8556d8f](https://github.com/hyperi-io/dfe-receiver/commit/8556d8fe0381360e646b84385da4a0593741d3df))
+* migrate scaling metric to rustlib ScalingPressure engine ([786fa7c](https://github.com/hyperi-io/dfe-receiver/commit/786fa7c1ec70f5def75aafab2b338fe85f05ad11))
+* wire up KEDA scaling metric with gated composite logic ([2e12d59](https://github.com/hyperi-io/dfe-receiver/commit/2e12d59019cbbe9cac7c6ec57d6a3d93d0f4e295))
+
 ## [1.9.2](https://github.com/hyperi-io/dfe-receiver/compare/v1.9.1...v1.9.2) (2026-03-02)
 
 
