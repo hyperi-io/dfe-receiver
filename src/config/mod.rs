@@ -27,6 +27,8 @@ use hyperi_rustlib::config::{self, ConfigOptions};
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
+use hyperi_rustlib::scaling::{ScalingComponent, ScalingPressure, ScalingPressureConfig};
+
 use crate::error::{Error, Result};
 
 /// Environment variable prefix for configuration.
@@ -72,6 +74,9 @@ pub struct Config {
     /// Metrics configuration.
     pub metrics: MetricsConfig,
 
+    /// Scaling pressure configuration for KEDA autoscaling.
+    pub scaling: ScalingConfig,
+
     /// Periodic config reload interval in seconds (0 = disabled, SIGHUP only).
     #[serde(default)]
     pub config_reload_secs: u64,
@@ -98,6 +103,7 @@ impl Default for Config {
             loader: LoaderConfig::default(),
             buffer: BufferConfig::default(),
             metrics: MetricsConfig::default(),
+            scaling: ScalingConfig::default(),
             config_reload_secs: 0,
             config_path: None,
             #[cfg(feature = "plugins")]
@@ -297,6 +303,18 @@ fn apply_env_overrides(config: &mut Config) {
     if let Ok(v) = env_var("METRICS_ADDRESS") {
         config.metrics.address = v;
         debug!("Override: metrics.address from env");
+    }
+
+    // Scaling pressure
+    if let Ok(v) = env_var("SCALING_ENABLED") {
+        config.scaling.enabled = matches!(v.to_lowercase().as_str(), "true" | "1" | "yes");
+        debug!("Override: scaling.enabled from env");
+    }
+    if let Ok(v) = env_var("SCALING_MEMORY_GATE_THRESHOLD") {
+        if let Ok(n) = v.parse() {
+            config.scaling.memory_gate_threshold = n;
+            debug!("Override: scaling.memory_gate_threshold from env");
+        }
     }
 
     // Config reload
@@ -929,6 +947,85 @@ impl Default for MetricsConfig {
             enabled: true,
             address: "0.0.0.0:9090".to_string(),
         }
+    }
+}
+
+/// Scaling pressure configuration for KEDA autoscaling.
+///
+/// Configures the weighted composite metric that KEDA uses to scale the receiver.
+/// Each component has a weight (relative importance) and saturation point (value
+/// at which it contributes its full weight to the composite).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScalingConfig {
+    /// Enable scaling pressure calculation.
+    pub enabled: bool,
+
+    /// Memory usage ratio that triggers the memory gate (0.0-1.0).
+    pub memory_gate_threshold: f64,
+
+    /// Weight for request rate component (default 0.30).
+    pub weight_request_rate: f64,
+
+    /// Weight for queue depth component (default 0.25).
+    pub weight_queue_depth: f64,
+
+    /// Weight for memory component (default 0.25).
+    pub weight_memory: f64,
+
+    /// Weight for active connections component (default 0.10).
+    pub weight_connections: f64,
+
+    /// Weight for spilled messages component (default 0.10).
+    pub weight_spill: f64,
+
+    /// Saturation point for request rate (req/s).
+    pub saturation_request_rate: f64,
+
+    /// Saturation point for queue depth (messages).
+    pub saturation_queue_depth: f64,
+
+    /// Saturation point for active connections.
+    pub saturation_connections: f64,
+
+    /// Saturation point for spilled messages.
+    pub saturation_spill: f64,
+}
+
+impl Default for ScalingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            memory_gate_threshold: 0.8,
+            weight_request_rate: 0.30,
+            weight_queue_depth: 0.25,
+            weight_memory: 0.25,
+            weight_connections: 0.10,
+            weight_spill: 0.10,
+            saturation_request_rate: 100_000.0,
+            saturation_queue_depth: 10_000.0,
+            saturation_connections: 1_000.0,
+            saturation_spill: 1_000.0,
+        }
+    }
+}
+
+impl ScalingConfig {
+    /// Build a `ScalingPressure` engine from this config.
+    #[must_use]
+    pub fn build_pressure(&self) -> ScalingPressure {
+        let base = ScalingPressureConfig {
+            enabled: self.enabled,
+            memory_gate_threshold: self.memory_gate_threshold,
+        };
+        let components = vec![
+            ScalingComponent::new("request_rate", self.weight_request_rate, self.saturation_request_rate),
+            ScalingComponent::new("queue_depth", self.weight_queue_depth, self.saturation_queue_depth),
+            ScalingComponent::new("memory", self.weight_memory, 1.0),
+            ScalingComponent::new("connections", self.weight_connections, self.saturation_connections),
+            ScalingComponent::new("spill", self.weight_spill, self.saturation_spill),
+        ];
+        ScalingPressure::new(base, components)
     }
 }
 

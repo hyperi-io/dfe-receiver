@@ -123,8 +123,8 @@ async fn main() -> anyhow::Result<()> {
         "Starting dfe-receiver"
     );
 
-    // Initialise metrics
-    let metrics = Arc::new(Metrics::new());
+    // Initialise metrics with scaling pressure engine
+    let metrics = Arc::new(Metrics::with_scaling(config.scaling.build_pressure()));
 
     // Create cancellation token for coordinated shutdown
     let shutdown_token = CancellationToken::new();

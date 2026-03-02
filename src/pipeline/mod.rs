@@ -332,6 +332,9 @@ impl PipelineState {
         }
 
         metrics.set_batch_queue_size(total_queue);
+
+        // Sync all metrics into the scaling pressure engine
+        metrics.update_scaling();
     }
 
     /// Reload configuration, rebuilding router and validator.

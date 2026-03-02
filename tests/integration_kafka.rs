@@ -502,7 +502,7 @@ async fn test_http_to_kafka() {
     let port = 10000 + (uuid::Uuid::new_v4().as_u128() % 10000) as u16;
     config.server.bind_address = format!("127.0.0.1:{port}");
 
-    let metrics = Arc::new(Metrics::new());
+    let metrics = Arc::new(Metrics::default());
     let shutdown = CancellationToken::new();
 
     // Create orchestrator and get pipeline state

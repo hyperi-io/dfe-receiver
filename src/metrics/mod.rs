@@ -22,6 +22,8 @@
 
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
+use hyperi_rustlib::scaling::ScalingPressure;
+
 /// Reason for authentication failure (for metrics labels).
 #[derive(Debug, Clone, Copy)]
 pub enum AuthFailureReason {
@@ -46,7 +48,6 @@ use std::time::{Duration, Instant};
 use parking_lot::RwLock;
 
 /// Metrics collector for dfe-receiver.
-#[derive(Debug)]
 pub struct Metrics {
     // Counters
     requests_total: AtomicU64,
@@ -85,8 +86,11 @@ pub struct Metrics {
     circuit_state: AtomicU8,
     circuit_consecutive_failures: AtomicU64,
 
-    // Rate tracking for KEDA
+    // Rate tracking
     rate_window: RwLock<RateWindow>,
+
+    // Scaling pressure engine (from hyperi-rustlib)
+    scaling: ScalingPressure,
 }
 
 /// Sliding window for rate calculation.
@@ -136,9 +140,19 @@ impl RateWindow {
     }
 }
 
+impl std::fmt::Debug for Metrics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Metrics")
+            .field("requests_total", &self.requests_total.load(Ordering::Relaxed))
+            .field("batch_queue_size", &self.batch_queue_size.load(Ordering::Relaxed))
+            .field("active_connections", &self.active_connections.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
+}
+
 impl Metrics {
-    /// Create a new metrics collector.
-    pub fn new() -> Self {
+    /// Create a new metrics collector with scaling pressure engine.
+    pub fn with_scaling(scaling: ScalingPressure) -> Self {
         Self {
             requests_total: AtomicU64::new(0),
             requests_success: AtomicU64::new(0),
@@ -170,6 +184,7 @@ impl Metrics {
             circuit_state: AtomicU8::new(0),
             circuit_consecutive_failures: AtomicU64::new(0),
             rate_window: RwLock::new(RateWindow::new(Duration::from_secs(60))),
+            scaling,
         }
     }
 
@@ -406,47 +421,42 @@ impl Metrics {
     }
 
     // ==========================================================================
-    // KEDA composite scaling metric
+    // Scaling pressure (delegated to hyperi-rustlib ScalingPressure engine)
     // ==========================================================================
 
-    /// Calculate gated KEDA scaling metric.
+    /// Sync current metric values into the scaling pressure engine.
     ///
-    /// Returns 0.0-100.0. Uses gated logic:
-    /// - Circuit breaker open → 0 (don't scale; sink is down, more pods won't help)
-    /// - Memory pressure high → 100 (scale immediately; about to OOM)
-    /// - Otherwise → weighted composite of queue depth, request rate, memory, connections
-    pub fn keda_scaling_metric(&self) -> f64 {
-        // Gate: circuit breaker open — sink is down, scaling won't help
-        if self.is_circuit_open() {
-            return 0.0;
-        }
+    /// Called from the metrics update cycle (every 1 second) to feed
+    /// current component values into the rustlib `ScalingPressure` engine.
+    pub fn update_scaling(&self) {
+        self.scaling.set_component(
+            "request_rate",
+            self.request_rate(),
+        );
+        self.scaling.set_component(
+            "queue_depth",
+            self.batch_queue_size.load(Ordering::Relaxed) as f64,
+        );
+        self.scaling.set_component(
+            "connections",
+            self.active_connections.load(Ordering::Relaxed) as f64,
+        );
+        self.scaling.set_component(
+            "spill",
+            self.messages_spilled.load(Ordering::Relaxed) as f64,
+        );
+        self.scaling.set_memory(
+            self.memory_used_bytes.load(Ordering::Relaxed),
+            self.memory_limit_bytes.load(Ordering::Relaxed),
+        );
+        self.scaling.set_circuit_open(self.is_circuit_open());
+    }
 
-        let memory_used = self.memory_used_bytes.load(Ordering::Relaxed) as f64;
-        let memory_limit = self.memory_limit_bytes.load(Ordering::Relaxed) as f64;
-        let memory_ratio = if memory_limit > 0.0 {
-            memory_used / memory_limit
-        } else {
-            0.0
-        };
-
-        // Gate: high memory pressure — scale immediately before OOM
-        if memory_ratio >= 0.8 {
-            return 100.0;
-        }
-
-        let queue_size = self.batch_queue_size.load(Ordering::Relaxed) as f64;
-        let active_conns = self.active_connections.load(Ordering::Relaxed) as f64;
-        let rate = self.request_rate();
-        let spilled = self.messages_spilled.load(Ordering::Relaxed) as f64;
-
-        // Weighted composite (tuned for PB/s scale ingestion)
-        let rate_score = (rate / 100_000.0).min(1.0) * 30.0; // 100K req/s = 30%
-        let queue_score = (queue_size / 10_000.0).min(1.0) * 25.0; // 10K queued = 25%
-        let memory_score = memory_ratio * 25.0; // Linear memory = 25%
-        let conn_score = (active_conns / 1_000.0).min(1.0) * 10.0; // 1K conns = 10%
-        let spill_score = (spilled / 1_000.0).min(1.0) * 10.0; // 1K spilled = 10%
-
-        (rate_score + queue_score + memory_score + conn_score + spill_score).min(100.0)
+    /// Calculate scaling pressure (0.0-100.0).
+    ///
+    /// Delegates to the `ScalingPressure` engine from hyperi-rustlib.
+    pub fn scaling_pressure(&self) -> f64 {
+        self.scaling.calculate()
     }
 
     /// Render metrics in Prometheus format.
@@ -592,14 +602,14 @@ impl Metrics {
             self.circuit_consecutive_failures.load(Ordering::Relaxed)
         ));
 
-        // KEDA scaling metric
+        // Scaling pressure
         output.push_str(
-            "# HELP receiver_keda_scaling_metric Gated scaling metric for KEDA (0-100)\n",
+            "# HELP receiver_scaling_pressure Gated scaling pressure for autoscaling (0-100)\n",
         );
-        output.push_str("# TYPE receiver_keda_scaling_metric gauge\n");
+        output.push_str("# TYPE receiver_scaling_pressure gauge\n");
         output.push_str(&format!(
-            "receiver_keda_scaling_metric {:.2}\n",
-            self.keda_scaling_metric()
+            "receiver_scaling_pressure {:.2}\n",
+            self.scaling_pressure()
         ));
 
         output.push_str("# HELP receiver_request_rate_per_second Current request rate\n");
@@ -668,7 +678,7 @@ impl Metrics {
 
 impl Default for Metrics {
     fn default() -> Self {
-        Self::new()
+        Self::with_scaling(crate::config::ScalingConfig::default().build_pressure())
     }
 }
 
@@ -678,7 +688,7 @@ mod tests {
 
     #[test]
     fn test_metrics_counters() {
-        let metrics = Metrics::new();
+        let metrics = Metrics::default();
 
         metrics.inc_requests_total();
         metrics.inc_requests_total();
@@ -691,7 +701,7 @@ mod tests {
 
     #[test]
     fn test_metrics_gauges() {
-        let metrics = Metrics::new();
+        let metrics = Metrics::default();
 
         metrics.set_batch_queue_size(100);
         metrics.set_batch_queue_bytes(1024);
@@ -704,44 +714,50 @@ mod tests {
     }
 
     #[test]
-    fn test_keda_scaling_metric_zero() {
-        let metrics = Metrics::new();
+    fn test_scaling_pressure_zero() {
+        let metrics = Metrics::default();
 
-        // With no load, metric should be near 0
-        let metric = metrics.keda_scaling_metric();
+        // Sync empty state into engine
+        metrics.update_scaling();
+
+        let metric = metrics.scaling_pressure();
         assert!(metric >= 0.0);
         assert!(metric <= 10.0);
     }
 
     #[test]
-    fn test_keda_scaling_metric_high_queue() {
-        let metrics = Metrics::new();
+    fn test_scaling_pressure_high_queue() {
+        let metrics = Metrics::default();
 
         // High queue should increase metric
         metrics.set_batch_queue_size(10_000);
-        let metric = metrics.keda_scaling_metric();
+        metrics.update_scaling();
+
+        let metric = metrics.scaling_pressure();
         assert!(metric >= 20.0);
     }
 
     #[test]
-    fn test_keda_scaling_metric_max() {
-        let metrics = Metrics::new();
+    fn test_scaling_pressure_max() {
+        let metrics = Metrics::default();
 
         metrics.set_batch_queue_size(100_000);
-        metrics.set_spool_messages(10_000);
         metrics.set_memory_usage(1_000_000, 1_000_000);
 
         for _ in 0..1000 {
             metrics.inc_active_connections();
         }
 
-        let metric = metrics.keda_scaling_metric();
+        metrics.update_scaling();
+
+        let metric = metrics.scaling_pressure();
+        // Memory gate fires at 100% → returns 100.0
         assert!(metric <= 100.0);
     }
 
     #[test]
     fn test_spill_metrics() {
-        let metrics = Metrics::new();
+        let metrics = Metrics::default();
 
         metrics.add_messages_spilled(10);
         metrics.add_messages_drained(5);
@@ -753,7 +769,7 @@ mod tests {
 
     #[test]
     fn test_memory_metrics() {
-        let metrics = Metrics::new();
+        let metrics = Metrics::default();
 
         metrics.set_memory_usage(500_000, 1_000_000);
 
