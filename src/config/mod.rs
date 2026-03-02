@@ -866,7 +866,7 @@ pub struct LoaderConfig {
     /// Loader address.
     pub address: String,
 
-    /// Transport type (kafka, zenoh, memory).
+    /// Transport type (kafka, memory).
     pub transport: String,
 
     /// Connection timeout in milliseconds.

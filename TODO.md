@@ -116,6 +116,12 @@ All protocols follow: receive -> convert to JSON -> validate -> route -> Kafka/d
 
 ### High Priority
 
+- [ ] GHCR container image publishing (see `docs/CONTAINER-PUBLISHING.md`)
+  1. [ ] Create `Dockerfile` in repo root (wraps pre-built binary, Option B)
+  2. [ ] Add `publish.container` section to `.hyperi-ci.yaml`
+  3. [ ] Update ci submodule to v1.59.0+
+  4. [ ] Update publish workflow for container inputs
+  5. [ ] Test: trigger release, verify `ghcr.io/hyperi-io/dfe-receiver`
 - [ ] KEDA scaling metrics endpoint
 
 ### Medium Priority
