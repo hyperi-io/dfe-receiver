@@ -41,10 +41,12 @@ Native Rust receiver that:
 1. **HTTP Server** - axum-based with TLS termination and auth middleware
 2. **gRPC Server** - tonic-based Vector sink protocol with protobuf-to-JSON conversion
 3. **OTLP Server** - gRPC (port 4317) + HTTP (port 4318) for OpenTelemetry logs/metrics/traces
-4. **Router** - Zero-copy JSON field extraction for topic routing
-5. **TieredSink** - In-memory buffering with hyperi-rustlib CircuitBreaker
-6. **BearerTokenProvider** - Dynamic token loading from secret managers
-7. **ProtocolHandler trait** - Pluggable protocol handler abstraction (`src/server/traits.rs`)
+4. **Lumberjack/Beats Server** - TCP/TLS listener (port 5044), Lumberjack v2 frame parser with zlib decompression
+5. **Splunk HEC Server** - axum HTTP (port 8088), `/services/collector/event` + `/raw` + `/health`
+6. **Router** - Zero-copy JSON field extraction for topic routing
+7. **TieredSink** - In-memory buffering with hyperi-rustlib CircuitBreaker
+8. **BearerTokenProvider** - Dynamic token loading from secret managers
+9. **ProtocolHandler trait** - Pluggable protocol handler abstraction (`src/server/traits.rs`)
 
 ### Tech Stack
 

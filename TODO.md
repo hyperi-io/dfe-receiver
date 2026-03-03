@@ -55,12 +55,14 @@ All protocols follow: receive -> convert to JSON -> validate -> route -> Kafka/d
 - [ ] TimeSeries -> JSON conversion
 - [ ] `PrometheusConfig` + `prometheus-rw` feature flag
 
-#### Phase 3: Lumberjack/Beats (Tier 2) [NOT STARTED]
+#### Phase 3: Lumberjack/Beats (Tier 2) [DONE]
 
-- [ ] TCP/TLS listener, Lumberjack v2 frame parser
-- [ ] Windowed ACK protocol
-- [ ] Beats fields -> JSON conversion
-- [ ] `LumberjackConfig` + `lumberjack` feature flag
+- [x] TCP/TLS listener, Lumberjack v2 frame parser
+- [x] Windowed ACK protocol (window + ACK frames)
+- [x] Zlib decompression of compressed frames
+- [x] Beats fields -> JSON conversion
+- [x] `LumberjackConfig` in config
+- [x] Integration tests with real Filebeat binary (auto-downloaded)
 
 #### Phase 4: Syslog (Tier 2) [NOT STARTED]
 
@@ -72,12 +74,15 @@ All protocols follow: receive -> convert to JSON -> validate -> route -> Kafka/d
 - [ ] Octet-counting + non-transparent framing (TCP)
 - [ ] `SyslogConfig` + `syslog` feature flag
 
-#### Phase 5: Splunk HEC (Tier 2) [NOT STARTED]
+#### Phase 5: Splunk HEC (Tier 2) [DONE]
 
-- [ ] HTTP endpoints: `/services/collector/event` + `/services/collector/raw`
-- [ ] Splunk token auth
-- [ ] HEC JSON -> normalised JSON
-- [ ] `SplunkHecConfig` + `splunk-hec` feature flag
+- [x] HTTP endpoints: `/services/collector/event`, `/services/collector/raw`, `/services/collector/health`
+- [x] Splunk token auth (`Authorization: Splunk <token>` + `Bearer <token>`)
+- [x] NDJSON event parsing via StreamDeserializer
+- [x] HEC JSON -> normalised JSON (metadata injection, field precedence)
+- [x] HEC response format with standard error codes (0, 5, 6, 8, 9, 12, 17, 18)
+- [x] `SplunkHecConfig` in config (port 8088)
+- [x] 15 unit tests + 11 integration tests (reqwest-based)
 
 #### Phase 6: Fluent Forward (Tier 3) [NOT STARTED]
 
@@ -93,8 +98,13 @@ All protocols follow: receive -> convert to JSON -> validate -> route -> Kafka/d
 
 ---
 
-## Completed (This Session)
+## Completed (Recent Sessions)
 
+- [x] Phase 3: Lumberjack/Beats handler (TCP/TLS, frame parser, zlib, ACK, Filebeat integration tests)
+- [x] Phase 5: Splunk HEC handler (event/raw/health endpoints, NDJSON, auth, integration tests)
+- [x] CI fix: aarch64 cross-compile (`-fuse-ld=bfd` to avoid mold linker for cross targets)
+- [x] CI fix: publish-binary.sh SCRIPT_DIR clobber (source order fix)
+- [x] Published v1.10.3 to JFrog (first successful Publish pipeline in 5+ releases)
 - [x] Phase 0: ProtocolHandler trait + server refactor
 - [x] Phase 1: OTLP proto compilation (vendored opentelemetry-proto v1.5.0)
 - [x] Phase 1: OTLP module structure and proto includes
@@ -144,7 +154,7 @@ All protocols follow: receive -> convert to JSON -> validate -> route -> Kafka/d
 
 ## Blocked
 
-- [ ] Binary build local test -- blocked on CI submodule libsasl2-dev multiarch fix
+(none)
 
 ---
 
