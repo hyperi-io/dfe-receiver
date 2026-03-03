@@ -752,6 +752,12 @@ pub struct PrometheusRwConfig {
     /// Bind address for HTTP listener.
     pub bind_address: String,
 
+    /// Output mode: "native" (default), "otel", or "hyperdx".
+    /// - `native`: Flat JSON with labels as top-level fields.
+    /// - `otel`: Generic OTel JSON envelope (snake_case, RFC 3339).
+    /// - `hyperdx`: HyperDX ClickHouse-compatible JSON (PascalCase, DateTime64).
+    pub mode: String,
+
     /// Maximum request body size in bytes.
     pub max_body_size: usize,
 
@@ -770,6 +776,7 @@ impl Default for PrometheusRwConfig {
         Self {
             enabled: false,
             bind_address: "0.0.0.0:9090".to_string(),
+            mode: "native".to_string(),
             max_body_size: 10 * 1024 * 1024,
             request_timeout_ms: 30_000,
             tls: TlsConfig::default(),

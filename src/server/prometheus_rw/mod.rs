@@ -45,7 +45,7 @@ use crate::server::http::create_auth_state;
 use crate::server::tls::{build_tls_acceptor, uses_secrets, TlsCertProvider};
 use crate::server::traits::ProtocolHandler;
 
-use self::convert::write_request_to_json;
+use self::convert::{write_request_to_json, PrometheusRwMode};
 
 /// Prometheus Remote Write protocol handler.
 pub struct PrometheusRwHandler {
@@ -97,6 +97,7 @@ impl ProtocolHandler for PrometheusRwHandler {
 struct RwState {
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
+    mode: PrometheusRwMode,
 }
 
 // ---------------------------------------------------------------------------
@@ -111,10 +112,12 @@ async fn run_prometheus_rw_server(
     shutdown: CancellationToken,
 ) -> Result<()> {
     let auth_state = create_auth_state(&config.auth).await?;
+    let mode = PrometheusRwMode::from_str(&config.mode);
 
     let state = RwState {
         pipeline,
         metrics: metrics.clone(),
+        mode,
     };
 
     let max_body_size = config.max_body_size;
@@ -211,7 +214,7 @@ async fn write_handler(
     })?;
 
     // Convert to JSON events
-    let events = write_request_to_json(request).map_err(|e| {
+    let events = write_request_to_json(request, state.mode).map_err(|e| {
         state.metrics.inc_requests_error();
         RwError::internal(&e.to_string())
     })?;
@@ -288,6 +291,7 @@ mod tests {
         let config = PrometheusRwConfig::default();
         assert!(!config.enabled);
         assert_eq!(config.bind_address, "0.0.0.0:9090");
+        assert_eq!(config.mode, "native");
         assert_eq!(config.max_body_size, 10 * 1024 * 1024);
         assert_eq!(config.request_timeout_ms, 30_000);
     }

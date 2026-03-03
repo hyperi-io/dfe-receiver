@@ -138,6 +138,11 @@ syslog:
 prometheus_rw:
   enabled: false
   bind_address: "0.0.0.0:9090"
+  # Output mode: "native" (default), "otel", or "hyperdx"
+  # - native: flat JSON with labels as top-level fields
+  # - otel: generic OTel JSON envelope (for custom pipelines)
+  # - hyperdx: HyperDX ClickHouse-compatible JSON (otel_metrics_* tables)
+  mode: "native"
   max_body_size: 10485760  # 10MB
   request_timeout_ms: 30000
 
