@@ -1,6 +1,6 @@
 // Project:   dfe-receiver
 // File:      build.rs
-// Purpose:   Build script for proto compilation (Vector + OTLP)
+// Purpose:   Build script for proto compilation (Vector + OTLP + Prometheus)
 // Language:  Rust
 //
 // License:   FSL-1.1-ALv2
@@ -27,10 +27,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &["proto"],
         )?;
 
+    // Compile Prometheus Remote Write proto (v1)
+    // Vendored from https://github.com/prometheus/prometheus prompb/
+    tonic_build::configure()
+        .build_server(false)
+        .build_client(false)
+        .compile_protos(&["proto/prometheus/remote.proto"], &["proto"])?;
+
     // Tell cargo to rerun if protos change
     println!("cargo:rerun-if-changed=proto/vector.proto");
     println!("cargo:rerun-if-changed=proto/event.proto");
     println!("cargo:rerun-if-changed=proto/opentelemetry/");
+    println!("cargo:rerun-if-changed=proto/prometheus/");
 
     Ok(())
 }

@@ -93,6 +93,7 @@ syslog_loose = "0.23"
 
 # Compression
 flate2 = "1"
+snap = "1.1"
 
 # Encoding
 base64 = "0.22"
