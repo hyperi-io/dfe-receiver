@@ -1,3 +1,11 @@
+# [1.10.0](https://github.com/hyperi-io/dfe-receiver/compare/v1.9.4...v1.10.0) (2026-03-03)
+
+
+### Features
+
+* add Lumberjack v2 (Beats) protocol handler with Filebeat integration tests ([7bdc9fb](https://github.com/hyperi-io/dfe-receiver/commit/7bdc9fb3604888c30a0ab9f3b122834d5347ccfe))
+* add Splunk HEC protocol handler with integration tests ([a729f81](https://github.com/hyperi-io/dfe-receiver/commit/a729f81bd1dfaf304c4f379ca2edcd67223a856b))
+
 ## [1.9.4](https://github.com/hyperi-io/dfe-receiver/compare/v1.9.3...v1.9.4) (2026-03-02)
 
 
