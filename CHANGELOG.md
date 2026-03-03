@@ -1,3 +1,17 @@
+# [1.11.0](https://github.com/hyperi-io/dfe-receiver/compare/v1.10.3...v1.11.0) (2026-03-03)
+
+
+### Bug Fixes
+
+* add otel/hyperdx output modes to prometheus remote write ([72fb5de](https://github.com/hyperi-io/dfe-receiver/commit/72fb5de5352ce038941fc8db0ea7cdcaf1e4beb1))
+* wire rustlib cli/deployment module and generate artefacts ([1108f47](https://github.com/hyperi-io/dfe-receiver/commit/1108f4717dbfb79df96a354ff36052a4131958bf))
+
+
+### Features
+
+* add prometheus remote write v1 receiver ([645844f](https://github.com/hyperi-io/dfe-receiver/commit/645844f657e18b396935829d95504dcc74163bf4))
+* add syslog protocol handler (UDP + TCP + TLS) ([b6f1651](https://github.com/hyperi-io/dfe-receiver/commit/b6f165113b8f679b6188d49a8c72c694550477f9))
+
 ## [1.10.3](https://github.com/hyperi-io/dfe-receiver/compare/v1.10.2...v1.10.3) (2026-03-03)
 
 
