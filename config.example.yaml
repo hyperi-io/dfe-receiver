@@ -108,6 +108,32 @@ splunk_hec:
     #   secret_source: "file:/etc/secrets/hec-tokens"
     #   refresh_interval_secs: 300
 
+# Syslog receiver (RFC 5424 + RFC 3164 auto-detect)
+syslog:
+  enabled: false
+  udp_bind_address: "0.0.0.0:514"
+  tcp_bind_address: "0.0.0.0:514"
+  tls_bind_address: "0.0.0.0:6514"
+  max_message_size: 65536  # 64KB
+
+  # TLS for secure syslog (RFC 5425, port 6514)
+  tls:
+    enabled: false
+    cert_file: "/etc/ssl/syslog-receiver.crt"
+    key_file: "/etc/ssl/syslog-receiver.key"
+    # ca_file: "/etc/ssl/ca.crt"
+    # client_auth: "none"
+    # cert_secret: "vault:secret/tls:cert"
+    # key_secret: "vault:secret/tls:key"
+    # refresh_interval_secs: 3600
+
+  auth:
+    mode: "none"
+    # bearer:
+    #   tokens: []
+    #   secret_source: "file:/etc/secrets/syslog-tokens"
+    #   refresh_interval_secs: 300
+
 validation:
   require_json: true
   required_fields: []
