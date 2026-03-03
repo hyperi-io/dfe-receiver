@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "dfe-receiver.fullname" . }}
+  labels:
+    {{- include "dfe-receiver.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: metrics
+      protocol: TCP
+      name: metrics
+    - port: 8080
+      targetPort: 8080
+      protocol: TCP
+      name: http
+    - port: 6000
+      targetPort: 6000
+      protocol: TCP
+      name: grpc
+    - port: 4317
+      targetPort: 4317
+      protocol: TCP
+      name: otlp-grpc
+    - port: 4318
+      targetPort: 4318
+      protocol: TCP
+      name: otlp-http
+    - port: 5044
+      targetPort: 5044
+      protocol: TCP
+      name: beats
+    - port: 8088
+      targetPort: 8088
+      protocol: TCP
+      name: hec
+  selector:
+    {{- include "dfe-receiver.selectorLabels" . | nindent 4 }}

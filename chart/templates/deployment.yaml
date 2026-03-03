@@ -1,0 +1,122 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dfe-receiver.fullname" . }}
+  labels:
+    {{- include "dfe-receiver.labels" . | nindent 4 }}
+spec:
+  {{- if not (or .Values.keda.enabled .Values.autoscaling.enabled) }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "dfe-receiver.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "dfe-receiver.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "dfe-receiver.serviceAccountName" . }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - "--config"
+            - "/etc/dfe-receiver/config.yaml"
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: grpc
+              containerPort: 6000
+              protocol: TCP
+            - name: otlp-grpc
+              containerPort: 4317
+              protocol: TCP
+            - name: otlp-http
+              containerPort: 4318
+              protocol: TCP
+            - name: beats
+              containerPort: 5044
+              protocol: TCP
+            - name: hec
+              containerPort: 8088
+              protocol: TCP
+          env:
+            # kafka credentials via Secret (figment env cascade overrides file config)
+            - name: DFE_RECEIVER__KAFKA__SASL__USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "dfe-receiver.kafkaSecretName" . }}
+                  key: {{ .Values.kafka.secretKeys.username }}
+            - name: DFE_RECEIVER__KAFKA__SASL__PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "dfe-receiver.kafkaSecretName" . }}
+                  key: {{ .Values.kafka.secretKeys.password }}
+            # auth credentials via Secret (figment env cascade overrides file config)
+            - name: DFE_RECEIVER__SERVER__AUTH__BEARER__TOKENS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "dfe-receiver.authSecretName" . }}
+                  key: {{ .Values.auth.secretKeys.bearer-tokens }}
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 2
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: metrics
+            failureThreshold: 30
+            periodSeconds: 5
+          volumeMounts:
+            - name: config
+              mountPath: /etc/dfe-receiver
+              readOnly: true
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "dfe-receiver.fullname" . }}-config
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
