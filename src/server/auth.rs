@@ -383,10 +383,14 @@ pub fn validate_bearer_auth(
         });
     };
 
-    // Parse "Bearer <token>" format
+    // Parse "Bearer <token>" or "Splunk <token>" format
     let token = if let Some(token) = auth_value.strip_prefix("Bearer ") {
         token.trim()
     } else if let Some(token) = auth_value.strip_prefix("bearer ") {
+        token.trim()
+    } else if let Some(token) = auth_value.strip_prefix("Splunk ") {
+        token.trim()
+    } else if let Some(token) = auth_value.strip_prefix("splunk ") {
         token.trim()
     } else {
         return Some(AuthError {

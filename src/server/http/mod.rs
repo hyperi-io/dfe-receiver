@@ -239,7 +239,7 @@ async fn run_plain_server(
 ///
 /// Accepts an `Arc<RwLock<TlsAcceptor>>` to support hot-reload of certificates.
 /// The RwLock read is held only to clone the acceptor (cheap - wraps Arc<ServerConfig>).
-async fn run_tls_server(
+pub(crate) async fn run_tls_server(
     listener: TcpListener,
     app: Router,
     acceptor: Arc<parking_lot::RwLock<TlsAcceptor>>,
