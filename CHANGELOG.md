@@ -1,3 +1,10 @@
+## [1.10.1](https://github.com/hyperi-io/dfe-receiver/compare/v1.10.0...v1.10.1) (2026-03-03)
+
+
+### Bug Fixes
+
+* resolve clippy errors in lumberjack codec and splunk hec handler ([cdf1ca9](https://github.com/hyperi-io/dfe-receiver/commit/cdf1ca94b99b4ef814a6bcdaff443755cda9ba5e))
+
 # [1.10.0](https://github.com/hyperi-io/dfe-receiver/compare/v1.9.4...v1.10.0) (2026-03-03)
 
 
