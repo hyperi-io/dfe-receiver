@@ -62,6 +62,9 @@ pub struct Config {
     /// Syslog receiver configuration.
     pub syslog: SyslogConfig,
 
+    /// Prometheus Remote Write receiver configuration.
+    pub prometheus_rw: PrometheusRwConfig,
+
     /// Validation rules.
     pub validation: ValidationConfig,
 
@@ -108,6 +111,7 @@ impl Default for Config {
             lumberjack: LumberjackConfig::default(),
             splunk_hec: SplunkHecConfig::default(),
             syslog: SyslogConfig::default(),
+            prometheus_rw: PrometheusRwConfig::default(),
             validation: ValidationConfig::default(),
             routing: RoutingConfig::default(),
             destinations: DestinationsConfig::default(),
@@ -729,6 +733,45 @@ impl Default for SyslogConfig {
             tcp_bind_address: "0.0.0.0:514".to_string(),
             tls_bind_address: "0.0.0.0:6514".to_string(),
             max_message_size: 64 * 1024,
+            tls: TlsConfig::default(),
+            auth: AuthConfig {
+                mode: "none".to_string(),
+                ..AuthConfig::default()
+            },
+        }
+    }
+}
+
+/// Prometheus Remote Write receiver configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PrometheusRwConfig {
+    /// Enable Prometheus Remote Write receiver.
+    pub enabled: bool,
+
+    /// Bind address for HTTP listener.
+    pub bind_address: String,
+
+    /// Maximum request body size in bytes.
+    pub max_body_size: usize,
+
+    /// Request timeout in milliseconds.
+    pub request_timeout_ms: u64,
+
+    /// TLS configuration.
+    pub tls: TlsConfig,
+
+    /// Authentication configuration.
+    pub auth: AuthConfig,
+}
+
+impl Default for PrometheusRwConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind_address: "0.0.0.0:9090".to_string(),
+            max_body_size: 10 * 1024 * 1024,
+            request_timeout_ms: 30_000,
             tls: TlsConfig::default(),
             auth: AuthConfig {
                 mode: "none".to_string(),

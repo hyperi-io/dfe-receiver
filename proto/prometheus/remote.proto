@@ -1,0 +1,17 @@
+// Vendored from prometheus/prometheus prompb/remote.proto
+// Stripped of gogoproto annotations for prost compatibility.
+// Only WriteRequest retained (receiver does not need ReadRequest).
+//
+// Copyright 2016 Prometheus Team
+// Licensed under the Apache License, Version 2.0
+
+syntax = "proto3";
+package prometheus;
+
+import "prometheus/types.proto";
+
+message WriteRequest {
+  repeated prometheus.TimeSeries timeseries = 1;
+  reserved 2;
+  repeated prometheus.MetricMetadata metadata = 3;
+}

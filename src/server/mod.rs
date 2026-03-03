@@ -18,6 +18,7 @@ pub mod lumberjack;
 pub mod otlp;
 #[cfg(feature = "plugins")]
 pub mod plugins;
+pub mod prometheus_rw;
 pub mod splunk_hec;
 pub mod syslog;
 pub mod tls;
@@ -35,6 +36,7 @@ use crate::server::grpc::GrpcVectorHandler;
 use crate::server::http::HttpHandler;
 use crate::server::lumberjack::LumberjackHandler;
 use crate::server::otlp::OtlpHandler;
+use crate::server::prometheus_rw::PrometheusRwHandler;
 use crate::server::splunk_hec::SplunkHecHandler;
 use crate::server::syslog::SyslogHandler;
 use crate::server::traits::ProtocolHandler;
@@ -94,6 +96,15 @@ impl Server {
         if config.splunk_hec.enabled {
             handlers.push(Box::new(SplunkHecHandler::new(
                 config.splunk_hec.clone(),
+                self.state.clone(),
+                self.metrics.clone(),
+            )));
+        }
+
+        // Prometheus Remote Write handler (if enabled)
+        if config.prometheus_rw.enabled {
+            handlers.push(Box::new(PrometheusRwHandler::new(
+                config.prometheus_rw.clone(),
                 self.state.clone(),
                 self.metrics.clone(),
             )));
