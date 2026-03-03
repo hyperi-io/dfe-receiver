@@ -144,7 +144,7 @@ pub struct RawMetadata {
 }
 
 /// Convert a raw text line to pipeline-ready JSON bytes.
-pub fn raw_to_json(line: &[u8], metadata: &RawMetadata) -> Bytes {
+pub fn raw_to_json(line: &[u8], metadata: &RawMetadata) -> Result<Bytes> {
     let message = String::from_utf8_lossy(line);
 
     let mut obj = serde_json::Map::new();
@@ -169,9 +169,9 @@ pub fn raw_to_json(line: &[u8], metadata: &RawMetadata) -> Bytes {
         obj.insert("index".into(), serde_json::Value::String(index.clone()));
     }
 
-    // Safe: serde_json::Map always serialises to valid JSON
-    let json = serde_json::to_vec(&obj).expect("Map serialisation cannot fail");
-    Bytes::from(json)
+    let json =
+        serde_json::to_vec(&obj).map_err(|e| Error::Server(format!("JSON serialize: {e}")))?;
+    Ok(Bytes::from(json))
 }
 
 #[cfg(test)]
@@ -296,7 +296,7 @@ mod tests {
             sourcetype: Some("syslog".into()),
             index: None,
         };
-        let json = raw_to_json(b"hello world", &metadata);
+        let json = raw_to_json(b"hello world", &metadata).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
         assert_eq!(parsed["message"], "hello world");
         assert_eq!(parsed["host"], "web01");
@@ -308,7 +308,7 @@ mod tests {
     #[test]
     fn test_raw_to_json_no_metadata() {
         let metadata = RawMetadata::default();
-        let json = raw_to_json(b"plain text event", &metadata);
+        let json = raw_to_json(b"plain text event", &metadata).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
         assert_eq!(parsed["message"], "plain text event");
         assert_eq!(parsed.as_object().unwrap().len(), 1);
