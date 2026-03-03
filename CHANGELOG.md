@@ -1,3 +1,10 @@
+## [1.10.2](https://github.com/hyperi-io/dfe-receiver/compare/v1.10.1...v1.10.2) (2026-03-03)
+
+
+### Bug Fixes
+
+* update ci submodule with aarch64 cross-compile linker fix ([c34018b](https://github.com/hyperi-io/dfe-receiver/commit/c34018b32e7ef4c958060f38da660b673eb0d2c5))
+
 ## [1.10.1](https://github.com/hyperi-io/dfe-receiver/compare/v1.10.0...v1.10.1) (2026-03-03)
 
 
