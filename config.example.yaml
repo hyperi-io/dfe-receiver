@@ -58,6 +58,30 @@ grpc:
     #   secret_source: "file:/etc/secrets/grpc-tokens"
     #   refresh_interval_secs: 300
 
+# Lumberjack v2 / Beats protocol (Filebeat, Winlogbeat, etc.)
+lumberjack:
+  enabled: false
+  bind_address: "0.0.0.0:5044"
+
+  # TLS (recommended — Beats clients typically expect TLS)
+  tls:
+    enabled: false
+    cert_file: "/etc/ssl/beats-receiver.crt"
+    key_file: "/etc/ssl/beats-receiver.key"
+    # ca_file: "/etc/ssl/ca.crt"        # For mTLS
+    # client_auth: "none"               # none, optional, required
+    # cert_secret: "vault:secret/tls:cert"
+    # key_secret: "vault:secret/tls:key"
+    # refresh_interval_secs: 3600
+
+  # Auth (same options as HTTP/gRPC auth)
+  auth:
+    mode: "none"
+    # bearer:
+    #   tokens: []
+    #   secret_source: "file:/etc/secrets/beats-tokens"
+    #   refresh_interval_secs: 300
+
 validation:
   require_json: true
   required_fields: []

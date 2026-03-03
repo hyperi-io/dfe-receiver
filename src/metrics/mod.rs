@@ -143,9 +143,18 @@ impl RateWindow {
 impl std::fmt::Debug for Metrics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Metrics")
-            .field("requests_total", &self.requests_total.load(Ordering::Relaxed))
-            .field("batch_queue_size", &self.batch_queue_size.load(Ordering::Relaxed))
-            .field("active_connections", &self.active_connections.load(Ordering::Relaxed))
+            .field(
+                "requests_total",
+                &self.requests_total.load(Ordering::Relaxed),
+            )
+            .field(
+                "batch_queue_size",
+                &self.batch_queue_size.load(Ordering::Relaxed),
+            )
+            .field(
+                "active_connections",
+                &self.active_connections.load(Ordering::Relaxed),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -429,10 +438,8 @@ impl Metrics {
     /// Called from the metrics update cycle (every 1 second) to feed
     /// current component values into the rustlib `ScalingPressure` engine.
     pub fn update_scaling(&self) {
-        self.scaling.set_component(
-            "request_rate",
-            self.request_rate(),
-        );
+        self.scaling
+            .set_component("request_rate", self.request_rate());
         self.scaling.set_component(
             "queue_depth",
             self.batch_queue_size.load(Ordering::Relaxed) as f64,
