@@ -19,6 +19,7 @@ pub mod otlp;
 #[cfg(feature = "plugins")]
 pub mod plugins;
 pub mod splunk_hec;
+pub mod syslog;
 pub mod tls;
 pub mod traits;
 
@@ -35,6 +36,7 @@ use crate::server::http::HttpHandler;
 use crate::server::lumberjack::LumberjackHandler;
 use crate::server::otlp::OtlpHandler;
 use crate::server::splunk_hec::SplunkHecHandler;
+use crate::server::syslog::SyslogHandler;
 use crate::server::traits::ProtocolHandler;
 
 /// Main server that manages protocol handlers.
@@ -92,6 +94,15 @@ impl Server {
         if config.splunk_hec.enabled {
             handlers.push(Box::new(SplunkHecHandler::new(
                 config.splunk_hec.clone(),
+                self.state.clone(),
+                self.metrics.clone(),
+            )));
+        }
+
+        // Syslog handler (if enabled)
+        if config.syslog.enabled {
+            handlers.push(Box::new(SyslogHandler::new(
+                config.syslog.clone(),
                 self.state.clone(),
                 self.metrics.clone(),
             )));

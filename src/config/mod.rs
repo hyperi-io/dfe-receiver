@@ -59,6 +59,9 @@ pub struct Config {
     /// Splunk HEC receiver configuration.
     pub splunk_hec: SplunkHecConfig,
 
+    /// Syslog receiver configuration.
+    pub syslog: SyslogConfig,
+
     /// Validation rules.
     pub validation: ValidationConfig,
 
@@ -104,6 +107,7 @@ impl Default for Config {
             otlp: OtlpConfig::default(),
             lumberjack: LumberjackConfig::default(),
             splunk_hec: SplunkHecConfig::default(),
+            syslog: SyslogConfig::default(),
             validation: ValidationConfig::default(),
             routing: RoutingConfig::default(),
             destinations: DestinationsConfig::default(),
@@ -679,6 +683,52 @@ impl Default for SplunkHecConfig {
             bind_address: "0.0.0.0:8088".to_string(),
             max_body_size: 10 * 1024 * 1024,
             request_timeout_ms: 30_000,
+            tls: TlsConfig::default(),
+            auth: AuthConfig {
+                mode: "none".to_string(),
+                ..AuthConfig::default()
+            },
+        }
+    }
+}
+
+/// Syslog receiver configuration (RFC 5424 + RFC 3164).
+///
+/// Accepts syslog messages over UDP, TCP, and TLS/TCP.
+/// Auto-detects message format (RFC 5424 vs RFC 3164) per message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SyslogConfig {
+    /// Enable syslog receiver.
+    pub enabled: bool,
+
+    /// Bind address for UDP listener (standard port 514).
+    pub udp_bind_address: String,
+
+    /// Bind address for TCP listener (standard port 514).
+    pub tcp_bind_address: String,
+
+    /// Bind address for TLS/TCP listener (standard port 6514, RFC 5425).
+    pub tls_bind_address: String,
+
+    /// Maximum syslog message size in bytes.
+    pub max_message_size: usize,
+
+    /// TLS configuration (for secure syslog on port 6514).
+    pub tls: TlsConfig,
+
+    /// Authentication configuration.
+    pub auth: AuthConfig,
+}
+
+impl Default for SyslogConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            udp_bind_address: "0.0.0.0:514".to_string(),
+            tcp_bind_address: "0.0.0.0:514".to_string(),
+            tls_bind_address: "0.0.0.0:6514".to_string(),
+            max_message_size: 64 * 1024,
             tls: TlsConfig::default(),
             auth: AuthConfig {
                 mode: "none".to_string(),
