@@ -18,6 +18,7 @@ pub mod lumberjack;
 pub mod otlp;
 #[cfg(feature = "plugins")]
 pub mod plugins;
+pub mod splunk_hec;
 pub mod tls;
 pub mod traits;
 
@@ -33,6 +34,7 @@ use crate::server::grpc::GrpcVectorHandler;
 use crate::server::http::HttpHandler;
 use crate::server::lumberjack::LumberjackHandler;
 use crate::server::otlp::OtlpHandler;
+use crate::server::splunk_hec::SplunkHecHandler;
 use crate::server::traits::ProtocolHandler;
 
 /// Main server that manages protocol handlers.
@@ -81,6 +83,15 @@ impl Server {
         if config.lumberjack.enabled {
             handlers.push(Box::new(LumberjackHandler::new(
                 config.lumberjack.clone(),
+                self.state.clone(),
+                self.metrics.clone(),
+            )));
+        }
+
+        // Splunk HEC handler (if enabled)
+        if config.splunk_hec.enabled {
+            handlers.push(Box::new(SplunkHecHandler::new(
+                config.splunk_hec.clone(),
                 self.state.clone(),
                 self.metrics.clone(),
             )));

@@ -56,6 +56,9 @@ pub struct Config {
     /// Lumberjack v2 (Beats) receiver configuration.
     pub lumberjack: LumberjackConfig,
 
+    /// Splunk HEC receiver configuration.
+    pub splunk_hec: SplunkHecConfig,
+
     /// Validation rules.
     pub validation: ValidationConfig,
 
@@ -100,6 +103,7 @@ impl Default for Config {
             grpc: GrpcConfig::default(),
             otlp: OtlpConfig::default(),
             lumberjack: LumberjackConfig::default(),
+            splunk_hec: SplunkHecConfig::default(),
             validation: ValidationConfig::default(),
             routing: RoutingConfig::default(),
             destinations: DestinationsConfig::default(),
@@ -633,6 +637,48 @@ impl Default for LumberjackConfig {
         Self {
             enabled: false,
             bind_address: "0.0.0.0:5044".to_string(),
+            tls: TlsConfig::default(),
+            auth: AuthConfig {
+                mode: "none".to_string(),
+                ..AuthConfig::default()
+            },
+        }
+    }
+}
+
+/// Splunk HEC (HTTP Event Collector) receiver configuration.
+///
+/// Accepts data from Splunk forwarders and HTTP clients over the HEC protocol.
+/// Supports both `Authorization: Splunk <token>` and `Authorization: Bearer <token>`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SplunkHecConfig {
+    /// Enable Splunk HEC receiver.
+    pub enabled: bool,
+
+    /// Bind address for Splunk HEC HTTP listener (standard port 8088).
+    pub bind_address: String,
+
+    /// Maximum request body size in bytes.
+    pub max_body_size: usize,
+
+    /// Request timeout in milliseconds.
+    pub request_timeout_ms: u64,
+
+    /// TLS configuration.
+    pub tls: TlsConfig,
+
+    /// Authentication configuration.
+    pub auth: AuthConfig,
+}
+
+impl Default for SplunkHecConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind_address: "0.0.0.0:8088".to_string(),
+            max_body_size: 10 * 1024 * 1024,
+            request_timeout_ms: 30_000,
             tls: TlsConfig::default(),
             auth: AuthConfig {
                 mode: "none".to_string(),
