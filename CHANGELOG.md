@@ -1,3 +1,10 @@
+## [1.10.3](https://github.com/hyperi-io/dfe-receiver/compare/v1.10.2...v1.10.3) (2026-03-03)
+
+
+### Bug Fixes
+
+* update ci submodule with publish-binary source order fix ([57d23ae](https://github.com/hyperi-io/dfe-receiver/commit/57d23ae4c1ae6f0dda6c37fd86dc7994fbd7e007))
+
 ## [1.10.2](https://github.com/hyperi-io/dfe-receiver/compare/v1.10.1...v1.10.2) (2026-03-03)
 
 
