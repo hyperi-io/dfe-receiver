@@ -36,12 +36,18 @@ fn random_port() -> u16 {
 
 /// Create a minimal config for testing with Prometheus RW enabled.
 fn test_config(rw_port: u16) -> Config {
+    test_config_with_mode(rw_port, "native")
+}
+
+/// Create a config with a specific output mode.
+fn test_config_with_mode(rw_port: u16, mode: &str) -> Config {
     let mut config = Config::default();
     let http_port = random_port();
     config.server.bind_address = format!("127.0.0.1:{http_port}");
     config.server.auth.mode = "none".to_string();
     config.prometheus_rw.enabled = true;
     config.prometheus_rw.bind_address = format!("127.0.0.1:{rw_port}");
+    config.prometheus_rw.mode = mode.to_string();
     config.prometheus_rw.auth.mode = "none".to_string();
     config.destinations.default = "loader".to_string();
     config
@@ -140,7 +146,11 @@ async fn test_single_timeseries() {
     let (shutdown, metrics, url) = start_rw_handler(config).await;
 
     let request = proto::WriteRequest {
-        timeseries: vec![make_timeseries("http_requests_total", 42.0, 1_709_540_000_000)],
+        timeseries: vec![make_timeseries(
+            "http_requests_total",
+            42.0,
+            1_709_540_000_000,
+        )],
         metadata: vec![],
     };
 
@@ -339,7 +349,11 @@ async fn test_bytes_received_tracked() {
     let (shutdown, metrics, url) = start_rw_handler(config).await;
 
     let request = proto::WriteRequest {
-        timeseries: vec![make_timeseries("bytes_test_metric", 99.9, 1_709_540_000_000)],
+        timeseries: vec![make_timeseries(
+            "bytes_test_metric",
+            99.9,
+            1_709_540_000_000,
+        )],
         metadata: vec![],
     };
 
@@ -386,6 +400,80 @@ async fn test_empty_write_request() {
         .expect("request failed");
 
     assert_eq!(resp.status(), 204, "empty write request should succeed");
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        requests_success(&metrics) >= 1,
+        "expected at least 1 success"
+    );
+
+    shutdown.cancel();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+// ---------------------------------------------------------------------------
+// OTel mode tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_otel_mode_single_timeseries() {
+    let port = random_port();
+    let config = test_config_with_mode(port, "otel");
+    let (shutdown, metrics, url) = start_rw_handler(config).await;
+
+    let request = proto::WriteRequest {
+        timeseries: vec![make_timeseries(
+            "http_requests_total",
+            42.0,
+            1_709_540_000_000,
+        )],
+        metadata: vec![],
+    };
+
+    let body = encode_write_request(&request);
+    let resp = reqwest::Client::new()
+        .post(format!("{url}/api/v1/write"))
+        .header("Content-Type", "application/x-protobuf")
+        .header("Content-Encoding", "snappy")
+        .body(body)
+        .send()
+        .await
+        .expect("request failed");
+
+    assert_eq!(resp.status(), 204, "expected 204 No Content");
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        requests_success(&metrics) >= 1,
+        "expected at least 1 success"
+    );
+
+    shutdown.cancel();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+#[tokio::test]
+async fn test_hyperdx_mode_single_timeseries() {
+    let port = random_port();
+    let config = test_config_with_mode(port, "hyperdx");
+    let (shutdown, metrics, url) = start_rw_handler(config).await;
+
+    let request = proto::WriteRequest {
+        timeseries: vec![make_timeseries("cpu_usage", 0.75, 1_709_540_000_000)],
+        metadata: vec![],
+    };
+
+    let body = encode_write_request(&request);
+    let resp = reqwest::Client::new()
+        .post(format!("{url}/api/v1/write"))
+        .header("Content-Type", "application/x-protobuf")
+        .header("Content-Encoding", "snappy")
+        .body(body)
+        .send()
+        .await
+        .expect("request failed");
+
+    assert_eq!(resp.status(), 204, "expected 204 No Content");
 
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(

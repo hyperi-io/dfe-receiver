@@ -9,8 +9,18 @@
 //! Converts Prometheus Remote Write v1 `WriteRequest` protobuf into
 //! pipeline-ready JSON events.
 //!
-//! Each `TimeSeries` + `Sample` pair produces one JSON event with labels
-//! flattened to top-level fields.
+//! Supports three output modes:
+//!
+//! - **`native`** (default): Flat JSON with labels as top-level fields.
+//!   Each `TimeSeries` + `Sample` pair produces one JSON event.
+//!
+//! - **`otel`**: Generic OTel JSON envelope with snake_case fields,
+//!   RFC 3339 timestamps, and native JSON types.
+//!
+//! - **`hyperdx`**: HyperDX ClickHouse-compatible JSON with PascalCase
+//!   fields and DateTime64 timestamps.
+
+use std::collections::HashMap;
 
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
@@ -19,11 +29,94 @@ use crate::error::{Error, Result};
 
 use super::proto;
 
+// ---------------------------------------------------------------------------
+// Output mode
+// ---------------------------------------------------------------------------
+
+/// Prometheus Remote Write output mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PrometheusRwMode {
+    /// Flat JSON with labels as top-level fields (default).
+    #[default]
+    Native,
+    /// Generic OTel JSON envelope (matches OTLP generic mode).
+    OTel,
+    /// HyperDX ClickHouse-compatible JSON (matches OTLP HyperDX mode).
+    HyperDx,
+}
+
+impl PrometheusRwMode {
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "otel" | "generic" => Self::OTel,
+            "hyperdx" => Self::HyperDx,
+            _ => Self::Native,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Timestamp helpers
+// ---------------------------------------------------------------------------
+
+/// Convert epoch milliseconds to RFC 3339 timestamp string (millisecond precision).
+/// Used by native mode.
+fn epoch_ms_to_rfc3339(epoch_ms: i64) -> String {
+    let secs = epoch_ms / 1000;
+    let nanos = ((epoch_ms % 1000) * 1_000_000) as u32;
+    match DateTime::from_timestamp(secs, nanos) {
+        Some(dt) => dt
+            .with_timezone(&Utc)
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        None => epoch_ms.to_string(),
+    }
+}
+
+/// Convert epoch milliseconds to RFC 3339 with nanosecond precision.
+/// Used by OTel generic mode to match OTLP convention.
+fn epoch_ms_to_rfc3339_nanos(epoch_ms: i64) -> String {
+    let secs = epoch_ms / 1000;
+    let nanos = ((epoch_ms % 1000) * 1_000_000) as u32;
+    match DateTime::from_timestamp(secs, nanos) {
+        Some(dt) => dt
+            .with_timezone(&Utc)
+            .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+        None => epoch_ms.to_string(),
+    }
+}
+
+/// Convert epoch milliseconds to ClickHouse DateTime64(9) format.
+/// Used by HyperDX mode. Format: "2024-03-04 08:13:20.000000000"
+fn epoch_ms_to_ch_datetime(epoch_ms: i64) -> String {
+    let secs = epoch_ms / 1000;
+    let nanos = ((epoch_ms % 1000) * 1_000_000) as u32;
+    match DateTime::from_timestamp(secs, nanos) {
+        Some(dt) => dt.format("%Y-%m-%d %H:%M:%S%.9f").to_string(),
+        None => epoch_ms.to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Conversion
+// ---------------------------------------------------------------------------
+
 /// Convert a decoded `WriteRequest` into a vector of JSON `Bytes` for the pipeline.
-///
-/// Each `TimeSeries` with N samples produces N JSON events. Labels are flattened
-/// to top-level fields. `_source` is set to `"prometheus"` for routing.
-pub fn write_request_to_json(request: proto::WriteRequest) -> Result<Vec<Bytes>> {
+pub fn write_request_to_json(
+    request: proto::WriteRequest,
+    mode: PrometheusRwMode,
+) -> Result<Vec<Bytes>> {
+    match mode {
+        PrometheusRwMode::Native => convert_native(request),
+        PrometheusRwMode::OTel | PrometheusRwMode::HyperDx => convert_otel(request, mode),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Native mode (existing behaviour)
+// ---------------------------------------------------------------------------
+
+/// Native conversion: flat JSON with labels as top-level fields.
+fn convert_native(request: proto::WriteRequest) -> Result<Vec<Bytes>> {
     let mut events = Vec::new();
 
     for ts in request.timeseries {
@@ -90,16 +183,74 @@ pub fn write_request_to_json(request: proto::WriteRequest) -> Result<Vec<Bytes>>
     Ok(events)
 }
 
-/// Convert epoch milliseconds to RFC 3339 timestamp string.
-fn epoch_ms_to_rfc3339(epoch_ms: i64) -> String {
-    let secs = epoch_ms / 1000;
-    let nanos = ((epoch_ms % 1000) * 1_000_000) as u32;
-    match DateTime::from_timestamp(secs, nanos) {
-        Some(dt) => dt
-            .with_timezone(&Utc)
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-        None => epoch_ms.to_string(),
+// ---------------------------------------------------------------------------
+// OTel mode (generic + hyperdx)
+// ---------------------------------------------------------------------------
+
+/// OTel conversion: structured JSON matching OTLP handler output.
+fn convert_otel(request: proto::WriteRequest, mode: PrometheusRwMode) -> Result<Vec<Bytes>> {
+    // Build metadata lookup for metric type determination
+    // MetricType::COUNTER (1) → "sum", everything else → "gauge"
+    let metadata: HashMap<&str, i32> = request
+        .metadata
+        .iter()
+        .map(|m| (m.metric_family_name.as_str(), m.r#type))
+        .collect();
+
+    let mut events = Vec::new();
+    let empty_resource = serde_json::Map::new();
+
+    for ts in &request.timeseries {
+        // Extract __name__ label as metric name; remaining labels are attributes
+        let mut metric_name = "";
+        let mut attrs = serde_json::Map::with_capacity(ts.labels.len());
+
+        for label in &ts.labels {
+            if label.name == "__name__" {
+                metric_name = &label.value;
+            } else {
+                attrs.insert(
+                    label.name.clone(),
+                    serde_json::Value::String(label.value.clone()),
+                );
+            }
+        }
+
+        // Determine OTel metric type from metadata
+        let metric_type = match metadata.get(metric_name) {
+            Some(&1) => "sum", // COUNTER
+            _ => "gauge",
+        };
+
+        // Emit one event per sample
+        for sample in &ts.samples {
+            let json_value = match mode {
+                PrometheusRwMode::HyperDx => serde_json::json!({
+                    "TimeUnix": epoch_ms_to_ch_datetime(sample.timestamp),
+                    "MetricName": metric_name,
+                    "Value": sample.value,
+                    "Attributes": attrs,
+                    "ResourceAttributes": empty_resource,
+                    "_otel_metric_type": metric_type,
+                }),
+                _ => serde_json::json!({
+                    "_signal": "metric",
+                    "_timestamp": epoch_ms_to_rfc3339_nanos(sample.timestamp),
+                    "metric_name": metric_name,
+                    "metric_type": metric_type,
+                    "value": sample.value,
+                    "attributes": attrs,
+                    "resource": empty_resource,
+                }),
+            };
+
+            let json = serde_json::to_vec(&json_value)
+                .map_err(|e| Error::Validation(format!("JSON serialisation failed: {e}")))?;
+            events.push(Bytes::from(json));
+        }
     }
+
+    Ok(events)
 }
 
 // ---------------------------------------------------------------------------
@@ -134,6 +285,67 @@ mod tests {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Mode parsing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_mode_from_str() {
+        assert_eq!(
+            PrometheusRwMode::from_str("native"),
+            PrometheusRwMode::Native
+        );
+        assert_eq!(PrometheusRwMode::from_str("otel"), PrometheusRwMode::OTel);
+        assert_eq!(
+            PrometheusRwMode::from_str("generic"),
+            PrometheusRwMode::OTel
+        );
+        assert_eq!(
+            PrometheusRwMode::from_str("hyperdx"),
+            PrometheusRwMode::HyperDx
+        );
+        assert_eq!(
+            PrometheusRwMode::from_str("HYPERDX"),
+            PrometheusRwMode::HyperDx
+        );
+        assert_eq!(
+            PrometheusRwMode::from_str("unknown"),
+            PrometheusRwMode::Native
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Timestamp helpers
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_timestamp_conversion() {
+        let ts = epoch_ms_to_rfc3339(1709540000000);
+        assert_eq!(ts, "2024-03-04T08:13:20.000Z");
+    }
+
+    #[test]
+    fn test_timestamp_with_millis() {
+        let ts = epoch_ms_to_rfc3339(1709540000123);
+        assert_eq!(ts, "2024-03-04T08:13:20.123Z");
+    }
+
+    #[test]
+    fn test_timestamp_rfc3339_nanos() {
+        let ts = epoch_ms_to_rfc3339_nanos(1709540000123);
+        assert_eq!(ts, "2024-03-04T08:13:20.123000000Z");
+    }
+
+    #[test]
+    fn test_timestamp_ch_datetime() {
+        let ts = epoch_ms_to_ch_datetime(1709540000123);
+        assert_eq!(ts, "2024-03-04 08:13:20.123000000");
+    }
+
+    // -----------------------------------------------------------------------
+    // Native mode tests
+    // -----------------------------------------------------------------------
+
     #[test]
     fn test_single_timeseries_single_sample() {
         let request = proto::WriteRequest {
@@ -147,7 +359,7 @@ mod tests {
             metadata: vec![],
         };
 
-        let events = write_request_to_json(request).unwrap();
+        let events = write_request_to_json(request, PrometheusRwMode::Native).unwrap();
         assert_eq!(events.len(), 1);
 
         let obj: serde_json::Value = serde_json::from_slice(&events[0]).unwrap();
@@ -174,7 +386,7 @@ mod tests {
             metadata: vec![],
         };
 
-        let events = write_request_to_json(request).unwrap();
+        let events = write_request_to_json(request, PrometheusRwMode::Native).unwrap();
         assert_eq!(events.len(), 3);
 
         let obj0: serde_json::Value = serde_json::from_slice(&events[0]).unwrap();
@@ -201,7 +413,7 @@ mod tests {
             metadata: vec![],
         };
 
-        let events = write_request_to_json(request).unwrap();
+        let events = write_request_to_json(request, PrometheusRwMode::Native).unwrap();
         assert_eq!(events.len(), 2);
 
         let obj0: serde_json::Value = serde_json::from_slice(&events[0]).unwrap();
@@ -220,7 +432,7 @@ mod tests {
             metadata: vec![],
         };
 
-        let events = write_request_to_json(request).unwrap();
+        let events = write_request_to_json(request, PrometheusRwMode::Native).unwrap();
         assert!(events.is_empty());
     }
 
@@ -231,7 +443,7 @@ mod tests {
             metadata: vec![],
         };
 
-        let events = write_request_to_json(request).unwrap();
+        let events = write_request_to_json(request, PrometheusRwMode::Native).unwrap();
         assert!(events.is_empty());
     }
 
@@ -245,7 +457,7 @@ mod tests {
             metadata: vec![],
         };
 
-        let events = write_request_to_json(request).unwrap();
+        let events = write_request_to_json(request, PrometheusRwMode::Native).unwrap();
         let obj: serde_json::Value = serde_json::from_slice(&events[0]).unwrap();
         assert_eq!(obj["_source"], "prometheus");
     }
@@ -263,21 +475,9 @@ mod tests {
             metadata: vec![],
         };
 
-        let events = write_request_to_json(request).unwrap();
+        let events = write_request_to_json(request, PrometheusRwMode::Native).unwrap();
         let obj: serde_json::Value = serde_json::from_slice(&events[0]).unwrap();
         assert_eq!(obj["_source"], "custom");
-    }
-
-    #[test]
-    fn test_timestamp_conversion() {
-        let ts = epoch_ms_to_rfc3339(1709540000000);
-        assert_eq!(ts, "2024-03-04T08:13:20.000Z");
-    }
-
-    #[test]
-    fn test_timestamp_with_millis() {
-        let ts = epoch_ms_to_rfc3339(1709540000123);
-        assert_eq!(ts, "2024-03-04T08:13:20.123Z");
     }
 
     #[test]
@@ -296,7 +496,7 @@ mod tests {
             metadata: vec![],
         };
 
-        let events = write_request_to_json(request).unwrap();
+        let events = write_request_to_json(request, PrometheusRwMode::Native).unwrap();
         // 1 sample + 1 exemplar = 2 events
         assert_eq!(events.len(), 2);
 
@@ -304,5 +504,196 @@ mod tests {
         assert_eq!(exemplar["_type"], "exemplar");
         assert_eq!(exemplar["exemplar_value"], 0.95);
         assert_eq!(exemplar["exemplar_labels"]["trace_id"], "abc123");
+    }
+
+    // -----------------------------------------------------------------------
+    // OTel generic mode tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_otel_generic_single_sample() {
+        let request = proto::WriteRequest {
+            timeseries: vec![make_timeseries(
+                vec![
+                    make_label("__name__", "http_requests_total"),
+                    make_label("job", "api-server"),
+                    make_label("method", "GET"),
+                ],
+                vec![make_sample(42.0, 1709540000000)],
+            )],
+            metadata: vec![],
+        };
+
+        let events = write_request_to_json(request, PrometheusRwMode::OTel).unwrap();
+        assert_eq!(events.len(), 1);
+
+        let obj: serde_json::Value = serde_json::from_slice(&events[0]).unwrap();
+        assert_eq!(obj["_signal"], "metric");
+        assert_eq!(obj["metric_name"], "http_requests_total");
+        assert_eq!(obj["metric_type"], "gauge");
+        assert_eq!(obj["value"], 42.0);
+        assert_eq!(obj["attributes"]["job"], "api-server");
+        assert_eq!(obj["attributes"]["method"], "GET");
+        // __name__ should NOT appear in attributes
+        assert!(obj["attributes"]["__name__"].is_null());
+        // Timestamp should be RFC 3339 with nanos
+        let ts = obj["_timestamp"].as_str().unwrap();
+        assert!(ts.ends_with('Z'));
+        assert!(ts.contains("000000000Z"));
+        // resource should be empty object
+        assert!(obj["resource"].is_object());
+    }
+
+    #[test]
+    fn test_otel_generic_empty_request() {
+        let request = proto::WriteRequest {
+            timeseries: vec![],
+            metadata: vec![],
+        };
+
+        let events = write_request_to_json(request, PrometheusRwMode::OTel).unwrap();
+        assert!(events.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // HyperDX mode tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_hyperdx_single_sample() {
+        let request = proto::WriteRequest {
+            timeseries: vec![make_timeseries(
+                vec![
+                    make_label("__name__", "cpu_usage"),
+                    make_label("host", "server-1"),
+                ],
+                vec![make_sample(0.75, 1709540000123)],
+            )],
+            metadata: vec![],
+        };
+
+        let events = write_request_to_json(request, PrometheusRwMode::HyperDx).unwrap();
+        assert_eq!(events.len(), 1);
+
+        let obj: serde_json::Value = serde_json::from_slice(&events[0]).unwrap();
+        assert_eq!(obj["MetricName"], "cpu_usage");
+        assert_eq!(obj["Value"], 0.75);
+        assert_eq!(obj["_otel_metric_type"], "gauge");
+        assert_eq!(obj["Attributes"]["host"], "server-1");
+        // __name__ should NOT appear in Attributes
+        assert!(obj["Attributes"]["__name__"].is_null());
+        // Timestamp should be ClickHouse DateTime64 format
+        let ts = obj["TimeUnix"].as_str().unwrap();
+        assert!(ts.contains("08:13:20.123000000"));
+        // ResourceAttributes should be empty object
+        assert!(obj["ResourceAttributes"].is_object());
+    }
+
+    // -----------------------------------------------------------------------
+    // Metric type from metadata
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_otel_counter_metadata() {
+        let request = proto::WriteRequest {
+            timeseries: vec![make_timeseries(
+                vec![
+                    make_label("__name__", "http_requests_total"),
+                    make_label("method", "GET"),
+                ],
+                vec![make_sample(100.0, 1709540000000)],
+            )],
+            metadata: vec![proto::MetricMetadata {
+                r#type: 1, // COUNTER
+                metric_family_name: "http_requests_total".to_string(),
+                help: String::new(),
+                unit: String::new(),
+            }],
+        };
+
+        let events = write_request_to_json(request, PrometheusRwMode::OTel).unwrap();
+        let obj: serde_json::Value = serde_json::from_slice(&events[0]).unwrap();
+        assert_eq!(obj["metric_type"], "sum");
+    }
+
+    #[test]
+    fn test_otel_no_metadata_defaults_gauge() {
+        let request = proto::WriteRequest {
+            timeseries: vec![make_timeseries(
+                vec![make_label("__name__", "temperature")],
+                vec![make_sample(23.5, 1709540000000)],
+            )],
+            metadata: vec![],
+        };
+
+        let events = write_request_to_json(request, PrometheusRwMode::OTel).unwrap();
+        let obj: serde_json::Value = serde_json::from_slice(&events[0]).unwrap();
+        assert_eq!(obj["metric_type"], "gauge");
+    }
+
+    #[test]
+    fn test_hyperdx_counter_metadata() {
+        let request = proto::WriteRequest {
+            timeseries: vec![make_timeseries(
+                vec![make_label("__name__", "bytes_sent_total")],
+                vec![make_sample(999.0, 1709540000000)],
+            )],
+            metadata: vec![proto::MetricMetadata {
+                r#type: 1, // COUNTER
+                metric_family_name: "bytes_sent_total".to_string(),
+                help: String::new(),
+                unit: String::new(),
+            }],
+        };
+
+        let events = write_request_to_json(request, PrometheusRwMode::HyperDx).unwrap();
+        let obj: serde_json::Value = serde_json::from_slice(&events[0]).unwrap();
+        assert_eq!(obj["_otel_metric_type"], "sum");
+    }
+
+    #[test]
+    fn test_otel_metric_name_extraction() {
+        let request = proto::WriteRequest {
+            timeseries: vec![make_timeseries(
+                vec![
+                    make_label("__name__", "process_cpu_seconds_total"),
+                    make_label("instance", "localhost:9090"),
+                ],
+                vec![make_sample(1234.5, 1709540000000)],
+            )],
+            metadata: vec![],
+        };
+
+        let events = write_request_to_json(request, PrometheusRwMode::OTel).unwrap();
+        let obj: serde_json::Value = serde_json::from_slice(&events[0]).unwrap();
+
+        // __name__ becomes metric_name, not an attribute
+        assert_eq!(obj["metric_name"], "process_cpu_seconds_total");
+        assert!(obj["attributes"]["__name__"].is_null());
+        assert_eq!(obj["attributes"]["instance"], "localhost:9090");
+    }
+
+    #[test]
+    fn test_otel_multiple_samples() {
+        let request = proto::WriteRequest {
+            timeseries: vec![make_timeseries(
+                vec![make_label("__name__", "temp"), make_label("sensor", "a")],
+                vec![
+                    make_sample(20.0, 1709540000000),
+                    make_sample(21.0, 1709540001000),
+                ],
+            )],
+            metadata: vec![],
+        };
+
+        let events = write_request_to_json(request, PrometheusRwMode::OTel).unwrap();
+        assert_eq!(events.len(), 2);
+
+        let obj0: serde_json::Value = serde_json::from_slice(&events[0]).unwrap();
+        let obj1: serde_json::Value = serde_json::from_slice(&events[1]).unwrap();
+        assert_eq!(obj0["value"], 20.0);
+        assert_eq!(obj1["value"], 21.0);
+        assert_eq!(obj0["metric_name"], "temp");
+        assert_eq!(obj1["metric_name"], "temp");
     }
 }
