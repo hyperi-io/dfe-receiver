@@ -64,15 +64,17 @@ All protocols follow: receive -> convert to JSON -> validate -> route -> Kafka/d
 - [x] `LumberjackConfig` in config
 - [x] Integration tests with real Filebeat binary (auto-downloaded)
 
-#### Phase 4: Syslog (Tier 2) [NOT STARTED]
+#### Phase 4: Syslog (Tier 2) [DONE]
 
-- [ ] UDP listener (port 514)
-- [ ] TCP listener (port 514)
-- [ ] TLS/TCP listener (port 6514)
-- [ ] RFC 5424 parser (structured data) + RFC 3164 parser (BSD format)
-- [ ] Auto-detect format per message
-- [ ] Octet-counting + non-transparent framing (TCP)
-- [ ] `SyslogConfig` + `syslog` feature flag
+- [x] UDP listener (port 514)
+- [x] TCP listener (port 514)
+- [x] TLS/TCP listener (port 6514)
+- [x] RFC 5424 parser (structured data) + RFC 3164 parser (BSD format)
+- [x] Auto-detect format per message (syslog_loose Variant::Either)
+- [x] Octet-counting + non-transparent framing (TCP, RFC 6587)
+- [x] `SyslogConfig` in config
+- [x] 18 unit tests (7 convert + 10 framing + 1 config)
+- [x] 8 integration tests using `logger` binary (bsdutils)
 
 #### Phase 5: Splunk HEC (Tier 2) [DONE]
 
@@ -100,6 +102,7 @@ All protocols follow: receive -> convert to JSON -> validate -> route -> Kafka/d
 
 ## Completed (Recent Sessions)
 
+- [x] Phase 4: Syslog handler (UDP/TCP/TLS, RFC 5424+3164, octet-counting, logger integration tests)
 - [x] Phase 3: Lumberjack/Beats handler (TCP/TLS, frame parser, zlib, ACK, Filebeat integration tests)
 - [x] Phase 5: Splunk HEC handler (event/raw/health endpoints, NDJSON, auth, integration tests)
 - [x] CI fix: aarch64 cross-compile (`-fuse-ld=bfd` to avoid mold linker for cross targets)
