@@ -492,14 +492,15 @@ mod tests {
 
     #[test]
     fn test_compressed_multiple_inner_frames() {
+        use flate2::write::ZlibEncoder;
+        use std::io::Write;
+
         let mut inner = Vec::new();
         inner.extend_from_slice(&build_json_data_frame(1, b"{\"x\":1}"));
         inner.extend_from_slice(&build_json_data_frame(2, b"{\"y\":2}"));
         inner.extend_from_slice(&build_json_data_frame(3, b"{\"z\":3}"));
 
         // Compress the inner frames
-        use flate2::write::ZlibEncoder;
-        use std::io::Write;
         let mut encoder = ZlibEncoder::new(Vec::new(), flate2::Compression::default());
         encoder.write_all(&inner).unwrap();
         let compressed = encoder.finish().unwrap();

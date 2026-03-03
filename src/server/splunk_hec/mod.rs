@@ -249,15 +249,16 @@ async fn run_hec_server(
         build_tls_acceptor(&config.tls)?
     };
 
-    if tls_provider.is_some() || tls_acceptor.is_some() {
-        info!(addr = %addr, tls = true, "Splunk HEC server listening");
-        // Reuse the HTTP TLS server pattern
-        let acceptor = if let Some(ref provider) = tls_provider {
-            provider.acceptor_handle()
-        } else {
-            Arc::new(parking_lot::RwLock::new(tls_acceptor.unwrap()))
-        };
-        crate::server::http::run_tls_server(listener, app, acceptor, shutdown, metrics).await
+    if let Some(ref provider) = tls_provider {
+        // Hot-reloadable TLS via TlsCertProvider
+        let acceptor_handle = provider.acceptor_handle();
+        info!(addr = %addr, tls = true, hot_reload = true, "Splunk HEC server listening");
+        crate::server::http::run_tls_server(listener, app, acceptor_handle, shutdown, metrics).await
+    } else if let Some(acceptor) = tls_acceptor {
+        // Static TLS (no secrets, no hot-reload)
+        let acceptor_handle = Arc::new(parking_lot::RwLock::new(acceptor));
+        info!(addr = %addr, tls = true, hot_reload = false, "Splunk HEC server listening");
+        crate::server::http::run_tls_server(listener, app, acceptor_handle, shutdown, metrics).await
     } else {
         info!(addr = %addr, tls = false, "Splunk HEC server listening");
         axum::serve(listener, app)
@@ -361,7 +362,10 @@ async fn raw_handler(
             continue;
         }
 
-        let json = raw_to_json(line, &metadata);
+        let json = raw_to_json(line, &metadata).map_err(|e| {
+            state.metrics.inc_requests_error();
+            HecError::internal(&e.to_string())
+        })?;
         state.pipeline.process(json).await.map_err(|e| {
             state.metrics.inc_requests_error();
             if e.to_string().contains("pressure") {
