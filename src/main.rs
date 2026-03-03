@@ -8,13 +8,8 @@
 
 //! dfe-receiver CLI entry point.
 //!
-//! Handles argument parsing, configuration loading, logging initialisation,
-//! and orchestrates the main processing pipeline with graceful shutdown.
-//!
-//! Uses hyperi-rustlib for:
-//! - Configuration (7-layer cascade)
-//! - Logging (structured JSON/text with masking)
-//! - Metrics (Prometheus with process/container metrics)
+//! Uses rustlib's `DfeApp` trait for the standard lifecycle:
+//! parse → log → config → dispatch.
 
 #![forbid(unsafe_code)]
 
@@ -33,16 +28,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Context;
-use clap::Parser;
+use clap::{Parser, Subcommand};
+use hyperi_rustlib::cli::{run_app, CliError, CommonArgs, DfeApp, StandardCommand, VersionInfo};
 use hyperi_rustlib::config::reloader::{ConfigReloader, ReloaderConfig};
-use hyperi_rustlib::env::Environment;
-use hyperi_rustlib::logger::{self, LogFormat, LoggerOptions};
+use hyperi_rustlib::deployment::{generate_chart, generate_compose_fragment, generate_dockerfile};
 use tokio::signal;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn, Level};
+use tracing::{error, info, warn};
 
 use dfe_receiver::config::{reload_config, Config};
+use dfe_receiver::deployment;
 use dfe_receiver::metrics::Metrics;
 use dfe_receiver::pipeline::Orchestrator;
 use dfe_receiver::server::Server;
@@ -50,231 +45,245 @@ use dfe_receiver::server::Server;
 /// dfe-receiver: High-performance HTTP/gRPC receiver for data ingestion.
 #[derive(Parser, Debug)]
 #[command(name = "dfe-receiver")]
-#[command(version, about, long_about = None)]
-struct Args {
-    /// Path to configuration file.
-    #[arg(short, long, env = "DFE_RECEIVER_CONFIG")]
-    config: Option<String>,
+#[command(about = "High-performance HTTP/gRPC receiver for PB/s scale data ingestion")]
+#[command(version)]
+struct App {
+    #[command(flatten)]
+    common: CommonArgs,
 
-    /// Log level (trace, debug, info, warn, error).
-    #[arg(long, env = "DFE_RECEIVER_LOG_LEVEL", default_value = "info")]
-    log_level: String,
-
-    /// Log format (json, text, auto).
-    #[arg(long, env = "DFE_RECEIVER_LOG_FORMAT", default_value = "auto")]
-    log_format: String,
-
-    /// Metrics server address.
-    #[arg(
-        long,
-        env = "DFE_RECEIVER_METRICS_ADDR",
-        default_value = "0.0.0.0:9090"
-    )]
-    metrics_addr: String,
-
-    /// Validate configuration and exit.
-    #[arg(long)]
-    validate: bool,
-
-    /// Print loaded configuration and exit.
-    #[arg(long)]
-    print_config: bool,
+    #[command(subcommand)]
+    command: Option<AppCommand>,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // Detect environment early
-    let env = Environment::detect();
+/// CLI subcommands.
+#[derive(Subcommand, Clone, Debug)]
+enum AppCommand {
+    /// Start the service (default if no subcommand given).
+    Run,
 
-    // Parse CLI arguments (with env var fallbacks)
-    let args = Args::parse();
+    /// Print version information and exit.
+    Version,
 
-    // Initialise logging using hyperi-rustlib
-    init_logging(&args.log_format, &args.log_level).context("failed to initialise logging")?;
+    /// Validate configuration and exit.
+    #[command(name = "config-check")]
+    ConfigCheck,
 
-    info!(
-        environment = ?env,
-        "Runtime environment detected"
-    );
+    /// Emit generated Dockerfile to stdout.
+    #[command(name = "emit-dockerfile")]
+    EmitDockerfile,
 
-    // Load and validate configuration
-    let config = Config::load(args.config.as_deref()).context("failed to load configuration")?;
+    /// Generate Helm chart directory.
+    #[command(name = "emit-chart")]
+    EmitChart {
+        /// Output directory for the Helm chart.
+        #[arg(default_value = "chart")]
+        dir: String,
+    },
 
-    if let Err(e) = config.validate() {
-        error!(error = %e, "configuration validation failed");
-        std::process::exit(1);
+    /// Emit Docker Compose fragment to stdout.
+    #[command(name = "emit-compose")]
+    EmitCompose,
+
+    /// Emit deployment contract as JSON to stdout.
+    #[command(name = "emit-contract")]
+    EmitContract,
+}
+
+impl DfeApp for App {
+    type Config = Config;
+
+    fn name(&self) -> &str {
+        "dfe-receiver"
     }
 
-    // Early exit for special modes
-    if args.print_config {
-        println!("{config:#?}");
-        return Ok(());
+    fn env_prefix(&self) -> &str {
+        "DFE_RECEIVER"
     }
 
-    if args.validate {
-        info!("Configuration is valid");
-        return Ok(());
+    fn version_info(&self) -> VersionInfo {
+        VersionInfo::new("dfe-receiver", env!("CARGO_PKG_VERSION"))
     }
 
-    // Log startup info
-    info!(
-        version = env!("CARGO_PKG_VERSION"),
-        config_path = ?args.config,
-        "Starting dfe-receiver"
-    );
+    fn common_args(&self) -> &CommonArgs {
+        &self.common
+    }
 
-    // Initialise metrics with scaling pressure engine
-    let metrics = Arc::new(Metrics::with_scaling(config.scaling.build_pressure()));
-
-    // Create cancellation token for coordinated shutdown
-    let shutdown_token = CancellationToken::new();
-
-    // Spawn signal handler for graceful shutdown
-    let signal_token = shutdown_token.clone();
-    tokio::spawn(async move {
-        if let Err(e) = signal::ctrl_c().await {
-            warn!(error = %e, "Failed to listen for SIGINT");
-            return;
+    fn command(&self) -> Option<&StandardCommand> {
+        match &self.command {
+            Some(AppCommand::Version) => {
+                // Use a const to return a stable reference
+                const VERSION: StandardCommand = StandardCommand::Version;
+                Some(&VERSION)
+            }
+            Some(AppCommand::ConfigCheck) => {
+                const CONFIG_CHECK: StandardCommand = StandardCommand::ConfigCheck;
+                Some(&CONFIG_CHECK)
+            }
+            _ => None,
         }
-        info!("Received SIGINT, initiating shutdown");
-        signal_token.cancel();
-    });
+    }
 
-    // Parse metrics server address
-    let default_metrics_addr: SocketAddr = SocketAddr::from(([0, 0, 0, 0], 9090));
-    let metrics_addr: SocketAddr = args.metrics_addr.parse().unwrap_or_else(|_| {
-        warn!(addr = %args.metrics_addr, "Invalid metrics address, using default");
-        default_metrics_addr
-    });
+    fn load_config(&self, path: Option<&str>) -> Result<Self::Config, CliError> {
+        let config = Config::load(path).map_err(|e| CliError::Config(e.to_string()))?;
+        config
+            .validate()
+            .map_err(|e| CliError::Config(e.to_string()))?;
+        Ok(config)
+    }
 
-    // Create and run the pipeline orchestrator
-    let orchestrator = Orchestrator::new(config.clone(), metrics.clone(), shutdown_token.clone())?;
+    async fn run_service(&self, config: Self::Config) -> Result<(), CliError> {
+        info!(version = env!("CARGO_PKG_VERSION"), "Starting dfe-receiver");
 
-    // Start config hot-reload (SIGHUP + periodic + file polling via rustlib ConfigReloader)
-    {
-        let config_path_str = config.config_path.clone();
-        let shared_config = orchestrator.shared_config();
-        let reload_state = orchestrator.state();
+        // Initialise metrics with scaling pressure engine
+        let metrics = Arc::new(Metrics::with_scaling(config.scaling.build_pressure()));
 
-        let reloader_config = ReloaderConfig {
-            config_path: config.config_path.as_ref().map(PathBuf::from),
-            poll_interval: Duration::from_secs(config.config_reload_secs.max(5)),
-            periodic_interval: if config.config_reload_secs > 0 {
-                Duration::from_secs(config.config_reload_secs)
-            } else {
-                Duration::ZERO
-            },
-            debounce: Duration::from_millis(500),
-            enable_sighup: true,
-        };
+        // Create cancellation token for coordinated shutdown
+        let shutdown_token = CancellationToken::new();
 
-        let reloader = ConfigReloader::new(
-            reloader_config,
-            shared_config.clone(),
-            move || reload_config_from_path(config_path_str.as_deref()),
-            |cfg| {
-                cfg.validate()
-                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
-            },
-        );
-
-        let _handle = reloader.start();
-
-        // Subscribe to config changes and rebuild pipeline components
-        // (ConfigReloader updates SharedConfig; this task rebuilds Router/Validator)
-        let mut config_rx = shared_config.subscribe();
+        // Spawn signal handler for graceful shutdown
+        let signal_token = shutdown_token.clone();
         tokio::spawn(async move {
-            while config_rx.changed().await.is_ok() {
-                let new_config = reload_state.config();
-                reload_state.rebuild_components(&new_config);
+            if let Err(e) = signal::ctrl_c().await {
+                warn!(error = %e, "Failed to listen for SIGINT");
+                return;
+            }
+            info!("Received SIGINT, initiating shutdown");
+            signal_token.cancel();
+        });
+
+        // Parse metrics server address
+        let default_metrics_addr: SocketAddr = SocketAddr::from(([0, 0, 0, 0], 9090));
+        let metrics_addr: SocketAddr = self.common.metrics_addr.parse().unwrap_or_else(|_| {
+            warn!(addr = %self.common.metrics_addr, "Invalid metrics address, using default");
+            default_metrics_addr
+        });
+
+        // Create and run the pipeline orchestrator
+        let orchestrator =
+            Orchestrator::new(config.clone(), metrics.clone(), shutdown_token.clone())
+                .map_err(|e| CliError::Service(e.to_string()))?;
+
+        // Start config hot-reload (SIGHUP + periodic + file polling via rustlib ConfigReloader)
+        {
+            let config_path_str = config.config_path.clone();
+            let shared_config = orchestrator.shared_config();
+            let reload_state = orchestrator.state();
+
+            let reloader_config = ReloaderConfig {
+                config_path: config.config_path.as_ref().map(PathBuf::from),
+                poll_interval: Duration::from_secs(config.config_reload_secs.max(5)),
+                periodic_interval: if config.config_reload_secs > 0 {
+                    Duration::from_secs(config.config_reload_secs)
+                } else {
+                    Duration::ZERO
+                },
+                debounce: Duration::from_millis(500),
+                enable_sighup: true,
+            };
+
+            let reloader = ConfigReloader::new(
+                reloader_config,
+                shared_config.clone(),
+                move || reload_config_from_path(config_path_str.as_deref()),
+                |cfg| {
+                    cfg.validate()
+                        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+                },
+            );
+
+            let _handle = reloader.start();
+
+            // Subscribe to config changes and rebuild pipeline components
+            let mut config_rx = shared_config.subscribe();
+            tokio::spawn(async move {
+                while config_rx.changed().await.is_ok() {
+                    let new_config = reload_state.config();
+                    reload_state.rebuild_components(&new_config);
+                    info!(
+                        version = *config_rx.borrow(),
+                        "Pipeline components rebuilt after config reload"
+                    );
+                }
+            });
+
+            if config.config_reload_secs > 0 {
                 info!(
-                    version = *config_rx.borrow(),
-                    "Pipeline components rebuilt after config reload"
+                    interval_secs = config.config_reload_secs,
+                    "Config hot-reload enabled (SIGHUP + periodic + file polling)"
                 );
+            } else {
+                info!("Config hot-reload enabled (SIGHUP + file polling)");
+            }
+        }
+
+        // Create HTTP/gRPC server
+        let server = Server::new(orchestrator.state(), metrics.clone());
+
+        // Spawn metrics server
+        let metrics_token = shutdown_token.clone();
+        let metrics_clone = metrics.clone();
+        tokio::spawn(async move {
+            if let Err(e) = run_metrics_server(metrics_addr, metrics_clone, metrics_token).await {
+                error!(error = %e, "Metrics server error");
             }
         });
 
-        if config.config_reload_secs > 0 {
-            info!(
-                interval_secs = config.config_reload_secs,
-                "Config hot-reload enabled (SIGHUP + periodic + file polling)"
-            );
-        } else {
-            info!("Config hot-reload enabled (SIGHUP + file polling)");
+        // Run main server (blocks until shutdown)
+        if let Err(e) = server.run(shutdown_token.clone()).await {
+            error!(error = %e, "Server error");
+            return Err(CliError::Service(e.to_string()));
         }
-    }
 
-    // Create HTTP/gRPC server
-    let server = Server::new(orchestrator.state(), metrics.clone());
-
-    // Spawn metrics server
-    let metrics_token = shutdown_token.clone();
-    let metrics_clone = metrics.clone();
-    tokio::spawn(async move {
-        if let Err(e) = run_metrics_server(metrics_addr, metrics_clone, metrics_token).await {
-            error!(error = %e, "Metrics server error");
+        // Run pipeline orchestrator
+        if let Err(e) = orchestrator.run().await {
+            error!(error = %e, "Pipeline error");
+            return Err(CliError::Service(e.to_string()));
         }
-    });
 
-    // Run main server (blocks until shutdown)
-    if let Err(e) = server.run(shutdown_token.clone()).await {
-        error!(error = %e, "Server error");
-        std::process::exit(1);
+        info!("Shutdown complete");
+        Ok(())
     }
-
-    // Run pipeline orchestrator
-    if let Err(e) = orchestrator.run().await {
-        error!(error = %e, "Pipeline error");
-        std::process::exit(1);
-    }
-
-    info!("Shutdown complete");
-    Ok(())
 }
 
-/// Initialise logging using hyperi-rustlib's logger module.
-///
-/// Supports:
-/// - Auto-detection (JSON in containers, text on TTY)
-/// - Sensitive data masking
-/// - Environment variable overrides (LOG_LEVEL, LOG_FORMAT)
-fn init_logging(format: &str, level: &str) -> anyhow::Result<()> {
-    let log_format = match format {
-        "json" => LogFormat::Json,
-        "text" => LogFormat::Text,
-        _ => LogFormat::Auto,
-    };
+#[tokio::main]
+async fn main() {
+    let app = App::parse();
 
-    let log_level = match level.to_lowercase().as_str() {
-        "trace" => Level::TRACE,
-        "debug" => Level::DEBUG,
-        "info" => Level::INFO,
-        "warn" | "warning" => Level::WARN,
-        "error" => Level::ERROR,
-        _ => Level::INFO,
-    };
+    // Handle deployment commands before the DfeApp lifecycle
+    if let Some(ref cmd) = app.command {
+        match cmd {
+            AppCommand::EmitDockerfile => {
+                println!("{}", generate_dockerfile(&deployment::contract()));
+                return;
+            }
+            AppCommand::EmitChart { dir } => {
+                if let Err(e) = generate_chart(&deployment::contract(), dir) {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                }
+                eprintln!("Helm chart written to {dir}/");
+                return;
+            }
+            AppCommand::EmitCompose => {
+                println!("{}", generate_compose_fragment(&deployment::contract()));
+                return;
+            }
+            AppCommand::EmitContract => {
+                println!("{}", deployment::contract().to_json());
+                return;
+            }
+            _ => {}
+        }
+    }
 
-    logger::setup(LoggerOptions {
-        level: log_level,
-        format: log_format,
-        add_source: true,
-        enable_masking: true,
-        sensitive_fields: vec![
-            "password".to_string(),
-            "secret".to_string(),
-            "token".to_string(),
-            "api_key".to_string(),
-        ],
-        span_events: false,
-    })
-    .map_err(|e| anyhow::anyhow!("logger setup failed: {e}"))?;
-
-    Ok(())
+    // Delegate to standard DfeApp lifecycle
+    if let Err(e) = run_app(app).await {
+        eprintln!("fatal: {e}");
+        std::process::exit(1);
+    }
 }
 
 /// Reload configuration from the original config path.
-///
-/// Wraps `reload_config` with the error type expected by `ConfigReloader`.
 fn reload_config_from_path(
     config_path: Option<&str>,
 ) -> std::result::Result<Config, Box<dyn std::error::Error + Send + Sync>> {

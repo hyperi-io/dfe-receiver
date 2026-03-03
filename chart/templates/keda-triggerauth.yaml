@@ -1,0 +1,16 @@
+{{- if .Values.keda.enabled }}
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: {{ include "dfe-receiver.fullname" . }}-kafka-auth
+  labels:
+    {{- include "dfe-receiver.labels" . | nindent 4 }}
+spec:
+  secretTargetRef:
+    - parameter: sasl
+      name: {{ include "dfe-receiver.kafkaSecretName" . }}
+      key: {{ .Values.kafka.secretKeys.username }}
+    - parameter: password
+      name: {{ include "dfe-receiver.kafkaSecretName" . }}
+      key: {{ .Values.kafka.secretKeys.password }}
+{{- end }}

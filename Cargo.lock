@@ -1259,7 +1259,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.2",
+ "socket2 0.5.10",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -1269,14 +1269,15 @@ dependencies = [
 
 [[package]]
 name = "hyperi-rustlib"
-version = "1.10.0"
+version = "1.13.0"
 source = "sparse+https://hypersec.jfrog.io/artifactory/api/cargo/hyperi-cargo-virtual/index/"
-checksum = "8e0105f6dfe690a5bb792447d03fb2d63e78c0b5793bf8df7649236e721dfe1c"
+checksum = "b38f8b76c164d7edbf66ce89282c864e90611a7bada14a6a6d48e60758d1bff7"
 dependencies = [
  "async-trait",
  "axum 0.8.8",
  "base64",
  "chrono",
+ "clap",
  "dirs",
  "dotenvy",
  "figment",
@@ -1317,7 +1318,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.61.2",
+ "windows-core 0.57.0",
 ]
 
 [[package]]
