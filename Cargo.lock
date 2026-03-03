@@ -677,6 +677,7 @@ dependencies = [
  "dfe-plugin-loader",
  "dfe-protocol-sdk",
  "dotenvy",
+ "flate2",
  "futures-core",
  "http",
  "hyper",

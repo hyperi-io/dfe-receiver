@@ -53,6 +53,9 @@ pub struct Config {
     /// OTLP receiver configuration.
     pub otlp: OtlpConfig,
 
+    /// Lumberjack v2 (Beats) receiver configuration.
+    pub lumberjack: LumberjackConfig,
+
     /// Validation rules.
     pub validation: ValidationConfig,
 
@@ -96,6 +99,7 @@ impl Default for Config {
             server: ServerConfig::default(),
             grpc: GrpcConfig::default(),
             otlp: OtlpConfig::default(),
+            lumberjack: LumberjackConfig::default(),
             validation: ValidationConfig::default(),
             routing: RoutingConfig::default(),
             destinations: DestinationsConfig::default(),
@@ -604,6 +608,40 @@ impl Default for OtlpConfig {
     }
 }
 
+/// Lumberjack v2 (Beats) protocol configuration.
+///
+/// Accepts data from Elastic Beats agents (Filebeat, Winlogbeat, etc.)
+/// over the Lumberjack v2 wire protocol on TCP/TLS.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LumberjackConfig {
+    /// Enable Lumberjack/Beats receiver.
+    pub enabled: bool,
+
+    /// Bind address for Lumberjack TCP listener (standard port 5044).
+    pub bind_address: String,
+
+    /// TLS configuration (Beats clients typically require TLS).
+    pub tls: TlsConfig,
+
+    /// Authentication configuration.
+    pub auth: AuthConfig,
+}
+
+impl Default for LumberjackConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind_address: "0.0.0.0:5044".to_string(),
+            tls: TlsConfig::default(),
+            auth: AuthConfig {
+                mode: "none".to_string(),
+                ..AuthConfig::default()
+            },
+        }
+    }
+}
+
 /// Validation configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1103,10 +1141,22 @@ impl ScalingConfig {
             memory_gate_threshold: self.memory_gate_threshold,
         };
         let components = vec![
-            ScalingComponent::new("request_rate", self.weight_request_rate, self.saturation_request_rate),
-            ScalingComponent::new("queue_depth", self.weight_queue_depth, self.saturation_queue_depth),
+            ScalingComponent::new(
+                "request_rate",
+                self.weight_request_rate,
+                self.saturation_request_rate,
+            ),
+            ScalingComponent::new(
+                "queue_depth",
+                self.weight_queue_depth,
+                self.saturation_queue_depth,
+            ),
             ScalingComponent::new("memory", self.weight_memory, 1.0),
-            ScalingComponent::new("connections", self.weight_connections, self.saturation_connections),
+            ScalingComponent::new(
+                "connections",
+                self.weight_connections,
+                self.saturation_connections,
+            ),
             ScalingComponent::new("spill", self.weight_spill, self.saturation_spill),
         ];
         ScalingPressure::new(base, components)

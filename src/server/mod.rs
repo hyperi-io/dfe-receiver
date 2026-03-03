@@ -14,6 +14,7 @@
 pub mod auth;
 pub mod grpc;
 pub mod http;
+pub mod lumberjack;
 pub mod otlp;
 #[cfg(feature = "plugins")]
 pub mod plugins;
@@ -30,6 +31,7 @@ use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
 use crate::server::grpc::GrpcVectorHandler;
 use crate::server::http::HttpHandler;
+use crate::server::lumberjack::LumberjackHandler;
 use crate::server::otlp::OtlpHandler;
 use crate::server::traits::ProtocolHandler;
 
@@ -70,6 +72,15 @@ impl Server {
         if config.otlp.enabled {
             handlers.push(Box::new(OtlpHandler::new(
                 config.otlp.clone(),
+                self.state.clone(),
+                self.metrics.clone(),
+            )));
+        }
+
+        // Lumberjack/Beats handler (if enabled)
+        if config.lumberjack.enabled {
+            handlers.push(Box::new(LumberjackHandler::new(
+                config.lumberjack.clone(),
                 self.state.clone(),
                 self.metrics.clone(),
             )));

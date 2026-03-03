@@ -260,7 +260,9 @@ fn assert_no_vector_errors(stderr: &str) {
 /// without errors.
 #[tokio::test]
 async fn test_vector_http_sink() {
-    let vector_bin = if let Some(path) = vector_binary_path() { path } else {
+    let vector_bin = if let Some(path) = vector_binary_path() {
+        path
+    } else {
         eprintln!("Skipping test: vector binary not available");
         return;
     };
@@ -327,7 +329,9 @@ sinks:
 async fn test_vector_https_sink() {
     install_crypto_provider();
 
-    let vector_bin = if let Some(path) = vector_binary_path() { path } else {
+    let vector_bin = if let Some(path) = vector_binary_path() {
+        path
+    } else {
         eprintln!("Skipping test: vector binary not available");
         return;
     };
@@ -408,7 +412,9 @@ sinks:
 /// at the gRPC endpoint, and verifies clean delivery.
 #[tokio::test]
 async fn test_vector_grpc_sink() {
-    let vector_bin = if let Some(path) = vector_binary_path() { path } else {
+    let vector_bin = if let Some(path) = vector_binary_path() {
+        path
+    } else {
         eprintln!("Skipping test: vector binary not available");
         return;
     };
@@ -513,7 +519,9 @@ sinks:
 async fn test_vector_grpc_tls_sink() {
     install_crypto_provider();
 
-    let vector_bin = if let Some(path) = vector_binary_path() { path } else {
+    let vector_bin = if let Some(path) = vector_binary_path() {
+        path
+    } else {
         eprintln!("Skipping test: vector binary not available");
         return;
     };
@@ -635,7 +643,9 @@ sinks:
 async fn test_vector_http_bearer_auth() {
     use dfe_receiver::config::BearerConfig;
 
-    let vector_bin = if let Some(path) = vector_binary_path() { path } else {
+    let vector_bin = if let Some(path) = vector_binary_path() {
+        path
+    } else {
         eprintln!("Skipping test: vector binary not available");
         return;
     };
