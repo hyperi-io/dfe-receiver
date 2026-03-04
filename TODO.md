@@ -6,12 +6,7 @@ This is the **single source of truth** for all tasks and progress.
 
 ## Active Tasks
 
-Tasks currently being worked on. Only one task should be `[IN PROGRESS]` at a time.
-
-- [ ] Update Cargo.lock for hyperi-rustlib >=1.5 `[BLOCKED]`
-  - Current state: Cargo.toml uses `version = ">=1.5"` with `config-reload` feature; merge to main complete and pushed
-  - Next: Run `cargo update -p hyperi-rustlib` once rustlib >=1.5 is published to JFrog
-  - Blockers: hyperi-rustlib >=1.5 not yet published (only 1.4.3 available); CI build will fail until resolved
+(none)
 
 ---
 
@@ -48,12 +43,13 @@ All protocols follow: receive -> convert to JSON -> validate -> route -> Kafka/d
 - [ ] Integration tests: send OTLP data via gRPC client, verify pipeline `[PENDING]`
 - [ ] Integration tests: send OTLP data via HTTP, verify pipeline `[PENDING]`
 
-#### Phase 2: Prometheus Remote Write (Tier 1) [NOT STARTED]
+#### Phase 2: Prometheus Remote Write (Tier 1) [DONE]
 
-- [ ] HTTP endpoint: `POST /api/v1/write`
-- [ ] Snappy decompression + protobuf decode (v1 + v2)
-- [ ] TimeSeries -> JSON conversion
-- [ ] `PrometheusConfig` + `prometheus-rw` feature flag
+- [x] HTTP endpoint: `POST /api/v1/write`
+- [x] Snappy decompression + protobuf decode (v1)
+- [x] TimeSeries -> JSON conversion (native, otel, hyperdx modes)
+- [x] `PrometheusRwConfig` in config, wired into server orchestration
+- [x] 21 unit tests + 10 integration tests
 
 #### Phase 3: Lumberjack/Beats (Tier 2) [DONE]
 
@@ -102,6 +98,10 @@ All protocols follow: receive -> convert to JSON -> validate -> route -> Kafka/d
 
 ## Completed (Recent Sessions)
 
+- [x] Phase 2: Prometheus Remote Write v1 (snappy+protobuf, native/otel/hyperdx modes, 10 integration tests)
+- [x] rustlib updated to 1.13.0 — CLI module wired (`DfeApp` trait, `CommonArgs`, `StandardCommand`)
+- [x] Deployment artefacts generated — Dockerfile (Ubuntu 24.04, multi-arch), chart/, docker-compose.yaml
+- [x] Container + Helm publishing enabled in `.hyperi-ci.yaml`
 - [x] Phase 4: Syslog handler (UDP/TCP/TLS, RFC 5424+3164, octet-counting, logger integration tests)
 - [x] Phase 3: Lumberjack/Beats handler (TCP/TLS, frame parser, zlib, ACK, Filebeat integration tests)
 - [x] Phase 5: Splunk HEC handler (event/raw/health endpoints, NDJSON, auth, integration tests)
@@ -129,12 +129,11 @@ All protocols follow: receive -> convert to JSON -> validate -> route -> Kafka/d
 
 ### High Priority
 
-- [ ] GHCR container image publishing (see `docs/CONTAINER-PUBLISHING.md`)
-  1. [ ] Create `Dockerfile` in repo root (wraps pre-built binary, Option B)
-  2. [ ] Add `publish.container` section to `.hyperi-ci.yaml`
-  3. [ ] Update ci submodule to v1.59.0+
-  4. [ ] Update publish workflow for container inputs
-  5. [ ] Test: trigger release, verify `ghcr.io/hyperi-io/dfe-receiver`
+- [x] GHCR container image publishing
+  - [x] `Dockerfile` — Ubuntu 24.04, multi-arch via `ARG TARGETARCH` + BuildKit bind mount
+  - [x] `publish.container` section in `.hyperi-ci.yaml` (ghcr, linux/amd64+arm64)
+  - [x] `publish.helm` section in `.hyperi-ci.yaml` (oci://ghcr.io/hyperi-io/charts)
+  - [ ] Test: trigger release, verify `ghcr.io/hyperi-io/dfe-receiver`
 - [ ] KEDA scaling metrics endpoint — expose backpressure metrics for KEDA ScaledObject
   - CPU utilisation (process-level)
   - Consumer group lag (Kafka topic lag via rdkafka stats)
