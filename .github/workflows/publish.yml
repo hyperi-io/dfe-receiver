@@ -109,7 +109,7 @@ jobs:
           build-type: ${{ needs.detect.outputs.build_type }}
           publish-binaries: ${{ needs.detect.outputs.publish_binaries }}
           binaries-repo: ${{ needs.detect.outputs.binaries_repo }}
-          github-token: ${{ steps.token.outputs.token }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           # Container publishing (optional - enable in .hyperi-ci.yaml)
           container-enabled: ${{ needs.detect.outputs.container_enabled }}
           container-registry: ${{ needs.detect.outputs.container_registry }}
