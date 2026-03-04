@@ -26,7 +26,7 @@ RUN --mount=type=bind,source=dist,target=/dist \
     cp "$binary" /usr/local/bin/dfe-receiver && \
     chmod +x /usr/local/bin/dfe-receiver
 
-RUN useradd --create-home --uid 1000 appuser
+RUN useradd --create-home --uid 10001 appuser
 USER appuser
 
 EXPOSE 9090 8080 6000 4317 4318 5044 8088
