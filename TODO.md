@@ -4,12 +4,6 @@ This is the **single source of truth** for all tasks and progress.
 
 ---
 
-## Active Tasks
-
-(none)
-
----
-
 ## Work Breakdown Structure (WBS)
 
 ### Multi-Protocol Ingestion (Approach C: Dual Mode)
@@ -93,6 +87,19 @@ All protocols follow: receive -> convert to JSON -> validate -> route -> Kafka/d
 - [ ] TCP listener (null-delimited)
 - [ ] GELF JSON parsing
 - [ ] `GelfConfig` + `gelf` feature flag
+
+---
+
+## Active Tasks
+
+- [ ] Get clean CI build through to JFrog publish `[IN PROGRESS]`
+  - Current state: CI triggered manually then cancelled at user request
+  - Fixes applied:
+    - `Dockerfile`: uid 10001 (was 1000, conflicts with ubuntu user in base image)
+    - `ci` submodule: fixed test parallelism bug (nextest `-j` was setting test threads not build jobs; integration tests now run with `RUST_TEST_THREADS=1` to prevent port conflicts)
+    - `ai`/`ci` submodules updated to latest
+  - Next: user to re-trigger CI when ready (`gh workflow run ci.yml --repo hyperi-io/dfe-receiver --ref main`)
+  - Watch with: `gh run watch --repo hyperi-io/dfe-receiver`
 
 ---
 
