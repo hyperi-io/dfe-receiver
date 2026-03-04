@@ -92,19 +92,18 @@ All protocols follow: receive -> convert to JSON -> validate -> route -> Kafka/d
 
 ## Active Tasks
 
-- [ ] Get clean CI build through to JFrog publish `[IN PROGRESS]`
-  - Current state: CI triggered manually then cancelled at user request
-  - Fixes applied:
-    - `Dockerfile`: uid 10001 (was 1000, conflicts with ubuntu user in base image)
-    - `ci` submodule: fixed test parallelism bug (nextest `-j` was setting test threads not build jobs; integration tests now run with `RUST_TEST_THREADS=1` to prevent port conflicts)
-    - `ai`/`ci` submodules updated to latest
-  - Next: user to re-trigger CI when ready (`gh workflow run ci.yml --repo hyperi-io/dfe-receiver --ref main`)
-  - Watch with: `gh run watch --repo hyperi-io/dfe-receiver`
+(none)
 
 ---
 
 ## Completed (Recent Sessions)
 
+- [x] v1.13.0 published — gRPC loader transport + file debug sink, full CI green (Quality ✓, Test ✓, Publish ✓)
+- [x] gRPC loader transport (`loader.transport = "grpc"`) — `GrpcSink` wrapping rustlib `GrpcTransport`; receiver→loader without Kafka for dfe-docker
+- [x] File debug sink (`file_sink.enabled`) — NDJSON tap writing all processed messages to disk
+- [x] CI publish fixes: GHCR permissions (`GITHUB_TOKEN`), Helm stdout pollution (`>&2` on info/success)
+- [x] Cargo publish excludes applied across all Rust dfe-* projects (dfe-archiver, dfe-fetcher, dfe-receiver-plugin-syslog, dfe-transform-vector, hyperi-rustlib)
+- [x] Get clean CI build through to JFrog publish
 - [x] Phase 2: Prometheus Remote Write v1 (snappy+protobuf, native/otel/hyperdx modes, 10 integration tests)
 - [x] rustlib updated to 1.13.0 — CLI module wired (`DfeApp` trait, `CommonArgs`, `StandardCommand`)
 - [x] Deployment artefacts generated — Dockerfile (Ubuntu 24.04, multi-arch), chart/, docker-compose.yaml
