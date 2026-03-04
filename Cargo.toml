@@ -14,7 +14,7 @@ rust-version = "1.75"
 description = "High-performance HTTP/gRPC receiver for PB/s scale data ingestion"
 license = "FSL-1.1-ALv2"
 repository = "https://github.com/hyperi-io/dfe-receiver"
-exclude = [".claude/", ".github/", "ai/", "ci/", "docs/", "reference/", "benches/"]
+exclude = [".claude/", ".github/", "ai/", "ci/", "chart/", "docs/", "reference/", "scripts/", "benches/"]
 
 [lib]
 name = "dfe_receiver"
