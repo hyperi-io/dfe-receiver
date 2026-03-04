@@ -30,6 +30,7 @@ hyperi-rustlib = { version = ">=1.13.0", registry = "hyperi", features = [
     "metrics",
     "http-server",
     "transport-kafka",
+    "transport-grpc",
     "dlq-kafka",
     "spool",
     "tiered-sink",

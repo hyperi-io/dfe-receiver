@@ -161,6 +161,7 @@ impl DfeApp for App {
         // Create and run the pipeline orchestrator
         let orchestrator =
             Orchestrator::new(config.clone(), metrics.clone(), shutdown_token.clone())
+                .await
                 .map_err(|e| CliError::Service(e.to_string()))?;
 
         // Start config hot-reload (SIGHUP + periodic + file polling via rustlib ConfigReloader)

@@ -97,6 +97,9 @@ pub struct Config {
     #[serde(skip)]
     pub config_path: Option<String>,
 
+    /// Debug file sink — writes all processed messages to a file.
+    pub file_sink: FileSinkConfig,
+
     /// External protocol plugins.
     #[cfg(feature = "plugins")]
     pub plugins: PluginsConfig,
@@ -122,6 +125,7 @@ impl Default for Config {
             scaling: ScalingConfig::default(),
             config_reload_secs: 0,
             config_path: None,
+            file_sink: FileSinkConfig::default(),
             #[cfg(feature = "plugins")]
             plugins: PluginsConfig::default(),
         }
@@ -1149,14 +1153,18 @@ impl Default for ProducerConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LoaderConfig {
-    /// Loader address.
+    /// Loader address (used for Kafka mode reference; override with grpc_endpoint for gRPC mode).
     pub address: String,
 
-    /// Transport type (kafka, memory).
+    /// Transport type (kafka, memory, grpc).
     pub transport: String,
 
     /// Connection timeout in milliseconds.
     pub timeout_ms: u64,
+
+    /// gRPC endpoint URI for loader (only used when transport = "grpc").
+    /// Defaults to http://{address} if not set.
+    pub grpc_endpoint: Option<String>,
 }
 
 impl Default for LoaderConfig {
@@ -1165,6 +1173,40 @@ impl Default for LoaderConfig {
             address: "dfe-loader:9000".to_string(),
             transport: "kafka".to_string(),
             timeout_ms: 5000,
+            grpc_endpoint: None,
+        }
+    }
+}
+
+impl LoaderConfig {
+    /// Returns the effective gRPC endpoint URI.
+    ///
+    /// Uses `grpc_endpoint` if set, otherwise derives `http://{address}`.
+    pub fn effective_grpc_endpoint(&self) -> String {
+        if let Some(ref ep) = self.grpc_endpoint {
+            ep.clone()
+        } else {
+            format!("http://{}", self.address)
+        }
+    }
+}
+
+/// Debug file sink configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FileSinkConfig {
+    /// Enable writing all processed messages to a file.
+    pub enabled: bool,
+
+    /// Path to the output file (NDJSON format, appended).
+    pub path: String,
+}
+
+impl Default for FileSinkConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            path: "/tmp/dfe-receiver-debug.ndjson".to_string(),
         }
     }
 }

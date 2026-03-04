@@ -27,6 +27,8 @@ use crate::config::{Config, SharedConfig};
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
 use crate::routing::{RouteResult, Router};
+use crate::sink::file::FileSink;
+use crate::sink::grpc::GrpcSink;
 use crate::sink::kafka::KafkaSink;
 use crate::sink::loader::LoaderSink;
 use crate::sink::Sink;
@@ -39,6 +41,8 @@ pub struct PipelineState {
     router: RwLock<Router>,
     kafka_sink: Option<Arc<TieredSink<KafkaSink>>>,
     loader_sink: Option<Arc<TieredSink<LoaderSink>>>,
+    grpc_loader_sink: Option<Arc<TieredSink<GrpcSink>>>,
+    file_sink: Option<Arc<FileSink>>,
     buffer_manager: Arc<BufferManager>,
     dlq: Option<Arc<Dlq>>,
     ready: AtomicBool,
@@ -46,7 +50,7 @@ pub struct PipelineState {
 
 impl PipelineState {
     /// Create new pipeline state.
-    pub fn new(shared_config: SharedConfig) -> Result<Self> {
+    pub async fn new(shared_config: SharedConfig) -> Result<Self> {
         let config = shared_config.get();
         let validator = Validator::new(config.validation.clone());
         let router = Router::new(
@@ -64,16 +68,43 @@ impl PipelineState {
             None
         };
 
-        // Initialise loader sink with tiered wrapper
-        let loader_sink = if config.destinations.default == "loader"
+        // Determine if loader destination is in use
+        let loader_destination_active = config.destinations.default == "loader"
             || config
                 .destinations
                 .rules
                 .iter()
-                .any(|r| r.destination == "loader")
-        {
-            let primary = LoaderSink::new(&config.loader, &config.kafka)?;
-            Some(Arc::new(TieredSink::new(primary, &config.buffer)))
+                .any(|r| r.destination == "loader");
+
+        // Initialise loader or gRPC loader sink with tiered wrapper
+        let (loader_sink, grpc_loader_sink) = if loader_destination_active {
+            if config.loader.transport == "grpc" {
+                let endpoint = config.loader.effective_grpc_endpoint();
+                let primary = GrpcSink::new(&endpoint).await?;
+                (
+                    None,
+                    Some(Arc::new(TieredSink::new(primary, &config.buffer))),
+                )
+            } else {
+                let primary = LoaderSink::new(&config.loader, &config.kafka)?;
+                (
+                    Some(Arc::new(TieredSink::new(primary, &config.buffer))),
+                    None,
+                )
+            }
+        } else {
+            (None, None)
+        };
+
+        // Initialise debug file sink if enabled
+        let file_sink = if config.file_sink.enabled {
+            match FileSink::new(&config.file_sink.path) {
+                Ok(sink) => Some(Arc::new(sink)),
+                Err(e) => {
+                    warn!(error = %e, path = %config.file_sink.path, "Failed to open file sink, disabled");
+                    None
+                }
+            }
         } else {
             None
         };
@@ -103,6 +134,8 @@ impl PipelineState {
             router: RwLock::new(router),
             kafka_sink,
             loader_sink,
+            grpc_loader_sink,
+            file_sink,
             buffer_manager,
             dlq,
             ready: AtomicBool::new(true),
@@ -139,6 +172,12 @@ impl PipelineState {
 
         if let Some(ref loader) = self.loader_sink {
             if !loader.is_healthy() {
+                return false;
+            }
+        }
+
+        if let Some(ref grpc) = self.grpc_loader_sink {
+            if !grpc.is_healthy() {
                 return false;
             }
         }
@@ -246,13 +285,20 @@ impl PipelineState {
         let route = self.router.read().route(&payload);
         match route {
             RouteResult::Kafka(topic) => {
-                self.send_to_kafka(&topic, payload).await?;
+                self.send_to_kafka(&topic, payload.clone()).await?;
             }
             RouteResult::Loader => {
-                self.send_to_loader(payload).await?;
+                self.send_to_loader(payload.clone()).await?;
             }
             RouteResult::Dlq(topic) => {
-                self.send_to_kafka(&topic, payload).await?;
+                self.send_to_kafka(&topic, payload.clone()).await?;
+            }
+        }
+
+        // Debug tap: fire-and-forget write to file sink (errors are logged, not propagated)
+        if let Some(ref fsink) = self.file_sink {
+            if let Err(e) = fsink.send("", payload).await {
+                warn!(error = %e, "File sink write failed");
             }
         }
 
@@ -302,8 +348,15 @@ impl PipelineState {
     }
 
     /// Send message to loader.
+    ///
+    /// Dispatches to the gRPC loader sink when `loader.transport = "grpc"`,
+    /// otherwise uses the Kafka-backed loader sink.
     #[inline]
     async fn send_to_loader(&self, payload: Bytes) -> Result<()> {
+        if let Some(ref sink) = self.grpc_loader_sink {
+            return sink.send("", payload).await;
+        }
+
         let Some(ref sink) = self.loader_sink else {
             return Err(Error::Config("Loader sink not configured".into()));
         };
@@ -362,6 +415,12 @@ impl PipelineState {
             total_queue += stats.queue_size as u64;
         }
 
+        // gRPC loader sink stats
+        if let Some(ref grpc) = self.grpc_loader_sink {
+            let stats = grpc.stats().await;
+            total_queue += stats.queue_size as u64;
+        }
+
         metrics.set_batch_queue_size(total_queue);
 
         // Sync all metrics into the scaling pressure engine
@@ -411,9 +470,13 @@ pub struct Orchestrator {
 
 impl Orchestrator {
     /// Create a new orchestrator.
-    pub fn new(config: Config, metrics: Arc<Metrics>, shutdown: CancellationToken) -> Result<Self> {
+    pub async fn new(
+        config: Config,
+        metrics: Arc<Metrics>,
+        shutdown: CancellationToken,
+    ) -> Result<Self> {
         let shared_config = SharedConfig::new(config);
-        let state = PipelineState::new(shared_config.clone())?;
+        let state = PipelineState::new(shared_config.clone()).await?;
 
         Ok(Self {
             state: Arc::new(state),
@@ -443,6 +506,9 @@ impl Orchestrator {
         }
         if let Some(ref loader) = self.state.loader_sink {
             loader.clone().start_drain_task(self.shutdown.clone());
+        }
+        if let Some(ref grpc) = self.state.grpc_loader_sink {
+            grpc.clone().start_drain_task(self.shutdown.clone());
         }
 
         // Periodic metrics update (1s interval)
@@ -479,6 +545,18 @@ impl Orchestrator {
             }
         }
 
+        if let Some(ref grpc) = self.state.grpc_loader_sink {
+            if let Err(e) = grpc.flush().await {
+                error!(error = %e, "Failed to flush gRPC loader sink");
+            }
+        }
+
+        if let Some(ref fsink) = self.state.file_sink {
+            if let Err(e) = fsink.flush().await {
+                error!(error = %e, "Failed to flush file sink");
+            }
+        }
+
         info!("Pipeline orchestrator stopped");
         Ok(())
     }
@@ -496,18 +574,18 @@ mod tests {
         config
     }
 
-    fn test_state() -> PipelineState {
+    async fn test_state() -> PipelineState {
         let config = test_config();
-        PipelineState::new(SharedConfig::new(config)).unwrap()
+        PipelineState::new(SharedConfig::new(config)).await.unwrap()
     }
 
-    fn test_state_with(config: Config) -> PipelineState {
-        PipelineState::new(SharedConfig::new(config)).unwrap()
+    async fn test_state_with(config: Config) -> PipelineState {
+        PipelineState::new(SharedConfig::new(config)).await.unwrap()
     }
 
     #[tokio::test]
     async fn test_pipeline_validation_reject() {
-        let state = test_state();
+        let state = test_state().await;
 
         // Invalid JSON with dlq_on_invalid=true goes to DLQ (success since it's routed)
         let result = state.process(Bytes::from("not json")).await;
@@ -517,7 +595,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pipeline_valid_json() {
-        let state = test_state();
+        let state = test_state().await;
 
         let valid_json = Bytes::from(r#"{"test": "data"}"#);
         let result = state.process(valid_json).await;
@@ -526,7 +604,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pipeline_ready_check() {
-        let state = test_state();
+        let state = test_state().await;
         assert!(state.is_ready());
     }
 
@@ -536,16 +614,16 @@ mod tests {
         config.buffer.memory_limit = 1000;
         config.buffer.pressure_threshold = 0.8;
 
-        let state = test_state_with(config);
+        let state = test_state_with(config).await;
 
         // Should start without pressure
         assert!(!state.should_apply_backpressure());
         assert_eq!(state.memory_pressure(), MemoryPressure::Low);
     }
 
-    #[test]
-    fn test_enrich_payload_injects_timestamp() {
-        let state = test_state();
+    #[tokio::test]
+    async fn test_enrich_payload_injects_timestamp() {
+        let state = test_state().await;
 
         let payload = Bytes::from(r#"{"key": "value"}"#);
         let enriched = state.enrich_payload(payload);
@@ -558,9 +636,9 @@ mod tests {
         assert_eq!(parsed.get("key").unwrap(), "value");
     }
 
-    #[test]
-    fn test_enrich_payload_empty_object() {
-        let state = test_state();
+    #[tokio::test]
+    async fn test_enrich_payload_empty_object() {
+        let state = test_state().await;
 
         let payload = Bytes::from(r#"{}"#);
         let enriched = state.enrich_payload(payload);
@@ -569,24 +647,24 @@ mod tests {
         assert!(parsed.get("_timestamp_receiver").is_some());
     }
 
-    #[test]
-    fn test_enrichment_disabled() {
+    #[tokio::test]
+    async fn test_enrichment_disabled() {
         let mut config = test_config();
         config.server.auth.include_common_header = false;
-        let state = test_state_with(config);
+        let state = test_state_with(config).await;
 
         assert!(!state.enrichment_enabled());
     }
 
-    #[test]
-    fn test_enrichment_enabled_by_default() {
-        let state = test_state();
+    #[tokio::test]
+    async fn test_enrichment_enabled_by_default() {
+        let state = test_state().await;
         assert!(state.enrichment_enabled());
     }
 
-    #[test]
-    fn test_reload_config_updates_version() {
-        let state = test_state();
+    #[tokio::test]
+    async fn test_reload_config_updates_version() {
+        let state = test_state().await;
         assert_eq!(state.shared_config().version(), 0);
 
         let mut new_config = test_config();
@@ -597,9 +675,9 @@ mod tests {
         assert_eq!(state.config().routing.default_source, "reloaded");
     }
 
-    #[test]
-    fn test_reload_config_toggles_enrichment() {
-        let state = test_state();
+    #[tokio::test]
+    async fn test_reload_config_toggles_enrichment() {
+        let state = test_state().await;
         assert!(state.enrichment_enabled());
 
         // Disable enrichment via reload
@@ -619,7 +697,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reload_config_while_processing() {
-        let state = Arc::new(test_state());
+        let state = Arc::new(test_state().await);
 
         // Process a message before reload
         let result = state.process(Bytes::from(r#"{"a": 1}"#)).await;
@@ -640,7 +718,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reload_config_subscriber_notified() {
-        let state = test_state();
+        let state = test_state().await;
         let mut rx = state.shared_config().subscribe();
 
         let new_config = test_config();
