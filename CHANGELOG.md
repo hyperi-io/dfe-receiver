@@ -1,3 +1,10 @@
+# [1.12.0](https://github.com/hyperi-io/dfe-receiver/compare/v1.11.0...v1.12.0) (2026-03-04)
+
+
+### Features
+
+* enable container and Helm publishing with multi-arch Dockerfile ([5456936](https://github.com/hyperi-io/dfe-receiver/commit/54569364a7ab793d4db832f38ea2a4db2b141156))
+
 # [1.11.0](https://github.com/hyperi-io/dfe-receiver/compare/v1.10.3...v1.11.0) (2026-03-03)
 
 
