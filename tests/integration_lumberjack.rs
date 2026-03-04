@@ -102,7 +102,9 @@ async fn start_lumberjack_handler(config: Config) -> (CancellationToken, Arc<Met
     let metrics = Arc::new(Metrics::default());
     let shutdown = CancellationToken::new();
     let pipeline = Arc::new(
-        PipelineState::new(SharedConfig::new(config.clone())).expect("Failed to create pipeline"),
+        PipelineState::new(SharedConfig::new(config.clone()))
+            .await
+            .expect("Failed to create pipeline"),
     );
 
     let handler = LumberjackHandler::new(config.lumberjack.clone(), pipeline, metrics.clone());

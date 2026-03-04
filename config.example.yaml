@@ -218,14 +218,19 @@ kafka:
 
 loader:
   address: "dfe-loader:9000"
-  transport: "kafka"  # kafka, zenoh, memory
+  transport: "kafka"  # kafka, memory, grpc
   timeout_ms: 5000
+  # grpc_endpoint: "http://dfe-loader:6000"  # when transport=grpc (defaults to http://{address})
 
 buffer:
   memory_limit: 0  # 0 = auto-detect (67% available)
   pressure_threshold: 0.8
   spool_path: "/var/spool/dfe-receiver"
   spool_max_bytes: 10737418240  # 10GB
+
+file_sink:
+  enabled: false  # set true to write all processed messages to a file (debug only)
+  path: "/tmp/dfe-receiver-debug.ndjson"
 
 metrics:
   enabled: true

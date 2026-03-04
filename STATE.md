@@ -24,6 +24,20 @@
 
 ---
 
+## CI Workflow Rules
+
+> **ALWAYS run `./ci/local-build.sh` before triggering any CI push.**
+>
+> The local build script runs fmt, clippy, audit, and tests. Fix all issues locally
+> before pushing. Do NOT use CI as a build validator — it consumes shared runner time
+> and creates noise. Push only when local-build passes.
+>
+> The `plugins` feature requires JFrog auth (unavailable locally) — use `cargo test`
+> (without `--all-features`) to verify tests pass. The CI handles plugins feature
+> in a credentialed environment.
+
+---
+
 ## Project Overview
 
 ### Architecture

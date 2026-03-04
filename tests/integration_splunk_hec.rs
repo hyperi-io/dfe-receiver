@@ -69,7 +69,9 @@ async fn start_hec_handler(config: Config) -> (CancellationToken, Arc<Metrics>, 
     let metrics = Arc::new(Metrics::default());
     let shutdown = CancellationToken::new();
     let pipeline = Arc::new(
-        PipelineState::new(SharedConfig::new(config.clone())).expect("Failed to create pipeline"),
+        PipelineState::new(SharedConfig::new(config.clone()))
+            .await
+            .expect("Failed to create pipeline"),
     );
 
     let handler = SplunkHecHandler::new(config.splunk_hec.clone(), pipeline, metrics.clone());

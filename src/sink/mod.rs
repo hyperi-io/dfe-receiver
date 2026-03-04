@@ -10,6 +10,8 @@
 //!
 //! Provides the `Sink` trait and implementations for Kafka and dfe-loader.
 
+pub mod file;
+pub mod grpc;
 pub mod kafka;
 pub mod loader;
 
