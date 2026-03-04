@@ -1,3 +1,11 @@
+## [1.12.1](https://github.com/hyperi-io/dfe-receiver/compare/v1.12.0...v1.12.1) (2026-03-04)
+
+
+### Bug Fixes
+
+* update ci submodule with test parallelism fix [skip ci] ([c9a785d](https://github.com/hyperi-io/dfe-receiver/commit/c9a785dee526715ef9958b0889ae9eaba987062c))
+* use uid 10001 for appuser to avoid collision with ubuntu user in base image ([83d8040](https://github.com/hyperi-io/dfe-receiver/commit/83d8040af8e88fab732cd6ccde8e3a4e9b4b69b2))
+
 # [1.12.0](https://github.com/hyperi-io/dfe-receiver/compare/v1.11.0...v1.12.0) (2026-03-04)
 
 
