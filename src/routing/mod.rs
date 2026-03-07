@@ -241,7 +241,7 @@ impl Default for Router {
     fn default() -> Self {
         Self {
             source_rules: vec![],
-            default_source: "dfe".to_string(),
+            default_source: "default".to_string(),
             topic_suffix: "_land".to_string(),
             source_to_topic: FxHashMap::default(),
             dlq_topic: "dlq_land".to_string(),
@@ -263,7 +263,7 @@ mod tests {
     fn default_routing_config() -> RoutingConfig {
         RoutingConfig {
             source_rules: vec![],
-            default_source: "dfe".to_string(),
+            default_source: "default".to_string(),
             topic_suffix: "_land".to_string(),
             source_to_topic: HashMap::new(),
             legacy_compat: false,
@@ -297,7 +297,7 @@ mod tests {
         let payload = Bytes::from(r#"{"data": "test"}"#);
 
         match router.route(&payload) {
-            RouteResult::Kafka(topic) => assert_eq!(topic, "dfe_land"),
+            RouteResult::Kafka(topic) => assert_eq!(topic, "default_land"),
             _ => panic!("expected Kafka route"),
         }
     }
@@ -339,7 +339,7 @@ mod tests {
         let payload = Bytes::from(r#"{"data": "test"}"#);
 
         match router.route(&payload) {
-            RouteResult::Kafka(topic) => assert_eq!(topic, "dfe_land"),
+            RouteResult::Kafka(topic) => assert_eq!(topic, "default_land"),
             _ => panic!("expected Kafka route"),
         }
     }
@@ -381,7 +381,7 @@ mod tests {
         let payload = Bytes::from(r#"{"data": "test"}"#);
 
         match router.route(&payload) {
-            RouteResult::Kafka(topic) => assert_eq!(topic, "dfe_land"),
+            RouteResult::Kafka(topic) => assert_eq!(topic, "default_land"),
             _ => panic!("expected Kafka route"),
         }
     }
@@ -423,7 +423,7 @@ mod tests {
         let payload = Bytes::from(r#"{"type": "netflow", "data": "test"}"#);
 
         match router.route(&payload) {
-            RouteResult::Kafka(topic) => assert_eq!(topic, "dfe_land"),
+            RouteResult::Kafka(topic) => assert_eq!(topic, "default_land"),
             _ => panic!("expected Kafka route"),
         }
     }
@@ -477,7 +477,7 @@ mod tests {
         let payload = Bytes::from(r#"{"_source": "auth", "data": "test"}"#);
 
         match router.route(&payload) {
-            RouteResult::Kafka(topic) => assert_eq!(topic, "dfe_land"),
+            RouteResult::Kafka(topic) => assert_eq!(topic, "default_land"),
             _ => panic!("expected Kafka route"),
         }
     }
@@ -551,7 +551,7 @@ mod tests {
 
         // No rules, no legacy compat → default source
         match router.route(&payload) {
-            RouteResult::Kafka(topic) => assert_eq!(topic, "dfe_land"),
+            RouteResult::Kafka(topic) => assert_eq!(topic, "default_land"),
             _ => panic!("expected Kafka route"),
         }
     }
@@ -621,7 +621,7 @@ mod tests {
         let router = Router::new(&routing, &default_destinations_config(), true);
 
         match router.route_dlq("test error") {
-            RouteResult::Kafka(topic) => assert_eq!(topic, "dfe_land"),
+            RouteResult::Kafka(topic) => assert_eq!(topic, "default_land"),
             _ => panic!("expected Kafka fallback"),
         }
     }
@@ -671,7 +671,7 @@ mod tests {
             let payload = Bytes::from(payload_str);
             match router.route(&payload) {
                 RouteResult::Kafka(topic) => {
-                    assert_eq!(topic, "dfe_land", "for payload: {payload_str}")
+                    assert_eq!(topic, "default_land", "for payload: {payload_str}")
                 }
                 _ => panic!("expected Kafka route for payload: {payload_str}"),
             }

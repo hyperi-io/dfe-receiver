@@ -67,7 +67,7 @@ config:
     http_bind_address: 0.0.0.0:4318
     mode: hyperdx
   routing:
-    default_source: dfe
+    default_source: default
     topic_suffix: _land
   server:
     auth:

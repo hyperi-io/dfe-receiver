@@ -26,7 +26,6 @@ pub fn contract() -> DeploymentContract {
     DeploymentContract {
         app_name: "dfe-receiver".into(),
         binary_name: "dfe-receiver".into(),
-        base_image: "ubuntu:24.04".into(),
         description: "High-performance HTTP/gRPC receiver for PB/s scale data ingestion".into(),
         metrics_port: 9090,
         health: HealthContract {
@@ -130,7 +129,7 @@ pub fn contract() -> DeploymentContract {
                 }
             },
             "routing": {
-                "default_source": "dfe",
+                "default_source": "default",
                 "topic_suffix": "_land"
             },
             "metrics": {
