@@ -97,11 +97,16 @@ All protocols follow: receive -> convert to JSON -> validate -> route -> Kafka/d
 
 ## Active Tasks
 
-- [ ] Commit and push all pending changes (OTLP feature flag, Fluent Forward, GELF, integration tests) `[PENDING]`
+- [ ] Commit pending Fluent Forward, GELF, OTLP integration test files `[PENDING]`
+  - Untracked: src/server/fluent/, src/server/gelf/, tests/integration_fluent.rs, tests/integration_gelf.rs, tests/integration_otlp.rs
+  - Modified: config.example.yaml, src/server/mod.rs
+  - Scripts: scripts/fetch-fluent-bit.sh
 
 ---
 
 ## Completed (Recent Sessions)
+
+- [x] Upgrade all deps to latest (sonic-rs 0.5, axum 0.8, tonic 0.14, prost 0.14, sysinfo 0.37), adopt edition 2024, migrate KafkaSink/LoaderSink to rustlib KafkaProducer (removed TopicBatch, rdkafka from prod deps)
 
 - [x] v1.13.0 published — gRPC loader transport + file debug sink, full CI green (Quality ✓, Test ✓, Publish ✓)
 - [x] gRPC loader transport (`loader.transport = "grpc"`) — `GrpcSink` wrapping rustlib `GrpcTransport`; receiver→loader without Kafka for dfe-docker
