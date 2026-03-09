@@ -33,9 +33,9 @@ All protocols follow: receive -> convert to JSON -> validate -> route -> Kafka/d
 - [x] Wire OTLP handler into server orchestration
 - [x] Suppress proto doctests via `doctest = false` in Cargo.toml
 - [x] Clippy fixes for OTLP code
-- [ ] OTLP feature flag in Cargo.toml (currently always compiled) `[PENDING]`
-- [ ] Integration tests: send OTLP data via gRPC client, verify pipeline `[PENDING]`
-- [ ] Integration tests: send OTLP data via HTTP, verify pipeline `[PENDING]`
+- [x] OTLP feature flag in Cargo.toml (`otlp` feature, default-enabled)
+- [x] Integration tests: send OTLP data via gRPC client, verify pipeline (9 tests)
+- [x] Integration tests: send OTLP data via HTTP, verify pipeline
 
 #### Phase 2: Prometheus Remote Write (Tier 1) [DONE]
 
@@ -76,23 +76,28 @@ All protocols follow: receive -> convert to JSON -> validate -> route -> Kafka/d
 - [x] `SplunkHecConfig` in config (port 8088)
 - [x] 15 unit tests + 11 integration tests (reqwest-based)
 
-#### Phase 6: Fluent Forward (Tier 3) [NOT STARTED]
+#### Phase 6: Fluent Forward (Tier 3) [DONE]
 
-- [ ] TCP listener, Forward protocol parser (msgpack)
-- [ ] Message/Forward/PackedForward modes
-- [ ] `FluentConfig` + `fluent-forward` feature flag
+- [x] TCP listener, Forward protocol parser (msgpack via rmpv)
+- [x] Message/Forward/PackedForward modes
+- [x] EventTime extension type 0 support
+- [x] Chunk ACK response
+- [x] `FluentConfig` in config (port 24224)
+- [x] 10 unit tests + 3 integration tests (fluent-bit binary, auto-downloaded)
 
-#### Phase 7: GELF (Tier 3) [NOT STARTED]
+#### Phase 7: GELF (Tier 3) [DONE]
 
-- [ ] TCP listener (null-delimited)
-- [ ] GELF JSON parsing
-- [ ] `GelfConfig` + `gelf` feature flag
+- [x] TCP listener (null-byte delimited via tokio codec)
+- [x] GELF 1.1 JSON validation (version, host, short_message)
+- [x] Severity mapping, short_message→message copy, `_source: "gelf"` injection
+- [x] `GelfConfig` in config (port 12201)
+- [x] 14 unit tests + 3 integration tests (fluent-bit GELF output, auto-downloaded)
 
 ---
 
 ## Active Tasks
 
-(none)
+- [ ] Commit and push all pending changes (OTLP feature flag, Fluent Forward, GELF, integration tests) `[PENDING]`
 
 ---
 
@@ -111,6 +116,10 @@ All protocols follow: receive -> convert to JSON -> validate -> route -> Kafka/d
 - [x] Phase 4: Syslog handler (UDP/TCP/TLS, RFC 5424+3164, octet-counting, logger integration tests)
 - [x] Phase 3: Lumberjack/Beats handler (TCP/TLS, frame parser, zlib, ACK, Filebeat integration tests)
 - [x] Phase 5: Splunk HEC handler (event/raw/health endpoints, NDJSON, auth, integration tests)
+- [x] Changed default_source from "dfe" to "default" (happy path topic: default_land)
+- [x] OTLP feature flag (compile-gated, default-enabled) + 9 OTLP integration tests
+- [x] Phase 6: Fluent Forward handler (msgpack TCP, 3 modes, ACK, fluent-bit integration tests)
+- [x] Phase 7: GELF handler (null-delimited JSON TCP, validation, fluent-bit integration tests)
 - [x] CI fix: aarch64 cross-compile (`-fuse-ld=bfd` to avoid mold linker for cross targets)
 - [x] CI fix: publish-binary.sh SCRIPT_DIR clobber (source order fix)
 - [x] Published v1.10.3 to JFrog (first successful Publish pipeline in 5+ releases)
