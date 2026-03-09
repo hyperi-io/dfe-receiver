@@ -8,28 +8,30 @@
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Compile Vector proto definitions (event.proto + vector.proto)
-    tonic_build::configure()
+    tonic_prost_build::configure()
         .build_server(true)
         .build_client(false)
         .compile_protos(&["proto/vector.proto", "proto/event.proto"], &["proto"])?;
 
     // Compile OTLP proto definitions (logs, metrics, traces services)
     // Vendored from https://github.com/open-telemetry/opentelemetry-proto v1.5.0
-    tonic_build::configure()
-        .build_server(true)
-        .build_client(false)
-        .compile_protos(
-            &[
-                "proto/opentelemetry/proto/collector/logs/v1/logs_service.proto",
-                "proto/opentelemetry/proto/collector/metrics/v1/metrics_service.proto",
-                "proto/opentelemetry/proto/collector/trace/v1/trace_service.proto",
-            ],
-            &["proto"],
-        )?;
+    if std::env::var("CARGO_FEATURE_OTLP").is_ok() {
+        tonic_prost_build::configure()
+            .build_server(true)
+            .build_client(true)
+            .compile_protos(
+                &[
+                    "proto/opentelemetry/proto/collector/logs/v1/logs_service.proto",
+                    "proto/opentelemetry/proto/collector/metrics/v1/metrics_service.proto",
+                    "proto/opentelemetry/proto/collector/trace/v1/trace_service.proto",
+                ],
+                &["proto"],
+            )?;
+    }
 
     // Compile Prometheus Remote Write proto (v1)
     // Vendored from https://github.com/prometheus/prometheus prompb/
-    tonic_build::configure()
+    tonic_prost_build::configure()
         .build_server(false)
         .build_client(false)
         .compile_protos(&["proto/prometheus/remote.proto"], &["proto"])?;

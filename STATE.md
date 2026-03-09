@@ -6,6 +6,11 @@ The CI system is being completely rewritten. Until migration instructions are pr
 - Do not trigger CI runs or rely on CI for validation
 - Run `./ci/local-build.sh` for local validation if it exists
 
+## Shared Build Host
+
+This host runs multiple projects concurrently. **Never kill cargo processes** to
+free the build lock — other projects may be building. Wait for the lock naturally.
+
 ---
 
 # Project Context
@@ -85,6 +90,12 @@ Native Rust receiver that:
 ---
 
 ## Key Decisions
+
+### No MSRV Pinning (Pre-OSS)
+
+**Decision:** Remove `rust-version` from Cargo.toml — build against latest stable Rust
+**Rationale:** While the project is internal/FSL-licensed, there's no benefit to pinning MSRV. It constrains dependency upgrades (e.g. sysinfo 0.38 requires 1.88) and prevents using new language features. MSRV will be pinned when the project is open-sourced and needs to support a wider range of toolchains.
+**Alternatives considered:** Pinning to 1.75/1.82 (rejected — causes duplicate deps when rustlib uses newer crates)
 
 ### Use hyperi-rustlib CircuitBreaker
 

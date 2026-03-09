@@ -1,222 +1,80 @@
 // Project:   dfe-receiver
 // File:      src/sink/kafka/mod.rs
-// Purpose:   Kafka producer with batching
+// Purpose:   Kafka producer sink using rustlib KafkaProducer
 // Language:  Rust
 //
 // License:   FSL-1.1-ALv2
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
-//! Kafka sink with per-topic batching.
+//! Kafka sink using hyperi-rustlib KafkaProducer.
 //!
-//! Implements optimised batching (10K messages / 8MiB / 20ms) before
-//! sending to Kafka with zstd compression.
+//! Delegates all batching and compression to librdkafka via
+//! `KafkaProducer::HighThroughput` profile (256KB batches, 100ms linger, LZ4).
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use parking_lot::RwLock;
-use rdkafka::producer::{FutureProducer, FutureRecord};
-use rdkafka::ClientConfig;
-use tracing::{debug, error, info};
+use hyperi_rustlib::transport::kafka::{KafkaProducer, ProducerProfile};
+use tracing::{error, info};
 
 use crate::config::KafkaConfig;
 use crate::error::{Error, Result};
 use crate::sink::Sink;
 
-/// Kafka sink with per-topic batching.
+/// Kafka sink backed by rustlib KafkaProducer.
 pub struct KafkaSink {
-    producer: FutureProducer,
-    batches: RwLock<HashMap<String, TopicBatch>>,
-    config: BatchConfig,
+    producer: KafkaProducer,
     healthy: AtomicBool,
-}
-
-/// Configuration for batching.
-#[derive(Debug, Clone)]
-struct BatchConfig {
-    max_bytes: usize,
-    max_messages: usize,
-    max_age: Duration,
-}
-
-/// Per-topic batch accumulator.
-struct TopicBatch {
-    messages: Vec<Bytes>,
-    bytes: usize,
-    created_at: Instant,
-}
-
-impl TopicBatch {
-    fn new() -> Self {
-        Self {
-            messages: Vec::with_capacity(10_000),
-            bytes: 0,
-            created_at: Instant::now(),
-        }
-    }
-
-    fn should_flush(&self, config: &BatchConfig) -> bool {
-        self.bytes >= config.max_bytes
-            || self.messages.len() >= config.max_messages
-            || self.created_at.elapsed() >= config.max_age
-    }
 }
 
 impl KafkaSink {
     /// Create a new Kafka sink.
     pub fn new(config: &KafkaConfig) -> Result<Self> {
-        let mut client_config = ClientConfig::new();
-
-        // Set brokers
-        client_config.set("bootstrap.servers", config.brokers.join(","));
-
-        // Set client ID
-        client_config.set("client.id", &config.client_id);
-
-        // Producer settings
-        client_config.set("batch.size", config.producer.batch_size.to_string());
-        client_config.set("linger.ms", config.producer.linger_ms.to_string());
-        client_config.set("compression.type", &config.producer.compression);
-        client_config.set("acks", &config.producer.acks);
-        client_config.set("retries", config.producer.retries.to_string());
-
-        // Message size
-        client_config.set("message.max.bytes", "8388608"); // 8MiB
-
-        // TLS settings
-        if config.tls.enabled {
-            client_config.set("security.protocol", "ssl");
-            if let Some(ref ca) = config.tls.ca_file {
-                client_config.set("ssl.ca.location", ca);
-            }
-            if let Some(ref cert) = config.tls.cert_file {
-                client_config.set("ssl.certificate.location", cert);
-            }
-            if let Some(ref key) = config.tls.key_file {
-                client_config.set("ssl.key.location", key);
-            }
-        }
-
-        // SASL settings
-        if let Some(ref sasl) = config.sasl {
-            if sasl.enabled {
-                let protocol = if config.tls.enabled {
-                    "sasl_ssl"
-                } else {
-                    "sasl_plaintext"
-                };
-                client_config.set("security.protocol", protocol);
-                client_config.set("sasl.mechanism", &sasl.mechanism.to_uppercase());
-                client_config.set("sasl.username", &sasl.username);
-                client_config.set("sasl.password", &sasl.password);
-            }
-        }
-
-        let producer: FutureProducer = client_config.create().map_err(Error::Kafka)?;
-
-        let batch_config = BatchConfig {
-            max_bytes: config.producer.batch_size,
-            max_messages: config.producer.batch_messages,
-            max_age: Duration::from_millis(config.producer.linger_ms as u64),
-        };
+        let rustlib_config = config.to_rustlib_kafka_config_for_producer();
+        let producer = KafkaProducer::new(&rustlib_config, ProducerProfile::HighThroughput)
+            .map_err(|e| Error::Transport(format!("failed to create Kafka producer: {e}")))?;
 
         info!(
             brokers = ?config.brokers,
-            batch_size = config.producer.batch_size,
-            batch_messages = config.producer.batch_messages,
-            linger_ms = config.producer.linger_ms,
+            profile = "high_throughput",
             "Kafka producer initialised"
         );
 
         Ok(Self {
             producer,
-            batches: RwLock::new(HashMap::new()),
-            config: batch_config,
             healthy: AtomicBool::new(true),
         })
-    }
-
-    /// Flush a specific topic's batch.
-    async fn flush_topic(&self, topic: &str) -> Result<()> {
-        let batch = {
-            let mut batches = self.batches.write();
-            batches.remove(topic)
-        };
-
-        let Some(batch) = batch else {
-            return Ok(());
-        };
-
-        if batch.messages.is_empty() {
-            return Ok(());
-        }
-
-        debug!(
-            topic = topic,
-            messages = batch.messages.len(),
-            bytes = batch.bytes,
-            "Flushing Kafka batch"
-        );
-
-        // Send messages and await immediately to avoid lifetime issues
-        for msg in batch.messages {
-            let record: FutureRecord<'_, str, [u8]> = FutureRecord::to(topic).payload(&msg[..]);
-            match self.producer.send(record, Duration::from_secs(5)).await {
-                Ok(_) => {}
-                Err((e, _)) => {
-                    error!(error = %e, topic = topic, "Kafka send failed");
-                    self.healthy.store(false, Ordering::Relaxed);
-                    return Err(Error::Kafka(e));
-                }
-            }
-        }
-
-        self.healthy.store(true, Ordering::Relaxed);
-        Ok(())
     }
 }
 
 #[async_trait]
 impl Sink for KafkaSink {
-    /// Add a message to the batch for a topic.
+    /// Send a message to a topic (non-blocking, librdkafka batches internally).
     async fn send(&self, topic: &str, payload: Bytes) -> Result<()> {
-        let should_flush = {
-            let mut batches = self.batches.write();
-            let batch = batches
-                .entry(topic.to_string())
-                .or_insert_with(TopicBatch::new);
-
-            batch.bytes += payload.len();
-            batch.messages.push(payload);
-
-            batch.should_flush(&self.config)
-        };
-
-        if should_flush {
-            self.flush_topic(topic).await?;
+        match self.producer.send(topic, None, &payload) {
+            Ok(()) => {
+                self.healthy.store(true, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(e) => {
+                error!(error = %e, topic = topic, "Kafka send failed");
+                self.healthy.store(false, Ordering::Relaxed);
+                Err(Error::Transport(format!("kafka send failed: {e}")))
+            }
         }
-
-        Ok(())
     }
 
-    /// Flush all pending batches.
+    /// Flush all queued messages (blocks until delivered or timeout).
     async fn flush(&self) -> Result<()> {
-        let topics: Vec<String> = {
-            let batches = self.batches.read();
-            batches.keys().cloned().collect()
-        };
-
-        for topic in topics {
-            self.flush_topic(&topic).await?;
+        use std::time::Duration;
+        let remaining = self.producer.flush(Duration::from_secs(30));
+        if remaining > 0 {
+            error!(remaining = remaining, "Kafka flush timed out with messages in flight");
         }
-
         Ok(())
     }
 
-    /// Check if the sink is healthy.
     fn is_healthy(&self) -> bool {
         self.healthy.load(Ordering::Relaxed)
     }
@@ -224,5 +82,5 @@ impl Sink for KafkaSink {
 
 #[cfg(test)]
 mod tests {
-    // Integration tests would require a running Kafka broker
+    // Integration tests require a running Kafka broker — see tests/integration_kafka.rs
 }
