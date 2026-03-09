@@ -372,8 +372,7 @@ mod tests {
         let log = event::Log {
             fields: std::collections::HashMap::new(),
             value: Some(make_map_value(fields)),
-            metadata: None,
-            metadata_full: None,
+            ..Default::default()
         };
 
         let json = log_to_json(&log);
@@ -388,9 +387,7 @@ mod tests {
 
         let log = event::Log {
             fields,
-            value: None,
-            metadata: None,
-            metadata_full: None,
+            ..Default::default()
         };
 
         let json = log_to_json(&log);
@@ -406,8 +403,7 @@ mod tests {
             event: Some(event::event_wrapper::Event::Log(event::Log {
                 fields: std::collections::HashMap::new(),
                 value: Some(make_map_value(fields)),
-                metadata: None,
-                metadata_full: None,
+                ..Default::default()
             })),
         };
 

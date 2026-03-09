@@ -51,6 +51,7 @@ pub struct Config {
     pub grpc: GrpcConfig,
 
     /// OTLP receiver configuration.
+    #[cfg(feature = "otlp")]
     pub otlp: OtlpConfig,
 
     /// Lumberjack v2 (Beats) receiver configuration.
@@ -64,6 +65,12 @@ pub struct Config {
 
     /// Prometheus Remote Write receiver configuration.
     pub prometheus_rw: PrometheusRwConfig,
+
+    /// Fluent Forward protocol receiver configuration.
+    pub fluent: FluentConfig,
+
+    /// GELF receiver configuration.
+    pub gelf: GelfConfig,
 
     /// Validation rules.
     pub validation: ValidationConfig,
@@ -110,11 +117,14 @@ impl Default for Config {
         Self {
             server: ServerConfig::default(),
             grpc: GrpcConfig::default(),
+            #[cfg(feature = "otlp")]
             otlp: OtlpConfig::default(),
             lumberjack: LumberjackConfig::default(),
             splunk_hec: SplunkHecConfig::default(),
             syslog: SyslogConfig::default(),
             prometheus_rw: PrometheusRwConfig::default(),
+            fluent: FluentConfig::default(),
+            gelf: GelfConfig::default(),
             validation: ValidationConfig::default(),
             routing: RoutingConfig::default(),
             destinations: DestinationsConfig::default(),
@@ -582,6 +592,7 @@ impl Default for GrpcConfig {
 }
 
 /// OTLP (OpenTelemetry Protocol) receiver configuration.
+#[cfg(feature = "otlp")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OtlpConfig {
@@ -608,6 +619,7 @@ pub struct OtlpConfig {
     pub auth: AuthConfig,
 }
 
+#[cfg(feature = "otlp")]
 impl Default for OtlpConfig {
     fn default() -> Self {
         Self {
@@ -792,6 +804,68 @@ impl Default for PrometheusRwConfig {
     }
 }
 
+/// Fluent Forward protocol configuration.
+///
+/// Accepts data from Fluentd and Fluent Bit agents over the Forward
+/// protocol (msgpack over TCP) on the standard port 24224.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FluentConfig {
+    /// Enable Fluent Forward receiver.
+    pub enabled: bool,
+
+    /// Bind address for TCP listener (standard port 24224).
+    pub bind_address: String,
+
+    /// Maximum message size in bytes.
+    pub max_message_size: usize,
+
+    /// TLS configuration.
+    pub tls: TlsConfig,
+}
+
+impl Default for FluentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind_address: "0.0.0.0:24224".to_string(),
+            max_message_size: 32 * 1024 * 1024,
+            tls: TlsConfig::default(),
+        }
+    }
+}
+
+/// GELF (Graylog Extended Log Format) receiver configuration.
+///
+/// Accepts GELF messages over TCP (null-byte delimited JSON)
+/// on the standard port 12201.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GelfConfig {
+    /// Enable GELF receiver.
+    pub enabled: bool,
+
+    /// Bind address for TCP listener (standard port 12201).
+    pub bind_address: String,
+
+    /// Maximum message size in bytes.
+    pub max_message_size: usize,
+
+    /// TLS configuration.
+    pub tls: TlsConfig,
+}
+
+impl Default for GelfConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind_address: "0.0.0.0:12201".to_string(),
+            max_message_size: 1024 * 1024,
+            tls: TlsConfig::default(),
+        }
+    }
+}
+
 /// Validation configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -969,22 +1043,18 @@ impl DlqConfig {
 }
 
 impl KafkaConfig {
-    /// Convert to rustlib transport KafkaConfig for DLQ producer.
-    pub fn to_rustlib_kafka_config(&self) -> hyperi_rustlib::transport::KafkaConfig {
+    /// Convert to rustlib transport KafkaConfig with a given client ID suffix.
+    fn to_rustlib_config_with_suffix(&self, suffix: &str) -> hyperi_rustlib::transport::KafkaConfig {
         let mut config = hyperi_rustlib::transport::KafkaConfig {
             brokers: self.brokers.clone(),
-            client_id: format!("{}-dlq", self.client_id),
+            client_id: format!("{}{}", self.client_id, suffix),
             ..Default::default()
         };
 
         // SASL
         if let Some(ref sasl) = self.sasl {
             if sasl.enabled {
-                let protocol = if self.tls.enabled {
-                    "sasl_ssl"
-                } else {
-                    "sasl_plaintext"
-                };
+                let protocol = if self.tls.enabled { "sasl_ssl" } else { "sasl_plaintext" };
                 config.security_protocol = protocol.to_string();
                 config.sasl_mechanism = Some(sasl.mechanism.to_uppercase());
                 config.sasl_username = Some(sasl.username.clone());
@@ -1001,6 +1071,16 @@ impl KafkaConfig {
         config.ssl_key_location = self.tls.key_file.clone();
 
         config
+    }
+
+    /// Convert to rustlib transport KafkaConfig for the main producer sink.
+    pub fn to_rustlib_kafka_config_for_producer(&self) -> hyperi_rustlib::transport::KafkaConfig {
+        self.to_rustlib_config_with_suffix("")
+    }
+
+    /// Convert to rustlib transport KafkaConfig for DLQ producer.
+    pub fn to_rustlib_kafka_config(&self) -> hyperi_rustlib::transport::KafkaConfig {
+        self.to_rustlib_config_with_suffix("-dlq")
     }
 }
 
@@ -1419,6 +1499,7 @@ impl Default for PluginsConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use temp_env;
 
     #[test]
     fn test_default_config() {
@@ -1454,13 +1535,9 @@ mod tests {
     // then cleans up. Tests are serial-safe because they use unique var names.
 
     fn with_env<F: FnOnce()>(vars: &[(&str, &str)], f: F) {
-        for (k, v) in vars {
-            std::env::set_var(k, v);
-        }
-        f();
-        for (k, _) in vars {
-            std::env::remove_var(k);
-        }
+        // temp_env handles unsafe set_var/remove_var internally with a mutex guard.
+        let owned: Vec<(&str, Option<&str>)> = vars.iter().map(|(k, v)| (*k, Some(*v))).collect();
+        temp_env::with_vars(owned, f);
     }
 
     #[test]
