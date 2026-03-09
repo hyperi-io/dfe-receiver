@@ -165,6 +165,38 @@ prometheus_rw:
     #   secret_source: "file:/etc/secrets/prometheus-tokens"
     #   refresh_interval_secs: 300
 
+# Fluent Forward protocol (Fluentd/Fluent Bit, msgpack over TCP)
+fluent:
+  enabled: false
+  bind_address: "0.0.0.0:24224"
+  max_message_size: 33554432  # 32MB
+
+  tls:
+    enabled: false
+    cert_file: "/etc/ssl/fluent-receiver.crt"
+    key_file: "/etc/ssl/fluent-receiver.key"
+    # ca_file: "/etc/ssl/ca.crt"
+    # client_auth: "none"
+    # cert_secret: "vault:secret/tls:cert"
+    # key_secret: "vault:secret/tls:key"
+    # refresh_interval_secs: 3600
+
+# GELF (Graylog Extended Log Format, null-delimited JSON over TCP)
+gelf:
+  enabled: false
+  bind_address: "0.0.0.0:12201"
+  max_message_size: 1048576  # 1MB
+
+  tls:
+    enabled: false
+    cert_file: "/etc/ssl/gelf-receiver.crt"
+    key_file: "/etc/ssl/gelf-receiver.key"
+    # ca_file: "/etc/ssl/ca.crt"
+    # client_auth: "none"
+    # cert_secret: "vault:secret/tls:cert"
+    # key_secret: "vault:secret/tls:key"
+    # refresh_interval_secs: 3600
+
 validation:
   require_json: true
   required_fields: []

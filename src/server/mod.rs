@@ -12,9 +12,12 @@
 //! All enabled handlers are spawned in parallel and monitored for health.
 
 pub mod auth;
+pub mod fluent;
+pub mod gelf;
 pub mod grpc;
 pub mod http;
 pub mod lumberjack;
+#[cfg(feature = "otlp")]
 pub mod otlp;
 #[cfg(feature = "plugins")]
 pub mod plugins;
@@ -32,9 +35,12 @@ use tracing::{error, info};
 use crate::error::Result;
 use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
+use crate::server::fluent::FluentHandler;
+use crate::server::gelf::GelfHandler;
 use crate::server::grpc::GrpcVectorHandler;
 use crate::server::http::HttpHandler;
 use crate::server::lumberjack::LumberjackHandler;
+#[cfg(feature = "otlp")]
 use crate::server::otlp::OtlpHandler;
 use crate::server::prometheus_rw::PrometheusRwHandler;
 use crate::server::splunk_hec::SplunkHecHandler;
@@ -74,7 +80,8 @@ impl Server {
             )));
         }
 
-        // OTLP handler (if enabled)
+        // OTLP handler (if enabled and compiled with otlp feature)
+        #[cfg(feature = "otlp")]
         if config.otlp.enabled {
             handlers.push(Box::new(OtlpHandler::new(
                 config.otlp.clone(),
@@ -114,6 +121,24 @@ impl Server {
         if config.syslog.enabled {
             handlers.push(Box::new(SyslogHandler::new(
                 config.syslog.clone(),
+                self.state.clone(),
+                self.metrics.clone(),
+            )));
+        }
+
+        // Fluent Forward handler (if enabled)
+        if config.fluent.enabled {
+            handlers.push(Box::new(FluentHandler::new(
+                config.fluent.clone(),
+                self.state.clone(),
+                self.metrics.clone(),
+            )));
+        }
+
+        // GELF handler (if enabled)
+        if config.gelf.enabled {
+            handlers.push(Box::new(GelfHandler::new(
+                config.gelf.clone(),
                 self.state.clone(),
                 self.metrics.clone(),
             )));
