@@ -4,12 +4,30 @@ High-performance HTTP/gRPC receiver for PB/s scale data ingestion.
 
 ## Overview
 
-dfe-receiver is a native Rust data ingestion service that:
+dfe-receiver is a native Rust data ingestion service that accepts data from multiple
+agent protocols, normalises it to JSON, and routes it to Kafka topics or dfe-loader.
 
-- Receives JSON data over HTTP(S) and gRPC
-- Validates JSON format and required fields
-- Routes to Kafka topics or dfe-loader based on configurable rules
-- Buffers messages in-memory with backpressure (no disk spillover by design)
+**Supported protocols:**
+
+| Protocol | Port | Source |
+|---|---|---|
+| HTTP(S) JSON | configurable | Vector, custom agents |
+| gRPC Vector sink | configurable | Vector |
+| OTLP gRPC | 4317 | OpenTelemetry collectors |
+| OTLP HTTP | 4318 | OpenTelemetry collectors |
+| Lumberjack/Beats | 5044 | Filebeat, Logstash Beats output |
+| Splunk HEC | 8088 | Splunk forwarders, Fluentd HEC output |
+| Syslog UDP/TCP/TLS | 514 / 6514 | syslogd, rsyslog, syslog-ng |
+| Fluent Forward | 24224 | Fluentd, Fluent Bit |
+| GELF TCP | 12201 | Graylog GELF output, Fluent Bit |
+| Prometheus Remote Write | 9091 | Prometheus, VictoriaMetrics |
+
+**Core behaviour:**
+
+- Normalises all protocol data to JSON
+- Validates JSON format and optional required fields
+- Routes to Kafka topics based on configurable field extraction rules
+- Buffers in-memory with backpressure via CircuitBreaker (no disk spillover by design)
 - Supports header auth, bearer tokens, and mTLS authentication
 
 ## Quick Start
@@ -179,20 +197,44 @@ Key metrics:
 
 ## Architecture
 
+All protocols share the same core pipeline after normalisation:
+
 ```text
-HTTP Request (bytes::Bytes)
-    |
-    +-- Auth middleware (header/bearer/mTLS)
-    |
-    +-- JSON validation (sonic_rs - SIMD)
-    |
-    +-- Router (zero-copy field extraction)
-    |   +-- Extract category field
-    |   +-- Map to destination topic
-    |
-    +-- TieredSink
-        +-- Primary: Kafka producer (librdkafka batched internally)
-        +-- Backpressure: CircuitBreaker -> 503 upstream
+┌─────────────────────────────────────────────────────┐
+│                  Protocol Handlers                  │
+│  (each independently enabled, spawned in parallel)  │
+│                                                     │
+│  HTTP(S)          →  JSON passthrough               │
+│  gRPC/Vector      →  protobuf → JSON                │
+│  OTLP gRPC/HTTP   →  OTel proto → JSON              │
+│  Lumberjack/Beats →  msgpack frames → JSON          │
+│  Splunk HEC       →  HEC JSON → normalised JSON     │
+│  Syslog UDP/TCP   →  RFC5424/3164 → JSON            │
+│  Fluent Forward   →  msgpack → JSON                 │
+│  GELF TCP         →  GELF JSON → normalised JSON    │
+│  Prometheus RW    →  protobuf timeseries → JSON     │
+└───────────────────────┬─────────────────────────────┘
+                        │ bytes::Bytes (normalised JSON)
+                        ▼
+               Auth middleware
+               (header / bearer token / mTLS)
+                        │
+                        ▼
+               JSON validation
+               (sonic_rs SIMD — optional field checks)
+                        │
+                        ▼
+               Router
+               (zero-copy field extraction → topic name)
+                        │
+                        ▼
+               TieredSink
+               (in-memory buffer + CircuitBreaker)
+                 │                    │
+                 ▼                    ▼
+           Kafka topics          dfe-loader
+           (librdkafka,          (direct Kafka
+            batched/LZ4)          input topic)
 ```
 
 ## Development
