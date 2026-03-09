@@ -9,7 +9,7 @@ dfe-receiver is a native Rust data ingestion service that:
 - Receives JSON data over HTTP(S) and gRPC
 - Validates JSON format and required fields
 - Routes to Kafka topics or dfe-loader based on configurable rules
-- Batches messages (10K / 8MiB / 20ms) with disk spillover
+- Buffers messages in-memory with backpressure (no disk spillover by design)
 - Supports header auth, bearer tokens, and mTLS authentication
 
 ## Quick Start
@@ -175,7 +175,6 @@ Key metrics:
 - `dfe_receiver_requests_total` - Total requests by status
 - `dfe_receiver_bytes_received_total` - Total bytes ingested
 - `dfe_receiver_kafka_messages_sent_total` - Messages sent to Kafka
-- `dfe_receiver_buffer_spilled_total` - Messages spilled to disk
 - `dfe_receiver_memory_pressure` - Current memory pressure (0-1)
 
 ## Architecture
@@ -192,8 +191,8 @@ HTTP Request (bytes::Bytes)
     |   +-- Map to destination topic
     |
     +-- TieredSink
-        +-- Primary: Kafka producer (batched)
-        +-- Fallback: Disk spool (circuit breaker)
+        +-- Primary: Kafka producer (librdkafka batched internally)
+        +-- Backpressure: CircuitBreaker -> 503 upstream
 ```
 
 ## Development

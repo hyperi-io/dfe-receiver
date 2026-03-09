@@ -73,19 +73,22 @@ Native Rust receiver that:
 4. **Lumberjack/Beats Server** - TCP/TLS listener (port 5044), Lumberjack v2 frame parser with zlib decompression
 5. **Splunk HEC Server** - axum HTTP (port 8088), `/services/collector/event` + `/raw` + `/health`
 6. **Syslog Server** - UDP (514) + TCP (514) + TLS/TCP (6514), RFC 5424+3164 auto-detect, RFC 6587 framing
-7. **Router** - Zero-copy JSON field extraction for topic routing
-8. **TieredSink** - In-memory buffering with hyperi-rustlib CircuitBreaker
-9. **BearerTokenProvider** - Dynamic token loading from secret managers
-10. **ProtocolHandler trait** - Pluggable protocol handler abstraction (`src/server/traits.rs`)
+7. **Fluent Forward Server** - TCP listener (port 24224), msgpack via rmpv, Message/Forward/PackedForward modes, chunk ACK
+8. **GELF Server** - TCP listener (port 12201), null-byte delimited JSON, GELF 1.1 validation
+9. **Prometheus Remote Write Server** - HTTP (port 9091), snappy+protobuf decode, native/otel/hyperdx modes
+10. **Router** - Zero-copy JSON field extraction for topic routing
+11. **TieredSink** - In-memory buffering with hyperi-rustlib CircuitBreaker
+12. **BearerTokenProvider** - Dynamic token loading from secret managers
+13. **ProtocolHandler trait** - Pluggable protocol handler abstraction (`src/server/traits.rs`)
 
 ### Tech Stack
 
 - **Language:** Rust
-- **HTTP Framework:** axum 0.7
-- **gRPC Framework:** tonic 0.12
-- **JSON Processing:** sonic-rs (SIMD)
-- **Kafka:** rdkafka
-- **Shared Library:** hyperi-rustlib (config, secrets, metrics, tiered-sink)
+- **HTTP Framework:** axum 0.8
+- **gRPC Framework:** tonic 0.14
+- **JSON Processing:** sonic-rs 0.5 (SIMD)
+- **Kafka:** hyperi-rustlib KafkaProducer (wraps librdkafka internally)
+- **Shared Library:** hyperi-rustlib (config, secrets, metrics, tiered-sink, kafka)
 
 ---
 
@@ -161,8 +164,8 @@ Native Rust receiver that:
 
 ## External Dependencies
 
-- **hyperi-rustlib** - Shared library for config, secrets, metrics, tiered-sink
-- **rdkafka** - Kafka producer with batching support
+- **hyperi-rustlib** - Shared library for config, secrets, metrics, tiered-sink, KafkaProducer
+- **librdkafka** - Kafka producer (accessed via hyperi-rustlib KafkaProducer, not linked directly)
 - **OpenBao/Vault** - Secret management (optional, via hyperi-rustlib)
 - **AWS Secrets Manager** - Secret management (optional, via hyperi-rustlib)
 
