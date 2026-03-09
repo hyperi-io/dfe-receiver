@@ -97,10 +97,7 @@ All protocols follow: receive -> convert to JSON -> validate -> route -> Kafka/d
 
 ## Active Tasks
 
-- [ ] Commit pending Fluent Forward, GELF, OTLP integration test files `[PENDING]`
-  - Untracked: src/server/fluent/, src/server/gelf/, tests/integration_fluent.rs, tests/integration_gelf.rs, tests/integration_otlp.rs
-  - Modified: config.example.yaml, src/server/mod.rs
-  - Scripts: scripts/fetch-fluent-bit.sh
+(none)
 
 ---
 
