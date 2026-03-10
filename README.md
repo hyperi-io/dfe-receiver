@@ -247,8 +247,53 @@ cargo test
 RUST_LOG=debug cargo run -- --config config.yaml
 
 # Run integration tests (requires Kafka)
+docker compose -f docker-compose.test.yaml up -d
 cargo test --test integration_kafka -- --ignored
+docker compose -f docker-compose.test.yaml down -v
 ```
+
+### Working with Kafka
+
+[kcat](https://github.com/edenhill/kcat) (formerly kafkacat) is the essential
+CLI tool for inspecting Kafka topics during development.
+
+```bash
+# Start local Kafka (KRaft, no Zookeeper)
+docker compose -f docker-compose.test.yaml up -d
+
+# List all topics and broker info
+kcat -b localhost:9092 -L
+
+# Consume all messages from a topic (Ctrl+C to stop)
+kcat -b localhost:9092 -t events -C
+
+# Consume with metadata (partition, offset, timestamp)
+kcat -b localhost:9092 -t events -C -f 'P:%p O:%o T:%T\n%s\n'
+
+# Tail a topic — watch live as dfe-receiver routes messages
+kcat -b localhost:9092 -t events -C -o end
+
+# Send a test event through dfe-receiver and verify it arrives
+curl -s -X POST http://localhost:8080/ingest \
+  -H 'Content-Type: application/json' \
+  -d '{"level":"info","message":"kcat test event"}'
+
+kcat -b localhost:9092 -t events -C -c 1  # consume exactly 1 message
+
+# Produce directly to Kafka (bypass dfe-receiver, useful for consumer testing)
+echo '{"level":"warn","message":"direct kafka test"}' | \
+  kcat -b localhost:9092 -t events -P
+
+# Count messages in a topic
+kcat -b localhost:9092 -t events -C -e -q | wc -l
+
+# Optional: open Kafbat UI in browser (start with --profile ui)
+docker compose -f docker-compose.test.yaml --profile ui up -d
+open http://localhost:8080
+```
+
+> **Install kcat:** `apt install kcat` / `brew install kcat`
+> On older systems it may be packaged as `kafkacat`.
 
 ## License
 
