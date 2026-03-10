@@ -1,3 +1,21 @@
+## [1.13.1](https://github.com/hyperi-io/dfe-receiver/compare/v1.13.0...v1.13.1) (2026-03-10)
+
+
+### Bug Fixes
+
+* add base_image field to DeploymentContract ([058201a](https://github.com/hyperi-io/dfe-receiver/commit/058201a33027482b4004da35e1f07a4da88b2b13))
+* add Fluent Forward, GELF handlers and integration tests [skip ci] ([ab85ad2](https://github.com/hyperi-io/dfe-receiver/commit/ab85ad296dc91a6de4dc7e659f1ce37b612d1160))
+* change default_source from "dfe" to "default" [skip ci] ([e3894cc](https://github.com/hyperi-io/dfe-receiver/commit/e3894cca7b8898adfd4fbdf128da241a1d57ff93))
+* fmt and clippy fixes for Rust 1.94, update STATE.md for crates.io rustlib [skip ci] ([fc8326d](https://github.com/hyperi-io/dfe-receiver/commit/fc8326d040f61854acdf70631da45e968ab78fff))
+* remove unknown cross build strategy from config ([294cff1](https://github.com/hyperi-io/dfe-receiver/commit/294cff1a1c3ce0579565d123578c22d168b98997))
+* resolve all cargo clippy and fmt errors for hyperi-ci pipeline ([ce1aa40](https://github.com/hyperi-io/dfe-receiver/commit/ce1aa408b890d4161f6fff91d4d6837288970bcb))
+* resolve Rust 2024 collapsible_if and feature flag errors ([89a762d](https://github.com/hyperi-io/dfe-receiver/commit/89a762d48c0121817d357dadaa4dbd71ef9580cd))
+* suppress remaining pedantic clippy lints for hyperi-ci pipeline ([7ef2ce1](https://github.com/hyperi-io/dfe-receiver/commit/7ef2ce119cba99016391bfedc935ba69d239ff5f))
+* switch hyperi-rustlib to crates.io, add base_image to DeploymentContract [skip ci] ([8b05762](https://github.com/hyperi-io/dfe-receiver/commit/8b05762f0e04ed3a9bb373abbfd347ece91acaa0))
+* trigger CI release after dep upgrades and crates.io migration ([3cfdf97](https://github.com/hyperi-io/dfe-receiver/commit/3cfdf97459d1b501c0b86bad1ceabb345463c56a))
+* upgrade deps to latest, edition 2024, migrate Kafka sinks to rustlib [skip ci] ([9d88ffc](https://github.com/hyperi-io/dfe-receiver/commit/9d88ffcb4281ef82efdfaf7412e89309ca584cb0))
+* vendor google/protobuf/timestamp.proto for CI protoc compatibility ([cf08fca](https://github.com/hyperi-io/dfe-receiver/commit/cf08fca0023630ae4c5394b40a9a0c8c2ba6b2e8))
+
 # [1.13.0](https://github.com/hyperi-io/dfe-receiver/compare/v1.12.1...v1.13.0) (2026-03-04)
 
 
