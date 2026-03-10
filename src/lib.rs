@@ -54,6 +54,7 @@
 #![allow(clippy::match_same_arms)]
 #![allow(clippy::cast_possible_wrap)]
 #![allow(clippy::unnecessary_map_or)]
+#![allow(clippy::semicolon_if_nothing_returned)]
 // Allow unwrap/expect in test code — they're idiomatic for failing fast on errors
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 #![cfg_attr(test, allow(clippy::expect_used))]

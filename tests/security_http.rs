@@ -18,6 +18,7 @@
 
 // Allow unwrap/expect in tests - they're the idiomatic way to fail fast
 #![allow(clippy::unwrap_used)]
+#![allow(clippy::double_ended_iterator_last)]
 #![allow(clippy::expect_used)]
 
 use std::sync::Arc;
