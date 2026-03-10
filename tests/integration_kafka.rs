@@ -6,6 +6,12 @@
 // License:   FSL-1.1-ALv2
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::match_wild_err_arm)]
+#![allow(clippy::field_reassign_with_default)]
+#![allow(clippy::manual_string_new)]
+#![allow(clippy::unused_async)]
+
 //! Integration tests for sending data through the receiver to Kafka.
 //!
 //! These tests require either:

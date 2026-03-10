@@ -107,7 +107,7 @@ pub fn write_request_to_json(
 ) -> Result<Vec<Bytes>> {
     match mode {
         PrometheusRwMode::Native => convert_native(request),
-        PrometheusRwMode::OTel | PrometheusRwMode::HyperDx => convert_otel(request, mode),
+        PrometheusRwMode::OTel | PrometheusRwMode::HyperDx => convert_otel(&request, mode),
     }
 }
 
@@ -188,7 +188,7 @@ fn convert_native(request: proto::WriteRequest) -> Result<Vec<Bytes>> {
 // ---------------------------------------------------------------------------
 
 /// OTel conversion: structured JSON matching OTLP handler output.
-fn convert_otel(request: proto::WriteRequest, mode: PrometheusRwMode) -> Result<Vec<Bytes>> {
+fn convert_otel(request: &proto::WriteRequest, mode: PrometheusRwMode) -> Result<Vec<Bytes>> {
     // Build metadata lookup for metric type determination
     // MetricType::COUNTER (1) → "sum", everything else → "gauge"
     let metadata: HashMap<&str, i32> = request

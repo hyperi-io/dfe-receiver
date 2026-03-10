@@ -6,6 +6,8 @@
 // License:   FSL-1.1-ALv2
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
+#![allow(clippy::double_ended_iterator_last)]
+
 //! Integration tests for the Splunk HEC handler.
 //!
 //! These tests start a real Splunk HEC handler and send requests via reqwest.

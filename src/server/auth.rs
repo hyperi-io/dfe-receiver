@@ -138,7 +138,9 @@ impl BearerTokenProvider {
         let provider = Self::new(config.tokens.clone());
 
         // If secret source is configured, load tokens from secret manager
-        if let Some(ref source) = config.secret_source && let Err(e) = provider.load_from_secret(source).await {
+        if let Some(ref source) = config.secret_source
+            && let Err(e) = provider.load_from_secret(source).await
+        {
             warn!(error = %e, source = %source, "Failed to load bearer tokens from secret, using static tokens");
         }
 
@@ -287,7 +289,9 @@ impl Drop for BearerTokenProvider {
 /// Returns the first IP from X-Forwarded-For if present, otherwise X-Real-IP.
 fn extract_client_ip(headers: &axum::http::HeaderMap) -> Option<String> {
     // X-Forwarded-For may contain multiple IPs: "client, proxy1, proxy2"
-    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) && let Some(first_ip) = xff.split(',').next() {
+    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok())
+        && let Some(first_ip) = xff.split(',').next()
+    {
         return Some(first_ip.trim().to_string());
     }
     // Fallback to X-Real-IP
