@@ -163,6 +163,19 @@ pub fn route(&self, payload: &Bytes) -> RouteResult {
 }
 ```
 
+### Kafka Authentication
+
+SASL-SCRAM-SHA-512 is the standard mechanism for all production deployments.
+It works across Apache Kafka, AutoMQ, AWS MSK, Confluent Cloud, and Redpanda
+with no code changes. Certificate-based auth (mTLS) and AWS IAM have high
+variance between platforms — avoid for cross-platform workloads.
+
+| Scenario | Protocol |
+|----------|----------|
+| External / internet-facing | `SASL_SSL` |
+| Internal K8s (pod-to-pod) | `SASL_PLAINTEXT` |
+| Local dev only | `PLAINTEXT` (no auth, no TLS) |
+
 ### Kafka Batching
 
 Per-topic batching with configurable thresholds:
@@ -252,7 +265,14 @@ routing:
     topic: "dlq_land"
 
 kafka:
-  brokers: ["kafka:9092"]
+  brokers: ["kafka.example.com:9094"]
+  sasl:
+    enabled: true
+    mechanism: scram_sha_512   # Works for Apache Kafka, AutoMQ, MSK, Confluent Cloud
+    username: dfe-receiver
+    password: "${KAFKA_PASSWORD}"
+  tls:
+    enabled: true              # SASL_SSL for external listeners; omit for internal K8s
   producer:
     batch_size: 8388608
     batch_messages: 10000
