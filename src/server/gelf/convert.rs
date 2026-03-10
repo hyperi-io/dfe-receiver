@@ -60,13 +60,11 @@ pub fn gelf_to_json(raw: &[u8]) -> Result<Bytes> {
     }
 
     // Map numeric level to severity name
-    if let Some(level) = obj.get("level").and_then(|v| v.as_u64()) {
-        if let Some(name) = SEVERITY_NAMES.get(level as usize) {
-            obj.insert(
-                "severity".to_string(),
-                serde_json::Value::String((*name).to_string()),
-            );
-        }
+    if let Some(level) = obj.get("level").and_then(|v| v.as_u64()) && let Some(name) = SEVERITY_NAMES.get(level as usize) {
+        obj.insert(
+            "severity".to_string(),
+            serde_json::Value::String((*name).to_string()),
+        );
     }
 
     // Source tag for routing

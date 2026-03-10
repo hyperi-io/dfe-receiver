@@ -166,11 +166,9 @@ pub fn fluent_to_json(msg: &Value) -> Result<Vec<Bytes>> {
                 let entry = rmpv::decode::read_value(&mut cursor).map_err(|e| {
                     Error::Validation(format!("Fluent PackedForward decode failed: {e}"))
                 })?;
-                if let Some(entry_arr) = entry.as_array() {
-                    if entry_arr.len() >= 2 {
-                        let ts = extract_timestamp(&entry_arr[0]);
-                        payloads.push(entry_to_json(tag, ts, &entry_arr[1])?);
-                    }
+                if let Some(entry_arr) = entry.as_array() && entry_arr.len() >= 2 {
+                    let ts = extract_timestamp(&entry_arr[0]);
+                    payloads.push(entry_to_json(tag, ts, &entry_arr[1])?);
                 }
             }
             Ok(payloads)

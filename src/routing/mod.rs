@@ -130,10 +130,8 @@ impl Router {
     #[inline]
     fn determine_destination(&self, payload: &Bytes) -> &str {
         for rule in &self.destination_rules {
-            if let Some(value) = self.extract_field_cow(payload, &rule.match_field) {
-                if value.as_ref() == rule.match_value {
-                    return &rule.destination;
-                }
+            if let Some(value) = self.extract_field_cow(payload, &rule.match_field) && value.as_ref() == rule.match_value {
+                return &rule.destination;
             }
         }
         &self.default_destination
