@@ -6,6 +6,9 @@
 // License:   FSL-1.1-ALv2
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::match_wild_err_arm)]
+
 //! Integration tests that use the Vector binary.
 //!
 //! These tests start a dfe-receiver server and run Vector as a subprocess

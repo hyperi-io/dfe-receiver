@@ -6,6 +6,9 @@
 // License:   FSL-1.1-ALv2
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::similar_names)]
+
 //! Integration tests that use the Filebeat binary.
 //!
 //! These tests start a dfe-receiver Lumberjack handler and run Filebeat as a

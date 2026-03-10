@@ -12,6 +12,7 @@
 //! parse → log → config → dispatch.
 
 #![forbid(unsafe_code)]
+#![allow(clippy::large_futures)]
 
 // Jemalloc takes priority when enabled (including when both features are enabled via --all-features)
 #[cfg(feature = "jemalloc")]

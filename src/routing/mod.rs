@@ -130,7 +130,9 @@ impl Router {
     #[inline]
     fn determine_destination(&self, payload: &Bytes) -> &str {
         for rule in &self.destination_rules {
-            if let Some(value) = self.extract_field_cow(payload, &rule.match_field) && value.as_ref() == rule.match_value {
+            if let Some(value) = Self::extract_field_cow(payload, &rule.match_field)
+                && value.as_ref() == rule.match_value
+            {
                 return &rule.destination;
             }
         }
@@ -148,22 +150,21 @@ impl Router {
         for rule in &self.source_rules {
             match rule.mode.as_str() {
                 "key_present" => {
-                    if self.extract_field_cow(payload, &rule.field).is_some() {
+                    if Self::extract_field_cow(payload, &rule.field).is_some() {
                         return rule.source.clone();
                     }
                 }
                 "key_value_set" => {
                     if let (Some(val), Some(match_val)) = (
-                        self.extract_field_cow(payload, &rule.field),
+                        Self::extract_field_cow(payload, &rule.field),
                         &rule.match_value,
-                    ) {
-                        if val.as_ref() == match_val.as_str() {
-                            return rule.source.clone();
-                        }
+                    ) && val.as_ref() == match_val.as_str()
+                    {
+                        return rule.source.clone();
                     }
                 }
                 "key_value_use" => {
-                    if let Some(val) = self.extract_field_cow(payload, &rule.field) {
+                    if let Some(val) = Self::extract_field_cow(payload, &rule.field) {
                         return Some(val.into_owned());
                     }
                 }
@@ -193,7 +194,7 @@ impl Router {
     ///
     /// Uses `Cow<str>` to avoid allocation for non-escaped strings.
     #[inline]
-    fn extract_field_cow<'a>(&self, payload: &'a Bytes, field: &str) -> Option<Cow<'a, str>> {
+    fn extract_field_cow<'a>(payload: &'a Bytes, field: &str) -> Option<Cow<'a, str>> {
         // Handle nested fields (dot notation)
         let lazy: LazyValue = if field.contains('.') {
             let parts: Vec<&str> = field.split('.').collect();

@@ -250,8 +250,8 @@ mod tests {
         let msg2 = "<14>msg two";
         data.put(format!("{} {}", msg1.len(), msg1).as_bytes());
         data.put(format!("{} {}", msg2.len(), msg2).as_bytes());
-        let msgs = decode_all(&mut decoder, &data);
-        assert_eq!(msgs, vec!["<14>msg one", "<14>msg two"]);
+        let frames = decode_all(&mut decoder, &data);
+        assert_eq!(frames, vec!["<14>msg one", "<14>msg two"]);
     }
 
     #[test]

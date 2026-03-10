@@ -164,15 +164,21 @@ impl PipelineState {
         }
 
         // Check sink health
-        if let Some(ref kafka) = self.kafka_sink && !kafka.is_healthy() {
+        if let Some(ref kafka) = self.kafka_sink
+            && !kafka.is_healthy()
+        {
             return false;
         }
 
-        if let Some(ref loader) = self.loader_sink && !loader.is_healthy() {
+        if let Some(ref loader) = self.loader_sink
+            && !loader.is_healthy()
+        {
             return false;
         }
 
-        if let Some(ref grpc) = self.grpc_loader_sink && !grpc.is_healthy() {
+        if let Some(ref grpc) = self.grpc_loader_sink
+            && !grpc.is_healthy()
+        {
             return false;
         }
 
@@ -224,7 +230,7 @@ impl PipelineState {
     /// Performs byte-level append before the closing `}` to avoid a full
     /// JSON parse/rewrite on the hot path.
     #[inline]
-    fn enrich_payload(&self, payload: Bytes) -> Bytes {
+    fn enrich_payload(payload: Bytes) -> Bytes {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -242,10 +248,9 @@ impl PipelineState {
         if let Some(pos) = raw[..insert_pos]
             .iter()
             .rposition(|b| !b.is_ascii_whitespace())
+            && raw[pos] != b'{'
         {
-            if raw[pos] != b'{' {
-                buf.push(b',');
-            }
+            buf.push(b',');
         }
         buf.extend_from_slice(format!("\"_timestamp_receiver\":{now_ms}").as_bytes());
         buf.extend_from_slice(&raw[insert_pos..]);
@@ -270,7 +275,7 @@ impl PipelineState {
 
         // Enrich (only when common header / enrichment enabled)
         let payload = if self.enrichment_enabled() {
-            self.enrich_payload(payload)
+            Self::enrich_payload(payload)
         } else {
             payload
         };
@@ -290,7 +295,9 @@ impl PipelineState {
         }
 
         // Debug tap: fire-and-forget write to file sink (errors are logged, not propagated)
-        if let Some(ref fsink) = self.file_sink && let Err(e) = fsink.send("", payload).await {
+        if let Some(ref fsink) = self.file_sink
+            && let Err(e) = fsink.send("", payload).await
+        {
             warn!(error = %e, "File sink write failed");
         }
 
@@ -313,8 +320,9 @@ impl PipelineState {
         let payload_size = payload.len() as u64;
         self.buffer_manager.add_bytes(payload_size);
 
-        // Validate
-        let result = match self.validator.read().validate(&payload) {
+        // Validate (acquire and release lock before any await)
+        let validation = self.validator.read().validate(&payload);
+        let result = match validation {
             ValidationResult::Valid => self.send_to_kafka(topic, payload).await,
             ValidationResult::Dlq(reason) => {
                 debug!(reason = %reason, "Message validation failed, routing to DLQ");
@@ -525,19 +533,27 @@ impl Orchestrator {
         info!("Pipeline orchestrator shutting down");
 
         // Flush all sinks
-        if let Some(ref kafka) = self.state.kafka_sink && let Err(e) = kafka.flush().await {
+        if let Some(ref kafka) = self.state.kafka_sink
+            && let Err(e) = kafka.flush().await
+        {
             error!(error = %e, "Failed to flush Kafka sink");
         }
 
-        if let Some(ref loader) = self.state.loader_sink && let Err(e) = loader.flush().await {
+        if let Some(ref loader) = self.state.loader_sink
+            && let Err(e) = loader.flush().await
+        {
             error!(error = %e, "Failed to flush loader sink");
         }
 
-        if let Some(ref grpc) = self.state.grpc_loader_sink && let Err(e) = grpc.flush().await {
+        if let Some(ref grpc) = self.state.grpc_loader_sink
+            && let Err(e) = grpc.flush().await
+        {
             error!(error = %e, "Failed to flush gRPC loader sink");
         }
 
-        if let Some(ref fsink) = self.state.file_sink && let Err(e) = fsink.flush().await {
+        if let Some(ref fsink) = self.state.file_sink
+            && let Err(e) = fsink.flush().await
+        {
             error!(error = %e, "Failed to flush file sink");
         }
 
@@ -607,10 +623,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_enrich_payload_injects_timestamp() {
-        let state = test_state().await;
-
         let payload = Bytes::from(r#"{"key": "value"}"#);
-        let enriched = state.enrich_payload(payload);
+        let enriched = PipelineState::enrich_payload(payload);
         let enriched_str = std::str::from_utf8(&enriched).unwrap();
 
         assert!(enriched_str.contains("\"_timestamp_receiver\":"));
@@ -622,10 +636,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_enrich_payload_empty_object() {
-        let state = test_state().await;
-
         let payload = Bytes::from(r"{}");
-        let enriched = state.enrich_payload(payload);
+        let enriched = PipelineState::enrich_payload(payload);
 
         let parsed: serde_json::Value = serde_json::from_slice(&enriched).unwrap();
         assert!(parsed.get("_timestamp_receiver").is_some());

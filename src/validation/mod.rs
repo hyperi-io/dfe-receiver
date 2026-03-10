@@ -44,19 +44,19 @@ impl Validator {
     #[inline]
     pub fn validate(&self, payload: &Bytes) -> ValidationResult {
         // Check JSON format using sonic-rs LazyValue (no full parse)
-        if self.config.require_json {
-            if let Err(reason) = self.validate_json(payload) {
-                return if self.config.dlq_on_invalid {
-                    ValidationResult::Dlq(reason)
-                } else {
-                    ValidationResult::Reject(reason)
-                };
-            }
+        if self.config.require_json
+            && let Err(reason) = Self::validate_json(payload)
+        {
+            return if self.config.dlq_on_invalid {
+                ValidationResult::Dlq(reason)
+            } else {
+                ValidationResult::Reject(reason)
+            };
         }
 
         // Check required fields
         for field in &self.config.required_fields {
-            if !self.has_field(payload, field) {
+            if !Self::has_field(payload, field) {
                 let reason = format!("missing required field: {field}");
                 return if self.config.dlq_on_invalid {
                     ValidationResult::Dlq(reason)
@@ -73,7 +73,7 @@ impl Validator {
     ///
     /// Uses sonic-rs LazyValue for fast format detection without full parsing.
     #[inline]
-    fn validate_json(&self, payload: &Bytes) -> std::result::Result<(), String> {
+    fn validate_json(payload: &Bytes) -> std::result::Result<(), String> {
         // Empty payload is invalid
         if payload.is_empty() {
             return Err("empty payload".to_string());
@@ -91,7 +91,7 @@ impl Validator {
     ///
     /// Uses on-demand extraction for zero-copy field access.
     #[inline]
-    fn has_field(&self, payload: &Bytes, field: &str) -> bool {
+    fn has_field(payload: &Bytes, field: &str) -> bool {
         // Handle nested fields (dot notation)
         if field.contains('.') {
             let parts: Vec<&str> = field.split('.').collect();
@@ -254,7 +254,7 @@ mod tests {
     #[test]
     fn test_truncated_json_array() {
         let validator = Validator::new(default_config());
-        let payload = Bytes::from(r#"[1, 2, 3"#);
+        let payload = Bytes::from(r"[1, 2, 3");
 
         assert!(matches!(
             validator.validate(&payload),
@@ -287,7 +287,7 @@ mod tests {
     #[test]
     fn test_unmatched_brackets() {
         let validator = Validator::new(default_config());
-        let payload = Bytes::from(r#"[1, 2, 3]]"#);
+        let payload = Bytes::from(r"[1, 2, 3]]");
 
         assert!(matches!(
             validator.validate(&payload),

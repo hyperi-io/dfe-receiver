@@ -6,6 +6,8 @@
 // License:   FSL-1.1-ALv2
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
+#![allow(clippy::collapsible_if)]
+
 //! Integration tests that use the Fluent Bit binary.
 //!
 //! These tests start a dfe-receiver Fluent Forward handler and run Fluent Bit

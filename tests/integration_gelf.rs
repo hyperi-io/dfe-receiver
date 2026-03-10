@@ -6,6 +6,9 @@
 // License:   FSL-1.1-ALv2
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::similar_names)]
+
 //! Integration tests that use the Fluent Bit binary to send GELF messages.
 //!
 //! These tests start a dfe-receiver GELF handler and run Fluent Bit as a

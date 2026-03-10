@@ -122,10 +122,10 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
                             rmpv::Value::String(chunk.clone().into()),
                         )]);
                         let mut ack_buf = Vec::new();
-                        if rmpv::encode::write_value(&mut ack_buf, &ack).is_ok() {
-                            if let Err(e) = stream.write_all(&ack_buf).await {
-                                debug!(peer = %peer_addr, error = %e, "Failed to send Fluent ACK");
-                            }
+                        if rmpv::encode::write_value(&mut ack_buf, &ack).is_ok()
+                            && let Err(e) = stream.write_all(&ack_buf).await
+                        {
+                            debug!(peer = %peer_addr, error = %e, "Failed to send Fluent ACK");
                         }
                     }
 

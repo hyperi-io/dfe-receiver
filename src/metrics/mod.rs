@@ -405,7 +405,7 @@ impl Metrics {
         };
         self.circuit_state.store(code, Ordering::Relaxed);
         self.circuit_consecutive_failures
-            .store(failures as u64, Ordering::Relaxed);
+            .store(u64::from(failures), Ordering::Relaxed);
     }
 
     /// Check if circuit breaker is open (sink down).
@@ -467,6 +467,7 @@ impl Metrics {
     }
 
     /// Render metrics in Prometheus format.
+    #[allow(clippy::too_many_lines)]
     pub fn render(&self) -> String {
         let mut output = String::with_capacity(4096);
 

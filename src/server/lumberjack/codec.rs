@@ -302,7 +302,11 @@ mod tests {
     fn build_json_data_frame(sequence: u32, payload: &[u8]) -> Vec<u8> {
         let mut buf = vec![PROTOCOL_VERSION, FRAME_JSON_DATA];
         buf.extend_from_slice(&sequence.to_be_bytes());
-        buf.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        buf.extend_from_slice(
+            &u32::try_from(payload.len())
+                .unwrap_or(u32::MAX)
+                .to_be_bytes(),
+        );
         buf.extend_from_slice(payload);
         buf
     }
@@ -317,7 +321,11 @@ mod tests {
         let compressed = encoder.finish().unwrap();
 
         let mut buf = vec![PROTOCOL_VERSION, FRAME_COMPRESSED];
-        buf.extend_from_slice(&(compressed.len() as u32).to_be_bytes());
+        buf.extend_from_slice(
+            &u32::try_from(compressed.len())
+                .unwrap_or(u32::MAX)
+                .to_be_bytes(),
+        );
         buf.extend_from_slice(&compressed);
         buf
     }

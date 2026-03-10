@@ -240,11 +240,15 @@ fn apply_env_overrides(config: &mut Config) {
         config.server.bind_address = v;
         debug!("Override: server.bind_address from env");
     }
-    if let Ok(v) = env_var("MAX_BODY_SIZE") && let Ok(n) = v.parse() {
+    if let Ok(v) = env_var("MAX_BODY_SIZE")
+        && let Ok(n) = v.parse()
+    {
         config.server.max_body_size = n;
         debug!("Override: server.max_body_size from env");
     }
-    if let Ok(v) = env_var("REQUEST_TIMEOUT_MS") && let Ok(n) = v.parse() {
+    if let Ok(v) = env_var("REQUEST_TIMEOUT_MS")
+        && let Ok(n) = v.parse()
+    {
         config.server.request_timeout_ms = n;
         debug!("Override: server.request_timeout_ms from env");
     }
@@ -312,11 +316,15 @@ fn apply_env_overrides(config: &mut Config) {
     }
 
     // Buffer / memory
-    if let Ok(v) = env_var("MEMORY_LIMIT") && let Ok(n) = v.parse() {
+    if let Ok(v) = env_var("MEMORY_LIMIT")
+        && let Ok(n) = v.parse()
+    {
         config.buffer.memory_limit = n;
         debug!("Override: buffer.memory_limit from env");
     }
-    if let Ok(v) = env_var("PRESSURE_THRESHOLD") && let Ok(n) = v.parse() {
+    if let Ok(v) = env_var("PRESSURE_THRESHOLD")
+        && let Ok(n) = v.parse()
+    {
         config.buffer.pressure_threshold = n;
         debug!("Override: buffer.pressure_threshold from env");
     }
@@ -332,13 +340,17 @@ fn apply_env_overrides(config: &mut Config) {
         config.scaling.enabled = matches!(v.to_lowercase().as_str(), "true" | "1" | "yes");
         debug!("Override: scaling.enabled from env");
     }
-    if let Ok(v) = env_var("SCALING_MEMORY_GATE_THRESHOLD") && let Ok(n) = v.parse() {
+    if let Ok(v) = env_var("SCALING_MEMORY_GATE_THRESHOLD")
+        && let Ok(n) = v.parse()
+    {
         config.scaling.memory_gate_threshold = n;
         debug!("Override: scaling.memory_gate_threshold from env");
     }
 
     // Config reload
-    if let Ok(v) = env_var("CONFIG_RELOAD_SECS") && let Ok(n) = v.parse() {
+    if let Ok(v) = env_var("CONFIG_RELOAD_SECS")
+        && let Ok(n) = v.parse()
+    {
         config.config_reload_secs = n;
         debug!("Override: config_reload_secs from env");
     }
@@ -1043,8 +1055,14 @@ impl KafkaConfig {
         };
 
         // SASL
-        if let Some(ref sasl) = self.sasl && sasl.enabled {
-            let protocol = if self.tls.enabled { "sasl_ssl" } else { "sasl_plaintext" };
+        if let Some(ref sasl) = self.sasl
+            && sasl.enabled
+        {
+            let protocol = if self.tls.enabled {
+                "sasl_ssl"
+            } else {
+                "sasl_plaintext"
+            };
             config.security_protocol = protocol.to_string();
             config.sasl_mechanism = Some(sasl.mechanism.to_uppercase());
             config.sasl_username = Some(sasl.username.clone());
