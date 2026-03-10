@@ -39,6 +39,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Tell cargo to rerun if protos change
     println!("cargo:rerun-if-changed=proto/vector.proto");
     println!("cargo:rerun-if-changed=proto/event.proto");
+    println!("cargo:rerun-if-changed=proto/google/");
     println!("cargo:rerun-if-changed=proto/opentelemetry/");
     println!("cargo:rerun-if-changed=proto/prometheus/");
 
