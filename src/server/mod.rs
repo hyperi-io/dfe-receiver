@@ -179,7 +179,7 @@ impl Server {
         }
 
         // Spawn all handlers concurrently
-        let mut handles = Vec::with_capacity(handlers.len());
+        let mut join_handles = Vec::with_capacity(handlers.len());
         for handler in handlers {
             let handler_shutdown = shutdown.clone();
             let name = handler.name();
@@ -190,14 +190,14 @@ impl Server {
                 }
             });
 
-            handles.push(handle);
+            join_handles.push(handle);
         }
 
         // Wait for shutdown
         shutdown.cancelled().await;
 
         // Wait for all handlers to finish
-        for handle in handles {
+        for handle in join_handles {
             let _ = handle.await;
         }
 

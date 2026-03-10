@@ -15,7 +15,7 @@ use std::borrow::Cow;
 
 use bytes::Bytes;
 use rustc_hash::FxHashMap;
-use sonic_rs::{get_from_slice, JsonValueTrait, LazyValue};
+use sonic_rs::{JsonValueTrait, LazyValue, get_from_slice};
 
 use crate::config::{DestinationsConfig, RoutingConfig, SourceRule};
 

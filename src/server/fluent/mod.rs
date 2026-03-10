@@ -222,11 +222,7 @@ pub struct FluentHandler {
 }
 
 impl FluentHandler {
-    pub fn new(
-        config: FluentConfig,
-        pipeline: Arc<PipelineState>,
-        metrics: Arc<Metrics>,
-    ) -> Self {
+    pub fn new(config: FluentConfig, pipeline: Arc<PipelineState>, metrics: Arc<Metrics>) -> Self {
         Self {
             config,
             pipeline,

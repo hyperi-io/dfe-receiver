@@ -70,7 +70,10 @@ impl Sink for KafkaSink {
         use std::time::Duration;
         let remaining = self.producer.flush(Duration::from_secs(30));
         if remaining > 0 {
-            error!(remaining = remaining, "Kafka flush timed out with messages in flight");
+            error!(
+                remaining = remaining,
+                "Kafka flush timed out with messages in flight"
+            );
         }
         Ok(())
     }

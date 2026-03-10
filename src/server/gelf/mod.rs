@@ -286,7 +286,9 @@ impl ProtocolHandler for GelfHandler {
         let tcp_shutdown = shutdown.clone();
 
         let tcp_handle = tokio::spawn(async move {
-            if let Err(e) = run_tcp(addr, pipeline, metrics, tcp_shutdown, tls_acceptor, max_msg).await {
+            if let Err(e) =
+                run_tcp(addr, pipeline, metrics, tcp_shutdown, tls_acceptor, max_msg).await
+            {
                 error!(error = %e, "GELF TCP listener failed");
             }
         });
@@ -320,9 +322,7 @@ mod tests {
     #[test]
     fn test_frame_decoder_single() {
         let mut decoder = GelfFrameDecoder::new(1024);
-        let mut buf = BytesMut::from(
-            &br#"{"version":"1.1","host":"h","short_message":"m"}"#[..],
-        );
+        let mut buf = BytesMut::from(&br#"{"version":"1.1","host":"h","short_message":"m"}"#[..]);
         buf.extend_from_slice(b"\0");
         let result = decoder.decode(&mut buf).unwrap().unwrap();
         let json: serde_json::Value = serde_json::from_slice(&result).unwrap();

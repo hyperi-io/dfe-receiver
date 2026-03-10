@@ -30,10 +30,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
+use rdkafka::ClientConfig;
 use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::message::Message;
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
-use rdkafka::ClientConfig;
 use tokio::time::timeout;
 
 /// Load environment variables from .env file if present.
@@ -298,8 +298,8 @@ async fn test_kafka_batch_send() {
 #[ignore = "requires Kafka - run with --ignored"]
 async fn test_receiver_kafka_sink() {
     use dfe_receiver::config::KafkaConfig;
-    use dfe_receiver::sink::kafka::KafkaSink;
     use dfe_receiver::sink::Sink;
+    use dfe_receiver::sink::kafka::KafkaSink;
 
     if !kafka_available().await {
         eprintln!("Skipping test: Kafka not available");

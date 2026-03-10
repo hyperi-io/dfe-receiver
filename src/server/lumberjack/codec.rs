@@ -397,10 +397,12 @@ mod tests {
         let mut cursor = Cursor::new(data.as_slice());
         let result = read_frame(&mut cursor).await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("unsupported protocol version"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported protocol version")
+        );
     }
 
     #[tokio::test]
@@ -409,10 +411,12 @@ mod tests {
         let mut cursor = Cursor::new(data.as_slice());
         let result = read_frame(&mut cursor).await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("unknown frame type"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unknown frame type")
+        );
     }
 
     #[tokio::test]

@@ -23,8 +23,8 @@
 //! 4. **Simplicity** - No disk I/O on hot path, no persistent volumes needed.
 //! 5. **Performance** - At PB/s scale, disk becomes a bottleneck.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;

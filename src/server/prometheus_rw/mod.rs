@@ -24,12 +24,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::Router;
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
-use axum::Router;
 use prost::Message;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -42,10 +42,10 @@ use crate::error::{Error, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
 use crate::server::http::create_auth_state;
-use crate::server::tls::{build_tls_acceptor, uses_secrets, TlsCertProvider};
+use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
 use crate::server::traits::ProtocolHandler;
 
-use self::convert::{write_request_to_json, PrometheusRwMode};
+use self::convert::{PrometheusRwMode, write_request_to_json};
 
 /// Prometheus Remote Write protocol handler.
 pub struct PrometheusRwHandler {

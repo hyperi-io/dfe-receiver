@@ -20,7 +20,7 @@
 //! - `receiver_body_size_rejected_total` - Oversized body rejections
 //! - `receiver_tls_handshake_failures_total` - TLS failures
 
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 use hyperi_rustlib::scaling::ScalingPressure;
 

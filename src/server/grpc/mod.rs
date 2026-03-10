@@ -28,7 +28,7 @@ use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
-use crate::server::auth::{validate_bearer_auth, AuthMode, AuthState};
+use crate::server::auth::{AuthMode, AuthState, validate_bearer_auth};
 use crate::server::http::create_auth_state;
 use crate::server::traits::ProtocolHandler;
 

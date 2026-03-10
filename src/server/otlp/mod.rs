@@ -32,7 +32,7 @@ use crate::config::OtlpConfig;
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
-use crate::server::auth::{validate_bearer_auth, AuthMode, AuthState};
+use crate::server::auth::{AuthMode, AuthState, validate_bearer_auth};
 use crate::server::http::create_auth_state;
 use crate::server::traits::ProtocolHandler;
 use convert::OtlpMode;
@@ -327,11 +327,11 @@ async fn run_http_server(
     metrics: Arc<Metrics>,
     shutdown: CancellationToken,
 ) -> Result<()> {
+    use axum::Router;
     use axum::body::Bytes;
     use axum::extract::State;
     use axum::http::{HeaderMap, StatusCode};
     use axum::routing::post;
-    use axum::Router;
     use tokio::net::TcpListener;
 
     #[derive(Clone)]

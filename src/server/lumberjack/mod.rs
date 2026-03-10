@@ -30,7 +30,7 @@ use crate::error::{Error, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
 use crate::server::traits::ProtocolHandler;
-use codec::{decompress_and_parse, encode_ack, read_frame, Frame};
+use codec::{Frame, decompress_and_parse, encode_ack, read_frame};
 
 /// TLS handshake timeout (matches HTTP handler).
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);

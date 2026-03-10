@@ -1044,7 +1044,10 @@ impl DlqConfig {
 
 impl KafkaConfig {
     /// Convert to rustlib transport KafkaConfig with a given client ID suffix.
-    fn to_rustlib_config_with_suffix(&self, suffix: &str) -> hyperi_rustlib::transport::KafkaConfig {
+    fn to_rustlib_config_with_suffix(
+        &self,
+        suffix: &str,
+    ) -> hyperi_rustlib::transport::KafkaConfig {
         let mut config = hyperi_rustlib::transport::KafkaConfig {
             brokers: self.brokers.clone(),
             client_id: format!("{}{}", self.client_id, suffix),
@@ -1054,7 +1057,11 @@ impl KafkaConfig {
         // SASL
         if let Some(ref sasl) = self.sasl {
             if sasl.enabled {
-                let protocol = if self.tls.enabled { "sasl_ssl" } else { "sasl_plaintext" };
+                let protocol = if self.tls.enabled {
+                    "sasl_ssl"
+                } else {
+                    "sasl_plaintext"
+                };
                 config.security_protocol = protocol.to_string();
                 config.sasl_mechanism = Some(sasl.mechanism.to_uppercase());
                 config.sasl_username = Some(sasl.username.clone());

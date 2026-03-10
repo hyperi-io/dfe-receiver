@@ -192,10 +192,12 @@ mod tests {
         let result = syslog_to_json(raw).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&result).unwrap();
 
-        assert!(json["message"]
-            .as_str()
-            .unwrap()
-            .contains("Just a plain log message"));
+        assert!(
+            json["message"]
+                .as_str()
+                .unwrap()
+                .contains("Just a plain log message")
+        );
         assert_eq!(json["_source"], "syslog");
         // No facility/severity without PRI
         assert!(json.get("facility").is_none());
