@@ -23,12 +23,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::Router;
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::middleware;
 use axum::routing::{get, post};
-use axum::Router;
 use tokio::net::TcpListener;
 use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
@@ -41,8 +41,8 @@ use crate::config::AuthConfig;
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
-use crate::server::auth::{token_auth_middleware, AuthState, BearerTokenProvider};
-use crate::server::tls::{build_tls_acceptor, uses_secrets, TlsCertProvider};
+use crate::server::auth::{AuthState, BearerTokenProvider, token_auth_middleware};
+use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
 use crate::server::traits::ProtocolHandler;
 
 /// TLS handshake timeout to prevent slow TLS attacks.

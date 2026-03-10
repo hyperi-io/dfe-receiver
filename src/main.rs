@@ -29,14 +29,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use hyperi_rustlib::cli::{run_app, CliError, CommonArgs, DfeApp, StandardCommand, VersionInfo};
+use hyperi_rustlib::cli::{CliError, CommonArgs, DfeApp, StandardCommand, VersionInfo, run_app};
 use hyperi_rustlib::config::reloader::{ConfigReloader, ReloaderConfig};
 use hyperi_rustlib::deployment::{generate_chart, generate_compose_fragment, generate_dockerfile};
 use tokio::signal;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use dfe_receiver::config::{reload_config, Config};
+use dfe_receiver::config::{Config, reload_config};
 use dfe_receiver::deployment;
 use dfe_receiver::metrics::Metrics;
 use dfe_receiver::pipeline::Orchestrator;
@@ -301,8 +301,8 @@ async fn run_metrics_server(
     metrics: Arc<Metrics>,
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
-    use axum::routing::get;
     use axum::Router;
+    use axum::routing::get;
 
     let app = Router::new()
         .route("/metrics", get(move || async move { metrics.render() }))

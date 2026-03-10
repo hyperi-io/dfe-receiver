@@ -164,10 +164,11 @@ Native Rust receiver that:
 
 ## External Dependencies
 
-- **hyperi-rustlib** - Shared library for config, secrets, metrics, tiered-sink, KafkaProducer
+- **hyperi-rustlib** - Shared library for config, secrets, metrics, tiered-sink, KafkaProducer (published to crates.io)
 - **librdkafka** - Kafka producer (accessed via hyperi-rustlib KafkaProducer, not linked directly)
 - **OpenBao/Vault** - Secret management (optional, via hyperi-rustlib)
 - **AWS Secrets Manager** - Secret management (optional, via hyperi-rustlib)
+- **dfe-plugin-loader / dfe-protocol-sdk** - Optional plugin system (JFrog registry, requires `plugins` feature, CI-only)
 
 ---
 

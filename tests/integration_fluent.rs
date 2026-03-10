@@ -180,7 +180,10 @@ async fn run_fluent_bit_and_wait(
 
     // Kill fluent-bit gracefully (SIGTERM)
     let _ = child.kill().await;
-    let output = child.wait_with_output().await.expect("Failed to collect fluent-bit output");
+    let output = child
+        .wait_with_output()
+        .await
+        .expect("Failed to collect fluent-bit output");
     String::from_utf8_lossy(&output.stderr).to_string()
 }
 

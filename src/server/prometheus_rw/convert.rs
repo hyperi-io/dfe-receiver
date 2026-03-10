@@ -320,25 +320,25 @@ mod tests {
 
     #[test]
     fn test_timestamp_conversion() {
-        let ts = epoch_ms_to_rfc3339(1709540000000);
+        let ts = epoch_ms_to_rfc3339(1_709_540_000_000);
         assert_eq!(ts, "2024-03-04T08:13:20.000Z");
     }
 
     #[test]
     fn test_timestamp_with_millis() {
-        let ts = epoch_ms_to_rfc3339(1709540000123);
+        let ts = epoch_ms_to_rfc3339(1_709_540_000_123);
         assert_eq!(ts, "2024-03-04T08:13:20.123Z");
     }
 
     #[test]
     fn test_timestamp_rfc3339_nanos() {
-        let ts = epoch_ms_to_rfc3339_nanos(1709540000123);
+        let ts = epoch_ms_to_rfc3339_nanos(1_709_540_000_123);
         assert_eq!(ts, "2024-03-04T08:13:20.123000000Z");
     }
 
     #[test]
     fn test_timestamp_ch_datetime() {
-        let ts = epoch_ms_to_ch_datetime(1709540000123);
+        let ts = epoch_ms_to_ch_datetime(1_709_540_000_123);
         assert_eq!(ts, "2024-03-04 08:13:20.123000000");
     }
 

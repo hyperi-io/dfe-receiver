@@ -968,10 +968,12 @@ mod tests {
         assert_eq!(json["SeverityText"], "INFO");
         assert_eq!(json["ScopeName"], "my-lib");
         assert_eq!(json["Body"], "Test log message");
-        assert!(json["Timestamp"]
-            .as_str()
-            .unwrap()
-            .starts_with("2026-02-19"));
+        assert!(
+            json["Timestamp"]
+                .as_str()
+                .unwrap()
+                .starts_with("2026-02-19")
+        );
     }
 
     #[test]

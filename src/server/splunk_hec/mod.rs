@@ -40,10 +40,10 @@ use crate::error::{Error, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
 use crate::server::http::create_auth_state;
-use crate::server::tls::{build_tls_acceptor, uses_secrets, TlsCertProvider};
+use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
 use crate::server::traits::ProtocolHandler;
 
-use self::convert::{hec_event_to_json, parse_hec_events, raw_to_json, RawMetadata};
+use self::convert::{RawMetadata, hec_event_to_json, parse_hec_events, raw_to_json};
 
 /// Splunk HEC protocol handler.
 pub struct SplunkHecHandler {

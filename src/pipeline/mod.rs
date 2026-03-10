@@ -11,8 +11,8 @@
 //! Coordinates the flow of messages through validation, routing,
 //! and delivery to sinks with backpressure support.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -27,11 +27,11 @@ use crate::config::{Config, SharedConfig};
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
 use crate::routing::{RouteResult, Router};
+use crate::sink::Sink;
 use crate::sink::file::FileSink;
 use crate::sink::grpc::GrpcSink;
 use crate::sink::kafka::KafkaSink;
 use crate::sink::loader::LoaderSink;
-use crate::sink::Sink;
 use crate::validation::{ValidationResult, Validator};
 
 /// Shared pipeline state accessible from handlers.
@@ -640,7 +640,7 @@ mod tests {
     async fn test_enrich_payload_empty_object() {
         let state = test_state().await;
 
-        let payload = Bytes::from(r#"{}"#);
+        let payload = Bytes::from(r"{}");
         let enriched = state.enrich_payload(payload);
 
         let parsed: serde_json::Value = serde_json::from_slice(&enriched).unwrap();

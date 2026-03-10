@@ -25,8 +25,8 @@ use std::time::Duration;
 use dfe_receiver::config::{Config, SharedConfig};
 use dfe_receiver::metrics::Metrics;
 use dfe_receiver::pipeline::PipelineState;
-use dfe_receiver::server::otlp::pb;
 use dfe_receiver::server::otlp::OtlpHandler;
+use dfe_receiver::server::otlp::pb;
 use dfe_receiver::server::traits::ProtocolHandler;
 use prost::Message;
 use tokio_util::sync::CancellationToken;
@@ -105,7 +105,7 @@ fn bytes_received(metrics: &Metrics) -> u64 {
 
 /// Build a minimal OTLP ExportLogsServiceRequest with one log record.
 fn build_logs_request() -> pb::collector::logs::v1::ExportLogsServiceRequest {
-    use pb::common::v1::{any_value, AnyValue, KeyValue};
+    use pb::common::v1::{AnyValue, KeyValue, any_value};
     use pb::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
     use pb::resource::v1::Resource;
 
@@ -115,9 +115,7 @@ fn build_logs_request() -> pb::collector::logs::v1::ExportLogsServiceRequest {
                 attributes: vec![KeyValue {
                     key: "service.name".into(),
                     value: Some(AnyValue {
-                        value: Some(any_value::Value::StringValue(
-                            "test-service".into(),
-                        )),
+                        value: Some(any_value::Value::StringValue("test-service".into())),
                     }),
                 }],
                 dropped_attributes_count: 0,
@@ -130,9 +128,7 @@ fn build_logs_request() -> pb::collector::logs::v1::ExportLogsServiceRequest {
                     severity_number: 9, // INFO
                     severity_text: "INFO".into(),
                     body: Some(AnyValue {
-                        value: Some(any_value::Value::StringValue(
-                            "Test log message".into(),
-                        )),
+                        value: Some(any_value::Value::StringValue("Test log message".into())),
                     }),
                     attributes: vec![],
                     dropped_attributes_count: 0,
@@ -150,7 +146,7 @@ fn build_logs_request() -> pb::collector::logs::v1::ExportLogsServiceRequest {
 
 /// Build a minimal OTLP ExportTraceServiceRequest with one span.
 fn build_traces_request() -> pb::collector::trace::v1::ExportTraceServiceRequest {
-    use pb::common::v1::{any_value, AnyValue, KeyValue};
+    use pb::common::v1::{AnyValue, KeyValue, any_value};
     use pb::resource::v1::Resource;
     use pb::trace::v1::{ResourceSpans, ScopeSpans, Span};
 
@@ -160,9 +156,7 @@ fn build_traces_request() -> pb::collector::trace::v1::ExportTraceServiceRequest
                 attributes: vec![KeyValue {
                     key: "service.name".into(),
                     value: Some(AnyValue {
-                        value: Some(any_value::Value::StringValue(
-                            "test-service".into(),
-                        )),
+                        value: Some(any_value::Value::StringValue("test-service".into())),
                     }),
                 }],
                 dropped_attributes_count: 0,
@@ -196,9 +190,9 @@ fn build_traces_request() -> pb::collector::trace::v1::ExportTraceServiceRequest
 
 /// Build a minimal OTLP ExportMetricsServiceRequest with one gauge.
 fn build_metrics_request() -> pb::collector::metrics::v1::ExportMetricsServiceRequest {
-    use pb::common::v1::{any_value, AnyValue, KeyValue};
+    use pb::common::v1::{AnyValue, KeyValue, any_value};
     use pb::metrics::v1::{
-        number_data_point, Gauge, Metric, NumberDataPoint, ResourceMetrics, ScopeMetrics,
+        Gauge, Metric, NumberDataPoint, ResourceMetrics, ScopeMetrics, number_data_point,
     };
     use pb::resource::v1::Resource;
 
@@ -208,9 +202,7 @@ fn build_metrics_request() -> pb::collector::metrics::v1::ExportMetricsServiceRe
                 attributes: vec![KeyValue {
                     key: "service.name".into(),
                     value: Some(AnyValue {
-                        value: Some(any_value::Value::StringValue(
-                            "test-service".into(),
-                        )),
+                        value: Some(any_value::Value::StringValue("test-service".into())),
                     }),
                 }],
                 dropped_attributes_count: 0,
@@ -260,9 +252,15 @@ async fn test_otlp_grpc_logs() {
 
     let request = build_logs_request();
     let response = client.export(request).await;
-    assert!(response.is_ok(), "OTLP gRPC logs export failed: {response:?}");
+    assert!(
+        response.is_ok(),
+        "OTLP gRPC logs export failed: {response:?}"
+    );
 
-    assert!(requests_total(&metrics) > 0, "Expected requests to be counted");
+    assert!(
+        requests_total(&metrics) > 0,
+        "Expected requests to be counted"
+    );
     assert!(bytes_received(&metrics) > 0, "Expected bytes to be counted");
 
     shutdown.cancel();
@@ -284,9 +282,15 @@ async fn test_otlp_grpc_traces() {
 
     let request = build_traces_request();
     let response = client.export(request).await;
-    assert!(response.is_ok(), "OTLP gRPC traces export failed: {response:?}");
+    assert!(
+        response.is_ok(),
+        "OTLP gRPC traces export failed: {response:?}"
+    );
 
-    assert!(requests_total(&metrics) > 0, "Expected requests to be counted");
+    assert!(
+        requests_total(&metrics) > 0,
+        "Expected requests to be counted"
+    );
 
     shutdown.cancel();
 }
@@ -307,9 +311,15 @@ async fn test_otlp_grpc_metrics() {
 
     let request = build_metrics_request();
     let response = client.export(request).await;
-    assert!(response.is_ok(), "OTLP gRPC metrics export failed: {response:?}");
+    assert!(
+        response.is_ok(),
+        "OTLP gRPC metrics export failed: {response:?}"
+    );
 
-    assert!(requests_total(&metrics) > 0, "Expected requests to be counted");
+    assert!(
+        requests_total(&metrics) > 0,
+        "Expected requests to be counted"
+    );
 
     shutdown.cancel();
 }
@@ -338,9 +348,17 @@ async fn test_otlp_http_logs() {
         .await
         .expect("Failed to send OTLP HTTP request");
 
-    assert_eq!(resp.status(), 200, "OTLP HTTP logs failed: {:?}", resp.text().await);
+    assert_eq!(
+        resp.status(),
+        200,
+        "OTLP HTTP logs failed: {:?}",
+        resp.text().await
+    );
 
-    assert!(requests_total(&metrics) > 0, "Expected requests to be counted");
+    assert!(
+        requests_total(&metrics) > 0,
+        "Expected requests to be counted"
+    );
     assert!(bytes_received(&metrics) > 0, "Expected bytes to be counted");
 
     shutdown.cancel();
@@ -366,9 +384,17 @@ async fn test_otlp_http_traces() {
         .await
         .expect("Failed to send OTLP HTTP request");
 
-    assert_eq!(resp.status(), 200, "OTLP HTTP traces failed: {:?}", resp.text().await);
+    assert_eq!(
+        resp.status(),
+        200,
+        "OTLP HTTP traces failed: {:?}",
+        resp.text().await
+    );
 
-    assert!(requests_total(&metrics) > 0, "Expected requests to be counted");
+    assert!(
+        requests_total(&metrics) > 0,
+        "Expected requests to be counted"
+    );
 
     shutdown.cancel();
 }
@@ -393,9 +419,17 @@ async fn test_otlp_http_metrics() {
         .await
         .expect("Failed to send OTLP HTTP request");
 
-    assert_eq!(resp.status(), 200, "OTLP HTTP metrics failed: {:?}", resp.text().await);
+    assert_eq!(
+        resp.status(),
+        200,
+        "OTLP HTTP metrics failed: {:?}",
+        resp.text().await
+    );
 
-    assert!(requests_total(&metrics) > 0, "Expected requests to be counted");
+    assert!(
+        requests_total(&metrics) > 0,
+        "Expected requests to be counted"
+    );
 
     shutdown.cancel();
 }
@@ -495,10 +529,7 @@ async fn test_otlp_bytes_received_tracked() {
         "Expected at least 2 requests, got {}",
         requests_total(&metrics)
     );
-    assert!(
-        bytes_received(&metrics) > 0,
-        "Expected bytes to be tracked"
-    );
+    assert!(bytes_received(&metrics) > 0, "Expected bytes to be tracked");
 
     shutdown.cancel();
 }
