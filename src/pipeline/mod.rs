@@ -164,22 +164,16 @@ impl PipelineState {
         }
 
         // Check sink health
-        if let Some(ref kafka) = self.kafka_sink {
-            if !kafka.is_healthy() {
-                return false;
-            }
+        if let Some(ref kafka) = self.kafka_sink && !kafka.is_healthy() {
+            return false;
         }
 
-        if let Some(ref loader) = self.loader_sink {
-            if !loader.is_healthy() {
-                return false;
-            }
+        if let Some(ref loader) = self.loader_sink && !loader.is_healthy() {
+            return false;
         }
 
-        if let Some(ref grpc) = self.grpc_loader_sink {
-            if !grpc.is_healthy() {
-                return false;
-            }
+        if let Some(ref grpc) = self.grpc_loader_sink && !grpc.is_healthy() {
+            return false;
         }
 
         true
@@ -296,10 +290,8 @@ impl PipelineState {
         }
 
         // Debug tap: fire-and-forget write to file sink (errors are logged, not propagated)
-        if let Some(ref fsink) = self.file_sink {
-            if let Err(e) = fsink.send("", payload).await {
-                warn!(error = %e, "File sink write failed");
-            }
+        if let Some(ref fsink) = self.file_sink && let Err(e) = fsink.send("", payload).await {
+            warn!(error = %e, "File sink write failed");
         }
 
         Ok(())
@@ -533,28 +525,20 @@ impl Orchestrator {
         info!("Pipeline orchestrator shutting down");
 
         // Flush all sinks
-        if let Some(ref kafka) = self.state.kafka_sink {
-            if let Err(e) = kafka.flush().await {
-                error!(error = %e, "Failed to flush Kafka sink");
-            }
+        if let Some(ref kafka) = self.state.kafka_sink && let Err(e) = kafka.flush().await {
+            error!(error = %e, "Failed to flush Kafka sink");
         }
 
-        if let Some(ref loader) = self.state.loader_sink {
-            if let Err(e) = loader.flush().await {
-                error!(error = %e, "Failed to flush loader sink");
-            }
+        if let Some(ref loader) = self.state.loader_sink && let Err(e) = loader.flush().await {
+            error!(error = %e, "Failed to flush loader sink");
         }
 
-        if let Some(ref grpc) = self.state.grpc_loader_sink {
-            if let Err(e) = grpc.flush().await {
-                error!(error = %e, "Failed to flush gRPC loader sink");
-            }
+        if let Some(ref grpc) = self.state.grpc_loader_sink && let Err(e) = grpc.flush().await {
+            error!(error = %e, "Failed to flush gRPC loader sink");
         }
 
-        if let Some(ref fsink) = self.state.file_sink {
-            if let Err(e) = fsink.flush().await {
-                error!(error = %e, "Failed to flush file sink");
-            }
+        if let Some(ref fsink) = self.state.file_sink && let Err(e) = fsink.flush().await {
+            error!(error = %e, "Failed to flush file sink");
         }
 
         info!("Pipeline orchestrator stopped");

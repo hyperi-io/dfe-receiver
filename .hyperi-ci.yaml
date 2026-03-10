@@ -11,9 +11,13 @@
 language: rust
 quality:
   enabled: true
+  rust:
+    features: default
 test:
   enabled: true
   coverage: false
+  rust:
+    features: default
 build:
   enabled: true
   strategies:

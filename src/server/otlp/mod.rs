@@ -213,12 +213,11 @@ fn make_auth_interceptor(
 ) -> impl Fn(Request<()>) -> std::result::Result<Request<()>, Status> + Clone {
     move |req: Request<()>| {
         let mut headers = axum::http::HeaderMap::new();
-        if let Some(auth_value) = req.metadata().get("authorization") {
-            if let Ok(s) = auth_value.to_str() {
-                if let Ok(hv) = axum::http::HeaderValue::from_str(s) {
-                    headers.insert("authorization", hv);
-                }
-            }
+        if let Some(auth_value) = req.metadata().get("authorization")
+            && let Ok(s) = auth_value.to_str()
+            && let Ok(hv) = axum::http::HeaderValue::from_str(s)
+        {
+            headers.insert("authorization", hv);
         }
 
         if let Some(err) = validate_bearer_auth(&auth, &headers) {

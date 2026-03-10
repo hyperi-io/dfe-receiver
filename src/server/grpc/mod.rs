@@ -116,12 +116,11 @@ fn make_auth_interceptor(
     move |req: Request<()>| {
         // Build an HTTP header map from gRPC metadata for reuse of validate_bearer_auth
         let mut headers = axum::http::HeaderMap::new();
-        if let Some(auth_value) = req.metadata().get("authorization") {
-            if let Ok(s) = auth_value.to_str() {
-                if let Ok(hv) = axum::http::HeaderValue::from_str(s) {
-                    headers.insert("authorization", hv);
-                }
-            }
+        if let Some(auth_value) = req.metadata().get("authorization")
+            && let Ok(s) = auth_value.to_str()
+            && let Ok(hv) = axum::http::HeaderValue::from_str(s)
+        {
+            headers.insert("authorization", hv);
         }
 
         if let Some(err) = validate_bearer_auth(&auth, &headers) {

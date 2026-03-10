@@ -36,10 +36,8 @@ impl FileSink {
     pub fn new(path: &str) -> Result<Self> {
         let path = PathBuf::from(path);
 
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
+        if let Some(parent) = path.parent() && !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
         }
 
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
