@@ -22,7 +22,6 @@ build:
   enabled: true
   strategies:
     - native
-    - cross
   rust:
     features: default
     targets:
