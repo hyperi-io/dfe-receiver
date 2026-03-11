@@ -12,8 +12,8 @@
 //! to produce Dockerfile, Helm chart, and Docker Compose fragments.
 
 use hyperi_rustlib::deployment::{
-    DeploymentContract, HealthContract, KedaContract, PortContract, SecretEnvContract,
-    SecretGroupContract,
+    DeploymentContract, HealthContract, ImageProfile, KedaContract, NativeDepsContract,
+    PortContract, SecretEnvContract, SecretGroupContract,
 };
 
 /// Build the deployment contract for dfe-receiver.
@@ -27,6 +27,27 @@ pub fn contract() -> DeploymentContract {
         app_name: "dfe-receiver".into(),
         binary_name: "dfe-receiver".into(),
         base_image: "ubuntu:24.04".into(),
+        native_deps: NativeDepsContract::for_rustlib_features(
+            &[
+                "config",
+                "config-reload",
+                "logger",
+                "metrics",
+                "http-server",
+                "transport-kafka",
+                "transport-grpc",
+                "dlq-kafka",
+                "spool",
+                "tiered-sink",
+                "runtime",
+                "secrets",
+                "scaling",
+                "cli",
+                "deployment",
+            ],
+            "ubuntu:24.04",
+        ),
+        image_profile: ImageProfile::Production,
         description: "High-performance HTTP/gRPC receiver for PB/s scale data ingestion".into(),
         metrics_port: 9090,
         health: HealthContract {
