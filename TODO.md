@@ -97,7 +97,12 @@ All protocols follow: receive -> convert to JSON -> validate -> route -> Kafka/d
 
 ## Active Tasks
 
-(none)
+### ~~Consume hyperi-rustlib v1.16.0 (Dynamic Linking)~~ [DONE]
+
+- [x] Bump hyperi-rustlib from `1.13.2` to `1.16.0`
+- [x] Add `NativeDepsContract` + `ImageProfile` to deployment contract
+- [x] Regenerate Dockerfile from contract (Confluent APT repo, runtime packages)
+- [x] `cargo update` + full test suite passing
 
 ---
 
