@@ -1,3 +1,10 @@
+## [1.13.3](https://github.com/hyperi-io/dfe-receiver/compare/v1.13.2...v1.13.3) (2026-03-12)
+
+
+### Bug Fixes
+
+* add build.type app, remove legacy publish workflow ([fa455fe](https://github.com/hyperi-io/dfe-receiver/commit/fa455fe48310e576049d3c12365f4eb59a5acbb1))
+
 ## [1.13.2](https://github.com/hyperi-io/dfe-receiver/compare/v1.13.1...v1.13.2) (2026-03-12)
 
 
