@@ -1,3 +1,11 @@
+## [1.13.2](https://github.com/hyperi-io/dfe-receiver/compare/v1.13.1...v1.13.2) (2026-03-12)
+
+
+### Bug Fixes
+
+* consume hyperi-rustlib 1.16.0 dynamic linking ([6bb8ebd](https://github.com/hyperi-io/dfe-receiver/commit/6bb8ebda08308465687a8265601bd8a432c3e88d))
+* update Dockerfile header and fix UID 1000 conflict ([f376d38](https://github.com/hyperi-io/dfe-receiver/commit/f376d3850968aaa4ae4a67320cb464afe018fdf7))
+
 ## [1.13.1](https://github.com/hyperi-io/dfe-receiver/compare/v1.13.0...v1.13.1) (2026-03-10)
 
 
