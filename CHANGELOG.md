@@ -1,3 +1,12 @@
+## [1.13.2-dev.1](https://github.com/hyperi-io/dfe-receiver/compare/v1.13.1...v1.13.2-dev.1) (2026-03-12)
+
+
+### Bug Fixes
+
+* add build.type app, remove legacy publish workflow ([30e03df](https://github.com/hyperi-io/dfe-receiver/commit/30e03df5b16d0e367c5d774bc7deb8c54e8a64b8))
+* consume hyperi-rustlib 1.16.0 dynamic linking ([6bb8ebd](https://github.com/hyperi-io/dfe-receiver/commit/6bb8ebda08308465687a8265601bd8a432c3e88d))
+* update Dockerfile header and fix UID 1000 conflict [skip ci] ([434ce5c](https://github.com/hyperi-io/dfe-receiver/commit/434ce5ce546fdbbe9d34946b877557e7c3ba6250))
+
 ## [1.13.1](https://github.com/hyperi-io/dfe-receiver/compare/v1.13.0...v1.13.1) (2026-03-10)
 
 
