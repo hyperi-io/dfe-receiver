@@ -31,3 +31,4 @@ build:
 publish:
   enabled: true
   target: internal
+  binaries: both
