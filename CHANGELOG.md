@@ -1,3 +1,10 @@
+## [1.13.4](https://github.com/hyperi-io/dfe-receiver/compare/v1.13.3...v1.13.4) (2026-03-13)
+
+
+### Bug Fixes
+
+* trigger release with binary publish support ([95bf3b0](https://github.com/hyperi-io/dfe-receiver/commit/95bf3b02166d12cc204272178d7261188a755303))
+
 ## [1.13.3](https://github.com/hyperi-io/dfe-receiver/compare/v1.13.2...v1.13.3) (2026-03-12)
 
 
