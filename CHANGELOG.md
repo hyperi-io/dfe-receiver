@@ -1,3 +1,10 @@
+## [1.13.6](https://github.com/hyperi-io/dfe-receiver/compare/v1.13.5...v1.13.6) (2026-03-13)
+
+
+### Bug Fixes
+
+* set publish-target to both for binary uploads ([43e8039](https://github.com/hyperi-io/dfe-receiver/commit/43e8039a818ecb33265d500b1f0215f9b0d853ac))
+
 ## [1.13.5](https://github.com/hyperi-io/dfe-receiver/compare/v1.13.4...v1.13.5) (2026-03-13)
 
 
