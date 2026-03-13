@@ -8,7 +8,7 @@
 
 [package]
 name = "dfe-receiver"
-version = "1.13.4"
+version = "1.13.5"
 edition = "2024"
 rust-version = "1.94"
 description = "High-performance HTTP/gRPC receiver for PB/s scale data ingestion"
