@@ -1,11 +1,3 @@
-## CI UNAVAILABLE — Commit with [skip ci]
-
-The CI system is being completely rewritten. Until migration instructions are provided:
-
-- **All commits MUST include `[skip ci]` in the commit message**
-- Do not trigger CI runs or rely on CI for validation
-- Run `./ci/local-build.sh` for local validation if it exists
-
 ## Shared Build Host
 
 This host runs multiple projects concurrently. **Never kill cargo processes** to
@@ -41,15 +33,10 @@ free the build lock — other projects may be building. Wait for the lock natura
 
 ## CI Workflow Rules
 
-> **ALWAYS run `./ci/local-build.sh` before triggering any CI push.**
+> **ALWAYS run `hyperi-ci check` before pushing.**
 >
-> The local build script runs fmt, clippy, audit, and tests. Fix all issues locally
-> before pushing. Do NOT use CI as a build validator — it consumes shared runner time
-> and creates noise. Push only when local-build passes.
->
-> The `plugins` feature requires JFrog auth (unavailable locally) — use `cargo test`
-> (without `--all-features`) to verify tests pass. The CI handles plugins feature
-> in a credentialed environment.
+> This runs quality (fmt, clippy) and tests locally. Fix all issues before pushing.
+> Do NOT use CI as a build validator — it consumes shared runner time and creates noise.
 
 ---
 
