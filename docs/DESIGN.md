@@ -21,7 +21,7 @@ dfe-receiver is a high-performance HTTP/gRPC receiver for PB/s scale data ingest
 3. **Routing**
    - Route to Kafka topics using configurable source rules (first match wins)
    - Rule modes: `key_present`, `key_value_set`, `key_value_use`
-   - Source-to-topic remapping and default source ("dfe")
+   - Source-to-topic remapping and default source ("default")
    - Legacy compat mode for `tags.event.category` / `event_category`
    - Support direct routing to dfe-loader
    - `_timestamp_receiver` enrichment (epoch ms injection)
@@ -33,7 +33,7 @@ dfe-receiver is a high-performance HTTP/gRPC receiver for PB/s scale data ingest
    - Certificates from file or secret manager (AWS, OpenBao/Vault)
 
 5. **Resilience**
-   - Disk spillover when downstream unavailable
+   - In-memory buffering with backpressure (no disk spillover by design)
    - Circuit breaker for failing sinks
    - Memory pressure detection and backpressure
 
@@ -91,7 +91,7 @@ dfe-receiver is a high-performance HTTP/gRPC receiver for PB/s scale data ingest
                ┌─────────▼─────────┐
                │   TieredSink      │
                │ (circuit breaker  │
-               │  + disk spool)    │
+               │  + memory buffer)    │
                └───────────────────┘
 ```
 
@@ -192,8 +192,7 @@ Wraps primary sink with resilience:
 
 1. **Circuit Breaker** (hyperi-rustlib) - Tracks consecutive failures, opens after threshold
 2. **In-Memory Queue** - Buffers during circuit-open state
-3. **Disk Spool** (planned) - Spillover when memory queue full
-4. **Background Drain** - Retries queued messages when circuit closes
+3. **Background Drain** - Retries queued messages when circuit closes
 
 ### Authentication
 
@@ -255,7 +254,7 @@ routing:
   source_rules:
     - field: "_source"
       mode: "key_value_use"
-  default_source: "dfe"
+  default_source: "default"
   topic_suffix: "_land"
   legacy_compat: false
   # source_to_topic:
@@ -282,7 +281,6 @@ kafka:
 buffer:
   memory_limit: 0  # Auto (67% of available)
   pressure_threshold: 0.8
-  spool_path: "/var/spool/dfe-receiver"
 
 metrics:
   address: "0.0.0.0:9090"
@@ -328,26 +326,24 @@ readinessProbe:
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `dfe_receiver_requests_total` | Counter | Total requests by status |
-| `dfe_receiver_bytes_received_total` | Counter | Total bytes ingested |
-| `dfe_receiver_request_duration_seconds` | Histogram | Request latency |
+| `receiver_requests_total` | Counter | Total requests received |
+| `receiver_requests_success` | Counter | Total successful requests |
+| `receiver_requests_error` | Counter | Total failed requests |
+| `receiver_bytes_received_total` | Counter | Total bytes ingested |
 
 ### Kafka Metrics
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `dfe_receiver_kafka_messages_total` | Counter | Messages sent to Kafka |
-| `dfe_receiver_kafka_bytes_total` | Counter | Bytes sent to Kafka |
-| `dfe_receiver_kafka_batch_size` | Histogram | Batch sizes |
+| `receiver_messages_sent_kafka_total` | Counter | Messages sent to Kafka |
+| `receiver_messages_sent_loader_total` | Counter | Messages sent to loader |
+| `receiver_messages_dlq_total` | Counter | Messages sent to DLQ |
 
-### Buffer Metrics
+### Scaling Metrics
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `dfe_receiver_buffer_spilled_total` | Counter | Messages spilled |
-| `dfe_receiver_buffer_drained_total` | Counter | Messages drained |
-| `dfe_receiver_buffer_queue_size` | Gauge | Current queue size |
-| `dfe_receiver_memory_pressure` | Gauge | Memory pressure (0-1) |
+| `receiver_scaling_pressure` | Gauge | Scaling pressure for autoscaling (0-100) |
 
 ### Scaling Metric
 
@@ -603,331 +599,35 @@ groups:
   - name: dfe-receiver-security
     rules:
       - alert: HighAuthFailureRate
-        expr: rate(dfe_receiver_auth_failures_total[5m]) > 100
+        expr: rate(receiver_requests_error[5m]) > 100
         labels:
           severity: warning
         annotations:
           summary: "High authentication failure rate"
 
       - alert: HighValidationFailureRate
-        expr: rate(dfe_receiver_validation_failures_total[5m]) > 50
+        expr: rate(receiver_messages_dlq_total[5m]) > 50
         labels:
           severity: warning
         annotations:
           summary: "High validation failure rate - check DLQ"
 
       - alert: RequestTimeoutSpike
-        expr: rate(dfe_receiver_request_timeout_total[5m]) > 10
+        expr: rate(receiver_requests_error[5m]) > 10
         labels:
           severity: info
         annotations:
           summary: "Request timeout spike - possible slow loris attempt"
 ```
 
-## Vector Agent Module
+## Completed Milestones
 
-### Module Overview
-
-Optional built-in Vector agent that ships as part of dfe-receiver, providing a
-turnkey local collection pipeline. Vector runs as a managed subprocess — not
-embedded as a library — with dfe-receiver handling lifecycle, configuration
-generation, binary management, and health monitoring.
-
-### Module Architecture
-
-```text
-┌─────────────────────────────────────────────────────┐
-│                   dfe-receiver                       │
-│                                                     │
-│  ┌──────────────────┐    ┌───────────────────────┐  │
-│  │  Vector Manager  │    │   Core Receiver       │  │
-│  │                  │    │   (HTTP/gRPC server,   │  │
-│  │  - Binary mgmt   │    │    validation,         │  │
-│  │  - Config gen    │    │    routing, sinks)     │  │
-│  │  - Health check  │    │                        │  │
-│  │  - Auto-update   │    │   127.0.0.1:5480       │  │
-│  └────────┬─────────┘    └───────────▲────────────┘  │
-│           │                          │               │
-│           │  spawns                  │  HTTP POST     │
-│           ▼                          │  (JSON)        │
-│  ┌────────────────────┐              │               │
-│  │  vector (child     │──────────────┘               │
-│  │  process)          │                              │
-│  │                    │                              │
-│  │  Sources:          │                              │
-│  │  - file            │                              │
-│  │  - journald        │                              │
-│  │  - syslog          │                              │
-│  │  - exec            │                              │
-│  │  - etc.            │                              │
-│  │                    │                              │
-│  │  Sink:             │                              │
-│  │  - http (→ core)   │                              │
-│  └────────────────────┘                              │
-└─────────────────────────────────────────────────────┘
-```
-
-### Why Subprocess (Not Embedded)
-
-| Factor | Subprocess | Embedded library |
-| -------- | ----------- | ----------------- |
-| **Licensing** | Clean boundary — Vector (MPL-2.0) and dfe-receiver (FSL-1.1-ALv2) are separate binaries | Requires legal review of MPL-2.0 + FSL-1.1 compatibility |
-| **Build complexity** | Zero impact on dfe-receiver build | Vector is 93+ crates, adds minutes to build time |
-| **Stability** | Vector crashes don't take down the receiver | Panic in Vector code takes down the process |
-| **Upgrades** | Vector binary updated independently | Requires full recompile |
-| **API surface** | Well-documented CLI + config file | Internal APIs, undocumented, may break between releases |
-
-### Binary Management
-
-dfe-receiver manages the Vector binary automatically:
-
-1. **Auto-download** — On first use or when version changes, download the
-   correct platform binary from `packages.timber.io`
-2. **Version pinning** — Config specifies a Vector version; dfe-receiver
-   downloads that exact version
-3. **Platform detection** — Automatically selects the correct binary:
-   - `x86_64-unknown-linux-musl` (amd64)
-   - `aarch64-unknown-linux-musl` (arm64)
-4. **Checksum verification** — SHA256 verification of downloaded binary
-5. **Auto-update** — Periodic check for newer versions based on update strategy
-6. **Storage** — Binary cached in `$DFE_RECEIVER_DATA_DIR/vector/` or
-   `/var/lib/dfe-receiver/vector/`
-
-#### Update Strategies
-
-| Strategy | Behaviour | Example (current latest: 0.54.2) |
-| -------- | --------- | -------------------------------- |
-| `pinned` | Exact version only, no auto-update | Uses whatever `version` is set to |
-| `patch` | Latest patch within pinned minor | `version: "0.54.0"` → uses `0.54.2` |
-| `n-1` **(default)** | Highest patch of the **previous** minor release | Latest is `0.54.x` → uses highest `0.53.x` |
-
-The `n-1` strategy is the recommended production default. It ensures:
-
-- **Stability** — you run a release that has had a full minor cycle of
-  production exposure across the Vector community
-- **Security** — patch releases within the n-1 minor are still applied
-  automatically (CVE fixes, bug fixes)
-- **Predictability** — you never get a new minor release's behaviour
-  changes until the *next* minor ships, giving you a full release cycle
-  of lead time
-
-Resolution logic for `n-1`:
-
-1. Query Vector releases (GitHub API or `packages.timber.io`)
-2. Determine the latest minor version (e.g., `0.54`)
-3. Select the previous minor (e.g., `0.53`)
-4. Use the highest patch within that minor (e.g., `0.53.4`)
-
-Download URL pattern:
-
-```text
-https://packages.timber.io/vector/{VERSION}/vector-{VERSION}-{ARCH}.tar.gz
-```
-
-### Configuration Generation
-
-dfe-receiver generates Vector's `vector.yaml` from its own config:
-
-```yaml
-# dfe-receiver config (user-facing)
-vector:
-  enabled: true
-  version: "0.53.0"           # used when strategy is pinned or patch
-  update_strategy: "n-1"      # pinned | patch | n-1 (default: n-1)
-  update_check_interval: 86400 # seconds between update checks (default: 24h)
-
-  # Memory isolation (cgroups v2)
-  memory_limit: "512MB"       # hard cap — Vector OOM-killed if exceeded
-  memory_high: "400MB"        # soft cap — kernel throttles Vector before OOM
-
-  # Vector config: use generated config OR supply your own
-  config_path: ""             # path to custom vector.yaml (overrides sources below)
-
-  # Source definitions (used when config_path is empty)
-  sources:
-    journald:
-      enabled: true
-      units: ["sshd", "nginx", "myapp"]
-    files:
-      enabled: true
-      paths: ["/var/log/app/*.log"]
-      encoding: "json"
-    syslog:
-      enabled: true
-      address: "0.0.0.0:514"
-      protocol: "udp"
-```
-
-#### Config Modes
-
-Two modes for Vector configuration:
-
-**Mode 1: Generated (default)** — define sources in dfe-receiver config,
-the sink targeting the core receiver is auto-generated. Simple, no Vector
-knowledge required.
-
-**Mode 2: Custom vector.yaml** — set `config_path` to a user-supplied
-`vector.yaml`. The receiver validates that the file contains at least one
-sink pointing to the core receiver endpoint (`127.0.0.1:5480`), and warns
-if missing. This mode gives full control over Vector's transforms, filters,
-and advanced source options.
-
-When `config_path` is set, the `sources` section is ignored entirely.
-
-This generates a `vector.yaml` under the hood (Mode 1 only):
-
-```yaml
-# Auto-generated — do not edit
-sources:
-  journald_source:
-    type: journald
-    units:
-      - sshd
-      - nginx
-      - myapp
-  file_source:
-    type: file
-    include:
-      - /var/log/app/*.log
-    decoding:
-      codec: json
-  syslog_source:
-    type: syslog
-    address: 0.0.0.0:514
-    mode: udp
-
-sinks:
-  dfe_receiver:
-    type: http
-    inputs: ["journald_source", "file_source", "syslog_source"]
-    uri: http://127.0.0.1:5480/ingest
-    encoding:
-      codec: json
-    buffer:
-      type: disk
-      max_size: 268435456  # 256MB disk buffer
-    batch:
-      max_bytes: 1048576
-      timeout_secs: 1
-    request:
-      retry_max_duration_secs: 30
-```
-
-### Lifecycle Management
-
-```text
-dfe-receiver start
-  │
-  ├── Start core receiver (HTTP on 127.0.0.1:5480 + external on 0.0.0.0:443)
-  │
-  ├── Check vector.enabled == true
-  │     │
-  │     ├── Ensure vector binary exists at pinned version
-  │     │     └── Download if missing or wrong version
-  │     │
-  │     ├── Generate vector.yaml from config
-  │     │
-  │     ├── Spawn: vector --config /run/dfe-receiver/vector.yaml
-  │     │
-  │     └── Monitor child process
-  │           ├── Health check via Vector API (localhost:8686)
-  │           ├── Restart on unexpected exit (backoff)
-  │           └── Log forwarding (Vector stderr → receiver logs)
-  │
-  └── Shutdown
-        ├── SIGTERM → vector child
-        ├── Wait grace period (30s)
-        └── SIGKILL if still running
-```
-
-### Memory Isolation (cgroups v2)
-
-The Vector subprocess runs inside its own cgroup with a configurable memory
-limit. This ensures a runaway Vector process is OOM-killed by the kernel
-**without affecting the receiver or transformer**.
-
-No system-level configuration is required — the receiver creates a child
-cgroup under its own cgroup at runtime.
-
-#### How It Works
-
-1. On spawn, the receiver discovers its own cgroup via `/proc/self/cgroup`
-2. Creates a child cgroup: `<own-cgroup>/vector/`
-3. Enables memory controller: writes `+memory` to parent's
-   `cgroup.subtree_control`
-4. Sets limits:
-   - `memory.high` → soft limit (throttle before OOM)
-   - `memory.max` → hard limit (OOM kill)
-5. Spawns Vector and writes its PID to `<own-cgroup>/vector/cgroup.procs`
-
-#### Behaviour Under Pressure
-
-```text
-Vector memory usage rises
-  │
-  ├── Below memory.high (400MB)
-  │     └── Normal operation
-  │
-  ├── Exceeds memory.high (400MB)
-  │     └── Kernel throttles Vector (reclaims pages)
-  │     └── Receiver logs warning, Vector slows down but stays alive
-  │
-  └── Exceeds memory.max (512MB)
-        └── Kernel OOM-kills Vector process ONLY
-        └── Receiver detects child exit, logs error
-        └── Receiver restarts Vector with exponential backoff
-        └── Receiver core pipeline unaffected — continues processing
-```
-
-#### Platform Requirements
-
-| Environment | Cgroup delegation | Notes |
-| ----------- | ----------------- | ----- |
-| Kubernetes | Automatic | Container cgroup delegated by kubelet |
-| systemd v252+ | Automatic | `Delegate=yes` in service unit (default) |
-| systemd older | Config needed | Add `Delegate=yes` to service unit |
-| Bare metal (root) | Works | Direct `/sys/fs/cgroup/` access |
-| Unprivileged user | May not work | Falls back to no memory limit with warning |
-
-If cgroup creation fails (permissions, cgroups v1 only, etc.), the receiver
-logs a warning and spawns Vector without memory isolation — degraded but
-functional.
-
-### Health and Observability
-
-- Vector's health API (`localhost:8686/health`) monitored by dfe-receiver
-- Vector process status exposed via `/health/ready` (receiver not ready if Vector is down)
-- Vector internal metrics scraped and re-exposed on dfe-receiver's Prometheus endpoint
-- Vector stdout/stderr captured and logged through dfe-receiver's structured logger
-- Vector memory usage (from cgroup stats) exposed as `dfe_vector_memory_bytes` gauge
-
-### Shared Vector Management (hyperi-rustlib)
-
-The Vector binary management (download, update strategies, checksum verification,
-lifecycle, health monitoring) will be implemented in **hyperi-rustlib** as a
-shared module, not directly in dfe-receiver. This is because other DFE services
-— notably dfe-transform (TBC) — will also need managed Vector subprocesses.
-
-dfe-receiver and dfe-transform will consume the same `hyperi_rustlib::vector`
-module, providing consistent binary management, update strategies, and health
-monitoring across the DFE suite.
-
-### Licensing Note
-
-Vector (MPL-2.0) is distributed as a separate binary. dfe-receiver (FSL-1.1-ALv2)
-downloads and manages it but does not link to or incorporate Vector source code.
-This maintains a clean license boundary — no MPL obligations attach to
-dfe-receiver's codebase or to hyperi-rustlib.
-
-## Future Work
-
-- [ ] gRPC Vector sink protocol implementation
-- [ ] Full disk spillover (currently in-memory only)
-- [x] Sidecar transport pattern (Vector/Fluent Bit push to gRPC/HTTP ingest — see `docs/SIDECAR-TRANSPORTS.md`)
+- [x] gRPC Vector sink protocol
+- [x] Sidecar transport pattern (see `docs/SIDECAR-TRANSPORTS.md`)
 - [x] Config hot-reload via SIGHUP (routing, validation, enrichment)
 - [x] Source-rule-based routing (key_present, key_value_set, key_value_use)
 - [x] `_timestamp_receiver` enrichment
-- [x] Rebranding: hs-rustlib to hyperi-rustlib
+- [x] 9-protocol multi-protocol ingestion (HTTP, gRPC, OTLP, Lumberjack, Splunk HEC, Syslog, Fluent, GELF, Prometheus RW)
 
 ## References
 

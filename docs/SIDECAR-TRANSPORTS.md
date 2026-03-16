@@ -6,7 +6,7 @@ dfe-receiver natively supports these ingest protocols:
 |----------|------|--------|
 | HTTP JSON | 8080 | POST JSON body |
 | gRPC (Vector-compat) | 6000 | Vector native protocol |
-| Syslog (RFC 3164/5424) | 1514 | UDP/TCP syslog |
+| Syslog (RFC 3164/5424) | 514 / 6514 | UDP/TCP / TLS syslog |
 | GELF | 12201 | Graylog Extended Log Format |
 | Splunk HEC | 8088 | Splunk HTTP Event Collector |
 | OTLP | 4317 | OpenTelemetry Protocol |

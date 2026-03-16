@@ -19,7 +19,7 @@ building from source or downloading binaries from JFrog.
 
 ## How It Works
 
-The CI submodule (v1.59.0+) has built-in container publishing support. On
+The `hyperi-ci` toolchain has built-in container publishing support. On
 release, it:
 
 1. Builds the Dockerfile for `linux/amd64` and `linux/arm64`
@@ -138,19 +138,11 @@ publish:
       - linux/arm64
 ```
 
-### 3. Update CI submodule
+### 3. CI Workflow
 
-Ensure the ci submodule is at v1.59.0 or later:
-
-```bash
-git submodule update --remote ci
-```
-
-### 4. Update publish workflow
-
-Regenerate or update `.github/workflows/publish.yml` to include container
-publishing inputs. The CI actions/jobs/publish composite action already handles
-container publishing when the config is detected.
+The reusable workflow at `hyperi-io/hyperi-ci/.github/workflows/rust-ci.yml`
+handles container publishing automatically when the config is detected in
+`.hyperi-ci.yaml`.
 
 ## Verification
 
