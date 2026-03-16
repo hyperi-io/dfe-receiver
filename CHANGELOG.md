@@ -1,3 +1,10 @@
+## [1.13.11](https://github.com/hyperi-io/dfe-receiver/compare/v1.13.10...v1.13.11) (2026-03-16)
+
+
+### Bug Fixes
+
+* disable rdkafka stats spam by default (closes [#3](https://github.com/hyperi-io/dfe-receiver/issues/3)) ([3654677](https://github.com/hyperi-io/dfe-receiver/commit/3654677f9fff782e6d19d3de90d820bbdb98c4e8))
+
 ## [1.13.10](https://github.com/hyperi-io/dfe-receiver/compare/v1.13.9...v1.13.10) (2026-03-16)
 
 
