@@ -1,3 +1,10 @@
+## [1.13.9](https://github.com/hyperi-io/dfe-receiver/compare/v1.13.8...v1.13.9) (2026-03-16)
+
+
+### Bug Fixes
+
+* add explicit binaries publish target to config ([6b040fa](https://github.com/hyperi-io/dfe-receiver/commit/6b040fa23eff3719be89eb648d9564fcab6ba90b))
+
 ## [1.13.8](https://github.com/hyperi-io/dfe-receiver/compare/v1.13.7...v1.13.8) (2026-03-16)
 
 
