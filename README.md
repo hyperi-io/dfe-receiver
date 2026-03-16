@@ -192,10 +192,10 @@ metrics:
 
 Key metrics:
 
-- `dfe_receiver_requests_total` - Total requests by status
-- `dfe_receiver_bytes_received_total` - Total bytes ingested
-- `dfe_receiver_kafka_messages_sent_total` - Messages sent to Kafka
-- `dfe_receiver_memory_pressure` - Current memory pressure (0-1)
+- `receiver_requests_total` - Total requests received
+- `receiver_bytes_received_total` - Total bytes ingested
+- `receiver_messages_sent_kafka_total` - Messages sent to Kafka
+- `receiver_scaling_pressure` - Scaling pressure for autoscaling (0-100)
 
 ## Architecture
 
@@ -243,7 +243,7 @@ All protocols share the same core pipeline after normalisation:
 
 ```bash
 # Run tests
-cargo test
+cargo nextest run
 
 # Run with debug logging
 RUST_LOG=debug cargo run -- --config config.yaml
