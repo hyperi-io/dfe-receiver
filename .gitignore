@@ -38,3 +38,4 @@ coverage.lcov
 .cargo/
 !.cargo/config.toml
 .tmp/
+docs/superpowers/
