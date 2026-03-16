@@ -7,7 +7,7 @@
 #
 # Override defaults with HYPERCI_* env vars.
 # Reference: config/defaults.yaml in hyperi-ci.
-# Binary artifacts published to GitHub Releases and JFrog.
+# Binary artifacts published to GitHub Releases and Cloudflare R2.
 
 language: rust
 quality:
