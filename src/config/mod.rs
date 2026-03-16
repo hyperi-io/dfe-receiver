@@ -1071,6 +1071,8 @@ impl KafkaConfig {
         config.ssl_certificate_location = self.tls.cert_file.clone();
         config.ssl_key_location = self.tls.key_file.clone();
 
+        config.librdkafka_overrides = self.librdkafka_overrides.clone();
+
         config
     }
 
@@ -1136,16 +1138,26 @@ pub struct KafkaConfig {
 
     /// Producer-specific settings.
     pub producer: ProducerConfig,
+
+    /// Raw librdkafka configuration overrides (highest priority).
+    pub librdkafka_overrides: std::collections::HashMap<String, String>,
 }
 
 impl Default for KafkaConfig {
     fn default() -> Self {
+        let mut overrides = std::collections::HashMap::new();
+        // Disable rdkafka statistics by default — the HighThroughput profile
+        // enables 1s stats, but dfe-receiver doesn't use StatsContext so the
+        // stats just spam the log at INFO level (see GH #3).
+        overrides.insert("statistics.interval.ms".to_string(), "0".to_string());
+
         Self {
             brokers: vec![],
             client_id: "dfe-receiver".to_string(),
             sasl: None,
             tls: KafkaTlsConfig::default(),
             producer: ProducerConfig::default(),
+            librdkafka_overrides: overrides,
         }
     }
 }
@@ -1649,6 +1661,77 @@ mod tests {
             apply_env_overrides(&mut config);
             assert_eq!(config.server.max_body_size, original_size);
         });
+    }
+
+    #[test]
+    fn test_kafka_default_disables_stats() {
+        let config = KafkaConfig::default();
+        assert_eq!(
+            config.librdkafka_overrides.get("statistics.interval.ms"),
+            Some(&"0".to_string()),
+            "stats must be disabled by default to prevent log spam"
+        );
+    }
+
+    #[test]
+    fn test_kafka_overrides_passed_to_rustlib() {
+        let mut config = KafkaConfig::default();
+        config.brokers = vec!["localhost:9092".to_string()];
+        config
+            .librdkafka_overrides
+            .insert("message.max.bytes".to_string(), "2097152".to_string());
+
+        let rustlib = config.to_rustlib_kafka_config_for_producer();
+        assert_eq!(
+            rustlib.librdkafka_overrides.get("statistics.interval.ms"),
+            Some(&"0".to_string()),
+        );
+        assert_eq!(
+            rustlib.librdkafka_overrides.get("message.max.bytes"),
+            Some(&"2097152".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_kafka_yaml_overrides_stats() {
+        let yaml = r#"
+kafka:
+  brokers:
+    - "localhost:9092"
+  librdkafka_overrides:
+    statistics.interval.ms: "5000"
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let rustlib = config.kafka.to_rustlib_kafka_config_for_producer();
+        assert_eq!(
+            rustlib.librdkafka_overrides.get("statistics.interval.ms"),
+            Some(&"5000".to_string()),
+            "user config must override the default"
+        );
+    }
+
+    #[test]
+    fn test_kafka_yaml_other_override_loses_stats_default() {
+        // When user provides librdkafka_overrides in YAML, serde replaces
+        // the entire map — the default stats.interval.ms=0 is NOT merged.
+        // This is acceptable: users who set overrides are advanced and can
+        // add statistics.interval.ms themselves if needed.
+        let yaml = r#"
+kafka:
+  brokers:
+    - "localhost:9092"
+  librdkafka_overrides:
+    message.max.bytes: "2097152"
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(
+            config
+                .kafka
+                .librdkafka_overrides
+                .get("statistics.interval.ms"),
+            None,
+            "serde replaces default map — only user-specified keys present"
+        );
     }
 
     #[test]

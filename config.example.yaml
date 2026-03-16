@@ -247,6 +247,10 @@ kafka:
     compression: "zstd"
     acks: "all"
     retries: 5
+  # Raw librdkafka overrides (highest priority, override profile defaults).
+  # Stats disabled by default to prevent log spam (GH #3).
+  librdkafka_overrides:
+    statistics.interval.ms: "0"
 
 loader:
   address: "dfe-loader:9000"
@@ -257,8 +261,6 @@ loader:
 buffer:
   memory_limit: 0  # 0 = auto-detect (67% available)
   pressure_threshold: 0.8
-  spool_path: "/var/spool/dfe-receiver"
-  spool_max_bytes: 10737418240  # 10GB
 
 file_sink:
   enabled: false  # set true to write all processed messages to a file (debug only)
