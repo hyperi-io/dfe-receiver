@@ -247,6 +247,10 @@ kafka:
     compression: "zstd"
     acks: "all"
     retries: 5
+  # Raw librdkafka overrides (highest priority, override profile defaults).
+  # Stats disabled by default to prevent log spam (GH #3).
+  librdkafka_overrides:
+    statistics.interval.ms: "0"
 
 loader:
   address: "dfe-loader:9000"
