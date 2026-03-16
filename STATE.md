@@ -163,8 +163,8 @@ Native Rust receiver that:
 
 **Documentation:**
 
-- [SCOPE.md](SCOPE.md) - Project scope and requirements
 - [config.example.yaml](config.example.yaml) - Configuration reference
+- [docs/DESIGN.md](docs/DESIGN.md) - Architecture and design
 
 **External Resources:**
 

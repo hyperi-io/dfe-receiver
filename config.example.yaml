@@ -257,8 +257,6 @@ loader:
 buffer:
   memory_limit: 0  # 0 = auto-detect (67% available)
   pressure_threshold: 0.8
-  spool_path: "/var/spool/dfe-receiver"
-  spool_max_bytes: 10737418240  # 10GB
 
 file_sink:
   enabled: false  # set true to write all processed messages to a file (debug only)
