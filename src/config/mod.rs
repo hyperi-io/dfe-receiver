@@ -785,7 +785,7 @@ impl Default for PrometheusRwConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            bind_address: "0.0.0.0:9090".to_string(),
+            bind_address: "0.0.0.0:9091".to_string(),
             mode: "native".to_string(),
             max_body_size: 10 * 1024 * 1024,
             request_timeout_ms: 30_000,

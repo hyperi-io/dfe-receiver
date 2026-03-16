@@ -137,7 +137,7 @@ syslog:
 # Prometheus Remote Write receiver (v1)
 prometheus_rw:
   enabled: false
-  bind_address: "0.0.0.0:9090"
+  bind_address: "0.0.0.0:9091"
   # Output mode: "native" (default), "otel", or "hyperdx"
   # - native: flat JSON with labels as top-level fields
   # - otel: generic OTel JSON envelope (for custom pipelines)
