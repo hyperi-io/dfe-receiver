@@ -1,3 +1,11 @@
+## [1.13.8](https://github.com/hyperi-io/dfe-receiver/compare/v1.13.7...v1.13.8) (2026-03-16)
+
+
+### Bug Fixes
+
+* test R2 binary upload to downloads.hyperi.io ([c8806fd](https://github.com/hyperi-io/dfe-receiver/commit/c8806fd8b7ed8d102a85fa1b15b02af83fb53a40))
+* update config comment to reflect R2 binary publishing ([f7621c3](https://github.com/hyperi-io/dfe-receiver/commit/f7621c3dc16e8092a66e12958e55e36fd630e9c0))
+
 ## [1.13.7](https://github.com/hyperi-io/dfe-receiver/compare/v1.13.6...v1.13.7) (2026-03-13)
 
 
