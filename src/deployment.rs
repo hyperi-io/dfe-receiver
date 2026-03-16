@@ -22,6 +22,7 @@ use hyperi_rustlib::deployment::{
 /// secrets, KEDA scaling, and default config. Artefact generators
 /// (`generate_dockerfile`, `generate_chart`, `generate_compose_fragment`)
 /// use this contract as their single source of truth.
+#[allow(clippy::too_many_lines)]
 pub fn contract() -> DeploymentContract {
     DeploymentContract {
         app_name: "dfe-receiver".into(),
@@ -90,6 +91,31 @@ pub fn contract() -> DeploymentContract {
                 port: 8088,
                 protocol: "TCP".into(),
             },
+            PortContract {
+                name: "prometheus-rw".into(),
+                port: 9091,
+                protocol: "TCP".into(),
+            },
+            PortContract {
+                name: "syslog".into(),
+                port: 514,
+                protocol: "TCP".into(),
+            },
+            PortContract {
+                name: "syslog-tls".into(),
+                port: 6514,
+                protocol: "TCP".into(),
+            },
+            PortContract {
+                name: "fluent".into(),
+                port: 24224,
+                protocol: "TCP".into(),
+            },
+            PortContract {
+                name: "gelf".into(),
+                port: 12201,
+                protocol: "TCP".into(),
+            },
         ],
         entrypoint_args: vec!["--config".into(), "/etc/dfe-receiver/config.yaml".into()],
         secrets: vec![
@@ -142,6 +168,24 @@ pub fn contract() -> DeploymentContract {
                 "enabled": false,
                 "bind_address": "0.0.0.0:8088"
             },
+            "prometheus_rw": {
+                "enabled": false,
+                "bind_address": "0.0.0.0:9091"
+            },
+            "syslog": {
+                "enabled": false,
+                "udp_bind_address": "0.0.0.0:514",
+                "tcp_bind_address": "0.0.0.0:514",
+                "tls_bind_address": "0.0.0.0:6514"
+            },
+            "fluent": {
+                "enabled": false,
+                "bind_address": "0.0.0.0:24224"
+            },
+            "gelf": {
+                "enabled": false,
+                "bind_address": "0.0.0.0:12201"
+            },
             "kafka": {
                 "brokers": ["kafka:9092"],
                 "client_id": "dfe-receiver",
@@ -193,7 +237,7 @@ mod tests {
     #[test]
     fn test_contract_ports() {
         let c = contract();
-        assert_eq!(c.extra_ports.len(), 6);
+        assert_eq!(c.extra_ports.len(), 11);
         let port_names: Vec<&str> = c.extra_ports.iter().map(|p| p.name.as_str()).collect();
         assert!(port_names.contains(&"http"));
         assert!(port_names.contains(&"grpc"));
@@ -201,6 +245,11 @@ mod tests {
         assert!(port_names.contains(&"otlp-http"));
         assert!(port_names.contains(&"beats"));
         assert!(port_names.contains(&"hec"));
+        assert!(port_names.contains(&"prometheus-rw"));
+        assert!(port_names.contains(&"syslog"));
+        assert!(port_names.contains(&"syslog-tls"));
+        assert!(port_names.contains(&"fluent"));
+        assert!(port_names.contains(&"gelf"));
     }
 
     #[test]
