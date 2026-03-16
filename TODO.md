@@ -108,6 +108,7 @@ All protocols follow: receive -> convert to JSON -> validate -> route -> Kafka/d
 
 ## Completed (Recent Sessions)
 
+- [x] Remove plugin system (dfe-plugin-loader, dfe-protocol-sdk deps), document sidecar transport pattern (`docs/SIDECAR-TRANSPORTS.md`)
 - [x] Upgrade all deps to latest (sonic-rs 0.5, axum 0.8, tonic 0.14, prost 0.14, sysinfo 0.37), adopt edition 2024, migrate KafkaSink/LoaderSink to rustlib KafkaProducer (removed TopicBatch, rdkafka from prod deps)
 
 - [x] v1.13.0 published — gRPC loader transport + file debug sink, full CI green (Quality ✓, Test ✓, Publish ✓)
@@ -165,7 +166,7 @@ All protocols follow: receive -> convert to JSON -> validate -> route -> Kafka/d
 
 ### Medium Priority
 
-- [ ] **Vector.dev agent module** — managed subprocess, auto-download, n-1 updates, cgroup memory isolation (see DESIGN.md)
+- [ ] **Sidecar transport documentation** — expand `docs/SIDECAR-TRANSPORTS.md` with more examples as needed
 - [ ] Disk spillover implementation (currently in-memory only)
 - [ ] Config hot-reload for auth settings
 - [ ] Performance benchmarks

@@ -60,7 +60,8 @@ kafka:
     - "localhost:9092"
 
 routing:
-  default_topic: "events"
+  default_source: "default"
+  topic_suffix: "_land"
 ```
 
 ### Authentication Modes
@@ -160,24 +161,25 @@ curl http://localhost:8080/health/ready
 
 ## Routing
 
-Messages are routed to Kafka topics based on JSON field extraction:
+Messages are routed to Kafka topics based on source rules that extract JSON fields:
 
 ```yaml
 routing:
-  topic_fields:
-    - "event.category"
-    - "event_type"
-  default_topic: "unmatched"
+  default_source: "default"
   topic_suffix: "_land"
-  category_to_topic:
-    auth: "logs_auth"
-    network: "logs_network"
+  source_rules:
+    - name: "auth_events"
+      mode: "key_value_set"
+      field: "event.category"
+      values: ["auth", "authentication"]
+      topic: "logs_auth"
   dlq:
     enabled: true
     topic: "dlq_land"
 ```
 
 Given `{"event": {"category": "auth"}}`, routes to `logs_auth_land`.
+Unmatched messages route to `default_land` (default_source + topic_suffix).
 
 ## Metrics
 

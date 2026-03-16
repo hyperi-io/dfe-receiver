@@ -923,7 +923,7 @@ dfe-receiver's codebase or to hyperi-rustlib.
 
 - [ ] gRPC Vector sink protocol implementation
 - [ ] Full disk spillover (currently in-memory only)
-- [ ] Vector agent module (managed subprocess with auto-download)
+- [x] Sidecar transport pattern (Vector/Fluent Bit push to gRPC/HTTP ingest — see `docs/SIDECAR-TRANSPORTS.md`)
 - [x] Config hot-reload via SIGHUP (routing, validation, enrichment)
 - [x] Source-rule-based routing (key_present, key_value_set, key_value_use)
 - [x] `_timestamp_receiver` enrichment

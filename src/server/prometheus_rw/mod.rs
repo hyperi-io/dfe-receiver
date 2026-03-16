@@ -290,7 +290,7 @@ mod tests {
     fn test_default_config() {
         let config = PrometheusRwConfig::default();
         assert!(!config.enabled);
-        assert_eq!(config.bind_address, "0.0.0.0:9090");
+        assert_eq!(config.bind_address, "0.0.0.0:9091");
         assert_eq!(config.mode, "native");
         assert_eq!(config.max_body_size, 10 * 1024 * 1024);
         assert_eq!(config.request_timeout_ms, 30_000);

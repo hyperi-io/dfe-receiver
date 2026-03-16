@@ -307,7 +307,7 @@ impl PipelineState {
     /// Process a message, sending directly to a specific Kafka topic.
     ///
     /// Skips routing but still applies validation and backpressure.
-    /// Used by external plugins that handle their own protocol-to-topic mapping.
+    /// Used by protocol handlers that handle their own protocol-to-topic mapping.
     #[inline]
     pub async fn process_to_topic(&self, payload: Bytes, topic: &str) -> Result<()> {
         // Check for backpressure
