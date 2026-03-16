@@ -168,7 +168,7 @@ Native Rust receiver that:
 - **librdkafka** - Kafka producer (accessed via hyperi-rustlib KafkaProducer, not linked directly)
 - **OpenBao/Vault** - Secret management (optional, via hyperi-rustlib)
 - **AWS Secrets Manager** - Secret management (optional, via hyperi-rustlib)
-- **dfe-plugin-loader / dfe-protocol-sdk** - Optional plugin system (JFrog registry, requires `plugins` feature, CI-only)
+- For unsupported protocols, use Vector as a sidecar pushing to gRPC ingest (:6000)
 
 ---
 
