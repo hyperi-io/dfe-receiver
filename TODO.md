@@ -97,6 +97,9 @@ All protocols follow: receive -> convert to JSON -> validate -> route -> Kafka/d
 
 ## Active Tasks
 
+- [ ] Remove dead `#[cfg(feature = "plugins")]` code in `src/config/mod.rs` (~lines 1435-1498)
+  - `PluginsConfig`, `PluginEntry` structs behind disabled feature flag — leftover from plugin removal
+
 ### ~~Consume hyperi-rustlib v1.16.0 (Dynamic Linking)~~ [DONE]
 
 - [x] Bump hyperi-rustlib from `1.13.2` to `1.16.0`
@@ -108,6 +111,15 @@ All protocols follow: receive -> convert to JSON -> validate -> route -> Kafka/d
 
 ## Completed (Recent Sessions)
 
+- [x] Full CI pipeline working end-to-end: Quality → Test → Build (amd64+arm64) → Release → Publish (GH Release + R2)
+  - GA release v1.13.10 with both binary architectures + checksums
+  - R2 binaries live at `downloads.hyperi.io/dfe-receiver/v1.13.10/` and `/latest/`
+  - Fixed flaky gRPC TLS test (TCP readiness loop + 30s Vector timeout)
+  - Fixed Prometheus RW port conflict (9090→9091)
+  - Added 5 missing protocol ports to deployment contract, Dockerfile, docker-compose
+  - Fixed stale README routing docs
+  - Enabled R2 binary publishing in `.hyperi-ci.yaml`
+  - Reconciled main/release branch divergence via PR
 - [x] Remove plugin system (dfe-plugin-loader, dfe-protocol-sdk deps), document sidecar transport pattern (`docs/SIDECAR-TRANSPORTS.md`)
 - [x] Upgrade all deps to latest (sonic-rs 0.5, axum 0.8, tonic 0.14, prost 0.14, sysinfo 0.37), adopt edition 2024, migrate KafkaSink/LoaderSink to rustlib KafkaProducer (removed TopicBatch, rdkafka from prod deps)
 
