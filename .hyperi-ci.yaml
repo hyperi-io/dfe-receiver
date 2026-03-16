@@ -32,3 +32,4 @@ build:
 publish:
   enabled: true
   target: both
+  binaries: both
