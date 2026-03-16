@@ -106,7 +106,6 @@ pub struct Config {
 
     /// Debug file sink — writes all processed messages to a file.
     pub file_sink: FileSinkConfig,
-
 }
 
 impl Default for Config {
