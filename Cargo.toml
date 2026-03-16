@@ -8,7 +8,7 @@
 
 [package]
 name = "dfe-receiver"
-version = "1.13.9"
+version = "1.13.2-dev.1"
 edition = "2024"
 rust-version = "1.94"
 description = "High-performance HTTP/gRPC receiver for PB/s scale data ingestion"
@@ -113,10 +113,6 @@ sysinfo = "0.37"
 tikv-jemallocator = { version = "0.6", optional = true }
 mimalloc = { version = "0.1", optional = true }
 
-# Plugin system (optional)
-dfe-plugin-loader = { version = "1.0.3", registry = "hyperi", optional = true }
-dfe-protocol-sdk = { version = "1.0.1", registry = "hyperi", optional = true }
-
 [build-dependencies]
 tonic-prost-build = "0.14"
 
@@ -135,7 +131,6 @@ default = ["otlp"]
 otlp = []
 jemalloc = ["dep:tikv-jemallocator"]
 mimalloc = ["dep:mimalloc"]
-plugins = ["dep:dfe-plugin-loader", "dep:dfe-protocol-sdk"]
 
 [profile.release]
 lto = "thin"

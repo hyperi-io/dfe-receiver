@@ -594,8 +594,16 @@ async fn test_vector_grpc_tls_sink() {
         }
     });
 
-    // Wait for servers to start (TLS setup takes longer)
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    // Wait for gRPC TLS server to accept connections (may take longer under load)
+    for _ in 0..50 {
+        if tokio::net::TcpStream::connect(format!("127.0.0.1:{grpc_port}"))
+            .await
+            .is_ok()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 
     let config_path = tmp_dir.path().join("vector.yaml");
     let cert_path_str = cert_path.to_str().unwrap();
@@ -629,7 +637,7 @@ sinks:
     write_vector_config(&config_path, &vector_config);
     validate_vector_config(vector_bin, &config_path);
 
-    let (success, stderr) = run_vector_async(vector_bin, &config_path, 15).await;
+    let (success, stderr) = run_vector_async(vector_bin, &config_path, 30).await;
 
     if !success {
         eprintln!("Vector stderr: {stderr}");

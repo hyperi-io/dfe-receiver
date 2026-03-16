@@ -13,6 +13,11 @@ services:
       - "4318:4318"
       - "5044:5044"
       - "8088:8088"
+      - "9091:9091"
+      - "514:514"
+      - "6514:6514"
+      - "24224:24224"
+      - "12201:12201"
     volumes:
       - ./config/config.yaml:/etc/dfe-receiver/config.yaml:ro
     healthcheck:

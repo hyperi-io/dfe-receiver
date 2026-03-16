@@ -1,60 +1,11 @@
-## [1.13.9](https://github.com/hyperi-io/dfe-receiver/compare/v1.13.8...v1.13.9) (2026-03-16)
+## [1.13.2-dev.1](https://github.com/hyperi-io/dfe-receiver/compare/v1.13.1...v1.13.2-dev.1) (2026-03-12)
 
 
 ### Bug Fixes
 
-* add explicit binaries publish target to config ([6b040fa](https://github.com/hyperi-io/dfe-receiver/commit/6b040fa23eff3719be89eb648d9564fcab6ba90b))
-
-## [1.13.8](https://github.com/hyperi-io/dfe-receiver/compare/v1.13.7...v1.13.8) (2026-03-16)
-
-
-### Bug Fixes
-
-* test R2 binary upload to downloads.hyperi.io ([c8806fd](https://github.com/hyperi-io/dfe-receiver/commit/c8806fd8b7ed8d102a85fa1b15b02af83fb53a40))
-* update config comment to reflect R2 binary publishing ([f7621c3](https://github.com/hyperi-io/dfe-receiver/commit/f7621c3dc16e8092a66e12958e55e36fd630e9c0))
-
-## [1.13.7](https://github.com/hyperi-io/dfe-receiver/compare/v1.13.6...v1.13.7) (2026-03-13)
-
-
-### Bug Fixes
-
-* trigger release with binary publish support ([9c0448a](https://github.com/hyperi-io/dfe-receiver/commit/9c0448a30ed9384e41f7d490093fce1b0fbc8add))
-
-## [1.13.6](https://github.com/hyperi-io/dfe-receiver/compare/v1.13.5...v1.13.6) (2026-03-13)
-
-
-### Bug Fixes
-
-* set publish-target to both for binary uploads ([43e8039](https://github.com/hyperi-io/dfe-receiver/commit/43e8039a818ecb33265d500b1f0215f9b0d853ac))
-
-## [1.13.5](https://github.com/hyperi-io/dfe-receiver/compare/v1.13.4...v1.13.5) (2026-03-13)
-
-
-### Bug Fixes
-
-* set publish target to both for binary uploads ([f9a2caa](https://github.com/hyperi-io/dfe-receiver/commit/f9a2caa30c6eb138aa40859700acf80896c9c97a))
-
-## [1.13.4](https://github.com/hyperi-io/dfe-receiver/compare/v1.13.3...v1.13.4) (2026-03-13)
-
-
-### Bug Fixes
-
-* trigger release with binary publish support ([95bf3b0](https://github.com/hyperi-io/dfe-receiver/commit/95bf3b02166d12cc204272178d7261188a755303))
-
-## [1.13.3](https://github.com/hyperi-io/dfe-receiver/compare/v1.13.2...v1.13.3) (2026-03-12)
-
-
-### Bug Fixes
-
-* add build.type app, remove legacy publish workflow ([fa455fe](https://github.com/hyperi-io/dfe-receiver/commit/fa455fe48310e576049d3c12365f4eb59a5acbb1))
-
-## [1.13.2](https://github.com/hyperi-io/dfe-receiver/compare/v1.13.1...v1.13.2) (2026-03-12)
-
-
-### Bug Fixes
-
+* add build.type app, remove legacy publish workflow ([30e03df](https://github.com/hyperi-io/dfe-receiver/commit/30e03df5b16d0e367c5d774bc7deb8c54e8a64b8))
 * consume hyperi-rustlib 1.16.0 dynamic linking ([6bb8ebd](https://github.com/hyperi-io/dfe-receiver/commit/6bb8ebda08308465687a8265601bd8a432c3e88d))
-* update Dockerfile header and fix UID 1000 conflict ([f376d38](https://github.com/hyperi-io/dfe-receiver/commit/f376d3850968aaa4ae4a67320cb464afe018fdf7))
+* update Dockerfile header and fix UID 1000 conflict [skip ci] ([434ce5c](https://github.com/hyperi-io/dfe-receiver/commit/434ce5ce546fdbbe9d34946b877557e7c3ba6250))
 
 ## [1.13.1](https://github.com/hyperi-io/dfe-receiver/compare/v1.13.0...v1.13.1) (2026-03-10)
 
