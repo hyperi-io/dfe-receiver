@@ -107,9 +107,6 @@ pub struct Config {
     /// Debug file sink — writes all processed messages to a file.
     pub file_sink: FileSinkConfig,
 
-    /// External protocol plugins.
-    #[cfg(feature = "plugins")]
-    pub plugins: PluginsConfig,
 }
 
 impl Default for Config {
@@ -136,8 +133,6 @@ impl Default for Config {
             config_reload_secs: 0,
             config_path: None,
             file_sink: FileSinkConfig::default(),
-            #[cfg(feature = "plugins")]
-            plugins: PluginsConfig::default(),
         }
     }
 }
@@ -1435,71 +1430,6 @@ impl ScalingConfig {
             ScalingComponent::new("spill", self.weight_spill, self.saturation_spill),
         ];
         ScalingPressure::new(base, components)
-    }
-}
-
-/// External protocol plugin configuration.
-///
-/// Plugins are loaded as shared libraries (.so files) at startup.
-/// Each plugin implements the dfe-protocol-sdk's `ProtocolPlugin` trait
-/// and is loaded via the C ABI interface.
-///
-/// ## Configuration
-///
-/// ```yaml
-/// plugins:
-///   directory: "/opt/dfe/plugins"   # optional: auto-discover .so files
-///   syslog:
-///     path: "/opt/dfe/plugins/libdfe_receiver_plugin_syslog.so"
-///     bind_address: "0.0.0.0:514"
-///     topic: "syslog_land"
-/// ```
-///
-/// The map key (e.g. `syslog`) is the plugin's logical name, used in
-/// logs, metrics, and health checks. The `path` field is consumed by
-/// the loader; all other fields are passed as JSON to the plugin's
-/// `create()` function.
-///
-/// Environment variable overrides work naturally:
-/// `RECEIVER_PLUGINS_SYSLOG_BIND_ADDRESS=0.0.0.0:1514`
-#[cfg(feature = "plugins")]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct PluginsConfig {
-    /// Directory to scan for plugin .so files (optional).
-    /// All `.so` files in this directory will be loaded with default config.
-    pub directory: Option<String>,
-
-    /// Named plugin entries. Each key is the plugin's logical name.
-    /// The entry must contain a `path` field; all other fields are
-    /// passed through as config JSON to the plugin.
-    #[serde(flatten)]
-    pub plugins: HashMap<String, PluginEntry>,
-}
-
-/// A single plugin entry specifying the .so path and its configuration.
-///
-/// The `path` field is consumed by the loader. All other fields are
-/// collected via `#[serde(flatten)]` and passed as JSON to the plugin.
-#[cfg(feature = "plugins")]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PluginEntry {
-    /// Path to the .so file.
-    pub path: String,
-
-    /// All remaining fields are plugin-specific configuration,
-    /// passed as JSON to the plugin's `create()` function.
-    #[serde(flatten)]
-    pub config: serde_json::Map<String, serde_json::Value>,
-}
-
-#[cfg(feature = "plugins")]
-impl Default for PluginsConfig {
-    fn default() -> Self {
-        Self {
-            directory: None,
-            plugins: HashMap::new(),
-        }
     }
 }
 
