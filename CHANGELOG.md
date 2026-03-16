@@ -1,3 +1,13 @@
+## [1.13.2-dev.2](https://github.com/hyperi-io/dfe-receiver/compare/v1.13.2-dev.1...v1.13.2-dev.2) (2026-03-16)
+
+
+### Bug Fixes
+
+* correct port conflicts and add missing protocol ports ([7596bf0](https://github.com/hyperi-io/dfe-receiver/commit/7596bf0400f4161c7a4caeac0650742f874960dd))
+* remove plugin system, document sidecar transport pattern ([4a453fb](https://github.com/hyperi-io/dfe-receiver/commit/4a453fba0d40eccc09a91998913dabe5ad4ed8e3))
+* stabilise grpc tls test, enable r2 publishing ([ddbca53](https://github.com/hyperi-io/dfe-receiver/commit/ddbca53b6265dba53fc95dd3029e29c3c803946e))
+* update docs for plugin removal and CI migration ([0173908](https://github.com/hyperi-io/dfe-receiver/commit/01739082ac31bfdbecd066cd4169f667109951d8))
+
 ## [1.13.2-dev.1](https://github.com/hyperi-io/dfe-receiver/compare/v1.13.1...v1.13.2-dev.1) (2026-03-12)
 
 
