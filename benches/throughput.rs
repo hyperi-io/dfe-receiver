@@ -6,7 +6,7 @@
 // License:   FSL-1.1-ALv2
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 fn json_validation_benchmark(c: &mut Criterion) {
     let mut group = c.benchmark_group("json_validation");
@@ -27,7 +27,7 @@ fn json_validation_benchmark(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("validate", name), &payload, |b, p| {
             b.iter(|| {
                 // Validate JSON is parseable using sonic-rs LazyValue
-                let _ = sonic_rs::from_slice::<sonic_rs::LazyValue>(p.as_bytes());
+                let _ = sonic_rs::from_slice::<sonic_rs::LazyValue>(black_box(p.as_bytes()));
             });
         });
     }
@@ -47,15 +47,74 @@ fn field_extraction_benchmark(c: &mut Criterion) {
         b.iter(|| {
             let bytes = payload.as_bytes();
             // Extract nested field using sonic-rs pointer
-            let _ = sonic_rs::get_from_slice(bytes, &["tags", "event", "category"]);
+            let _ = sonic_rs::get_from_slice(black_box(bytes), &["tags", "event", "category"]);
         });
     });
 
     group.bench_function("extract_top_level_field", |b| {
         b.iter(|| {
             let bytes = payload.as_bytes();
-            let _ = sonic_rs::get_from_slice(bytes, &["org_id"]);
+            let _ = sonic_rs::get_from_slice(black_box(bytes), &["org_id"]);
         });
+    });
+
+    group.finish();
+}
+
+fn router_benchmark(c: &mut Criterion) {
+    use bytes::Bytes;
+    use dfe_receiver::config::{DestinationsConfig, RoutingConfig, SourceRule};
+    use dfe_receiver::routing::Router;
+
+    let mut group = c.benchmark_group("router");
+
+    let payload =
+        Bytes::from(r#"{"org_id":"acme","event_category":"auth","source":"syslog","data":"test"}"#);
+
+    // No source rules — fast default path
+    let config = RoutingConfig::default();
+    let destinations = DestinationsConfig::default();
+    let router = Router::new(&config, &destinations, true);
+
+    group.throughput(Throughput::Elements(1));
+    group.bench_function("route_default", |b| {
+        b.iter(|| router.route(black_box(&payload)));
+    });
+
+    // 5 source rules — worst case miss (evaluates all rules)
+    let mut config_5 = RoutingConfig::default();
+    for i in 0..5 {
+        config_5.source_rules.push(SourceRule {
+            field: format!("nonexistent_field_{i}"),
+            mode: "key_value_set".into(),
+            match_value: Some(format!("value_{i}")),
+            source: Some(format!("source_{i}")),
+        });
+    }
+    let router_5 = Router::new(&config_5, &destinations, true);
+
+    group.bench_function("route_5_rules_miss", |b| {
+        b.iter(|| router_5.route(black_box(&payload)));
+    });
+
+    group.finish();
+}
+
+fn metrics_render_benchmark(c: &mut Criterion) {
+    use dfe_receiver::metrics::Metrics;
+
+    let mut group = c.benchmark_group("metrics_render");
+
+    let metrics = Metrics::default();
+    // Populate with sample data so render has realistic work
+    for _ in 0..100 {
+        metrics.inc_requests_total();
+        metrics.add_bytes_received(1024);
+    }
+
+    group.throughput(Throughput::Elements(1));
+    group.bench_function("render_prometheus", |b| {
+        b.iter(|| black_box(metrics.render()));
     });
 
     group.finish();
@@ -64,6 +123,8 @@ fn field_extraction_benchmark(c: &mut Criterion) {
 criterion_group!(
     benches,
     json_validation_benchmark,
-    field_extraction_benchmark
+    field_extraction_benchmark,
+    router_benchmark,
+    metrics_render_benchmark,
 );
 criterion_main!(benches);
