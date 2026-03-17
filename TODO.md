@@ -97,8 +97,7 @@ All protocols follow: receive -> convert to JSON -> validate -> route -> Kafka/d
 
 ## Active Tasks
 
-- [ ] Remove dead `#[cfg(feature = "plugins")]` code in `src/config/mod.rs` (~lines 1435-1498)
-  - `PluginsConfig`, `PluginEntry` structs behind disabled feature flag — leftover from plugin removal
+- [x] Remove dead `#[cfg(feature = "plugins")]` code — already removed in prior session (commit `4a453fb`)
 
 ### ~~Consume hyperi-rustlib v1.16.0 (Dynamic Linking)~~ [DONE]
 
