@@ -811,6 +811,52 @@ mod tests {
     // Common header tests
 
     #[test]
+    fn test_auth_config_partial_eq() {
+        let config1 = AuthConfig::default();
+        let config2 = AuthConfig::default();
+        assert_eq!(config1, config2);
+
+        let config3 = AuthConfig {
+            mode: "bearer".to_string(),
+            ..AuthConfig::default()
+        };
+        assert_ne!(config1, config3);
+    }
+
+    #[tokio::test]
+    async fn test_bearer_token_update() {
+        let provider = BearerTokenProvider::new(vec!["old_token".to_string()]);
+        assert!(provider.is_valid("old_token"));
+        assert!(!provider.is_valid("new_token"));
+
+        provider.update_tokens(vec!["new_token".to_string()]);
+        assert!(provider.is_valid("new_token"));
+        assert!(!provider.is_valid("old_token"));
+    }
+
+    #[tokio::test]
+    async fn test_auth_reload_updates_tokens() {
+        use crate::config::{Config, SharedConfig};
+
+        let config = Config::default();
+        let shared = SharedConfig::new(config);
+
+        // Simulate initial token load
+        let provider = BearerTokenProvider::new(vec!["initial".to_string()]);
+        assert!(provider.is_valid("initial"));
+
+        // Simulate what the reload watcher does on config change
+        let new_config = shared.get();
+        let new_tokens = vec!["rotated".to_string()];
+        provider.update_tokens(new_tokens);
+        assert!(provider.is_valid("rotated"));
+        assert!(!provider.is_valid("initial"));
+
+        // Verify shared config exposes auth section
+        assert_eq!(new_config.server.auth.mode, "none");
+    }
+
+    #[test]
     fn test_include_common_header_default() {
         let config = AuthConfig::default();
         assert!(config.include_common_header);
