@@ -10,6 +10,7 @@
 //!
 //! Provides in-memory batching with disk spillover when under pressure.
 
+pub mod adapter;
 pub mod tiered;
 
 pub use tiered::{InMemoryBuffer, InMemoryBufferStats};
