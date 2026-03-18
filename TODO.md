@@ -220,11 +220,19 @@ implemented in hyperi-rustlib and consumed by each project.
 - [ ] Run benchmarks to verify no regression
 - [ ] Push to main, verify CI
 
-#### Phase 4: Other dfe-* Projects (apply same pattern)
+#### Phase 4: Other dfe-* Rust Projects (apply same pattern)
 
 - [ ] dfe-loader: replace `prometheus` crate with rustlib `DfeMetrics`, fix coercion warn spam
 - [ ] dfe-fetcher: replace hand-rolled metrics with rustlib, fix container stderr spam
 - [ ] dfe-archiver: already uses MetricsManager — align metric names to `dfe_*`
+
+#### Phase 5: hyperi-pylib — Mirror Rust Patterns for Python
+
+- [ ] Add `RateLimitFilter` to `hyperi_pylib.logging.setup()` — opt-in global safety net
+- [ ] Add helper classes: `StateLogger`, `SampledLogger` to `hyperi_pylib.logging`
+- [ ] Add `DfeMetrics` wrapper to `hyperi_pylib.metrics` with standard `dfe_*` metric registration
+- [ ] Apply to dfe-engine (FastAPI) — standard metrics + log spam protection
+- [ ] Load Python standards (`hyperi-ai/standards/languages/PYTHON.md`) before implementation
 
 ### Hot Path Optimisation
 
