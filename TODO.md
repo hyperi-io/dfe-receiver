@@ -180,24 +180,66 @@ All protocols follow: receive -> convert to JSON -> validate -> route -> Kafka/d
 - [x] Performance benchmarks — expanded criterion suite (router, metrics render) + profiling profile + baseline capture
 - [x] Code review remediations — bounded queue backpressure, rate window sampling, config unmarshal warning, project files
 
-### High Priority
+### Observability Standardisation (WBS)
 
-- [ ] Standardise metrics to `dfe_` prefix convention (align with dfe-fetcher)
-  - `dfe_transport_sent_total{transport="kafka|grpc"}`, `dfe_transport_send_errors_total`, etc.
-  - `dfe_pipeline_ready`, `dfe_records_received_total`, `dfe_records_dlq_total`
-  - Update KEDA ScaledObject PromQL query after rename
-- [ ] Pre-compute topic strings in Router (eliminate `format!()` allocation on hot path)
-- [ ] Pre-split field paths at Router/Validator construction (eliminate per-message `.split('.').collect()`)
+**Goal:** Common metrics + log spam protection across all dfe-* Rust services,
+implemented in hyperi-rustlib and consumed by each project.
+
+**Standards:** `hyperi-ai/standards/universal/METRICS.md`, `hyperi-ai/standards/universal/LOG-FLOODING.md`
+**DFE design:** `docs/METRICS.md`, `docs/LOG-SPAMMING.md`
+
+#### Phase 1: rustlib — Log Spam Protection
+
+- [ ] Add `tracing-throttle` dep to rustlib `logger` feature
+- [ ] Wire throttle layer into `logger::setup()` — opt-in via `LOG_THROTTLE_ENABLED` env var
+- [ ] Add helper functions: `log_state_change()`, `log_sampled()`, `log_debounced()`
+- [ ] Tests for all three helpers + throttle layer integration
+- [ ] Publish rustlib patch
+
+#### Phase 2: rustlib — Standard DFE Metrics Framework
+
+- [ ] Add `DfeMetrics` struct to rustlib with standard `dfe_transport_*`, `dfe_pipeline_*`, `dfe_records_*`, `dfe_scaling_*` metrics
+- [ ] Pre-register all metrics at construction (counters init to 0)
+- [ ] Transport label support (`transport="kafka|grpc|file"`)
+- [ ] Standard histogram buckets (latency + size)
+- [ ] Make it generic enough for any hyperi app (namespace configurable) but with DFE convenience constructor
+- [ ] Tests + publish rustlib patch
+
+#### Phase 3: dfe-receiver — Consume New rustlib
+
+- [ ] Bump rustlib dep, remove `[patch.crates-io]`
+- [ ] Replace hand-rolled `Metrics` struct with rustlib `DfeMetrics`
+- [ ] Emit `dfe_*` metrics (dual-emit old names alongside new)
+- [ ] Wire log spam helpers into identified hot spots:
+  - Memory pressure warn → state-transition
+  - Kafka send error → sampled (1/1000)
+  - Loader send error → sampled (1/1000)
+  - Syslog UDP recv error → debounced (5s)
+  - Lumberjack frame parse error → sampled (1/100)
+- [ ] Update KEDA ScaledObject PromQL query
+- [ ] Run benchmarks to verify no regression
+- [ ] Push to main, verify CI
+
+#### Phase 4: Other dfe-* Projects (apply same pattern)
+
+- [ ] dfe-loader: replace `prometheus` crate with rustlib `DfeMetrics`, fix coercion warn spam
+- [ ] dfe-fetcher: replace hand-rolled metrics with rustlib, fix container stderr spam
+- [ ] dfe-archiver: already uses MetricsManager — align metric names to `dfe_*`
+
+### Hot Path Optimisation
+
+- [ ] Pre-compute topic strings in Router (eliminate `format!()` per-message)
+- [ ] Pre-split field paths at Router/Validator construction (eliminate `.split('.').collect()` per-message)
 
 ### Medium Priority
 
 - [ ] Fix Helm `chart/templates/secret.yaml` — `bearer-tokens` hyphen in Go template field name
-- [ ] Remove `[patch.crates-io]` from Cargo.toml after rustlib publishes >= 1.16.2
+- [ ] Remove `[patch.crates-io]` from Cargo.toml after rustlib publishes (blocked on Phase 1/2)
 - [ ] Documentation for deployment
 
 ### Low Priority
 
-- [ ] Migrate hand-rolled Prometheus text render to `metrics-exporter-prometheus` crate
+- [ ] Phase 2 removes need for this: Migrate hand-rolled Prometheus text render to `metrics-exporter-prometheus` crate
 
 ---
 
