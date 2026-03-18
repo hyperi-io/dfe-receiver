@@ -198,10 +198,13 @@ impl Metrics {
     }
 
     /// Increment total requests counter.
+    /// Rate window sampled every 100 requests to reduce write lock contention.
     #[inline]
     pub fn inc_requests_total(&self) {
         let count = self.requests_total.fetch_add(1, Ordering::Relaxed) + 1;
-        self.rate_window.write().add_sample(count);
+        if count % 100 == 0 {
+            self.rate_window.write().add_sample(count);
+        }
     }
 
     /// Increment successful requests counter.

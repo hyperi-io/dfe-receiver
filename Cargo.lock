@@ -1153,7 +1153,9 @@ dependencies = [
 
 [[package]]
 name = "hyperi-rustlib"
-version = "1.16.1"
+version = "1.16.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e17a97d71aa61fc4b6b99d18ed2ae23b34b55d8b81c5acb2cc0f31e29c7dfd6"
 dependencies = [
  "async-trait",
  "axum",
@@ -1164,7 +1166,6 @@ dependencies = [
  "dotenvy",
  "figment",
  "file-rotate",
- "libc",
  "lz4_flex",
  "metrics",
  "metrics-exporter-prometheus",

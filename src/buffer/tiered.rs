@@ -79,18 +79,20 @@ impl<S: Sink + Send + Sync + 'static> InMemoryBuffer<S> {
         matches!(state, CircuitState::Closed | CircuitState::HalfOpen)
     }
 
-    /// Queue a message for later delivery.
-    fn queue_message(&self, topic: String, payload: Bytes) {
+    /// Queue a message for later delivery. Returns false if queue is full.
+    fn queue_message(&self, topic: String, payload: Bytes) -> bool {
         let mut queue = self.spill_queue.lock();
-        queue.push(SpillMessage { topic, payload });
-        self.queued_count.fetch_add(1, Ordering::Relaxed);
-
         if queue.len() >= self.max_queue_size {
             warn!(
                 queue_size = queue.len(),
-                "Queue at capacity - backpressure recommended"
+                max = self.max_queue_size,
+                "In-memory queue full, rejecting message"
             );
+            return false;
         }
+        queue.push(SpillMessage { topic, payload });
+        self.queued_count.fetch_add(1, Ordering::Relaxed);
+        true
     }
 
     /// Try to drain queued messages.
@@ -204,7 +206,11 @@ impl<S: Sink + Send + Sync + 'static> Sink for InMemoryBuffer<S> {
     async fn send(&self, topic: &str, payload: Bytes) -> Result<()> {
         // Fast path: if circuit is open, queue immediately
         if !self.should_use_hot_path().await {
-            self.queue_message(topic.to_string(), payload);
+            if !self.queue_message(topic.to_string(), payload) {
+                return Err(crate::error::Error::Transport(
+                    "in-memory queue full, backpressure".into(),
+                ));
+            }
             return Ok(());
         }
 
@@ -217,8 +223,12 @@ impl<S: Sink + Send + Sync + 'static> Sink for InMemoryBuffer<S> {
             Err(e) => {
                 self.circuit.record_failure().await;
                 debug!(error = %e, topic = topic, "Primary send failed, queuing");
-                self.queue_message(topic.to_string(), payload);
-                Ok(()) // Return Ok - message is queued, not lost
+                if !self.queue_message(topic.to_string(), payload) {
+                    return Err(crate::error::Error::Transport(
+                        "in-memory queue full, backpressure".into(),
+                    ));
+                }
+                Ok(())
             }
         }
     }
