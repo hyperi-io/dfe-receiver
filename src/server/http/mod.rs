@@ -37,7 +37,7 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 use tracing::{debug, error, info, warn};
 
-use crate::config::AuthConfig;
+use crate::config::{AuthConfig, SharedConfig};
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
@@ -116,6 +116,54 @@ pub async fn create_auth_state(config: &AuthConfig) -> Result<AuthState> {
     }
 }
 
+/// Spawn a background task that watches for auth config changes and updates
+/// bearer tokens when the config is hot-reloaded.
+///
+/// Compares the auth config on each `SharedConfig` version bump. If bearer
+/// tokens changed, swaps them atomically via `BearerTokenProvider::update_tokens`.
+pub fn spawn_auth_reload_watcher(
+    shared_config: SharedConfig,
+    auth_state: AuthState,
+    shutdown: CancellationToken,
+) {
+    tokio::spawn(async move {
+        let mut rx = shared_config.subscribe();
+        let mut current_auth = shared_config.get().server.auth.clone();
+
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => break,
+                result = rx.changed() => {
+                    if result.is_err() {
+                        break; // Channel closed
+                    }
+                    let new_config = shared_config.get();
+                    let new_auth = &new_config.server.auth;
+
+                    if *new_auth != current_auth {
+                        info!("Auth config changed, reloading");
+
+                        // Update bearer tokens if provider exists and tokens changed
+                        if let Some(ref provider) = auth_state.bearer_provider
+                            && new_auth.bearer.tokens != current_auth.bearer.tokens
+                        {
+                            provider.update_tokens(new_auth.bearer.tokens.clone());
+                            info!(
+                                count = new_auth.bearer.tokens.len(),
+                                "Bearer tokens reloaded from config"
+                            );
+                        }
+
+                        current_auth = new_auth.clone();
+                    }
+                }
+            }
+        }
+
+        debug!("Auth reload watcher stopped");
+    });
+}
+
 /// Shared state for HTTP handlers.
 #[derive(Clone)]
 pub struct HttpState {
@@ -135,6 +183,13 @@ pub async fn run_server(
 
     // Create auth state with optional bearer token provider
     let auth_state = create_auth_state(&config.server.auth).await?;
+
+    // Watch for config changes and update auth state (bearer tokens)
+    spawn_auth_reload_watcher(
+        pipeline.shared_config(),
+        auth_state.clone(),
+        shutdown.clone(),
+    );
 
     let state = HttpState {
         pipeline,

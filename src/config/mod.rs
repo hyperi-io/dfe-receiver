@@ -435,7 +435,7 @@ impl Default for TlsConfig {
 }
 
 /// Authentication configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AuthConfig {
     /// Auth mode (none, header, bearer, mtls, both).
@@ -470,7 +470,7 @@ fn default_true() -> bool {
 }
 
 /// Bearer token authentication configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BearerConfig {
     /// Static tokens (for dev/simple deployments).
@@ -498,7 +498,7 @@ impl Default for BearerConfig {
 }
 
 /// Defines an accepted authentication header.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AcceptedHeader {
     /// Header name (e.g., "x-hyperi-agent", "Authorization").
     pub name: String,
@@ -1675,8 +1675,10 @@ mod tests {
 
     #[test]
     fn test_kafka_overrides_passed_to_rustlib() {
-        let mut config = KafkaConfig::default();
-        config.brokers = vec!["localhost:9092".to_string()];
+        let mut config = KafkaConfig {
+            brokers: vec!["localhost:9092".to_string()],
+            ..KafkaConfig::default()
+        };
         config
             .librdkafka_overrides
             .insert("message.max.bytes".to_string(), "2097152".to_string());
