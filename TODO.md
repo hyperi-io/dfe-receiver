@@ -234,39 +234,77 @@ implemented in hyperi-rustlib and consumed by each project.
 - [ ] Apply to dfe-engine (FastAPI) — standard metrics + log spam protection
 - [ ] Load Python standards (`hyperi-ai/standards/languages/PYTHON.md`) before implementation
 
-#### Phase 6: Remediate All Identified Spam Sites
+#### Phase 6: Remediate All dfe-* Projects (Log Spam + Metrics)
 
-Apply log spam fixes and metrics standardisation to every identified site from the audit.
+Two-part remediation per project: (A) fix identified log spam sites, (B) replace
+existing metrics with rustlib `DfeMetrics` standard `dfe_*` names.
 
 **dfe-receiver:**
+
+Log spam fixes:
 - [ ] `src/pipeline/mod.rs:205,315` — memory pressure warn → state-transition
 - [ ] `src/sink/kafka/mod.rs:61` — Kafka send error → sampled (1/1000) + metric
 - [ ] `src/sink/loader/mod.rs:95` — loader send error → sampled (1/1000) + metric
 - [ ] `src/server/syslog/mod.rs:73` — UDP recv error → debounced (5s)
 - [ ] `src/server/lumberjack/mod.rs:94,135` — frame parse error → sampled (1/100)
 
+Metrics migration:
+- [ ] Replace hand-rolled `Metrics` struct + `render()` with rustlib `DfeMetrics`
+- [ ] Emit standard `dfe_transport_*{transport="kafka|grpc|loader|file"}` metrics
+- [ ] Emit standard `dfe_records_*`, `dfe_pipeline_*`, `dfe_scaling_*`, `dfe_spool_*`
+- [ ] Add histograms: `dfe_transport_send_duration_seconds`
+- [ ] Dual-emit old `receiver_*` names during transition, remove in next release
+- [ ] Update KEDA ScaledObject PromQL to `dfe_scaling_pressure`
+
 **dfe-loader:**
+
+Log spam fixes:
 - [ ] `src/transform/coerce.rs:103` — type coercion warn per-row → sampled (1/1000) + log batch total
 - [ ] `src/clickhouse/inserter.rs:338,358` — retry warn → state-transition (first failure + recovery)
 - [ ] `src/pipeline/orchestrator.rs:783,786` — DLQ channel full → debounced (5s)
 - [ ] `src/kafka/consumer.rs:219` — consumer error → debounced (5s)
 
+Metrics migration:
+- [ ] Replace `prometheus` crate `Registry` with rustlib `DfeMetrics`
+- [ ] Replace bespoke `hyper` metrics server with rustlib `MetricsManager::start_server()`
+- [ ] Emit standard `dfe_*` names instead of `loader_*`
+- [ ] Register `dfe_scaling_pressure` properly (currently appended as raw text)
+
 **dfe-fetcher:**
+
+Log spam fixes:
 - [ ] `src/extractor/container/mod.rs:152` — container stderr warn per-line → sampled (1/100) + count
 - [ ] `src/scheduler/mod.rs:118` — source not ready → debounced (10s)
 - [ ] `src/output.rs:143` — transport send error → sampled (1/1000) + metric
 - [ ] `src/pipeline/mod.rs:253` — DLQ send failure → debounced (5s)
 
+Metrics migration:
+- [ ] Replace hand-rolled `Metrics` struct + `render()` with rustlib `DfeMetrics`
+- [ ] Resolve `dfe_pipeline_ready` collision with dfe-transform-vector (use `job` label)
+- [ ] Add `dfe_scaling_pressure` (currently missing — no KEDA integration)
+
 **dfe-archiver:**
+
+Log spam fixes:
 - [ ] `crates/archiver/src/archiver.rs:168` — routing failure → sampled (1/1000) + metric
 - [ ] `crates/archiver/src/archiver.rs:191` — buffer push under pressure → state-transition
 - [ ] `crates/core/src/buffer/tiered.rs:225,242` — spool full → state-transition
 - [ ] `crates/archiver/src/archiver.rs:134` — Kafka recv error → debounced (5s)
 
+Metrics migration:
+- [ ] Already uses `MetricsManager` — align metric names from `dfe_archiver_*` to `dfe_*`
+- [ ] Replace manual scaling pressure with rustlib `ScalingPressure`
+
 **dfe-engine (Python):**
+
+Log spam fixes:
 - [ ] Audit all `logger.warning`/`logger.error` sites for per-request spam potential
 - [ ] Apply `RateLimitFilter` globally via pylib
 - [ ] Fix identified sites with `StateLogger`/`SampledLogger`
+
+Metrics migration:
+- [ ] Apply pylib `DfeMetrics` wrapper with standard `dfe_*` names
+- [ ] Emit `dfe_transport_*`, `dfe_records_*`, `dfe_pipeline_ready`
 
 #### Phase 7: Clean Up Standards Docs
 
