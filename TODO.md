@@ -188,22 +188,22 @@ implemented in hyperi-rustlib and consumed by each project.
 **Standards:** `hyperi-ai/standards/universal/METRICS.md`, `hyperi-ai/standards/universal/LOG-FLOODING.md`
 **DFE design:** `docs/METRICS.md`, `docs/LOG-SPAMMING.md`
 
-#### Phase 1: rustlib — Log Spam Protection
+#### Phase 1: rustlib — Log Spam Protection [DONE]
 
-- [ ] Add `tracing-throttle` dep to rustlib `logger` feature
-- [ ] Wire throttle layer into `logger::setup()` — opt-in via `LOG_THROTTLE_ENABLED` env var
-- [ ] Add helper functions: `log_state_change()`, `log_sampled()`, `log_debounced()`
-- [ ] Tests for all three helpers + throttle layer integration
-- [ ] Publish rustlib patch
+- [x] Add `tracing-throttle` dep to rustlib `logger` feature
+- [x] Wire throttle layer into `logger::setup()` — opt-in via `LOG_THROTTLE_ENABLED` env var
+- [x] Add helper functions: `log_state_change()`, `log_sampled()`, `log_debounced()`
+- [x] Tests for all three helpers + throttle layer integration
+- [ ] Publish rustlib patch (push to main, let CI run)
 
-#### Phase 2: rustlib — Standard DFE Metrics Framework
+#### Phase 2: rustlib — Standard DFE Metrics Framework [DONE]
 
-- [ ] Add `DfeMetrics` struct to rustlib with standard `dfe_transport_*`, `dfe_pipeline_*`, `dfe_records_*`, `dfe_scaling_*` metrics
-- [ ] Pre-register all metrics at construction (counters init to 0)
-- [ ] Transport label support (`transport="kafka|grpc|file"`)
-- [ ] Standard histogram buckets (latency + size)
-- [ ] Make it generic enough for any hyperi app (namespace configurable) but with DFE convenience constructor
-- [ ] Tests + publish rustlib patch
+- [x] Add `DfeMetrics` struct with standard `dfe_transport_*`, `dfe_pipeline_*`, `dfe_records_*`, `dfe_scaling_*` metrics
+- [x] Pre-register all metrics at construction (counters init to 0)
+- [x] Transport label support (`transport="kafka|grpc|file"`)
+- [x] Tiered architecture: `MetricsManager` (generic base) → `DfeMetrics` (DFE extension)
+- [x] Tests
+- [ ] Publish rustlib patch (push to main, let CI run)
 
 #### Phase 3: dfe-receiver — Consume New rustlib
 
@@ -316,6 +316,29 @@ from the universal standards — they belong in TODO.md, not in standards.
 - [ ] `dfe-receiver/docs/LOG-SPAMMING.md` — remove or archive (audit data moves to git history)
 - [ ] `dfe-receiver/docs/METRICS.md` — remove migration section, keep as operational reference
 
+### Bespoke Code Dedup (receiver vs rustlib)
+
+- [ ] Audit dfe-receiver for functionality duplicated with rustlib
+- [ ] Replace bespoke code with rustlib equivalents (extend rustlib if needed)
+- [ ] Key suspects: hand-rolled `Metrics` struct, `RateWindow`, `BufferManager` memory detection, metrics HTTP server
+
+### Security Logging Standard (rustlib)
+
+- [ ] Design `SecurityEventLogger` for rustlib — structured security events separate from operational logs
+- [ ] Standard event types: `auth.success`, `auth.failure`, `access.denied`, `config.changed`, `rate_limit.triggered`, `tls.failure`
+- [ ] Mandatory fields: `event_type`, `actor`, `action`, `outcome`, `source_ip`, `timestamp`
+- [ ] Separate security log sink (file or structured JSON to dedicated index)
+- [ ] Wire into dfe-receiver auth middleware, TLS handler, rate limiting
+- [ ] Add to `hyperi-ai/standards/universal/` as `SECURITY-LOGGING.md`
+
+### Smart Log Combining (rustlib enhancement)
+
+- [ ] Enhance `tracing-throttle` integration — configure `exclude_fields` for high-cardinality fields
+  - Already supported: `exclude_fields(&["request_id", "span_id", "topic"])` strips variable parts before signature hash
+  - The message template (format string) becomes the grouping key — identical template = same group regardless of field values
+- [ ] Add collapsed summary on throttle: "N occurrences suppressed in last Xs" (tracing-throttle may support this natively)
+- [ ] Consider post-collection pattern detection for dashboards (Grafana Loki pattern detection, not code-level)
+
 ### Hot Path Optimisation
 
 - [ ] Pre-compute topic strings in Router (eliminate `format!()` per-message)
@@ -324,7 +347,7 @@ from the universal standards — they belong in TODO.md, not in standards.
 ### Medium Priority
 
 - [ ] Fix Helm `chart/templates/secret.yaml` — `bearer-tokens` hyphen in Go template field name
-- [ ] Remove `[patch.crates-io]` from Cargo.toml after rustlib publishes (blocked on Phase 1/2)
+- [ ] Remove `[patch.crates-io]` from Cargo.toml after rustlib publishes (blocked on Phases 1/2)
 - [ ] Documentation for deployment
 
 ### Low Priority
