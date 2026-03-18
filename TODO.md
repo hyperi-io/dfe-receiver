@@ -268,6 +268,16 @@ Apply log spam fixes and metrics standardisation to every identified site from t
 - [ ] Apply `RateLimitFilter` globally via pylib
 - [ ] Fix identified sites with `StateLogger`/`SampledLogger`
 
+#### Phase 7: Clean Up Standards Docs
+
+After all remediations are complete, remove project-specific audit findings
+from the universal standards — they belong in TODO.md, not in standards.
+
+- [ ] `hyperi-ai/standards/universal/LOG-FLOODING.md` — remove "Current State", "Worst Offenders" table, and per-project audit from DFE section
+- [ ] `hyperi-ai/standards/universal/METRICS.md` — remove "Migration" section (will be done) and any stale per-project references
+- [ ] `dfe-receiver/docs/LOG-SPAMMING.md` — remove or archive (audit data moves to git history)
+- [ ] `dfe-receiver/docs/METRICS.md` — remove migration section, keep as operational reference
+
 ### Hot Path Optimisation
 
 - [ ] Pre-compute topic strings in Router (eliminate `format!()` per-message)
