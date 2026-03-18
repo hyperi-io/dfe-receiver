@@ -234,6 +234,40 @@ implemented in hyperi-rustlib and consumed by each project.
 - [ ] Apply to dfe-engine (FastAPI) — standard metrics + log spam protection
 - [ ] Load Python standards (`hyperi-ai/standards/languages/PYTHON.md`) before implementation
 
+#### Phase 6: Remediate All Identified Spam Sites
+
+Apply log spam fixes and metrics standardisation to every identified site from the audit.
+
+**dfe-receiver:**
+- [ ] `src/pipeline/mod.rs:205,315` — memory pressure warn → state-transition
+- [ ] `src/sink/kafka/mod.rs:61` — Kafka send error → sampled (1/1000) + metric
+- [ ] `src/sink/loader/mod.rs:95` — loader send error → sampled (1/1000) + metric
+- [ ] `src/server/syslog/mod.rs:73` — UDP recv error → debounced (5s)
+- [ ] `src/server/lumberjack/mod.rs:94,135` — frame parse error → sampled (1/100)
+
+**dfe-loader:**
+- [ ] `src/transform/coerce.rs:103` — type coercion warn per-row → sampled (1/1000) + log batch total
+- [ ] `src/clickhouse/inserter.rs:338,358` — retry warn → state-transition (first failure + recovery)
+- [ ] `src/pipeline/orchestrator.rs:783,786` — DLQ channel full → debounced (5s)
+- [ ] `src/kafka/consumer.rs:219` — consumer error → debounced (5s)
+
+**dfe-fetcher:**
+- [ ] `src/extractor/container/mod.rs:152` — container stderr warn per-line → sampled (1/100) + count
+- [ ] `src/scheduler/mod.rs:118` — source not ready → debounced (10s)
+- [ ] `src/output.rs:143` — transport send error → sampled (1/1000) + metric
+- [ ] `src/pipeline/mod.rs:253` — DLQ send failure → debounced (5s)
+
+**dfe-archiver:**
+- [ ] `crates/archiver/src/archiver.rs:168` — routing failure → sampled (1/1000) + metric
+- [ ] `crates/archiver/src/archiver.rs:191` — buffer push under pressure → state-transition
+- [ ] `crates/core/src/buffer/tiered.rs:225,242` — spool full → state-transition
+- [ ] `crates/archiver/src/archiver.rs:134` — Kafka recv error → debounced (5s)
+
+**dfe-engine (Python):**
+- [ ] Audit all `logger.warning`/`logger.error` sites for per-request spam potential
+- [ ] Apply `RateLimitFilter` globally via pylib
+- [ ] Fix identified sites with `StateLogger`/`SampledLogger`
+
 ### Hot Path Optimisation
 
 - [ ] Pre-compute topic strings in Router (eliminate `format!()` per-message)
