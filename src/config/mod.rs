@@ -335,8 +335,7 @@ fn apply_env_overrides(config: &mut Config) {
 
     // Spillover
     if let Ok(v) = env_var("BUFFER_SPILLOVER_ENABLED") {
-        config.buffer.spillover.enabled =
-            matches!(v.to_lowercase().as_str(), "true" | "1" | "yes");
+        config.buffer.spillover.enabled = matches!(v.to_lowercase().as_str(), "true" | "1" | "yes");
         debug!("Override: buffer.spillover.enabled from env");
     }
     if let Ok(v) = env_var("BUFFER_SPILLOVER_PATH") {
