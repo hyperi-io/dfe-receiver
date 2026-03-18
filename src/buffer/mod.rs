@@ -12,7 +12,7 @@
 
 pub mod tiered;
 
-pub use tiered::{TieredSink, TieredSinkStats};
+pub use tiered::{InMemoryBuffer, InMemoryBufferStats};
 // Re-export CircuitState from hyperi-rustlib for convenience
 pub use hyperi_rustlib::tiered_sink::CircuitState;
 

@@ -187,3 +187,8 @@ format_push_string = "allow"
 single_char_add_str = "allow"
 uninlined_format_args = "allow"
 unnecessary_literal_bound = "allow"
+
+# TODO: Remove [patch.crates-io] after rustlib publishes the next version.
+# This is temporary for local development of the disk spillover feature.
+[patch.crates-io]
+hyperi-rustlib = { path = "../hyperi-rustlib" }
