@@ -22,7 +22,7 @@ use tracing::{debug, error, info, warn};
 
 use hyperi_rustlib::dlq::{Dlq, DlqEntry};
 
-use crate::buffer::{BufferManager, MemoryPressure, InMemoryBuffer};
+use crate::buffer::{BufferManager, InMemoryBuffer, MemoryPressure, SinkBackend};
 use crate::config::{Config, SharedConfig};
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
@@ -39,9 +39,9 @@ pub struct PipelineState {
     shared_config: SharedConfig,
     validator: RwLock<Validator>,
     router: RwLock<Router>,
-    kafka_sink: Option<Arc<InMemoryBuffer<KafkaSink>>>,
-    loader_sink: Option<Arc<InMemoryBuffer<LoaderSink>>>,
-    grpc_loader_sink: Option<Arc<InMemoryBuffer<GrpcSink>>>,
+    kafka_sink: Option<Arc<SinkBackend<KafkaSink>>>,
+    loader_sink: Option<Arc<SinkBackend<LoaderSink>>>,
+    grpc_loader_sink: Option<Arc<SinkBackend<GrpcSink>>>,
     file_sink: Option<Arc<FileSink>>,
     buffer_manager: Arc<BufferManager>,
     dlq: Option<Arc<Dlq>>,
@@ -60,10 +60,10 @@ impl PipelineState {
         );
         let buffer_manager = Arc::new(BufferManager::new(&config.buffer));
 
-        // Initialise Kafka sink with tiered wrapper if brokers configured
+        // Initialise Kafka sink with buffer wrapper if brokers configured
         let kafka_sink = if !config.kafka.brokers.is_empty() {
             let primary = KafkaSink::new(&config.kafka)?;
-            Some(Arc::new(InMemoryBuffer::new(primary, &config.buffer)))
+            Some(Arc::new(build_sink_backend(primary, &config.buffer).await?))
         } else {
             None
         };
@@ -76,19 +76,19 @@ impl PipelineState {
                 .iter()
                 .any(|r| r.destination == "loader");
 
-        // Initialise loader or gRPC loader sink with tiered wrapper
+        // Initialise loader or gRPC loader sink with buffer wrapper
         let (loader_sink, grpc_loader_sink) = if loader_destination_active {
             if config.loader.transport == "grpc" {
                 let endpoint = config.loader.effective_grpc_endpoint();
                 let primary = GrpcSink::new(&endpoint).await?;
                 (
                     None,
-                    Some(Arc::new(InMemoryBuffer::new(primary, &config.buffer))),
+                    Some(Arc::new(build_sink_backend(primary, &config.buffer).await?)),
                 )
             } else {
                 let primary = LoaderSink::new(&config.loader, &config.kafka)?;
                 (
-                    Some(Arc::new(InMemoryBuffer::new(primary, &config.buffer))),
+                    Some(Arc::new(build_sink_backend(primary, &config.buffer).await?)),
                     None,
                 )
             }
@@ -457,6 +457,45 @@ impl PipelineState {
 
         *self.router.write() = new_router;
         *self.validator.write() = new_validator;
+    }
+}
+
+/// Build the appropriate `SinkBackend` based on spillover configuration.
+///
+/// When `spillover.enabled` is true, wraps the primary sink in rustlib's `TieredSink`
+/// with disk spillover. Otherwise, uses the default in-memory buffer.
+async fn build_sink_backend<S: crate::sink::Sink + 'static>(
+    primary: S,
+    buffer_config: &crate::config::BufferConfig,
+) -> Result<SinkBackend<S>> {
+    if buffer_config.spillover.enabled {
+        let adapter = crate::buffer::adapter::RustlibSinkAdapter::new(Arc::new(primary));
+        let spillover = &buffer_config.spillover;
+
+        let mut tiered_config = hyperi_rustlib::tiered_sink::TieredSinkConfig::new(&spillover.path);
+
+        // Configure disk-aware capacity management
+        tiered_config.disk_aware = Some(hyperi_rustlib::tiered_sink::DiskAwareConfig {
+            max_usage_percent: spillover.max_usage_percent,
+            poll_interval_secs: spillover.poll_interval_secs,
+        });
+
+        let tiered = hyperi_rustlib::tiered_sink::TieredSink::new(adapter, tiered_config)
+            .await
+            .map_err(|e| Error::Config(format!("failed to create tiered sink: {e}")))?;
+
+        info!(
+            path = %spillover.path.display(),
+            max_usage_percent = spillover.max_usage_percent,
+            "Disk spillover enabled"
+        );
+
+        Ok(SinkBackend::Tiered(tiered))
+    } else {
+        Ok(SinkBackend::InMemory(InMemoryBuffer::new(
+            primary,
+            buffer_config,
+        )))
     }
 }
 

@@ -66,13 +66,9 @@ pub struct AdapterError(String);
 impl<S: ReceiverSink + 'static> RustlibSink for RustlibSinkAdapter<S> {
     type Error = AdapterError;
 
-    async fn try_send(
-        &self,
-        data: &[u8],
-    ) -> std::result::Result<(), SinkError<Self::Error>> {
-        let (topic, payload) = decode_message(data).ok_or_else(|| {
-            SinkError::Fatal(AdapterError("invalid message encoding".into()))
-        })?;
+    async fn try_send(&self, data: &[u8]) -> std::result::Result<(), SinkError<Self::Error>> {
+        let (topic, payload) = decode_message(data)
+            .ok_or_else(|| SinkError::Fatal(AdapterError("invalid message encoding".into())))?;
 
         self.inner
             .send(topic, Bytes::copy_from_slice(payload))

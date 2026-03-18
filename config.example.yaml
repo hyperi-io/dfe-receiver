@@ -261,6 +261,11 @@ loader:
 buffer:
   memory_limit: 0  # 0 = auto-detect (67% available)
   pressure_threshold: 0.8
+  spillover:
+    enabled: false  # opt-in disk spillover via rustlib TieredSink
+    path: /var/spool/dfe-receiver
+    max_usage_percent: 0.8  # pause spool writes when disk exceeds 80%
+    poll_interval_secs: 5
 
 file_sink:
   enabled: false  # set true to write all processed messages to a file (debug only)
