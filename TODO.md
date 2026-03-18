@@ -173,23 +173,31 @@ All protocols follow: receive -> convert to JSON -> validate -> route -> Kafka/d
   - [x] `publish.container` section in `.hyperi-ci.yaml` (ghcr, linux/amd64+arm64)
   - [x] `publish.helm` section in `.hyperi-ci.yaml` (oci://ghcr.io/hyperi-io/charts)
   - [ ] Test: trigger release, verify `ghcr.io/hyperi-io/dfe-receiver`
-- [ ] KEDA scaling metrics endpoint — expose backpressure metrics for KEDA ScaledObject
-  - CPU utilisation (process-level)
-  - Consumer group lag (Kafka topic lag via rdkafka stats)
-  - In-memory buffer saturation (TieredSink queue depth / capacity)
-  - Circuit breaker state (open/closed/half-open)
-  - Endpoint: `/metrics/keda` or Prometheus `/metrics` with KEDA-compatible labels
+- [x] KEDA Prometheus trigger — added optional `keda.prometheus.*` section to Helm ScaledObject
+- [x] Sidecar transport documentation — expanded with StatsD, Windows Event Log, Kafka examples + troubleshooting/sizing/health sections
+- [x] Disk spillover — opt-in via `buffer.spillover.enabled`, rustlib TieredSink with disk-aware capacity, SinkBackend enum
+- [x] Config hot-reload for auth — `spawn_auth_reload_watcher()` subscribes to SharedConfig, swaps bearer tokens atomically
+- [x] Performance benchmarks — expanded criterion suite (router, metrics render) + profiling profile + baseline capture
+- [x] Code review remediations — bounded queue backpressure, rate window sampling, config unmarshal warning, project files
+
+### High Priority
+
+- [ ] Standardise metrics to `dfe_` prefix convention (align with dfe-fetcher)
+  - `dfe_transport_sent_total{transport="kafka|grpc"}`, `dfe_transport_send_errors_total`, etc.
+  - `dfe_pipeline_ready`, `dfe_records_received_total`, `dfe_records_dlq_total`
+  - Update KEDA ScaledObject PromQL query after rename
+- [ ] Pre-compute topic strings in Router (eliminate `format!()` allocation on hot path)
+- [ ] Pre-split field paths at Router/Validator construction (eliminate per-message `.split('.').collect()`)
 
 ### Medium Priority
 
-- [ ] **Sidecar transport documentation** — expand `docs/SIDECAR-TRANSPORTS.md` with more examples as needed
-- [ ] Disk spillover implementation (currently in-memory only)
-- [ ] Config hot-reload for auth settings
-- [ ] Performance benchmarks
+- [ ] Fix Helm `chart/templates/secret.yaml` — `bearer-tokens` hyphen in Go template field name
+- [ ] Remove `[patch.crates-io]` from Cargo.toml after rustlib publishes >= 1.16.2
+- [ ] Documentation for deployment
 
 ### Low Priority
 
-- [ ] Documentation for deployment
+- [ ] Migrate hand-rolled Prometheus text render to `metrics-exporter-prometheus` crate
 
 ---
 
