@@ -150,7 +150,8 @@ impl BufferManager {
         // Auto-detect memory limit if not set
         let memory_limit = if config.memory_limit == 0 {
             // Default to 67% of available memory
-            let sys = sysinfo::System::new_all();
+            let mut sys = sysinfo::System::new();
+            sys.refresh_memory();
             let available = sys.available_memory();
             (available * 67) / 100
         } else {

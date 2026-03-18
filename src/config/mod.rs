@@ -163,8 +163,14 @@ impl Config {
         // Get the global config and unmarshal to our struct
         let cfg = config::get();
 
-        // Try to unmarshal the full config, falling back to defaults
-        let mut config: Config = cfg.unmarshal().unwrap_or_default();
+        // Unmarshal config — warn and fall back to defaults on failure
+        let mut config: Config = match cfg.unmarshal() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "config unmarshal failed, using defaults — check YAML syntax");
+                Config::default()
+            }
+        };
 
         // Store config path for reload support
         config.config_path = config_path.map(String::from);

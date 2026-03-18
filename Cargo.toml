@@ -188,7 +188,7 @@ single_char_add_str = "allow"
 uninlined_format_args = "allow"
 unnecessary_literal_bound = "allow"
 
-# TODO: Remove [patch.crates-io] after rustlib publishes the next version.
-# This is temporary for local development of the disk spillover feature.
+# Development override: use local rustlib until disk-aware TieredSink is published.
+# Remove after rustlib >= 1.16.2 is on crates.io.
 [patch.crates-io]
 hyperi-rustlib = { path = "../hyperi-rustlib" }
