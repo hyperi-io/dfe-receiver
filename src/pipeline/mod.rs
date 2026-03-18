@@ -22,7 +22,7 @@ use tracing::{debug, error, info, warn};
 
 use hyperi_rustlib::dlq::{Dlq, DlqEntry};
 
-use crate::buffer::{BufferManager, MemoryPressure, TieredSink};
+use crate::buffer::{BufferManager, MemoryPressure, InMemoryBuffer};
 use crate::config::{Config, SharedConfig};
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
@@ -39,9 +39,9 @@ pub struct PipelineState {
     shared_config: SharedConfig,
     validator: RwLock<Validator>,
     router: RwLock<Router>,
-    kafka_sink: Option<Arc<TieredSink<KafkaSink>>>,
-    loader_sink: Option<Arc<TieredSink<LoaderSink>>>,
-    grpc_loader_sink: Option<Arc<TieredSink<GrpcSink>>>,
+    kafka_sink: Option<Arc<InMemoryBuffer<KafkaSink>>>,
+    loader_sink: Option<Arc<InMemoryBuffer<LoaderSink>>>,
+    grpc_loader_sink: Option<Arc<InMemoryBuffer<GrpcSink>>>,
     file_sink: Option<Arc<FileSink>>,
     buffer_manager: Arc<BufferManager>,
     dlq: Option<Arc<Dlq>>,
@@ -63,7 +63,7 @@ impl PipelineState {
         // Initialise Kafka sink with tiered wrapper if brokers configured
         let kafka_sink = if !config.kafka.brokers.is_empty() {
             let primary = KafkaSink::new(&config.kafka)?;
-            Some(Arc::new(TieredSink::new(primary, &config.buffer)))
+            Some(Arc::new(InMemoryBuffer::new(primary, &config.buffer)))
         } else {
             None
         };
@@ -83,12 +83,12 @@ impl PipelineState {
                 let primary = GrpcSink::new(&endpoint).await?;
                 (
                     None,
-                    Some(Arc::new(TieredSink::new(primary, &config.buffer))),
+                    Some(Arc::new(InMemoryBuffer::new(primary, &config.buffer))),
                 )
             } else {
                 let primary = LoaderSink::new(&config.loader, &config.kafka)?;
                 (
-                    Some(Arc::new(TieredSink::new(primary, &config.buffer))),
+                    Some(Arc::new(InMemoryBuffer::new(primary, &config.buffer))),
                     None,
                 )
             }

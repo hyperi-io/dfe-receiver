@@ -207,6 +207,16 @@ impl Config {
             ));
         }
 
+        // Validate spillover config
+        if self.buffer.spillover.enabled {
+            let pct = self.buffer.spillover.max_usage_percent;
+            if pct <= 0.0 || pct > 1.0 {
+                return Err(Error::Config(format!(
+                    "buffer.spillover.max_usage_percent must be in (0.0, 1.0], got {pct}"
+                )));
+            }
+        }
+
         Ok(())
     }
 }
@@ -321,6 +331,17 @@ fn apply_env_overrides(config: &mut Config) {
     {
         config.buffer.pressure_threshold = n;
         debug!("Override: buffer.pressure_threshold from env");
+    }
+
+    // Spillover
+    if let Ok(v) = env_var("BUFFER_SPILLOVER_ENABLED") {
+        config.buffer.spillover.enabled =
+            matches!(v.to_lowercase().as_str(), "true" | "1" | "yes");
+        debug!("Override: buffer.spillover.enabled from env");
+    }
+    if let Ok(v) = env_var("BUFFER_SPILLOVER_PATH") {
+        config.buffer.spillover.path = std::path::PathBuf::from(v);
+        debug!("Override: buffer.spillover.path from env");
     }
 
     // Metrics
@@ -1322,6 +1343,12 @@ pub struct BufferConfig {
     /// Memory pressure threshold (0.0-1.0).
     /// When usage exceeds this, backpressure is applied (503 responses).
     pub pressure_threshold: f64,
+
+    /// Optional disk spillover configuration.
+    /// When enabled, messages are spilled to disk via rustlib's TieredSink
+    /// when the primary sink is unavailable (instead of in-memory only).
+    #[serde(default)]
+    pub spillover: SpilloverConfig,
 }
 
 impl Default for BufferConfig {
@@ -1329,6 +1356,51 @@ impl Default for BufferConfig {
         Self {
             memory_limit: 0, // Auto-detect
             pressure_threshold: 0.8,
+            spillover: SpilloverConfig::default(),
+        }
+    }
+}
+
+/// Disk spillover configuration (opt-in, default disabled).
+///
+/// When enabled, failed sends are spilled to disk via rustlib's TieredSink
+/// instead of being held in an in-memory queue. This provides crash-resilient
+/// buffering at the cost of disk I/O on the failure path.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct SpilloverConfig {
+    /// Enable disk spillover (default: false).
+    pub enabled: bool,
+
+    /// Directory for spool files.
+    pub path: std::path::PathBuf,
+
+    /// Maximum filesystem usage percentage (0.0-1.0) before pausing spool writes.
+    pub max_usage_percent: f64,
+
+    /// How often to check disk usage, in seconds.
+    pub poll_interval_secs: u64,
+}
+
+fn default_spillover_path() -> std::path::PathBuf {
+    std::path::PathBuf::from("/var/spool/dfe-receiver")
+}
+
+fn default_max_usage_percent() -> f64 {
+    0.8
+}
+
+fn default_poll_interval_secs() -> u64 {
+    5
+}
+
+impl Default for SpilloverConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            path: default_spillover_path(),
+            max_usage_percent: default_max_usage_percent(),
+            poll_interval_secs: default_poll_interval_secs(),
         }
     }
 }

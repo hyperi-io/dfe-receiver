@@ -63,7 +63,7 @@ impl Sink for GrpcSink {
                 Ok(())
             }
             SendResult::Backpressured => {
-                // Signal backpressure so TieredSink can buffer
+                // Signal backpressure so buffer backend can handle
                 Err(Error::Transport("gRPC loader backpressured".into()))
             }
             SendResult::Fatal(e) => {
