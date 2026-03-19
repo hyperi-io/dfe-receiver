@@ -1,3 +1,10 @@
+# [1.14.0-dev.3](https://github.com/hyperi-io/dfe-receiver/compare/v1.14.0-dev.2...v1.14.0-dev.3) (2026-03-19)
+
+
+### Bug Fixes
+
+* use MemoryGuardConfig::from_env for standard env var overrides ([4a0b302](https://github.com/hyperi-io/dfe-receiver/commit/4a0b30281aca56df7e0bb626f92157d9c07c6d61))
+
 # [1.14.0-dev.2](https://github.com/hyperi-io/dfe-receiver/compare/v1.14.0-dev.1...v1.14.0-dev.2) (2026-03-19)
 
 
