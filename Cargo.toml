@@ -23,7 +23,7 @@ doctest = false
 
 [dependencies]
 # HyperI shared library (crates.io)
-hyperi-rustlib = { version = "1.16.0", features = [
+hyperi-rustlib = { version = ">=1.16.3", features = [
     "config",
     "config-reload",
     "logger",
@@ -73,6 +73,13 @@ prost-types = "0.14"
 rustls = "0.23"
 rustls-pemfile = "2"
 tokio-rustls = "0.26"
+
+# Rate limiting
+tower_governor = { version = "0.8", features = ["axum"] }
+
+# IP filtering (CIDR allowlist/denylist)
+ipnet = "2"
+ipnet-trie = "0.2"
 
 # Performance
 rustc-hash = "2"
@@ -187,8 +194,3 @@ format_push_string = "allow"
 single_char_add_str = "allow"
 uninlined_format_args = "allow"
 unnecessary_literal_bound = "allow"
-
-# Development override: use local rustlib until disk-aware TieredSink is published.
-# Remove after rustlib >= 1.16.2 is on crates.io.
-[patch.crates-io]
-hyperi-rustlib = { path = "../hyperi-rustlib" }
