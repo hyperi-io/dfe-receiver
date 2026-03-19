@@ -1,3 +1,10 @@
+## [1.14.1](https://github.com/hyperi-io/dfe-receiver/compare/v1.14.0...v1.14.1) (2026-03-19)
+
+
+### Bug Fixes
+
+* use MemoryGuardConfig::from_env for standard env var overrides ([4a0b302](https://github.com/hyperi-io/dfe-receiver/commit/4a0b30281aca56df7e0bb626f92157d9c07c6d61))
+
 # [1.14.0](https://github.com/hyperi-io/dfe-receiver/compare/v1.13.11...v1.14.0) (2026-03-19)
 
 
@@ -23,4 +30,3 @@
 * add optional Prometheus scaling trigger to KEDA ScaledObject ([d3df594](https://github.com/hyperi-io/dfe-receiver/commit/d3df594))
 * add RustlibSinkAdapter for bridging sink traits ([c71cb2f](https://github.com/hyperi-io/dfe-receiver/commit/c71cb2f))
 * wire SharedConfig hot-reload to auth state ([9f57c6e](https://github.com/hyperi-io/dfe-receiver/commit/9f57c6e))
-
