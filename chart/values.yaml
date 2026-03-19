@@ -116,12 +116,12 @@ keda:
     # -- CPU utilisation percentage threshold
     threshold: "80"
   prometheus:
-    # -- Enable Prometheus-based scaling (receiver_scaling_pressure metric)
+    # -- Enable Prometheus-based scaling (dfe_scaling_pressure metric)
     enabled: false
     # -- Prometheus server address
     serverAddress: "http://prometheus:9090"
     # -- PromQL query for scaling decision
-    query: "avg(receiver_scaling_pressure)"
+    query: "avg(dfe_scaling_pressure)"
     # -- Threshold value (0-100) to trigger scale-up
     threshold: "70"
 
