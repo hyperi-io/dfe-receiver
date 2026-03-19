@@ -23,6 +23,8 @@ use rustls_pemfile::{certs, private_key};
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info};
 
+use hyperi_rustlib::logger::security::{self, SecurityOutcome};
+
 use crate::config::TlsConfig;
 use crate::error::{Error, Result};
 
@@ -459,12 +461,25 @@ impl TlsCertProvider {
                             Ok(Some(new_acceptor)) => {
                                 *acceptor.write() = new_acceptor;
                                 info!("TLS certificates refreshed successfully");
+                                security::tls_event("cert_refresh", SecurityOutcome::Success, None, None);
                             }
                             Ok(None) => {
                                 tracing::error!("TLS refresh returned None (TLS disabled?)");
+                                security::tls_event(
+                                    "cert_refresh",
+                                    SecurityOutcome::Error,
+                                    Some("tls_disabled_after_refresh"),
+                                    None,
+                                );
                             }
                             Err(e) => {
                                 tracing::error!(error = %e, "Failed to refresh TLS certificates");
+                                security::tls_event(
+                                    "cert_refresh",
+                                    SecurityOutcome::Failure,
+                                    Some(&e.to_string()),
+                                    None,
+                                );
                             }
                         }
                     }

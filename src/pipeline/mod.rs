@@ -24,6 +24,7 @@ use tracing::{debug, error, info, warn};
 static PRESSURE_LOGGED: AtomicBool = AtomicBool::new(false);
 
 use hyperi_rustlib::dlq::{Dlq, DlqEntry};
+use hyperi_rustlib::logger::security;
 
 use crate::buffer::{BufferManager, InMemoryBuffer, MemoryPressure, SinkBackend};
 use crate::config::{Config, SharedConfig};
@@ -275,9 +276,11 @@ impl PipelineState {
             ValidationResult::Valid => {}
             ValidationResult::Dlq(reason) => {
                 debug!(reason = %reason, "Message validation failed, routing to DLQ");
+                security::input_validation_failure("json_validate", &reason, None);
                 return self.send_to_dlq(&payload, &reason).await;
             }
             ValidationResult::Reject(reason) => {
+                security::input_validation_failure("json_validate", &reason, None);
                 return Err(Error::Validation(reason));
             }
         }
@@ -341,9 +344,13 @@ impl PipelineState {
             ValidationResult::Valid => self.send_to_kafka(topic, payload).await,
             ValidationResult::Dlq(reason) => {
                 debug!(reason = %reason, "Message validation failed, routing to DLQ");
+                security::input_validation_failure("json_validate", &reason, None);
                 self.send_to_dlq(&payload, &reason).await
             }
-            ValidationResult::Reject(reason) => Err(Error::Validation(reason)),
+            ValidationResult::Reject(reason) => {
+                security::input_validation_failure("json_validate", &reason, None);
+                Err(Error::Validation(reason))
+            }
         };
 
         // Release memory tracking on completion
