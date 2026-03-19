@@ -205,6 +205,18 @@ implemented in hyperi-rustlib and consumed by each project.
 - [x] Tests
 - [ ] Publish rustlib patch (push to main, let CI run)
 
+#### Phase 2.5: rustlib — Security Logging Framework
+
+- [ ] Design `SecurityEvent` struct — structured security events separate from operational logs
+- [ ] Standard event types: `auth.success`, `auth.failure`, `access.denied`, `config.changed`, `rate_limit.triggered`, `tls.failure`, `token.rotated`
+- [ ] Mandatory fields: `event_type`, `actor`, `action`, `outcome`, `source_ip`, `timestamp`
+- [ ] `SecurityLogger` — emits structured JSON events to tracing with a `security` target
+- [ ] Filtering: operators can route security events to a dedicated sink via `RUST_LOG=security=info`
+- [ ] Integrate into rustlib `logger` feature (no new feature flag needed)
+- [ ] Tests
+- [ ] Wire into dfe-receiver: auth middleware, TLS handler, token rotation
+- [ ] Add `SECURITY-LOGGING.md` to `hyperi-ai/standards/universal/`
+
 #### Phase 3: dfe-receiver — Consume New rustlib
 
 - [ ] Bump rustlib dep, remove `[patch.crates-io]`
