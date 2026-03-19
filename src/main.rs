@@ -135,8 +135,10 @@ impl DfeApp for App {
     async fn run_service(&self, config: Self::Config) -> Result<(), CliError> {
         info!(version = env!("CARGO_PKG_VERSION"), "Starting dfe-receiver");
 
-        // Initialise metrics with scaling pressure engine
-        let metrics = Arc::new(Metrics::with_scaling(config.scaling.build_pressure()));
+        // Initialise metrics with scaling pressure engine + standard DFE metrics.
+        // DfeMetrics::register() describes dfe_* names with the global recorder
+        // (installed by the DfeApp lifecycle before run_service is called).
+        let metrics = Arc::new(Metrics::with_dfe_metrics(config.scaling.build_pressure()));
 
         // Create cancellation token for coordinated shutdown
         let shutdown_token = CancellationToken::new();

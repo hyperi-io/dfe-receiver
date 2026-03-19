@@ -23,9 +23,9 @@ pub use shared::SharedConfig;
 
 use std::collections::HashMap;
 
+use hyperi_rustlib::config::flat_env::{self, ApplyFlatEnv, Normalize};
 use hyperi_rustlib::config::{self, ConfigOptions};
 use serde::{Deserialize, Serialize};
-use tracing::debug;
 
 use hyperi_rustlib::scaling::{ScalingComponent, ScalingPressure, ScalingPressureConfig};
 
@@ -163,14 +163,21 @@ impl Config {
         // Get the global config and unmarshal to our struct
         let cfg = config::get();
 
-        // Try to unmarshal the full config, falling back to defaults
-        let mut config: Config = cfg.unmarshal().unwrap_or_default();
+        // Unmarshal config — warn and fall back to defaults on failure
+        let mut config: Config = match cfg.unmarshal() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "config unmarshal failed, using defaults — check YAML syntax");
+                Config::default()
+            }
+        };
 
         // Store config path for reload support
         config.config_path = config_path.map(String::from);
 
         // Apply flat env var overrides (DFE_RECEIVER_*)
-        apply_env_overrides(&mut config);
+        config.apply_flat_env(ENV_PREFIX);
+        config.normalize();
 
         Ok(config)
     }
@@ -182,7 +189,8 @@ impl Config {
 
         let mut config: Config = serde_yaml_ng::from_str(&content)?;
         config.config_path = Some(path.to_string());
-        apply_env_overrides(&mut config);
+        config.apply_flat_env(ENV_PREFIX);
+        config.normalize();
         Ok(config)
     }
 
@@ -207,6 +215,16 @@ impl Config {
             ));
         }
 
+        // Validate spillover config
+        if self.buffer.spillover.enabled {
+            let pct = self.buffer.spillover.max_usage_percent;
+            if pct <= 0.0 || pct > 1.0 {
+                return Err(Error::Config(format!(
+                    "buffer.spillover.max_usage_percent must be in (0.0, 1.0], got {pct}"
+                )));
+            }
+        }
+
         Ok(())
     }
 }
@@ -219,134 +237,97 @@ pub fn reload_config(current: &Config) -> Result<Config> {
     Config::load(current.config_path.as_deref())
 }
 
-/// Read an env var with the DFE_RECEIVER_ prefix.
-fn env_var(name: &str) -> std::result::Result<String, std::env::VarError> {
-    std::env::var(format!("DFE_RECEIVER_{name}"))
+impl ApplyFlatEnv for Config {
+    fn apply_flat_env(&mut self, prefix: &str) {
+        // Server
+        if let Some(v) = flat_env::flat_env_string(prefix, "BIND_ADDRESS") {
+            self.server.bind_address = v;
+        }
+        if let Some(v) = flat_env::flat_env_parsed::<usize>(prefix, "MAX_BODY_SIZE") {
+            self.server.max_body_size = v;
+        }
+        if let Some(v) = flat_env::flat_env_parsed::<u64>(prefix, "REQUEST_TIMEOUT_MS") {
+            self.server.request_timeout_ms = v;
+        }
+        if let Some(v) = flat_env::flat_env_bool(prefix, "COMMON_HEADER") {
+            self.server.auth.include_common_header = v;
+        }
+
+        // Kafka
+        if let Some(v) = flat_env::flat_env_list(prefix, "KAFKA_BROKERS") {
+            self.kafka.brokers = v;
+        }
+        if let Some(v) = flat_env::flat_env_string(prefix, "KAFKA_CLIENT_ID") {
+            self.kafka.client_id = v;
+        }
+        if let Some(v) = flat_env::flat_env_string(prefix, "KAFKA_SASL_MECHANISM") {
+            let sasl = self.kafka.sasl.get_or_insert_with(SaslConfig::default);
+            sasl.mechanism = v;
+        }
+        if let Some(v) = flat_env::flat_env_string(prefix, "KAFKA_SECURITY_PROTOCOL") {
+            self.kafka.tls.enabled = v.to_uppercase().contains("SSL");
+        }
+        if let Some(v) = flat_env::flat_env_string_sensitive(prefix, "KAFKA_SASL_USER") {
+            let sasl = self.kafka.sasl.get_or_insert_with(SaslConfig::default);
+            sasl.username = v;
+        }
+        if let Some(v) = flat_env::flat_env_string_sensitive(prefix, "KAFKA_SASL_PASSWORD") {
+            let sasl = self.kafka.sasl.get_or_insert_with(SaslConfig::default);
+            sasl.password = v;
+        }
+
+        // Routing
+        if let Some(v) = flat_env::flat_env_string(prefix, "DEFAULT_SOURCE") {
+            self.routing.default_source = v;
+        }
+        if let Some(v) = flat_env::flat_env_string(prefix, "TOPIC_SUFFIX") {
+            self.routing.topic_suffix = v;
+        }
+
+        // Buffer
+        if let Some(v) = flat_env::flat_env_parsed::<usize>(prefix, "MEMORY_LIMIT") {
+            self.buffer.memory_limit = v;
+        }
+        if let Some(v) = flat_env::flat_env_parsed::<f64>(prefix, "PRESSURE_THRESHOLD") {
+            self.buffer.pressure_threshold = v;
+        }
+
+        // Spillover
+        if let Some(v) = flat_env::flat_env_bool(prefix, "BUFFER_SPILLOVER_ENABLED") {
+            self.buffer.spillover.enabled = v;
+        }
+        if let Some(v) = flat_env::flat_env_string(prefix, "BUFFER_SPILLOVER_PATH") {
+            self.buffer.spillover.path = std::path::PathBuf::from(v);
+        }
+
+        // Metrics
+        if let Some(v) = flat_env::flat_env_string(prefix, "METRICS_ADDRESS") {
+            self.metrics.address = v;
+        }
+
+        // Scaling
+        if let Some(v) = flat_env::flat_env_bool(prefix, "SCALING_ENABLED") {
+            self.scaling.enabled = v;
+        }
+        if let Some(v) = flat_env::flat_env_parsed::<f64>(prefix, "SCALING_MEMORY_GATE_THRESHOLD") {
+            self.scaling.memory_gate_threshold = v;
+        }
+
+        // Config reload
+        if let Some(v) = flat_env::flat_env_parsed::<u64>(prefix, "CONFIG_RELOAD_SECS") {
+            self.config_reload_secs = v;
+        }
+    }
 }
 
-/// Apply flat environment variable overrides (DFE_RECEIVER_* prefix).
-///
-/// Provides operator-friendly flat env vars alongside rustlib's nested `__` cascade.
-/// Flat overrides take final priority (applied after rustlib config merge).
-fn apply_env_overrides(config: &mut Config) {
-    // Server
-    if let Ok(v) = env_var("BIND_ADDRESS") {
-        config.server.bind_address = v;
-        debug!("Override: server.bind_address from env");
-    }
-    if let Ok(v) = env_var("MAX_BODY_SIZE")
-        && let Ok(n) = v.parse()
-    {
-        config.server.max_body_size = n;
-        debug!("Override: server.max_body_size from env");
-    }
-    if let Ok(v) = env_var("REQUEST_TIMEOUT_MS")
-        && let Ok(n) = v.parse()
-    {
-        config.server.request_timeout_ms = n;
-        debug!("Override: server.request_timeout_ms from env");
-    }
-
-    // Common header / enrichment toggle
-    if let Ok(v) = env_var("COMMON_HEADER") {
-        config.server.auth.include_common_header =
-            matches!(v.to_lowercase().as_str(), "true" | "1" | "yes");
-        debug!("Override: include_common_header from env");
-    }
-
-    // Kafka
-    if let Ok(v) = env_var("KAFKA_BROKERS") {
-        config.kafka.brokers = v.split(',').map(|s| s.trim().to_string()).collect();
-        debug!("Override: kafka.brokers from env");
-    }
-    if let Ok(v) = env_var("KAFKA_CLIENT_ID") {
-        config.kafka.client_id = v;
-        debug!("Override: kafka.client_id from env");
-    }
-    if let Ok(v) = env_var("KAFKA_SASL_MECHANISM") {
-        let sasl = config.kafka.sasl.get_or_insert_with(|| SaslConfig {
-            enabled: true,
-            mechanism: String::new(),
-            username: String::new(),
-            password: String::new(),
-        });
-        sasl.mechanism = v;
-        sasl.enabled = true;
-        debug!("Override: kafka.sasl.mechanism from env");
-    }
-    if let Ok(v) = env_var("KAFKA_SECURITY_PROTOCOL") {
-        config.kafka.tls.enabled = v.to_uppercase().contains("SSL");
-        debug!("Override: kafka.tls from env (protocol={v})");
-    }
-    if let Ok(v) = env_var("KAFKA_SASL_USER") {
-        let sasl = config.kafka.sasl.get_or_insert_with(|| SaslConfig {
-            enabled: true,
-            mechanism: String::new(),
-            username: String::new(),
-            password: String::new(),
-        });
-        sasl.username = v;
-        debug!("Override: kafka.sasl.username from env");
-    }
-    if let Ok(v) = env_var("KAFKA_SASL_PASSWORD") {
-        let sasl = config.kafka.sasl.get_or_insert_with(|| SaslConfig {
-            enabled: true,
-            mechanism: String::new(),
-            username: String::new(),
-            password: String::new(),
-        });
-        sasl.password = v;
-        debug!("Override: kafka.sasl.password from env (redacted)");
-    }
-
-    // Routing
-    if let Ok(v) = env_var("DEFAULT_SOURCE") {
-        config.routing.default_source = v;
-        debug!("Override: routing.default_source from env");
-    }
-    if let Ok(v) = env_var("TOPIC_SUFFIX") {
-        config.routing.topic_suffix = v;
-        debug!("Override: routing.topic_suffix from env");
-    }
-
-    // Buffer / memory
-    if let Ok(v) = env_var("MEMORY_LIMIT")
-        && let Ok(n) = v.parse()
-    {
-        config.buffer.memory_limit = n;
-        debug!("Override: buffer.memory_limit from env");
-    }
-    if let Ok(v) = env_var("PRESSURE_THRESHOLD")
-        && let Ok(n) = v.parse()
-    {
-        config.buffer.pressure_threshold = n;
-        debug!("Override: buffer.pressure_threshold from env");
-    }
-
-    // Metrics
-    if let Ok(v) = env_var("METRICS_ADDRESS") {
-        config.metrics.address = v;
-        debug!("Override: metrics.address from env");
-    }
-
-    // Scaling pressure
-    if let Ok(v) = env_var("SCALING_ENABLED") {
-        config.scaling.enabled = matches!(v.to_lowercase().as_str(), "true" | "1" | "yes");
-        debug!("Override: scaling.enabled from env");
-    }
-    if let Ok(v) = env_var("SCALING_MEMORY_GATE_THRESHOLD")
-        && let Ok(n) = v.parse()
-    {
-        config.scaling.memory_gate_threshold = n;
-        debug!("Override: scaling.memory_gate_threshold from env");
-    }
-
-    // Config reload
-    if let Ok(v) = env_var("CONFIG_RELOAD_SECS")
-        && let Ok(n) = v.parse()
-    {
-        config.config_reload_secs = n;
-        debug!("Override: config_reload_secs from env");
+impl Normalize for Config {
+    fn normalize(&mut self) {
+        // SASL credentials present → enable SASL (regardless of how they arrived)
+        if let Some(ref mut sasl) = self.kafka.sasl
+            && (!sasl.username.is_empty() || !sasl.mechanism.is_empty())
+        {
+            sasl.enabled = true;
+        }
     }
 }
 
@@ -363,6 +344,16 @@ pub struct ServerConfig {
     /// Request timeout in milliseconds.
     pub request_timeout_ms: u64,
 
+    /// Maximum concurrent in-flight requests (0 = unlimited).
+    /// Protects against connection exhaustion and memory pressure.
+    pub max_concurrent_requests: usize,
+
+    /// Per-IP rate limiting configuration.
+    pub rate_limit: RateLimitConfig,
+
+    /// IP filter (allowlist/denylist) configuration.
+    pub ip_filter: IpFilterConfig,
+
     /// TLS configuration.
     pub tls: TlsConfig,
 
@@ -376,8 +367,55 @@ impl Default for ServerConfig {
             bind_address: "0.0.0.0:8080".to_string(),
             max_body_size: 10 * 1024 * 1024, // 10MB
             request_timeout_ms: 30_000,
+            max_concurrent_requests: 10_000, // safe default for high-throughput ingest
+            rate_limit: RateLimitConfig::default(),
+            ip_filter: IpFilterConfig::default(),
             tls: TlsConfig::default(),
             auth: AuthConfig::default(),
+        }
+    }
+}
+
+/// Per-IP rate limiting configuration using GCRA (token bucket variant).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RateLimitConfig {
+    /// Enable per-IP rate limiting.
+    pub enabled: bool,
+
+    /// Maximum sustained requests per second per source IP.
+    pub requests_per_second: u64,
+
+    /// Burst capacity above the sustained rate.
+    pub burst: u32,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            requests_per_second: 100,
+            burst: 500,
+        }
+    }
+}
+
+/// IP filter (allowlist / denylist) configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct IpFilterConfig {
+    /// Filter mode: "disabled", "allowlist", "denylist".
+    pub mode: String,
+
+    /// CIDR ranges (e.g., `["10.0.0.0/8", "192.168.0.0/16"]`).
+    pub cidrs: Vec<String>,
+}
+
+impl Default for IpFilterConfig {
+    fn default() -> Self {
+        Self {
+            mode: "disabled".to_string(),
+            cidrs: Vec::new(),
         }
     }
 }
@@ -435,7 +473,7 @@ impl Default for TlsConfig {
 }
 
 /// Authentication configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AuthConfig {
     /// Auth mode (none, header, bearer, mtls, both).
@@ -470,7 +508,7 @@ fn default_true() -> bool {
 }
 
 /// Bearer token authentication configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BearerConfig {
     /// Static tokens (for dev/simple deployments).
@@ -498,7 +536,7 @@ impl Default for BearerConfig {
 }
 
 /// Defines an accepted authentication header.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AcceptedHeader {
     /// Header name (e.g., "x-hyperi-agent", "Authorization").
     pub name: String,
@@ -1163,7 +1201,7 @@ impl Default for KafkaConfig {
 }
 
 /// SASL authentication configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SaslConfig {
     /// Enable SASL.
     pub enabled: bool,
@@ -1322,6 +1360,12 @@ pub struct BufferConfig {
     /// Memory pressure threshold (0.0-1.0).
     /// When usage exceeds this, backpressure is applied (503 responses).
     pub pressure_threshold: f64,
+
+    /// Optional disk spillover configuration.
+    /// When enabled, messages are spilled to disk via rustlib's TieredSink
+    /// when the primary sink is unavailable (instead of in-memory only).
+    #[serde(default)]
+    pub spillover: SpilloverConfig,
 }
 
 impl Default for BufferConfig {
@@ -1329,6 +1373,51 @@ impl Default for BufferConfig {
         Self {
             memory_limit: 0, // Auto-detect
             pressure_threshold: 0.8,
+            spillover: SpilloverConfig::default(),
+        }
+    }
+}
+
+/// Disk spillover configuration (opt-in, default disabled).
+///
+/// When enabled, failed sends are spilled to disk via rustlib's TieredSink
+/// instead of being held in an in-memory queue. This provides crash-resilient
+/// buffering at the cost of disk I/O on the failure path.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct SpilloverConfig {
+    /// Enable disk spillover (default: false).
+    pub enabled: bool,
+
+    /// Directory for spool files.
+    pub path: std::path::PathBuf,
+
+    /// Maximum filesystem usage percentage (0.0-1.0) before pausing spool writes.
+    pub max_usage_percent: f64,
+
+    /// How often to check disk usage, in seconds.
+    pub poll_interval_secs: u64,
+}
+
+fn default_spillover_path() -> std::path::PathBuf {
+    std::path::PathBuf::from("/var/spool/dfe-receiver")
+}
+
+fn default_max_usage_percent() -> f64 {
+    0.8
+}
+
+fn default_poll_interval_secs() -> u64 {
+    5
+}
+
+impl Default for SpilloverConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            path: default_spillover_path(),
+            max_usage_percent: default_max_usage_percent(),
+            poll_interval_secs: default_poll_interval_secs(),
         }
     }
 }
@@ -1479,7 +1568,7 @@ mod tests {
     }
 
     // -- env override tests --
-    // Each test sets env vars, runs apply_env_overrides on a default config,
+    // Each test sets env vars, runs apply_flat_env on a default config,
     // then cleans up. Tests are serial-safe because they use unique var names.
 
     fn with_env<F: FnOnce()>(vars: &[(&str, &str)], f: F) {
@@ -1492,7 +1581,7 @@ mod tests {
     fn test_env_override_bind_address() {
         with_env(&[("DFE_RECEIVER_BIND_ADDRESS", "127.0.0.1:9999")], || {
             let mut config = Config::default();
-            apply_env_overrides(&mut config);
+            config.apply_flat_env(ENV_PREFIX);
             assert_eq!(config.server.bind_address, "127.0.0.1:9999");
         });
     }
@@ -1501,7 +1590,7 @@ mod tests {
     fn test_env_override_max_body_size() {
         with_env(&[("DFE_RECEIVER_MAX_BODY_SIZE", "5242880")], || {
             let mut config = Config::default();
-            apply_env_overrides(&mut config);
+            config.apply_flat_env(ENV_PREFIX);
             assert_eq!(config.server.max_body_size, 5_242_880);
         });
     }
@@ -1510,7 +1599,7 @@ mod tests {
     fn test_env_override_request_timeout_ms() {
         with_env(&[("DFE_RECEIVER_REQUEST_TIMEOUT_MS", "60000")], || {
             let mut config = Config::default();
-            apply_env_overrides(&mut config);
+            config.apply_flat_env(ENV_PREFIX);
             assert_eq!(config.server.request_timeout_ms, 60_000);
         });
     }
@@ -1521,14 +1610,14 @@ mod tests {
         with_env(&[("DFE_RECEIVER_COMMON_HEADER", "true")], || {
             let mut config = Config::default();
             config.server.auth.include_common_header = false;
-            apply_env_overrides(&mut config);
+            config.apply_flat_env(ENV_PREFIX);
             assert!(config.server.auth.include_common_header);
         });
 
         // Test false
         with_env(&[("DFE_RECEIVER_COMMON_HEADER", "false")], || {
             let mut config = Config::default();
-            apply_env_overrides(&mut config);
+            config.apply_flat_env(ENV_PREFIX);
             assert!(!config.server.auth.include_common_header);
         });
     }
@@ -1539,7 +1628,7 @@ mod tests {
             &[("DFE_RECEIVER_KAFKA_BROKERS", "broker1:9092, broker2:9092")],
             || {
                 let mut config = Config::default();
-                apply_env_overrides(&mut config);
+                config.apply_flat_env(ENV_PREFIX);
                 assert_eq!(
                     config.kafka.brokers,
                     vec!["broker1:9092".to_string(), "broker2:9092".to_string()]
@@ -1552,7 +1641,7 @@ mod tests {
     fn test_env_override_kafka_client_id() {
         with_env(&[("DFE_RECEIVER_KAFKA_CLIENT_ID", "my-receiver")], || {
             let mut config = Config::default();
-            apply_env_overrides(&mut config);
+            config.apply_flat_env(ENV_PREFIX);
             assert_eq!(config.kafka.client_id, "my-receiver");
         });
     }
@@ -1567,7 +1656,8 @@ mod tests {
             ],
             || {
                 let mut config = Config::default();
-                apply_env_overrides(&mut config);
+                config.apply_flat_env(ENV_PREFIX);
+                config.normalize();
                 let sasl = config.kafka.sasl.unwrap();
                 assert!(sasl.enabled);
                 assert_eq!(sasl.mechanism, "SCRAM-SHA-512");
@@ -1584,7 +1674,7 @@ mod tests {
             &[("DFE_RECEIVER_KAFKA_SECURITY_PROTOCOL", "SASL_SSL")],
             || {
                 let mut config = Config::default();
-                apply_env_overrides(&mut config);
+                config.apply_flat_env(ENV_PREFIX);
                 assert!(config.kafka.tls.enabled);
             },
         );
@@ -1593,7 +1683,7 @@ mod tests {
             &[("DFE_RECEIVER_KAFKA_SECURITY_PROTOCOL", "PLAINTEXT")],
             || {
                 let mut config = Config::default();
-                apply_env_overrides(&mut config);
+                config.apply_flat_env(ENV_PREFIX);
                 assert!(!config.kafka.tls.enabled);
             },
         );
@@ -1603,7 +1693,7 @@ mod tests {
     fn test_env_override_default_source() {
         with_env(&[("DFE_RECEIVER_DEFAULT_SOURCE", "firewall")], || {
             let mut config = Config::default();
-            apply_env_overrides(&mut config);
+            config.apply_flat_env(ENV_PREFIX);
             assert_eq!(config.routing.default_source, "firewall");
         });
     }
@@ -1612,7 +1702,7 @@ mod tests {
     fn test_env_override_topic_suffix() {
         with_env(&[("DFE_RECEIVER_TOPIC_SUFFIX", "_raw")], || {
             let mut config = Config::default();
-            apply_env_overrides(&mut config);
+            config.apply_flat_env(ENV_PREFIX);
             assert_eq!(config.routing.topic_suffix, "_raw");
         });
     }
@@ -1621,7 +1711,7 @@ mod tests {
     fn test_env_override_memory_limit() {
         with_env(&[("DFE_RECEIVER_MEMORY_LIMIT", "1073741824")], || {
             let mut config = Config::default();
-            apply_env_overrides(&mut config);
+            config.apply_flat_env(ENV_PREFIX);
             assert_eq!(config.buffer.memory_limit, 1_073_741_824);
         });
     }
@@ -1630,7 +1720,7 @@ mod tests {
     fn test_env_override_pressure_threshold() {
         with_env(&[("DFE_RECEIVER_PRESSURE_THRESHOLD", "0.9")], || {
             let mut config = Config::default();
-            apply_env_overrides(&mut config);
+            config.apply_flat_env(ENV_PREFIX);
             assert!((config.buffer.pressure_threshold - 0.9).abs() < f64::EPSILON);
         });
     }
@@ -1639,7 +1729,7 @@ mod tests {
     fn test_env_override_metrics_address() {
         with_env(&[("DFE_RECEIVER_METRICS_ADDRESS", "0.0.0.0:8888")], || {
             let mut config = Config::default();
-            apply_env_overrides(&mut config);
+            config.apply_flat_env(ENV_PREFIX);
             assert_eq!(config.metrics.address, "0.0.0.0:8888");
         });
     }
@@ -1648,7 +1738,7 @@ mod tests {
     fn test_env_override_config_reload_secs() {
         with_env(&[("DFE_RECEIVER_CONFIG_RELOAD_SECS", "60")], || {
             let mut config = Config::default();
-            apply_env_overrides(&mut config);
+            config.apply_flat_env(ENV_PREFIX);
             assert_eq!(config.config_reload_secs, 60);
         });
     }
@@ -1658,7 +1748,7 @@ mod tests {
         with_env(&[("DFE_RECEIVER_MAX_BODY_SIZE", "not_a_number")], || {
             let mut config = Config::default();
             let original_size = config.server.max_body_size;
-            apply_env_overrides(&mut config);
+            config.apply_flat_env(ENV_PREFIX);
             assert_eq!(config.server.max_body_size, original_size);
         });
     }
@@ -1675,8 +1765,10 @@ mod tests {
 
     #[test]
     fn test_kafka_overrides_passed_to_rustlib() {
-        let mut config = KafkaConfig::default();
-        config.brokers = vec!["localhost:9092".to_string()];
+        let mut config = KafkaConfig {
+            brokers: vec!["localhost:9092".to_string()],
+            ..KafkaConfig::default()
+        };
         config
             .librdkafka_overrides
             .insert("message.max.bytes".to_string(), "2097152".to_string());
@@ -1738,7 +1830,8 @@ kafka:
     fn test_env_override_no_vars_set() {
         let mut config = Config::default();
         let original = config.clone();
-        apply_env_overrides(&mut config);
+        config.apply_flat_env(ENV_PREFIX);
+        config.normalize();
         assert_eq!(config.server.bind_address, original.server.bind_address);
         assert_eq!(config.kafka.brokers, original.kafka.brokers);
         assert_eq!(

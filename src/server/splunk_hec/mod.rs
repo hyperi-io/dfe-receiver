@@ -249,16 +249,32 @@ async fn run_hec_server(
         build_tls_acceptor(&config.tls)?
     };
 
+    let ip_filter = crate::server::ip_filter::IpFilter::disabled();
+
     if let Some(ref provider) = tls_provider {
-        // Hot-reloadable TLS via TlsCertProvider
         let acceptor_handle = provider.acceptor_handle();
         info!(addr = %addr, tls = true, hot_reload = true, "Splunk HEC server listening");
-        crate::server::http::run_tls_server(listener, app, acceptor_handle, shutdown, metrics).await
+        crate::server::http::run_tls_server(
+            listener,
+            app,
+            acceptor_handle,
+            ip_filter,
+            shutdown,
+            metrics,
+        )
+        .await
     } else if let Some(acceptor) = tls_acceptor {
-        // Static TLS (no secrets, no hot-reload)
         let acceptor_handle = Arc::new(parking_lot::RwLock::new(acceptor));
         info!(addr = %addr, tls = true, hot_reload = false, "Splunk HEC server listening");
-        crate::server::http::run_tls_server(listener, app, acceptor_handle, shutdown, metrics).await
+        crate::server::http::run_tls_server(
+            listener,
+            app,
+            acceptor_handle,
+            ip_filter,
+            shutdown,
+            metrics,
+        )
+        .await
     } else {
         info!(addr = %addr, tls = false, "Splunk HEC server listening");
         axum::serve(listener, app)
