@@ -1,3 +1,30 @@
+# [1.14.0-dev.1](https://github.com/hyperi-io/dfe-receiver/compare/v1.13.2-dev.3...v1.14.0-dev.1) (2026-03-19)
+
+
+### Bug Fixes
+
+* code review remediations ([94ca17c](https://github.com/hyperi-io/dfe-receiver/commit/94ca17c9cb2b086447398d8d1c1c3f1f4091a4ec))
+* emit config_changed security event on pipeline config reload ([7133437](https://github.com/hyperi-io/dfe-receiver/commit/7133437d811b82e90f769556bab920a71545a8a4))
+* integrate DfeMetrics from rustlib (dual-emit dfe_* alongside receiver_*) ([561e170](https://github.com/hyperi-io/dfe-receiver/commit/561e170902ef46257b9c5cc5dc75d20bc1771c3d))
+* internet-facing hardening — slowloris, connection limits, rate limiting, IP filter ([ef7e8df](https://github.com/hyperi-io/dfe-receiver/commit/ef7e8df58b1738da39d0d782ba3159e6e59c51ed))
+* remove [patch.crates-io], bump rustlib to >=1.16.3 (published) ([a5992eb](https://github.com/hyperi-io/dfe-receiver/commit/a5992eb6bdb263d1edabe0e964ca7bc3e8ef96ca))
+* update KEDA PromQL to dfe_scaling_pressure ([631fd25](https://github.com/hyperi-io/dfe-receiver/commit/631fd2554f3974db2373a4d5ef6eb47cfcec9e3c))
+* wire log spam helpers into identified hot spots ([fbea6f4](https://github.com/hyperi-io/dfe-receiver/commit/fbea6f42273c247e2e20eaf215e8af18ae30d2cf))
+* wire security event logging into auth, TLS, and config reload ([2526c04](https://github.com/hyperi-io/dfe-receiver/commit/2526c04058f061b80a7adb7f8cc691444859ab72))
+
+
+### Features
+
+* add opt-in disk spillover via rustlib TieredSink ([5d798f6](https://github.com/hyperi-io/dfe-receiver/commit/5d798f620d82db85656950453bd3bc9570452e5a))
+* add optional Prometheus scaling trigger to KEDA ScaledObject ([d3df594](https://github.com/hyperi-io/dfe-receiver/commit/d3df59449b41a5e4b3d58c2bc49aad12c76595fe))
+* add RustlibSinkAdapter for bridging sink traits ([c71cb2f](https://github.com/hyperi-io/dfe-receiver/commit/c71cb2f3e183ecc7b6f79555cf9af1983ecabfad))
+* wire SharedConfig hot-reload to auth state ([9f57c6e](https://github.com/hyperi-io/dfe-receiver/commit/9f57c6efdd261c61a39e99dbb8d525697e05cb2f))
+
+
+### Performance Improvements
+
+* expand benchmark suite with router and metrics render groups ([18c1705](https://github.com/hyperi-io/dfe-receiver/commit/18c1705ffe2ff1960721912d5d1eb0904b98478a))
+
 ## [1.13.2-dev.3](https://github.com/hyperi-io/dfe-receiver/compare/v1.13.2-dev.2...v1.13.2-dev.3) (2026-03-16)
 
 
