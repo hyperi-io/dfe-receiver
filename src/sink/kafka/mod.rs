@@ -11,7 +11,7 @@
 //! Delegates all batching and compression to librdkafka via
 //! `KafkaProducer::HighThroughput` profile (256KB batches, 100ms linger, LZ4).
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -21,6 +21,9 @@ use tracing::{error, info};
 use crate::config::KafkaConfig;
 use crate::error::{Error, Result};
 use crate::sink::Sink;
+
+/// Sampled counter for Kafka send errors (log 1 in 1000).
+static KAFKA_ERRORS: AtomicU64 = AtomicU64::new(0);
 
 /// Kafka sink backed by rustlib KafkaProducer.
 pub struct KafkaSink {
@@ -58,7 +61,10 @@ impl Sink for KafkaSink {
                 Ok(())
             }
             Err(e) => {
-                error!(error = %e, topic = topic, "Kafka send failed");
+                if hyperi_rustlib::logger::log_sampled(&KAFKA_ERRORS, 1000) {
+                    let total = KAFKA_ERRORS.load(Ordering::Relaxed);
+                    error!(error = %e, topic, total_errors = total, "Kafka send failed (1 in 1000)");
+                }
                 self.healthy.store(false, Ordering::Relaxed);
                 Err(Error::Transport(format!("kafka send failed: {e}")))
             }

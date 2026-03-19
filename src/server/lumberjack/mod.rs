@@ -17,6 +17,7 @@ pub mod codec;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
@@ -24,6 +25,9 @@ use tokio::net::TcpListener;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
+
+/// Sampled counter for Lumberjack event processing errors (log 1 in 100).
+static LUMBERJACK_ERRORS: AtomicU64 = AtomicU64::new(0);
 
 use crate::config::LumberjackConfig;
 use crate::error::{Error, Result};
@@ -91,7 +95,10 @@ async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin>(
                 metrics.add_bytes_received(payload.len() as u64);
 
                 if let Err(e) = pipeline.process(payload).await {
-                    warn!(peer = %peer_addr, seq = sequence, error = %e, "Failed to process Lumberjack event");
+                    if hyperi_rustlib::logger::log_sampled(&LUMBERJACK_ERRORS, 100) {
+                        let total = LUMBERJACK_ERRORS.load(Ordering::Relaxed);
+                        warn!(peer = %peer_addr, seq = sequence, error = %e, total_errors = total, "Lumberjack event error (1 in 100)");
+                    }
                     metrics.inc_requests_error();
                 } else {
                     metrics.inc_requests_success();
@@ -132,7 +139,10 @@ async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin>(
                             metrics.add_bytes_received(payload.len() as u64);
 
                             if let Err(e) = pipeline.process(payload).await {
-                                warn!(peer = %peer_addr, seq = sequence, error = %e, "Failed to process Lumberjack event");
+                                if hyperi_rustlib::logger::log_sampled(&LUMBERJACK_ERRORS, 100) {
+                                    let total = LUMBERJACK_ERRORS.load(Ordering::Relaxed);
+                                    warn!(peer = %peer_addr, seq = sequence, error = %e, total_errors = total, "Lumberjack event error (1 in 100)");
+                                }
                                 metrics.inc_requests_error();
                             } else {
                                 metrics.inc_requests_success();

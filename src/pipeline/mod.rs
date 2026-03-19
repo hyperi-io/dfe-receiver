@@ -20,6 +20,9 @@ use parking_lot::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
+/// State-change flag for memory pressure log deduplication.
+static PRESSURE_LOGGED: AtomicBool = AtomicBool::new(false);
+
 use hyperi_rustlib::dlq::{Dlq, DlqEntry};
 
 use crate::buffer::{BufferManager, InMemoryBuffer, MemoryPressure, SinkBackend};
@@ -202,8 +205,14 @@ impl PipelineState {
     pub async fn process(&self, payload: Bytes) -> Result<()> {
         // Check for backpressure
         if self.should_apply_backpressure() {
-            warn!("Memory pressure high, applying backpressure");
+            if hyperi_rustlib::logger::log_state_change(&PRESSURE_LOGGED, true) {
+                warn!("Memory pressure HIGH — backpressure active");
+            }
             return Err(Error::Buffer("server under memory pressure".into()));
+        }
+        // Log recovery when pressure drops
+        if hyperi_rustlib::logger::log_state_change(&PRESSURE_LOGGED, false) {
+            info!("Memory pressure recovered");
         }
 
         // Track memory
@@ -312,8 +321,14 @@ impl PipelineState {
     pub async fn process_to_topic(&self, payload: Bytes, topic: &str) -> Result<()> {
         // Check for backpressure
         if self.should_apply_backpressure() {
-            warn!("Memory pressure high, applying backpressure");
+            if hyperi_rustlib::logger::log_state_change(&PRESSURE_LOGGED, true) {
+                warn!("Memory pressure HIGH — backpressure active");
+            }
             return Err(Error::Buffer("server under memory pressure".into()));
+        }
+        // Log recovery when pressure drops
+        if hyperi_rustlib::logger::log_state_change(&PRESSURE_LOGGED, false) {
+            info!("Memory pressure recovered");
         }
 
         // Track memory
