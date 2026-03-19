@@ -62,11 +62,15 @@ impl PipelineState {
             &config.destinations,
             config.server.auth.include_common_header,
         );
-        let memory_guard = Arc::new(MemoryGuard::new(MemoryGuardConfig {
-            limit_bytes: config.buffer.memory_limit as u64,
-            pressure_threshold: config.buffer.pressure_threshold,
-            ..Default::default()
-        }));
+        // Memory guard: env vars take precedence, then YAML config, then auto-detect
+        let mut mg_config = MemoryGuardConfig::from_env("DFE_RECEIVER");
+        if config.buffer.memory_limit > 0 && mg_config.limit_bytes == 0 {
+            mg_config.limit_bytes = config.buffer.memory_limit as u64;
+        }
+        if (config.buffer.pressure_threshold - 0.8).abs() > f64::EPSILON {
+            mg_config.pressure_threshold = config.buffer.pressure_threshold;
+        }
+        let memory_guard = Arc::new(MemoryGuard::new(mg_config));
 
         // Initialise Kafka sink with buffer wrapper if brokers configured
         let kafka_sink = if !config.kafka.brokers.is_empty() {
