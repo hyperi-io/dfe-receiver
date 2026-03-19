@@ -1,3 +1,11 @@
+# [1.14.0-dev.2](https://github.com/hyperi-io/dfe-receiver/compare/v1.14.0-dev.1...v1.14.0-dev.2) (2026-03-19)
+
+
+### Bug Fixes
+
+* clippy explicit_iter_loop in slowloris test ([c592019](https://github.com/hyperi-io/dfe-receiver/commit/c59201926160368fb8e3e1e46a4879320631922f))
+* minor GA readiness items ([44840ec](https://github.com/hyperi-io/dfe-receiver/commit/44840ec5d62c10e682a016940a97af9d6c6bd602))
+
 # [1.14.0-dev.1](https://github.com/hyperi-io/dfe-receiver/compare/v1.13.2-dev.3...v1.14.0-dev.1) (2026-03-19)
 
 
