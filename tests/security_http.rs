@@ -1143,7 +1143,7 @@ async fn test_slowloris_protection() {
     // Deliberately do NOT send the final \r\n\r\n to complete headers.
     let partial_headers = b"POST /ingest HTTP/1.1\r\nHost: lo";
 
-    for &byte in partial_headers.iter() {
+    for &byte in partial_headers {
         let write_result = stream.write_all(&[byte]).await;
         if write_result.is_err() {
             // Server already closed connection — slowloris protection worked
