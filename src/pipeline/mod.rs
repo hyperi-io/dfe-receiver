@@ -458,6 +458,11 @@ impl PipelineState {
 
         // Update shared config (bumps version, notifies subscribers)
         self.shared_config.update(new_config);
+        security::config_changed(
+            "config_reload",
+            "system",
+            "pipeline config reloaded (router + validator)",
+        );
 
         let version = self.shared_config.version();
         info!(version, "Configuration reloaded successfully");
