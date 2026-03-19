@@ -327,6 +327,7 @@ from the universal standards — they belong in TODO.md, not in standards.
 - [ ] `hyperi-ai/standards/universal/METRICS.md` — remove "Migration" section (will be done) and any stale per-project references
 - [ ] `dfe-receiver/docs/LOG-SPAMMING.md` — remove or archive (audit data moves to git history)
 - [ ] `dfe-receiver/docs/METRICS.md` — remove migration section, keep as operational reference
+- [ ] Revert `.claude/settings.local.json` to project-scoped permissions (remove broad `/projects/**` access)
 
 ### Bespoke Code Dedup (receiver vs rustlib)
 
