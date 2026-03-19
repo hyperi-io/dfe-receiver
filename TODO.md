@@ -357,6 +357,19 @@ from the universal standards — they belong in TODO.md, not in standards.
 - [ ] Pre-compute topic strings in Router (eliminate `format!()` per-message)
 - [ ] Pre-split field paths at Router/Validator construction (eliminate `.split('.').collect()` per-message)
 
+### Internet-Facing Hardening [DONE]
+
+- [x] Slowloris protection — refactored plain HTTP server from `axum::serve` to hyper low-level APIs; 5s `header_read_timeout` on all paths (TLS + plain)
+- [x] Connection idle timeout — 60s idle timeout via hyper HTTP/1 keepalive + HTTP/2 keep_alive_timeout
+- [x] Concurrency limit — `GlobalConcurrencyLimitLayer` with configurable `max_concurrent_requests` (default 10,000)
+- [x] 503 backpressure on HTTP ingest — `pipeline.is_ready()` check before processing, returns 503 + `Retry-After: 5`
+- [x] 503 backpressure on gRPC ingest — `pipeline.is_ready()` check, returns `Status::unavailable`
+- [x] Hardened hyper builder (`hardened_http_builder()`) shared between TLS and plain paths
+- [x] HARDENING.md — infrastructure fronting architecture doc (Envoy Gateway, Cloudflare, NLB, CrowdSec, cost analysis)
+- [x] Per-IP rate limiting — tower-governor 0.8 (GCRA), SmartIpKeyExtractor (X-Forwarded-For aware), opt-in via `server.rate_limit`
+- [x] IP allowlist/denylist — ipnet-trie CIDR matching, connection-level reject (before TLS handshake), opt-in via `server.ip_filter`
+- [x] Fixed test_bearer_auth_file_refresh flake — fresh reqwest client after 5s sleep to avoid stale keep-alive killed by header_read_timeout
+
 ### Medium Priority
 
 - [ ] Fix Helm `chart/templates/secret.yaml` — `bearer-tokens` hyphen in Go template field name
