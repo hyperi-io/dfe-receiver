@@ -28,11 +28,16 @@ use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::middleware;
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use tokio::net::TcpListener;
 use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
+use tower::limit::GlobalConcurrencyLimitLayer;
+use tower_governor::GovernorLayer;
+use tower_governor::governor::GovernorConfigBuilder;
+use tower_governor::key_extractor::SmartIpKeyExtractor;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 use tracing::{debug, error, info, warn};
@@ -44,11 +49,40 @@ use crate::error::{Error, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
 use crate::server::auth::{AuthState, BearerTokenProvider, token_auth_middleware};
+use crate::server::ip_filter::IpFilter;
 use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
 use crate::server::traits::ProtocolHandler;
 
 /// TLS handshake timeout to prevent slow TLS attacks.
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Time allowed for a client to send request headers after connecting.
+/// Defends against slowloris attacks where clients send headers very slowly.
+const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Idle connection timeout — close connections with no active streams.
+const CONNECTION_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Build a hyper HTTP connection builder with hardened timeouts.
+///
+/// Used by both TLS and plain-text server paths to ensure consistent
+/// slowloris protection. The timer is required by hyper when
+/// `header_read_timeout` is set.
+fn hardened_http_builder() -> hyper_util::server::conn::auto::Builder<hyper_util::rt::TokioExecutor>
+{
+    let mut builder =
+        hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+    builder
+        .http1()
+        .header_read_timeout(HEADER_READ_TIMEOUT)
+        .keep_alive(true)
+        .timer(hyper_util::rt::TokioTimer::new());
+    builder
+        .http2()
+        .keep_alive_timeout(CONNECTION_IDLE_TIMEOUT)
+        .timer(hyper_util::rt::TokioTimer::new());
+    builder
+}
 
 /// HTTP protocol handler wrapping the existing axum server.
 pub struct HttpHandler {
@@ -178,6 +212,7 @@ pub struct HttpState {
     pub pipeline: Arc<PipelineState>,
     pub metrics: Arc<Metrics>,
     pub auth: AuthState,
+    pub ip_filter: IpFilter,
 }
 
 /// Run the HTTP server with optional TLS.
@@ -199,10 +234,13 @@ pub async fn run_server(
         shutdown.clone(),
     );
 
+    let ip_filter = IpFilter::from_config(&config.server.ip_filter);
+
     let state = HttpState {
         pipeline,
         metrics: metrics.clone(),
         auth: auth_state.clone(),
+        ip_filter: ip_filter.clone(),
     };
 
     // Build TLS: use TlsCertProvider with hot-reload if secrets configured,
@@ -224,40 +262,78 @@ pub async fn run_server(
     // Security configuration
     let max_body_size = config.server.max_body_size;
     let request_timeout = Duration::from_millis(config.server.request_timeout_ms);
+    let max_concurrent = config.server.max_concurrent_requests;
+    let rate_limit_config = &config.server.rate_limit;
 
     info!(
         max_body_size = max_body_size,
         request_timeout_ms = config.server.request_timeout_ms,
+        max_concurrent_requests = max_concurrent,
+        rate_limit_enabled = rate_limit_config.enabled,
+        ip_filter_mode = %config.server.ip_filter.mode,
         "Security limits configured"
     );
 
     // Build router with security layers applied in correct order.
     //
     // LAYER ORDER (outermost to innermost, i.e. first to execute):
-    // 1. TimeoutLayer - Reject slow requests early (prevents slow loris)
-    // 2. RequestBodyLimitLayer - Reject oversized bodies before reading (prevents OOM)
-    // 3. Auth middleware - Reject unauthenticated requests before processing
-    // 4. Handler - Only reached by authenticated, properly-sized, timely requests
+    // 1. IP filter - Reject banned IPs immediately (zero work done)
+    // 2. Rate limit - Reject IPs exceeding rate (per-IP GCRA)
+    // 3. ConcurrencyLimit - Reject when too many in-flight requests
+    // 4. TimeoutLayer - Reject slow requests early (prevents slow loris)
+    // 5. RequestBodyLimitLayer - Reject oversized bodies before reading
+    // 6. Auth middleware - Reject unauthenticated requests before processing
+    // 7. Handler - Only reached by filtered, rate-limited, authenticated requests
     //
     // This order ensures minimal resource usage for malicious/bot requests.
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/ingest", post(ingest_handler))
         .route("/health/live", get(liveness_handler))
         .route("/health/ready", get(readiness_handler))
-        // Auth middleware - reject unauthenticated requests early (after body limit check)
+        // Auth middleware
         .layer(middleware::from_fn_with_state(
             auth_state,
             token_auth_middleware,
         ))
-        // Body size limit - reject oversized requests before reading body
+        // Body size limit
         .layer(RequestBodyLimitLayer::new(max_body_size))
-        // Request timeout - reject slow requests (slow loris protection)
-        // Returns 408 Request Timeout for slow clients
+        // Request timeout (408 for slow clients)
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
             request_timeout,
         ))
         .with_state(state);
+
+    // Concurrency limit (0 = unlimited)
+    if max_concurrent > 0 {
+        app = app.layer(GlobalConcurrencyLimitLayer::new(max_concurrent));
+    }
+
+    // Per-IP rate limiting via GCRA (tower-governor).
+    // SmartIpKeyExtractor: checks X-Forwarded-For, X-Real-IP, Forwarded
+    // headers first, then falls back to peer IP.
+    if rate_limit_config.enabled {
+        let governor_conf = GovernorConfigBuilder::default()
+            .per_second(rate_limit_config.requests_per_second)
+            .burst_size(rate_limit_config.burst)
+            .key_extractor(SmartIpKeyExtractor)
+            .finish()
+            .ok_or_else(|| Error::Config("invalid rate_limit configuration".into()))?;
+
+        app = app.layer(GovernorLayer::new(governor_conf));
+        info!(
+            rps = rate_limit_config.requests_per_second,
+            burst = rate_limit_config.burst,
+            "Per-IP rate limiting enabled"
+        );
+    }
+
+    // IP filter is checked in the ingest handler via HttpState (not as
+    // middleware) because our hyper serve pattern doesn't use
+    // into_make_service_with_connect_info and ConnectInfo isn't available.
+    // Peer IP is available in the TLS/plain accept loops but not propagated
+    // to axum request extensions. For now, the filter is applied at the
+    // handler level via state — still rejects before pipeline processing.
 
     let addr: SocketAddr = addr
         .parse()
@@ -268,31 +344,74 @@ pub async fn run_server(
         .map_err(|e| Error::Server(format!("failed to bind: {e}")))?;
 
     if let Some(ref provider) = tls_provider {
-        // Hot-reloadable TLS via TlsCertProvider
         let acceptor_handle = provider.acceptor_handle();
         info!(addr = %addr, tls = true, hot_reload = true, "HTTP server listening");
-        run_tls_server(listener, app, acceptor_handle, shutdown, metrics).await
+        run_tls_server(listener, app, acceptor_handle, ip_filter, shutdown, metrics).await
     } else if let Some(acceptor) = tls_acceptor {
-        // Static TLS (no secrets, no hot-reload)
         let acceptor_handle = Arc::new(parking_lot::RwLock::new(acceptor));
         info!(addr = %addr, tls = true, hot_reload = false, "HTTP server listening");
-        run_tls_server(listener, app, acceptor_handle, shutdown, metrics).await
+        run_tls_server(listener, app, acceptor_handle, ip_filter, shutdown, metrics).await
     } else {
         info!(addr = %addr, tls = false, "HTTP server listening");
-        run_plain_server(listener, app, shutdown).await
+        run_plain_server(listener, app, ip_filter, shutdown).await
     }
 }
 
 /// Run HTTP server without TLS.
+///
+/// Uses hyper low-level APIs (instead of `axum::serve`) to gain control over
+/// connection-level timeouts. This protects against slowloris attacks where
+/// `axum::serve` has no native defence.
 async fn run_plain_server(
     listener: TcpListener,
     app: Router,
+    ip_filter: IpFilter,
     shutdown: CancellationToken,
 ) -> Result<()> {
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown.cancelled_owned())
-        .await
-        .map_err(|e| Error::Server(format!("server error: {e}")))?;
+    loop {
+        tokio::select! {
+            _ = shutdown.cancelled() => {
+                info!("HTTP server stopping");
+                break;
+            }
+            result = listener.accept() => {
+                let (stream, peer_addr) = match result {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        error!(error = %e, "Failed to accept connection");
+                        continue;
+                    }
+                };
+
+                // IP filter at connection level — reject before any HTTP work
+                if !ip_filter.is_allowed(peer_addr.ip()) {
+                    debug!(peer = %peer_addr, "connection rejected by IP filter");
+                    drop(stream);
+                    continue;
+                }
+
+                let app = app.clone();
+                let shutdown = shutdown.clone();
+
+                tokio::spawn(async move {
+                    let io = hyper_util::rt::TokioIo::new(stream);
+                    let service = hyper_util::service::TowerToHyperService::new(app);
+
+                    let builder = hardened_http_builder();
+                    let conn = builder.serve_connection_with_upgrades(io, service);
+
+                    tokio::select! {
+                        _ = shutdown.cancelled() => {}
+                        result = conn => {
+                            if let Err(e) = result {
+                                debug!(peer = %peer_addr, error = %e, "Connection error");
+                            }
+                        }
+                    }
+                });
+            }
+        }
+    }
 
     info!("HTTP server stopped");
     Ok(())
@@ -306,6 +425,7 @@ pub(crate) async fn run_tls_server(
     listener: TcpListener,
     app: Router,
     acceptor: Arc<parking_lot::RwLock<TlsAcceptor>>,
+    ip_filter: IpFilter,
     shutdown: CancellationToken,
     metrics: Arc<Metrics>,
 ) -> Result<()> {
@@ -323,6 +443,13 @@ pub(crate) async fn run_tls_server(
                         continue;
                     }
                 };
+
+                // IP filter at connection level — reject before TLS handshake
+                if !ip_filter.is_allowed(peer_addr.ip()) {
+                    debug!(peer = %peer_addr, "connection rejected by IP filter");
+                    drop(stream);
+                    continue;
+                }
 
                 let acceptor = acceptor.read().clone();
                 let app = app.clone();
@@ -366,9 +493,7 @@ pub(crate) async fn run_tls_server(
                     let io = hyper_util::rt::TokioIo::new(tls_stream);
                     let service = hyper_util::service::TowerToHyperService::new(app);
 
-                    let builder = hyper_util::server::conn::auto::Builder::new(
-                        hyper_util::rt::TokioExecutor::new()
-                    );
+                    let builder = hardened_http_builder();
                     let conn = builder.serve_connection_with_upgrades(io, service);
 
                     tokio::select! {
@@ -392,11 +517,27 @@ pub(crate) async fn run_tls_server(
 ///
 /// Receives JSON payloads, validates them, routes to destination,
 /// and responds with appropriate status codes.
+///
+/// Returns 503 with Retry-After header when the pipeline is not ready
+/// (memory pressure, sink failure, shutdown). This gives clients a clear
+/// backpressure signal to back off rather than accepting and dropping.
 #[inline]
 async fn ingest_handler(
     State(state): State<HttpState>,
     body: Bytes,
-) -> std::result::Result<StatusCode, Error> {
+) -> std::result::Result<impl axum::response::IntoResponse, Error> {
+    // Shed load when pipeline is not ready (memory pressure, sink down, draining)
+    if !state.pipeline.is_ready() {
+        state.metrics.inc_requests_total();
+        state.metrics.inc_requests_error();
+        return Ok((
+            StatusCode::SERVICE_UNAVAILABLE,
+            [("retry-after", "5")],
+            "server is overloaded",
+        )
+            .into_response());
+    }
+
     // Record metrics
     state.metrics.inc_requests_total();
     state.metrics.add_bytes_received(body.len() as u64);
@@ -408,7 +549,7 @@ async fn ingest_handler(
     match state.pipeline.process(body).await {
         Ok(()) => {
             state.metrics.inc_requests_success();
-            Ok(StatusCode::ACCEPTED)
+            Ok(StatusCode::ACCEPTED.into_response())
         }
         Err(e) => {
             state.metrics.inc_requests_error();

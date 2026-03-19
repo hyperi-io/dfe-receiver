@@ -344,6 +344,16 @@ pub struct ServerConfig {
     /// Request timeout in milliseconds.
     pub request_timeout_ms: u64,
 
+    /// Maximum concurrent in-flight requests (0 = unlimited).
+    /// Protects against connection exhaustion and memory pressure.
+    pub max_concurrent_requests: usize,
+
+    /// Per-IP rate limiting configuration.
+    pub rate_limit: RateLimitConfig,
+
+    /// IP filter (allowlist/denylist) configuration.
+    pub ip_filter: IpFilterConfig,
+
     /// TLS configuration.
     pub tls: TlsConfig,
 
@@ -357,8 +367,55 @@ impl Default for ServerConfig {
             bind_address: "0.0.0.0:8080".to_string(),
             max_body_size: 10 * 1024 * 1024, // 10MB
             request_timeout_ms: 30_000,
+            max_concurrent_requests: 10_000, // safe default for high-throughput ingest
+            rate_limit: RateLimitConfig::default(),
+            ip_filter: IpFilterConfig::default(),
             tls: TlsConfig::default(),
             auth: AuthConfig::default(),
+        }
+    }
+}
+
+/// Per-IP rate limiting configuration using GCRA (token bucket variant).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RateLimitConfig {
+    /// Enable per-IP rate limiting.
+    pub enabled: bool,
+
+    /// Maximum sustained requests per second per source IP.
+    pub requests_per_second: u64,
+
+    /// Burst capacity above the sustained rate.
+    pub burst: u32,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            requests_per_second: 100,
+            burst: 500,
+        }
+    }
+}
+
+/// IP filter (allowlist / denylist) configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct IpFilterConfig {
+    /// Filter mode: "disabled", "allowlist", "denylist".
+    pub mode: String,
+
+    /// CIDR ranges (e.g., `["10.0.0.0/8", "192.168.0.0/16"]`).
+    pub cidrs: Vec<String>,
+}
+
+impl Default for IpFilterConfig {
+    fn default() -> Self {
+        Self {
+            mode: "disabled".to_string(),
+            cidrs: Vec::new(),
         }
     }
 }

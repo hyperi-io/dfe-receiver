@@ -643,6 +643,10 @@ async fn test_bearer_auth_file_refresh() {
     // Wait for refresh (1s interval + generous buffer for CI/slow machines)
     tokio::time::sleep(Duration::from_millis(5000)).await;
 
+    // Fresh client — old keep-alive connections may have been closed by
+    // server-side header_read_timeout (5s) during the sleep above.
+    let client = reqwest::Client::new();
+
     // New token should work after refresh
     let response = client
         .post(format!("{url}/ingest"))
