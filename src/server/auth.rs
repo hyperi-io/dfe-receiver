@@ -20,6 +20,7 @@
 //! - File (K8s secrets mounted as files)
 
 use std::collections::HashSet;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,6 +29,7 @@ use axum::extract::State;
 use axum::http::{Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use hyperi_rustlib::logger::security;
 use parking_lot::RwLock;
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
@@ -224,8 +226,14 @@ impl BearerTokenProvider {
             .filter(|s| !s.is_empty())
             .collect();
 
-        info!(count = new_tokens.len(), source = %source, "Loaded bearer tokens from secret");
+        let count = new_tokens.len();
+        info!(count, source = %source, "Loaded bearer tokens from secret");
         *self.tokens.write() = new_tokens;
+
+        security::token_rotated(
+            "bearer_refresh",
+            &format!("{count} tokens loaded from secret"),
+        );
 
         Ok(())
     }
@@ -247,6 +255,14 @@ impl BearerTokenProvider {
                     _ = ticker.tick() => {
                         if let Err(e) = self.load_from_secret(&source).await {
                             error!(error = %e, "Failed to refresh bearer tokens");
+                            security::SecurityEvent::new(
+                                "token.rotated",
+                                "bearer_refresh",
+                                security::SecurityOutcome::Error,
+                            )
+                            .reason("refresh_failed")
+                            .detail(&e.to_string())
+                            .emit();
                         }
                     }
                 }
@@ -263,8 +279,11 @@ impl BearerTokenProvider {
     /// Update tokens (for rotation callbacks).
     pub fn update_tokens(&self, tokens: Vec<String>) {
         let token_set: HashSet<String> = tokens.into_iter().collect();
-        info!(count = token_set.len(), "Bearer tokens updated");
+        let count = token_set.len();
+        info!(count, "Bearer tokens updated");
         *self.tokens.write() = token_set;
+
+        security::token_rotated("bearer_update", &format!("{count} tokens loaded"));
     }
 
     /// Get current token count.
@@ -287,18 +306,27 @@ impl Drop for BearerTokenProvider {
 /// Extract client IP from request headers (respects X-Forwarded-For from trusted proxies).
 ///
 /// Returns the first IP from X-Forwarded-For if present, otherwise X-Real-IP.
-fn extract_client_ip(headers: &axum::http::HeaderMap) -> Option<String> {
+/// Returns both a display string (for existing log fields) and a parsed `IpAddr`
+/// (for security events).
+fn extract_client_ip(headers: &axum::http::HeaderMap) -> (Option<String>, Option<IpAddr>) {
     // X-Forwarded-For may contain multiple IPs: "client, proxy1, proxy2"
     if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok())
         && let Some(first_ip) = xff.split(',').next()
     {
-        return Some(first_ip.trim().to_string());
+        let ip_str = first_ip.trim().to_string();
+        let parsed = ip_str.parse::<IpAddr>().ok();
+        return (Some(ip_str), parsed);
     }
     // Fallback to X-Real-IP
-    headers
+    if let Some(ip_str) = headers
         .get("x-real-ip")
         .and_then(|v| v.to_str().ok())
         .map(String::from)
+    {
+        let parsed = ip_str.parse::<IpAddr>().ok();
+        return (Some(ip_str), parsed);
+    }
+    (None, None)
 }
 
 /// Token-based authentication middleware.
@@ -322,7 +350,7 @@ pub async fn token_auth_middleware(
     }
 
     // Extract client IP for logging (before consuming request)
-    let client_ip = extract_client_ip(request.headers());
+    let (client_ip_str, client_ip) = extract_client_ip(request.headers());
 
     // Check authentication based on mode
     let auth_result = match mode {
@@ -348,12 +376,16 @@ pub async fn token_auth_middleware(
             // This uses WARN level - high enough to be captured in production,
             // but not ERROR (which would trigger alerts for expected traffic)
             warn!(
-                client_ip = client_ip.as_deref().unwrap_or("unknown"),
+                client_ip = client_ip_str.as_deref().unwrap_or("unknown"),
                 auth_mode = ?mode,
                 failure_reason = %err.message,
                 status_code = err.status.as_u16(),
                 "auth_failure"
             );
+
+            // Emit structured security event (target: "security")
+            security::auth_failure(&err.message, &err.message, client_ip);
+
             err.into_response()
         }
     }

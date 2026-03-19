@@ -37,6 +37,8 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 use tracing::{debug, error, info, warn};
 
+use hyperi_rustlib::logger::security::{self, SecurityOutcome};
+
 use crate::config::{AuthConfig, SharedConfig};
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
@@ -153,6 +155,12 @@ pub fn spawn_auth_reload_watcher(
                                 "Bearer tokens reloaded from config"
                             );
                         }
+
+                        security::config_changed(
+                            "auth_reload",
+                            "system",
+                            "auth configuration updated via config reload",
+                        );
 
                         current_auth = new_auth.clone();
                     }
@@ -331,12 +339,24 @@ pub(crate) async fn run_tls_server(
                             // Track TLS failure in metrics
                             metrics.inc_tls_handshake_failure();
                             debug!(peer = %peer_addr, error = %e, "tls_handshake_failed");
+                            security::tls_event(
+                                "handshake",
+                                SecurityOutcome::Failure,
+                                Some(&e.to_string()),
+                                Some(peer_addr.ip()),
+                            );
                             return;
                         }
                         Err(_) => {
                             // Track TLS timeout in metrics
                             metrics.inc_tls_handshake_failure();
                             warn!(peer = %peer_addr, "tls_handshake_timeout");
+                            security::tls_event(
+                                "handshake",
+                                SecurityOutcome::Failure,
+                                Some("handshake_timeout"),
+                                Some(peer_addr.ip()),
+                            );
                             return;
                         }
                     };
