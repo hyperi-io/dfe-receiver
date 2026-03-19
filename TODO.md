@@ -190,47 +190,41 @@ implemented in hyperi-rustlib and consumed by each project.
 
 #### Phase 1: rustlib — Log Spam Protection [DONE]
 
-- [x] Add `tracing-throttle` dep to rustlib `logger` feature
-- [x] Wire throttle layer into `logger::setup()` — opt-in via `LOG_THROTTLE_ENABLED` env var
-- [x] Add helper functions: `log_state_change()`, `log_sampled()`, `log_debounced()`
-- [x] Tests for all three helpers + throttle layer integration
-- [ ] Publish rustlib patch (push to main, let CI run)
+- [x] `tracing-throttle` layer, opt-in via `LOG_THROTTLE_ENABLED`
+- [x] Helper functions: `log_state_change()`, `log_sampled()`, `log_debounced()`
+- [x] Published as part of rustlib `v1.16.3`
 
 #### Phase 2: rustlib — Standard DFE Metrics Framework [DONE]
 
-- [x] Add `DfeMetrics` struct with standard `dfe_transport_*`, `dfe_pipeline_*`, `dfe_records_*`, `dfe_scaling_*` metrics
-- [x] Pre-register all metrics at construction (counters init to 0)
-- [x] Transport label support (`transport="kafka|grpc|file"`)
-- [x] Tiered architecture: `MetricsManager` (generic base) → `DfeMetrics` (DFE extension)
-- [x] Tests
-- [ ] Publish rustlib patch (push to main, let CI run)
+- [x] `DfeMetrics` struct with `dfe_transport_*`, `dfe_pipeline_*`, `dfe_records_*`, `dfe_scaling_*`
+- [x] Transport label support, tiered architecture
+- [x] Published as part of rustlib `v1.16.3`
 
-#### Phase 2.5: rustlib — Security Logging Framework
+#### Phase 2.5: rustlib — Security Logging Framework [DONE]
 
-- [ ] Design `SecurityEvent` struct — structured security events separate from operational logs
-- [ ] Standard event types: `auth.success`, `auth.failure`, `access.denied`, `config.changed`, `rate_limit.triggered`, `tls.failure`, `token.rotated`
-- [ ] Mandatory fields: `event_type`, `actor`, `action`, `outcome`, `source_ip`, `timestamp`
-- [ ] `SecurityLogger` — emits structured JSON events to tracing with a `security` target
-- [ ] Filtering: operators can route security events to a dedicated sink via `RUST_LOG=security=info`
-- [ ] Integrate into rustlib `logger` feature (no new feature flag needed)
-- [ ] Tests
-- [ ] Wire into dfe-receiver: auth middleware, TLS handler, token rotation
-- [ ] Add `SECURITY-LOGGING.md` to `hyperi-ai/standards/universal/`
+- [x] `SecurityEvent` builder + 10 convenience functions (OWASP-aligned)
+- [x] `target: "security"` routing, level-mapped (info/warn/error)
+- [x] Data quality events: `record_dlq`, `data_quality_alert`
+- [x] Service name + version in JSON log output (auto via DfeApp)
+- [x] Published as part of rustlib `v1.16.3`
 
-#### Phase 3: dfe-receiver — Consume New rustlib
+#### Phase 2.75: rustlib — Flat Env Override Helpers [DONE]
 
-- [ ] Bump rustlib dep, remove `[patch.crates-io]`
-- [ ] Replace hand-rolled `Metrics` struct with rustlib `DfeMetrics`
-- [ ] Emit `dfe_*` metrics (dual-emit old names alongside new)
-- [ ] Wire log spam helpers into identified hot spots:
-  - Memory pressure warn → state-transition
-  - Kafka send error → sampled (1/1000)
-  - Loader send error → sampled (1/1000)
-  - Syslog UDP recv error → debounced (5s)
-  - Lumberjack frame parse error → sampled (1/100)
-- [ ] Update KEDA ScaledObject PromQL query
-- [ ] Run benchmarks to verify no regression
-- [ ] Push to main, verify CI
+- [x] `ApplyFlatEnv` + `Normalize` traits
+- [x] Runtime helpers: `flat_env_string`, `flat_env_list`, `flat_env_bool`, `flat_env_parsed`
+- [x] `load_config<T>()` generic cascade function
+- [x] Published as part of rustlib `v1.16.3`
+
+#### Phase 3: dfe-receiver — Consume New rustlib [DONE]
+
+- [x] Bumped rustlib to `>=1.16.3`, removed `[patch.crates-io]`
+- [x] `DfeMetrics` dual-emit (old `receiver_*` + new `dfe_*`)
+- [x] Log spam helpers wired into 5 hot spots
+- [x] Security events wired into auth, TLS, config reload, validation
+- [x] `ApplyFlatEnv` migration (removed 153 lines of bespoke env override code)
+- [x] KEDA PromQL updated to `dfe_scaling_pressure`
+- [x] 14 hardening tests added (rate limit, IP filter, backpressure, slowloris, metrics)
+- [x] CI green, 404 tests passing
 
 #### Phase 4: Other dfe-* Rust Projects (apply same pattern)
 
@@ -329,20 +323,19 @@ from the universal standards — they belong in TODO.md, not in standards.
 - [ ] `dfe-receiver/docs/METRICS.md` — remove migration section, keep as operational reference
 - [ ] Revert `.claude/settings.local.json` to project-scoped permissions (remove broad `/projects/**` access)
 
-### Bespoke Code Dedup (receiver vs rustlib)
+### Bespoke Code Dedup (receiver vs rustlib) [PARTIAL]
 
-- [ ] Audit dfe-receiver for functionality duplicated with rustlib
-- [ ] Replace bespoke code with rustlib equivalents (extend rustlib if needed)
-- [ ] Key suspects: hand-rolled `Metrics` struct, `RateWindow`, `BufferManager` memory detection, metrics HTTP server
+- [x] `apply_env_overrides()` replaced with rustlib `ApplyFlatEnv` trait
+- [x] Security logging via rustlib `SecurityEvent` (not bespoke)
+- [ ] Hand-rolled `Metrics` struct — still used for `receiver_*` names (dual-emit). Remove after Phase 6 drops old names.
+- [ ] `RateWindow` — still bespoke. Consider moving to rustlib if other projects need it.
+- [ ] `BufferManager` memory detection — uses `sysinfo::System::new()` directly. rustlib's `MetricsManager` auto-detects container memory.
 
-### Security Logging Standard (rustlib)
+### Security Logging Standard (rustlib) [DONE]
 
-- [ ] Design `SecurityEventLogger` for rustlib — structured security events separate from operational logs
-- [ ] Standard event types: `auth.success`, `auth.failure`, `access.denied`, `config.changed`, `rate_limit.triggered`, `tls.failure`
-- [ ] Mandatory fields: `event_type`, `actor`, `action`, `outcome`, `source_ip`, `timestamp`
-- [ ] Separate security log sink (file or structured JSON to dedicated index)
-- [ ] Wire into dfe-receiver auth middleware, TLS handler, rate limiting
-- [ ] Add to `hyperi-ai/standards/universal/` as `SECURITY-LOGGING.md`
+- [x] `SecurityEvent` builder + convenience functions in rustlib
+- [x] Wired into dfe-receiver (auth, TLS, config reload, validation, token rotation)
+- [ ] Add `SECURITY-LOGGING.md` to `hyperi-ai/standards/universal/` (standards doc not yet written)
 
 ### Smart Log Combining (rustlib enhancement)
 
@@ -373,8 +366,10 @@ from the universal standards — they belong in TODO.md, not in standards.
 ### Medium Priority
 
 - [ ] Fix Helm `chart/templates/secret.yaml` — `bearer-tokens` hyphen in Go template field name
-- [ ] Remove `[patch.crates-io]` from Cargo.toml after rustlib publishes (blocked on Phases 1/2)
+- [x] Remove `[patch.crates-io]` from Cargo.toml — done, building against crates.io `v1.16.3`
 - [ ] Documentation for deployment
+- [ ] Write `SECURITY-LOGGING.md` universal standard for `hyperi-ai/standards/universal/`
+- [ ] `#[derive(FlatEnvOverrides)]` proc macro (Phase 2 of flat env spec — currently manual impls)
 
 ### Low Priority
 
