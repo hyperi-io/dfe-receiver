@@ -22,6 +22,9 @@ use crate::config::{KafkaConfig, LoaderConfig};
 use crate::error::{Error, Result};
 use crate::sink::Sink;
 
+/// Sampled counter for loader send errors (log 1 in 1000).
+static LOADER_ERRORS: AtomicU64 = AtomicU64::new(0);
+
 const LOADER_TOPIC: &str = "dfe-loader-input";
 
 /// dfe-loader sink that sends directly to a loader's Kafka input topic.
@@ -92,7 +95,10 @@ impl Sink for LoaderSink {
                     Ok(())
                 }
                 Err(e) => {
-                    error!(error = %e, topic = %self.topic, "Loader send failed");
+                    if hyperi_rustlib::logger::log_sampled(&LOADER_ERRORS, 1000) {
+                        let total = LOADER_ERRORS.load(Ordering::Relaxed);
+                        error!(error = %e, topic = %self.topic, total_errors = total, "Loader send failed (1 in 1000)");
+                    }
                     self.healthy.store(false, Ordering::Relaxed);
                     Err(Error::Transport(format!("loader send failed: {e}")))
                 }

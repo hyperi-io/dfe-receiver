@@ -22,6 +22,7 @@
 
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
+use hyperi_rustlib::metrics::DfeMetrics;
 use hyperi_rustlib::scaling::ScalingPressure;
 
 /// Reason for authentication failure (for metrics labels).
@@ -91,6 +92,10 @@ pub struct Metrics {
 
     // Scaling pressure engine (from hyperi-rustlib)
     scaling: ScalingPressure,
+
+    // Standard DFE metrics (dual-emit `dfe_*` alongside `receiver_*`).
+    // None in tests (no global recorder); Some in prod after MetricsManager.
+    dfe: Option<DfeMetrics>,
 }
 
 /// Sliding window for rate calculation.
@@ -161,6 +166,9 @@ impl std::fmt::Debug for Metrics {
 
 impl Metrics {
     /// Create a new metrics collector with scaling pressure engine.
+    ///
+    /// `dfe` is `None` — use [`with_dfe_metrics`] in production after
+    /// the global `MetricsManager` recorder is installed.
     pub fn with_scaling(scaling: ScalingPressure) -> Self {
         Self {
             requests_total: AtomicU64::new(0),
@@ -194,20 +202,41 @@ impl Metrics {
             circuit_consecutive_failures: AtomicU64::new(0),
             rate_window: RwLock::new(RateWindow::new(Duration::from_secs(60))),
             scaling,
+            dfe: None,
         }
     }
 
+    /// Create a metrics collector with standard DFE metrics enabled.
+    ///
+    /// Calls `DfeMetrics::register()` to describe all `dfe_*` metric names
+    /// with the global recorder. Must be called **after** `MetricsManager::new()`
+    /// installs the Prometheus recorder.
+    pub fn with_dfe_metrics(scaling: ScalingPressure) -> Self {
+        let mut metrics = Self::with_scaling(scaling);
+        metrics.dfe = Some(DfeMetrics::register());
+        metrics
+    }
+
     /// Increment total requests counter.
+    /// Rate window sampled every 100 requests to reduce write lock contention.
     #[inline]
     pub fn inc_requests_total(&self) {
         let count = self.requests_total.fetch_add(1, Ordering::Relaxed) + 1;
-        self.rate_window.write().add_sample(count);
+        if count.is_multiple_of(100) {
+            self.rate_window.write().add_sample(count);
+        }
+        if let Some(ref dfe) = self.dfe {
+            dfe.records_received(1);
+        }
     }
 
     /// Increment successful requests counter.
     #[inline]
     pub fn inc_requests_success(&self) {
         self.requests_success.fetch_add(1, Ordering::Relaxed);
+        if let Some(ref dfe) = self.dfe {
+            dfe.records_delivered(1);
+        }
     }
 
     /// Increment error requests counter.
@@ -232,6 +261,9 @@ impl Metrics {
     #[inline]
     pub fn add_messages_sent_kafka(&self, count: u64) {
         self.messages_sent_kafka.fetch_add(count, Ordering::Relaxed);
+        if let Some(ref dfe) = self.dfe {
+            dfe.transport_sent("kafka", count);
+        }
     }
 
     /// Increment messages sent to loader counter.
@@ -239,12 +271,18 @@ impl Metrics {
     pub fn add_messages_sent_loader(&self, count: u64) {
         self.messages_sent_loader
             .fetch_add(count, Ordering::Relaxed);
+        if let Some(ref dfe) = self.dfe {
+            dfe.transport_sent("loader", count);
+        }
     }
 
     /// Increment DLQ messages counter.
     #[inline]
     pub fn inc_messages_dlq(&self) {
         self.messages_dlq.fetch_add(1, Ordering::Relaxed);
+        if let Some(ref dfe) = self.dfe {
+            dfe.records_dlq(1);
+        }
     }
 
     /// Increment spilled messages counter.
@@ -275,12 +313,18 @@ impl Metrics {
     #[inline]
     pub fn set_spool_bytes(&self, bytes: u64) {
         self.spool_bytes.store(bytes, Ordering::Relaxed);
+        if let Some(ref dfe) = self.dfe {
+            dfe.spool_bytes(bytes as f64);
+        }
     }
 
     /// Set spool messages gauge.
     #[inline]
     pub fn set_spool_messages(&self, count: u64) {
         self.spool_messages.store(count, Ordering::Relaxed);
+        if let Some(ref dfe) = self.dfe {
+            dfe.spool_messages(count as f64);
+        }
     }
 
     /// Increment active connections.
@@ -310,19 +354,25 @@ impl Metrics {
     #[inline]
     pub fn inc_auth_failure(&self, reason: AuthFailureReason) {
         self.auth_failures_total.fetch_add(1, Ordering::Relaxed);
-        match reason {
+        let reason_str = match reason {
             AuthFailureReason::MissingHeader => {
                 self.auth_failures_missing_header
                     .fetch_add(1, Ordering::Relaxed);
+                "missing_header"
             }
             AuthFailureReason::InvalidToken => {
                 self.auth_failures_invalid_token
                     .fetch_add(1, Ordering::Relaxed);
+                "invalid_token"
             }
             AuthFailureReason::InvalidHeader => {
                 self.auth_failures_invalid_header
                     .fetch_add(1, Ordering::Relaxed);
+                "invalid_header"
             }
+        };
+        if let Some(ref dfe) = self.dfe {
+            dfe.auth_failure(reason_str);
         }
     }
 
@@ -331,15 +381,20 @@ impl Metrics {
     pub fn inc_validation_failure(&self, reason: ValidationFailureReason) {
         self.validation_failures_total
             .fetch_add(1, Ordering::Relaxed);
-        match reason {
+        let reason_str = match reason {
             ValidationFailureReason::InvalidJson => {
                 self.validation_failures_invalid_json
                     .fetch_add(1, Ordering::Relaxed);
+                "invalid_json"
             }
             ValidationFailureReason::MissingField => {
                 self.validation_failures_missing_field
                     .fetch_add(1, Ordering::Relaxed);
+                "missing_field"
             }
+        };
+        if let Some(ref dfe) = self.dfe {
+            dfe.validation_failure(reason_str);
         }
     }
 
@@ -437,6 +492,7 @@ impl Metrics {
     ///
     /// Called from the metrics update cycle (every 1 second) to feed
     /// current component values into the rustlib `ScalingPressure` engine.
+    /// Also emits standard `dfe_scaling_*` gauges when `DfeMetrics` is active.
     pub fn update_scaling(&self) {
         self.scaling
             .set_component("request_rate", self.request_rate());
@@ -452,11 +508,26 @@ impl Metrics {
             "spill",
             self.messages_spilled.load(Ordering::Relaxed) as f64,
         );
-        self.scaling.set_memory(
-            self.memory_used_bytes.load(Ordering::Relaxed),
-            self.memory_limit_bytes.load(Ordering::Relaxed),
-        );
-        self.scaling.set_circuit_open(self.is_circuit_open());
+
+        let mem_used = self.memory_used_bytes.load(Ordering::Relaxed);
+        let mem_limit = self.memory_limit_bytes.load(Ordering::Relaxed);
+        self.scaling.set_memory(mem_used, mem_limit);
+
+        let circuit_open = self.is_circuit_open();
+        self.scaling.set_circuit_open(circuit_open);
+
+        // Dual-emit scaling gauges via DfeMetrics
+        if let Some(ref dfe) = self.dfe {
+            let pressure = self.scaling.calculate();
+            dfe.scaling_pressure(pressure);
+            dfe.scaling_circuit_open(circuit_open);
+            let mem_ratio = if mem_limit > 0 {
+                mem_used as f64 / mem_limit as f64
+            } else {
+                0.0
+            };
+            dfe.scaling_memory_pressure(mem_ratio);
+        }
     }
 
     /// Calculate scaling pressure (0.0-100.0).

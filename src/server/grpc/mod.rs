@@ -69,6 +69,13 @@ impl Vector for VectorService {
         &self,
         request: Request<PushEventsRequest>,
     ) -> std::result::Result<Response<PushEventsResponse>, Status> {
+        // Shed load when pipeline is not ready (memory pressure, sink down, draining)
+        if !self.pipeline.is_ready() {
+            self.metrics.inc_requests_total();
+            self.metrics.inc_requests_error();
+            return Err(Status::unavailable("server is overloaded"));
+        }
+
         let req = request.into_inner();
         self.metrics.inc_requests_total();
 

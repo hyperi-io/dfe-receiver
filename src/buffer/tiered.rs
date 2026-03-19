@@ -1,27 +1,19 @@
 // Project:   dfe-receiver
 // File:      src/buffer/tiered.rs
-// Purpose:   TieredSink wrapper with circuit breaker
+// Purpose:   InMemoryBuffer wrapper with circuit breaker
 // Language:  Rust
 //
 // License:   FSL-1.1-ALv2
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
-//! TieredSink wrapper providing in-memory buffering when sinks are unavailable.
+//! In-memory buffer with circuit breaker for sink unavailability.
 //!
 //! Uses hyperi-rustlib's CircuitBreaker for health tracking with half-open state support.
 //! Messages are buffered in memory during outages and drained when the downstream
 //! sink recovers.
 //!
-//! ## Design Decision: No Disk Spillover
-//!
-//! Disk spillover was considered but rejected for PB/s scale ingestion:
-//!
-//! 1. **K8s memory limits** - Pods are OOMKilled when memory exceeded, triggering
-//!    KEDA scale-up. This is the desired behavior.
-//! 2. **Client-side buffering** - Vector has its own disk buffer for retries.
-//! 3. **Backpressure** - Circuit breaker + 503 responses propagate pressure upstream.
-//! 4. **Simplicity** - No disk I/O on hot path, no persistent volumes needed.
-//! 5. **Performance** - At PB/s scale, disk becomes a bottleneck.
+//! This is the default buffer backend (no disk I/O). For opt-in disk spillover,
+//! see `SinkBackend::Tiered` which uses rustlib's `TieredSink` with a disk spool.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -45,12 +37,12 @@ struct SpillMessage {
     payload: Bytes,
 }
 
-/// TieredSink wraps a primary sink with circuit breaker and in-memory buffering.
+/// InMemoryBuffer wraps a primary sink with circuit breaker and in-memory buffering.
 ///
 /// Uses hyperi-rustlib's CircuitBreaker for health tracking with half-open state support.
 /// When the primary sink fails, messages are buffered in memory and automatically
 /// drained when the sink recovers.
-pub struct TieredSink<S: Sink> {
+pub struct InMemoryBuffer<S: Sink> {
     /// Primary sink (hot path).
     primary: Arc<S>,
     /// In-memory spillover queue.
@@ -65,7 +57,7 @@ pub struct TieredSink<S: Sink> {
     drained_count: AtomicU64,
 }
 
-impl<S: Sink + Send + Sync + 'static> TieredSink<S> {
+impl<S: Sink + Send + Sync + 'static> InMemoryBuffer<S> {
     /// Create a new tiered sink.
     #[allow(unused_variables)]
     pub fn new(primary: S, config: &BufferConfig) -> Self {
@@ -87,18 +79,20 @@ impl<S: Sink + Send + Sync + 'static> TieredSink<S> {
         matches!(state, CircuitState::Closed | CircuitState::HalfOpen)
     }
 
-    /// Queue a message for later delivery.
-    fn queue_message(&self, topic: String, payload: Bytes) {
+    /// Queue a message for later delivery. Returns false if queue is full.
+    fn queue_message(&self, topic: String, payload: Bytes) -> bool {
         let mut queue = self.spill_queue.lock();
-        queue.push(SpillMessage { topic, payload });
-        self.queued_count.fetch_add(1, Ordering::Relaxed);
-
         if queue.len() >= self.max_queue_size {
             warn!(
                 queue_size = queue.len(),
-                "Queue at capacity - backpressure recommended"
+                max = self.max_queue_size,
+                "In-memory queue full, rejecting message"
             );
+            return false;
         }
+        queue.push(SpillMessage { topic, payload });
+        self.queued_count.fetch_add(1, Ordering::Relaxed);
+        true
     }
 
     /// Try to drain queued messages.
@@ -151,8 +145,8 @@ impl<S: Sink + Send + Sync + 'static> TieredSink<S> {
     }
 
     /// Get statistics.
-    pub async fn stats(&self) -> TieredSinkStats {
-        TieredSinkStats {
+    pub async fn stats(&self) -> InMemoryBufferStats {
+        InMemoryBufferStats {
             circuit_state: self.circuit.state().await,
             consecutive_failures: self.circuit.consecutive_failures(),
             queue_size: self.spill_queue.lock().len(),
@@ -185,7 +179,7 @@ impl<S: Sink + Send + Sync + 'static> TieredSink<S> {
 
 /// Statistics for the tiered sink.
 #[derive(Debug, Clone)]
-pub struct TieredSinkStats {
+pub struct InMemoryBufferStats {
     /// Current circuit breaker state.
     pub circuit_state: CircuitState,
     /// Consecutive failures.
@@ -198,7 +192,7 @@ pub struct TieredSinkStats {
     pub drained_total: u64,
 }
 
-impl TieredSinkStats {
+impl InMemoryBufferStats {
     /// Check if circuit is open.
     #[must_use]
     pub fn circuit_open(&self) -> bool {
@@ -207,12 +201,16 @@ impl TieredSinkStats {
 }
 
 #[async_trait]
-impl<S: Sink + Send + Sync + 'static> Sink for TieredSink<S> {
+impl<S: Sink + Send + Sync + 'static> Sink for InMemoryBuffer<S> {
     /// Send a message, queuing on failure.
     async fn send(&self, topic: &str, payload: Bytes) -> Result<()> {
         // Fast path: if circuit is open, queue immediately
         if !self.should_use_hot_path().await {
-            self.queue_message(topic.to_string(), payload);
+            if !self.queue_message(topic.to_string(), payload) {
+                return Err(crate::error::Error::Transport(
+                    "in-memory queue full, backpressure".into(),
+                ));
+            }
             return Ok(());
         }
 
@@ -225,8 +223,12 @@ impl<S: Sink + Send + Sync + 'static> Sink for TieredSink<S> {
             Err(e) => {
                 self.circuit.record_failure().await;
                 debug!(error = %e, topic = topic, "Primary send failed, queuing");
-                self.queue_message(topic.to_string(), payload);
-                Ok(()) // Return Ok - message is queued, not lost
+                if !self.queue_message(topic.to_string(), payload) {
+                    return Err(crate::error::Error::Transport(
+                        "in-memory queue full, backpressure".into(),
+                    ));
+                }
+                Ok(())
             }
         }
     }
@@ -299,13 +301,14 @@ mod tests {
         BufferConfig {
             memory_limit: 0,
             pressure_threshold: 0.8,
+            ..Default::default()
         }
     }
 
     #[tokio::test]
     async fn test_tiered_sink_success() {
         let primary = TestSink::new(0); // Always succeed
-        let tiered = TieredSink::new(primary, &test_config());
+        let tiered = InMemoryBuffer::new(primary, &test_config());
 
         let result = tiered.send("test", Bytes::from("data")).await;
         assert!(result.is_ok());
@@ -317,7 +320,7 @@ mod tests {
     #[tokio::test]
     async fn test_tiered_sink_failure_queues() {
         let primary = TestSink::new(100); // Always fail
-        let tiered = TieredSink::new(primary, &test_config());
+        let tiered = InMemoryBuffer::new(primary, &test_config());
 
         let result = tiered.send("test", Bytes::from("data")).await;
         assert!(result.is_ok()); // Should return Ok (queued)
@@ -331,7 +334,7 @@ mod tests {
     async fn test_tiered_sink_circuit_breaker() {
         let primary = TestSink::new(100); // Always fail
         let config = test_config();
-        let tiered = TieredSink::new(primary, &config);
+        let tiered = InMemoryBuffer::new(primary, &config);
 
         // Send enough to trip circuit breaker (threshold is 5)
         for _ in 0..6 {
@@ -346,7 +349,7 @@ mod tests {
     #[tokio::test]
     async fn test_tiered_sink_drain() {
         let primary = TestSink::new(3); // Fail first 3, then succeed
-        let tiered = TieredSink::new(primary, &test_config());
+        let tiered = InMemoryBuffer::new(primary, &test_config());
 
         // First 3 will fail and queue
         for _ in 0..3 {
@@ -364,7 +367,7 @@ mod tests {
     #[tokio::test]
     async fn test_stats() {
         let primary = TestSink::new(0);
-        let tiered = TieredSink::new(primary, &test_config());
+        let tiered = InMemoryBuffer::new(primary, &test_config());
 
         let stats = tiered.stats().await;
         assert!(!stats.circuit_open());

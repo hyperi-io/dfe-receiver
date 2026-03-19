@@ -1,0 +1,28 @@
+[advisories]
+vulnerability = "deny"
+unmaintained = "warn"
+
+[licenses]
+unlicensed = "deny"
+allow = [
+    "FSL-1.1-ALv2",
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "MPL-2.0",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+]
+copyleft = "warn"
+
+[bans]
+wildcards = "deny"
+multiple-versions = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
