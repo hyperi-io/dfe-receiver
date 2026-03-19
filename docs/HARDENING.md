@@ -1,8 +1,12 @@
 # Internet-Facing Hardening & Fronting Architecture
+March 2026  
 
-**dfe-receiver is the only direct internet-facing component in the DFE stack.**
-This document covers application-level hardening (80/20 effort) and
-cost-effective infrastructure fronting for K8s and AWS deployments.
+**dfe-receiver is the only direct internet-facing component in the DFE stack.**  
+
+This document covers application-level hardening (80/20 effort) and cost-effective infrastructure fronting for K8s and AWS deployments.  
+Based on the July-September 2026 PB/day stress tests and DFE 2.1/2.0 customer deployments  
+Answers for common customer deployment questions (cloud architects, security reviews)  
+HyperI internal -> see infrastructure standards, PB scale patterns  
 
 ---
 
@@ -237,12 +241,12 @@ This is free (just resource allocation) and prevents cross-service impact.
 scale, per-GB and per-request charges compound horrifically. Every layer
 that touches traffic must be evaluated on $/GB.
 
-### 3.1 The Honest Cost Table
+### 3.1 Estimated Cost Table
 
 Here's what things actually cost at scale, not the marketing pitch.
 Prices are US East (Virginia) as of March 2026 -- verify before deploying.
 
-**Monthly cost at 10 TB/month ingestion (a modest production workload):**
+**Estimated Monthly cost at 10 TB/month ingestion (a modest production workload):**
 
 | Service | Monthly Cost | $/GB | Notes |
 |---|---|---|---|
@@ -385,7 +389,7 @@ Internet -> CloudFront + AWS WAF -> ALB -> Envoy Gateway -> dfe-receiver
 - Protection: Full AWS-native stack, compliance-ready
 - Suitable for: Regulated industries, AWS-mandated security controls
 
-#### Variant D: Maximum Protection (Enterprise)
+#### Variant D: Maximum Protection
 
 ```
 Internet -> Cloudflare Enterprise -> NLB -> Envoy Gateway + CrowdSec -> dfe-receiver
@@ -489,20 +493,6 @@ No single layer is perfect. The value is in the combination:
 - Circuit breaker stops downstream cascade failures
 
 ---
-
-## Part 5: Implementation Status
-
-### Application-Level Hardening (Complete)
-
-All application-level protections are implemented and active:
-
-- **Slowloris protection** — hyper low-level builder with 5s `header_read_timeout` on all paths (TLS + plain), replacing `axum::serve` which has no header timeout ([axum #2741](https://github.com/tokio-rs/axum/issues/2741))
-- **Connection idle timeout** — 60s via HTTP/1 keepalive + HTTP/2 `keep_alive_timeout`
-- **Concurrency limit** — `GlobalConcurrencyLimitLayer` with configurable `max_concurrent_requests` (default 10,000)
-- **503 backpressure** — HTTP + gRPC ingest endpoints check `pipeline.is_ready()` before processing, return 503 with `Retry-After: 5` when pipeline is backpressured
-- **Per-IP rate limiting** — GCRA algorithm via `tower-governor`, configurable burst/period, `SmartIpKeyExtractor` with `X-Forwarded-For` support
-- **IP allowlist/denylist** — CIDR trie matching via `ipnet-trie`, connection-level reject before request processing
-- **Hardened hyper builder** — `hardened_http_builder()` shared between TLS and plain paths, consolidates all timeout/keepalive settings
 
 ### Infrastructure Fronting (Deployment-Time)
 
