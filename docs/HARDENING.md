@@ -68,7 +68,14 @@ The two NGINX ingress controllers are often confused:
 
 [Envoy Gateway](https://gateway.envoyproxy.io/) is the CNCF reference
 implementation of the Kubernetes Gateway API, built on Envoy Proxy.
+Reached v1.2 (stable) — production-ready for all use cases described here.
 Cost: **$0** (open source, Apache 2.0).
+
+**Future path:** If service mesh features are ever needed (mTLS between
+services, traffic shifting, canary deployments), Istio ambient mesh
+(sidecar-less, GA since Istio 1.22) uses Envoy as its data plane. The
+Envoy Gateway investment carries over — same proxy, same config patterns,
+same operational knowledge.
 
 **Security features via CRDs:**
 
