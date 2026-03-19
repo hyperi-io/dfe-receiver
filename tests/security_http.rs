@@ -1039,7 +1039,7 @@ async fn test_503_when_pipeline_not_ready() {
     );
 
     // Fill the buffer beyond pressure threshold (80% of 100 = 80 bytes)
-    pipeline.buffer_manager().add_bytes(90);
+    pipeline.memory_guard().add_bytes(90);
     assert!(
         !pipeline.is_ready(),
         "Pipeline should NOT be ready when buffer is under pressure"
@@ -1093,7 +1093,7 @@ async fn test_503_when_pipeline_not_ready() {
     );
 
     // Release pressure and verify recovery
-    pipeline.buffer_manager().remove_bytes(90);
+    pipeline.memory_guard().release(90);
     assert!(
         pipeline.is_ready(),
         "Pipeline should be ready after pressure is released"
