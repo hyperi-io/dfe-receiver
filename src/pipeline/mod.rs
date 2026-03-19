@@ -26,7 +26,7 @@ static PRESSURE_LOGGED: AtomicBool = AtomicBool::new(false);
 use hyperi_rustlib::dlq::{Dlq, DlqEntry};
 use hyperi_rustlib::logger::security;
 
-use crate::buffer::{BufferManager, InMemoryBuffer, MemoryPressure, SinkBackend};
+use crate::buffer::{InMemoryBuffer, MemoryGuard, MemoryGuardConfig, MemoryPressure, SinkBackend};
 use crate::config::{Config, SharedConfig};
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
@@ -47,7 +47,7 @@ pub struct PipelineState {
     loader_sink: Option<Arc<SinkBackend<LoaderSink>>>,
     grpc_loader_sink: Option<Arc<SinkBackend<GrpcSink>>>,
     file_sink: Option<Arc<FileSink>>,
-    buffer_manager: Arc<BufferManager>,
+    memory_guard: Arc<MemoryGuard>,
     dlq: Option<Arc<Dlq>>,
     ready: AtomicBool,
 }
@@ -62,7 +62,11 @@ impl PipelineState {
             &config.destinations,
             config.server.auth.include_common_header,
         );
-        let buffer_manager = Arc::new(BufferManager::new(&config.buffer));
+        let memory_guard = Arc::new(MemoryGuard::new(MemoryGuardConfig {
+            limit_bytes: config.buffer.memory_limit as u64,
+            pressure_threshold: config.buffer.pressure_threshold,
+            ..Default::default()
+        }));
 
         // Initialise Kafka sink with buffer wrapper if brokers configured
         let kafka_sink = if !config.kafka.brokers.is_empty() {
@@ -140,7 +144,7 @@ impl PipelineState {
             loader_sink,
             grpc_loader_sink,
             file_sink,
-            buffer_manager,
+            memory_guard,
             dlq,
             ready: AtomicBool::new(true),
         })
@@ -163,7 +167,7 @@ impl PipelineState {
         }
 
         // Not ready under high memory pressure
-        if self.buffer_manager.is_under_pressure() {
+        if self.memory_guard.under_pressure() {
             return false;
         }
 
@@ -191,12 +195,12 @@ impl PipelineState {
 
     /// Get memory pressure level.
     pub fn memory_pressure(&self) -> MemoryPressure {
-        self.buffer_manager.pressure()
+        self.memory_guard.pressure()
     }
 
     /// Check if backpressure should be applied.
     pub fn should_apply_backpressure(&self) -> bool {
-        self.buffer_manager.is_under_pressure()
+        self.memory_guard.under_pressure()
     }
 
     /// Process a message through the pipeline.
@@ -218,12 +222,12 @@ impl PipelineState {
 
         // Track memory
         let payload_size = payload.len() as u64;
-        self.buffer_manager.add_bytes(payload_size);
+        self.memory_guard.add_bytes(payload_size);
 
         let result = self.process_inner(payload).await;
 
         // Release memory tracking on completion
-        self.buffer_manager.remove_bytes(payload_size);
+        self.memory_guard.release(payload_size);
 
         result
     }
@@ -336,7 +340,7 @@ impl PipelineState {
 
         // Track memory
         let payload_size = payload.len() as u64;
-        self.buffer_manager.add_bytes(payload_size);
+        self.memory_guard.add_bytes(payload_size);
 
         // Validate (acquire and release lock before any await)
         let validation = self.validator.read().validate(&payload);
@@ -354,7 +358,7 @@ impl PipelineState {
         };
 
         // Release memory tracking on completion
-        self.buffer_manager.remove_bytes(payload_size);
+        self.memory_guard.release(payload_size);
 
         result
     }
@@ -407,9 +411,9 @@ impl PipelineState {
         }
     }
 
-    /// Get buffer manager for external access.
-    pub fn buffer_manager(&self) -> &Arc<BufferManager> {
-        &self.buffer_manager
+    /// Get memory guard for external access.
+    pub fn memory_guard(&self) -> &Arc<MemoryGuard> {
+        &self.memory_guard
     }
 
     /// Snapshot pipeline state into metrics gauges.
@@ -419,8 +423,8 @@ impl PipelineState {
     pub async fn update_metrics(&self, metrics: &Metrics) {
         // Memory usage
         metrics.set_memory_usage(
-            self.buffer_manager.total_bytes(),
-            self.buffer_manager.memory_limit(),
+            self.memory_guard.current_bytes(),
+            self.memory_guard.limit_bytes(),
         );
 
         // Kafka sink stats
