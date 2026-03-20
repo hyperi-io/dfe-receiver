@@ -8,7 +8,7 @@
 
 [package]
 name = "dfe-receiver"
-version = "1.13.10"
+version = "1.14.1"
 edition = "2024"
 rust-version = "1.94"
 description = "High-performance HTTP/gRPC receiver for PB/s scale data ingestion"
@@ -23,10 +23,11 @@ doctest = false
 
 [dependencies]
 # HyperI shared library (crates.io)
-hyperi-rustlib = { version = "1.16.0", features = [
+hyperi-rustlib = { version = ">=1.16.5", features = [
     "config",
     "config-reload",
     "logger",
+    "memory",
     "metrics",
     "http-server",
     "transport-kafka",
@@ -74,6 +75,13 @@ rustls = "0.23"
 rustls-pemfile = "2"
 tokio-rustls = "0.26"
 
+# Rate limiting
+tower_governor = { version = "0.8", features = ["axum"] }
+
+# IP filtering (CIDR allowlist/denylist)
+ipnet = "2"
+ipnet-trie = "0.2"
+
 # Performance
 rustc-hash = "2"
 compact_str = "0.8"
@@ -107,8 +115,6 @@ base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 async-trait = "0.1"
-sysinfo = "0.37"
-
 # Optional allocators
 tikv-jemallocator = { version = "0.6", optional = true }
 mimalloc = { version = "0.1", optional = true }
@@ -142,6 +148,11 @@ opt-level = 3
 [profile.bench]
 lto = "thin"
 codegen-units = 1
+
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false
 
 [[bench]]
 name = "throughput"
@@ -182,3 +193,4 @@ format_push_string = "allow"
 single_char_add_str = "allow"
 uninlined_format_args = "allow"
 unnecessary_literal_bound = "allow"
+
