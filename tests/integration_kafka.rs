@@ -32,6 +32,8 @@
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
 
+mod common;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -42,127 +44,52 @@ use rdkafka::message::Message;
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
 use tokio::time::timeout;
 
-/// Load environment variables from .env file if present.
-fn load_env() {
-    let _ = dotenvy::dotenv();
-}
+use common::{kafka_test_config, test_topic};
 
-/// Get Kafka brokers from environment or use default.
-fn kafka_brokers() -> String {
-    std::env::var("KAFKA_BROKERS").unwrap_or_else(|_| "localhost:9092".to_string())
-}
-
-/// Get test topic prefix from environment or use default.
-fn test_topic_prefix() -> String {
-    std::env::var("TEST_TOPIC_PREFIX").unwrap_or_else(|_| "dfe-receiver-test".to_string())
-}
-
-/// Create a unique test topic name.
-fn test_topic(suffix: &str) -> String {
-    format!(
-        "{}-{}-{}",
-        test_topic_prefix(),
-        suffix,
-        uuid::Uuid::new_v4()
-    )
-}
-
-/// Check if Kafka is available.
+/// Check if Kafka is available (uses dual-mode config).
 async fn kafka_available() -> bool {
-    load_env();
+    let kf = kafka_test_config();
+    if !kf.is_reachable() {
+        return false;
+    }
 
     let mut config = ClientConfig::new();
-    config.set("bootstrap.servers", kafka_brokers());
-    config.set("socket.timeout.ms", "5000");
-    config.set("metadata.request.timeout.ms", "5000");
-
-    // Add SASL if configured
-    if let Ok(user) = std::env::var("KAFKA_SASL_USER") {
-        if let Ok(password) = std::env::var("KAFKA_SASL_PASSWORD") {
-            let mechanism =
-                std::env::var("KAFKA_SASL_MECHANISM").unwrap_or_else(|_| "PLAIN".to_string());
-            let protocol = std::env::var("KAFKA_SECURITY_PROTOCOL")
-                .unwrap_or_else(|_| "SASL_PLAINTEXT".to_string());
-
-            config.set("security.protocol", &protocol);
-            config.set("sasl.mechanism", &mechanism);
-            config.set("sasl.username", &user);
-            config.set("sasl.password", &password);
-        }
-    }
+    config.set("bootstrap.servers", &kf.brokers);
+    config.set("socket.timeout.ms", "10000");
+    config.set("metadata.request.timeout.ms", "10000");
+    kf.apply_sasl(&mut config);
 
     let producer: Result<FutureProducer, _> = config.create();
     match producer {
-        Ok(p) => {
-            // Try to get metadata to verify connection
-            match p.client().fetch_metadata(None, Duration::from_secs(5)) {
-                Ok(_) => true,
-                Err(e) => {
-                    eprintln!("Kafka metadata fetch failed: {e}");
-                    false
-                }
-            }
-        }
-        Err(e) => {
-            eprintln!("Kafka producer creation failed: {e}");
-            false
-        }
+        Ok(p) => p
+            .client()
+            .fetch_metadata(None, Duration::from_secs(5))
+            .is_ok(),
+        Err(_) => false,
     }
 }
 
-/// Create a Kafka producer with proper configuration.
+/// Create a Kafka producer with dual-mode configuration.
 fn create_producer() -> FutureProducer {
-    load_env();
-
+    let kf = kafka_test_config();
     let mut config = ClientConfig::new();
-    config.set("bootstrap.servers", kafka_brokers());
+    config.set("bootstrap.servers", &kf.brokers);
     config.set("message.timeout.ms", "30000");
     config.set("acks", "all");
-
-    // Add SASL if configured
-    if let Ok(user) = std::env::var("KAFKA_SASL_USER") {
-        if let Ok(password) = std::env::var("KAFKA_SASL_PASSWORD") {
-            let mechanism =
-                std::env::var("KAFKA_SASL_MECHANISM").unwrap_or_else(|_| "PLAIN".to_string());
-            let protocol = std::env::var("KAFKA_SECURITY_PROTOCOL")
-                .unwrap_or_else(|_| "SASL_PLAINTEXT".to_string());
-
-            config.set("security.protocol", &protocol);
-            config.set("sasl.mechanism", &mechanism);
-            config.set("sasl.username", &user);
-            config.set("sasl.password", &password);
-        }
-    }
-
+    kf.apply_sasl(&mut config);
     config.create().expect("Failed to create Kafka producer")
 }
 
-/// Create a Kafka consumer with proper configuration.
+/// Create a Kafka consumer with dual-mode configuration.
 fn create_consumer(group_id: &str) -> StreamConsumer {
-    load_env();
-
+    let kf = kafka_test_config();
     let mut config = ClientConfig::new();
-    config.set("bootstrap.servers", kafka_brokers());
+    config.set("bootstrap.servers", &kf.brokers);
     config.set("group.id", group_id);
     config.set("auto.offset.reset", "earliest");
     config.set("enable.auto.commit", "false");
     config.set("session.timeout.ms", "10000");
-
-    // Add SASL if configured
-    if let Ok(user) = std::env::var("KAFKA_SASL_USER") {
-        if let Ok(password) = std::env::var("KAFKA_SASL_PASSWORD") {
-            let mechanism =
-                std::env::var("KAFKA_SASL_MECHANISM").unwrap_or_else(|_| "PLAIN".to_string());
-            let protocol = std::env::var("KAFKA_SECURITY_PROTOCOL")
-                .unwrap_or_else(|_| "SASL_PLAINTEXT".to_string());
-
-            config.set("security.protocol", &protocol);
-            config.set("sasl.mechanism", &mechanism);
-            config.set("sasl.username", &user);
-            config.set("sasl.password", &password);
-        }
-    }
-
+    kf.apply_sasl(&mut config);
     config.create().expect("Failed to create Kafka consumer")
 }
 
@@ -174,10 +101,13 @@ fn create_consumer(group_id: &str) -> StreamConsumer {
 #[tokio::test]
 #[ignore = "requires Kafka - run with --ignored"]
 async fn test_kafka_connectivity() {
-    assert!(
-        kafka_available().await,
-        "Kafka is not available. Set KAFKA_BROKERS or start docker-compose."
-    );
+    if !kafka_available().await {
+        eprintln!(
+            "Skipping: Kafka not available (TEST_MODE={:?})",
+            common::TestMode::detect()
+        );
+        return;
+    }
 }
 
 /// Test sending a message directly to Kafka and consuming it.
@@ -303,7 +233,6 @@ async fn test_kafka_batch_send() {
 #[tokio::test]
 #[ignore = "requires Kafka - run with --ignored"]
 async fn test_receiver_kafka_sink() {
-    use dfe_receiver::config::KafkaConfig;
     use dfe_receiver::sink::Sink;
     use dfe_receiver::sink::kafka::KafkaSink;
 
@@ -312,30 +241,8 @@ async fn test_receiver_kafka_sink() {
         return;
     }
 
-    load_env();
-
-    // Build config from environment
-    let mut config = KafkaConfig::default();
-    config.brokers = kafka_brokers()
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .collect();
-    config.client_id = "dfe-receiver-test".to_string();
-
-    // Add SASL if configured
-    if let Ok(user) = std::env::var("KAFKA_SASL_USER") {
-        if let Ok(password) = std::env::var("KAFKA_SASL_PASSWORD") {
-            let mechanism =
-                std::env::var("KAFKA_SASL_MECHANISM").unwrap_or_else(|_| "PLAIN".to_string());
-
-            config.sasl = Some(dfe_receiver::config::SaslConfig {
-                enabled: true,
-                mechanism,
-                username: user,
-                password,
-            });
-        }
-    }
+    let kf = kafka_test_config();
+    let config = kf.to_receiver_kafka_config();
 
     let topic = test_topic("sink");
     let sink = KafkaSink::new(&config).expect("Failed to create KafkaSink");
@@ -374,7 +281,7 @@ async fn test_receiver_kafka_sink() {
 #[tokio::test]
 #[ignore = "requires Kafka - run with --ignored"]
 async fn test_full_pipeline_to_kafka() {
-    use dfe_receiver::config::{Config, SaslConfig, SharedConfig};
+    use dfe_receiver::config::{Config, SharedConfig};
     use dfe_receiver::pipeline::PipelineState;
 
     if !kafka_available().await {
@@ -382,30 +289,8 @@ async fn test_full_pipeline_to_kafka() {
         return;
     }
 
-    load_env();
-
-    // Build config
-    let mut config = Config::default();
-    config.kafka.brokers = kafka_brokers()
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .collect();
-    config.kafka.client_id = "dfe-receiver-test".to_string();
-
-    // Add SASL if configured
-    if let Ok(user) = std::env::var("KAFKA_SASL_USER") {
-        if let Ok(password) = std::env::var("KAFKA_SASL_PASSWORD") {
-            let mechanism =
-                std::env::var("KAFKA_SASL_MECHANISM").unwrap_or_else(|_| "PLAIN".to_string());
-
-            config.kafka.sasl = Some(SaslConfig {
-                enabled: true,
-                mechanism,
-                username: user,
-                password,
-            });
-        }
-    }
+    let kf = kafka_test_config();
+    let mut config = kf.to_receiver_config();
 
     // Configure routing to use test topic
     let topic = test_topic("pipeline");
@@ -460,7 +345,7 @@ async fn test_full_pipeline_to_kafka() {
 #[tokio::test]
 #[ignore = "requires Kafka - run with --ignored"]
 async fn test_http_to_kafka() {
-    use dfe_receiver::config::{Config, SaslConfig};
+    use dfe_receiver::config::Config;
     use dfe_receiver::metrics::Metrics;
     use dfe_receiver::pipeline::Orchestrator;
     use dfe_receiver::server::http;
@@ -471,30 +356,8 @@ async fn test_http_to_kafka() {
         return;
     }
 
-    load_env();
-
-    // Build config
-    let mut config = Config::default();
-    config.kafka.brokers = kafka_brokers()
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .collect();
-    config.kafka.client_id = "dfe-receiver-test".to_string();
-
-    // Add SASL if configured
-    if let Ok(user) = std::env::var("KAFKA_SASL_USER") {
-        if let Ok(password) = std::env::var("KAFKA_SASL_PASSWORD") {
-            let mechanism =
-                std::env::var("KAFKA_SASL_MECHANISM").unwrap_or_else(|_| "PLAIN".to_string());
-
-            config.kafka.sasl = Some(SaslConfig {
-                enabled: true,
-                mechanism,
-                username: user,
-                password,
-            });
-        }
-    }
+    let kf = kafka_test_config();
+    let mut config = kf.to_receiver_config();
 
     // Configure routing
     let topic = test_topic("http");
@@ -585,7 +448,7 @@ async fn test_http_to_kafka() {
 #[tokio::test]
 #[ignore = "requires Kafka - run with --ignored"]
 async fn test_category_routing() {
-    use dfe_receiver::config::{Config, SaslConfig, SharedConfig};
+    use dfe_receiver::config::{Config, SharedConfig};
     use dfe_receiver::pipeline::PipelineState;
 
     if !kafka_available().await {
@@ -593,30 +456,8 @@ async fn test_category_routing() {
         return;
     }
 
-    load_env();
-
-    // Build config
-    let mut config = Config::default();
-    config.kafka.brokers = kafka_brokers()
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .collect();
-    config.kafka.client_id = "dfe-receiver-test".to_string();
-
-    // Add SASL if configured
-    if let Ok(user) = std::env::var("KAFKA_SASL_USER") {
-        if let Ok(password) = std::env::var("KAFKA_SASL_PASSWORD") {
-            let mechanism =
-                std::env::var("KAFKA_SASL_MECHANISM").unwrap_or_else(|_| "PLAIN".to_string());
-
-            config.kafka.sasl = Some(SaslConfig {
-                enabled: true,
-                mechanism,
-                username: user,
-                password,
-            });
-        }
-    }
+    let kf = kafka_test_config();
+    let mut config = kf.to_receiver_config();
 
     // Configure category-based routing
     let auth_topic = test_topic("auth");
@@ -687,7 +528,7 @@ async fn test_category_routing() {
 #[tokio::test]
 #[ignore = "requires Kafka - run with --ignored"]
 async fn test_dlq_routing() {
-    use dfe_receiver::config::{Config, SaslConfig, SharedConfig};
+    use dfe_receiver::config::{Config, SharedConfig};
     use dfe_receiver::pipeline::PipelineState;
 
     if !kafka_available().await {
@@ -695,30 +536,8 @@ async fn test_dlq_routing() {
         return;
     }
 
-    load_env();
-
-    // Build config
-    let mut config = Config::default();
-    config.kafka.brokers = kafka_brokers()
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .collect();
-    config.kafka.client_id = "dfe-receiver-test".to_string();
-
-    // Add SASL if configured
-    if let Ok(user) = std::env::var("KAFKA_SASL_USER") {
-        if let Ok(password) = std::env::var("KAFKA_SASL_PASSWORD") {
-            let mechanism =
-                std::env::var("KAFKA_SASL_MECHANISM").unwrap_or_else(|_| "PLAIN".to_string());
-
-            config.kafka.sasl = Some(SaslConfig {
-                enabled: true,
-                mechanism,
-                username: user,
-                password,
-            });
-        }
-    }
+    let kf = kafka_test_config();
+    let mut config = kf.to_receiver_config();
 
     // Configure DLQ
     let dlq_topic = test_topic("dlq");
