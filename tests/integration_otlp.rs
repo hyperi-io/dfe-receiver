@@ -73,34 +73,14 @@ async fn start_otlp_handler(config: Config) -> (CancellationToken, Arc<Metrics>)
     (shutdown, metrics)
 }
 
-/// Check total requests from metrics.
+/// Get total requests from metrics.
 fn requests_total(metrics: &Metrics) -> u64 {
-    let output = metrics.render();
-    for line in output.lines() {
-        if line.starts_with("receiver_requests_total ") {
-            return line
-                .trim_start_matches("receiver_requests_total ")
-                .trim()
-                .parse()
-                .unwrap_or(0);
-        }
-    }
-    0
+    metrics.get_requests_total()
 }
 
-/// Check bytes received from metrics.
+/// Get bytes received from metrics.
 fn bytes_received(metrics: &Metrics) -> u64 {
-    let output = metrics.render();
-    for line in output.lines() {
-        if line.starts_with("receiver_bytes_received_total ") {
-            return line
-                .trim_start_matches("receiver_bytes_received_total ")
-                .trim()
-                .parse()
-                .unwrap_or(0);
-        }
-    }
-    0
+    metrics.get_bytes_received()
 }
 
 /// Build a minimal OTLP ExportLogsServiceRequest with one log record.

@@ -1,6 +1,6 @@
 // Project:   dfe-receiver
 // File:      src/metrics/mod.rs
-// Purpose:   Prometheus metrics and KEDA scaling
+// Purpose:   Prometheus metrics and KEDA scaling (dfe_receiver namespace)
 // Language:  Rust
 //
 // License:   FSL-1.1-ALv2
@@ -8,21 +8,27 @@
 
 //! Prometheus metrics for dfe-receiver.
 //!
-//! Exposes counters, gauges, and histograms for monitoring and KEDA scaling.
-//! Includes a compound scaling metric for autoscaling decisions.
+//! Uses `MetricsManager` with namespace `dfe_receiver` and rustlib
+//! `dfe_groups` for standardised metric groups. Receiver-specific
+//! counters use the `metrics` crate directly with transport labels.
 //!
 //! # Security Metrics
 //!
 //! Security-related metrics for alerting on potential attacks:
-//! - `receiver_auth_failures_total` - Authentication failures by reason
-//! - `receiver_validation_failures_total` - Validation failures by reason
-//! - `receiver_request_timeouts_total` - Request timeouts (slow loris indicator)
-//! - `receiver_body_size_rejected_total` - Oversized body rejections
-//! - `receiver_tls_handshake_failures_total` - TLS failures
+//! - `dfe_receiver_auth_failures_total` - Authentication failures by reason
+//! - `dfe_receiver_validation_failures_total` - Validation failures by reason
+//! - `dfe_receiver_request_timeouts_total` - Request timeouts (slow loris indicator)
+//! - `dfe_receiver_body_size_rejected_total` - Oversized body rejections
+//! - `dfe_receiver_tls_handshake_failures_total` - TLS failures
 
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::time::Duration;
 
 use hyperi_rustlib::metrics::DfeMetrics;
+use hyperi_rustlib::metrics::MetricsManager;
+use hyperi_rustlib::metrics::dfe_groups::{
+    AppMetrics, BackpressureMetrics, BufferMetrics, CircuitBreakerMetrics, SinkMetrics,
+};
 use hyperi_rustlib::scaling::{RateWindow, ScalingPressure};
 
 /// Reason for authentication failure (for metrics labels).
@@ -44,11 +50,14 @@ pub enum ValidationFailureReason {
     /// Required field is missing.
     MissingField,
 }
-use std::time::Duration;
 
 /// Metrics collector for dfe-receiver.
+///
+/// Wraps rustlib metric groups (`AppMetrics`, `BufferMetrics`, etc.) plus
+/// receiver-specific counters with transport labels. Atomics are retained
+/// for values the scaling pressure engine reads back.
 pub struct Metrics {
-    // Counters
+    // Atomics for scaling engine read-back and test getter access
     requests_total: AtomicU64,
     requests_success: AtomicU64,
     requests_error: AtomicU64,
@@ -60,7 +69,7 @@ pub struct Metrics {
     messages_spilled: AtomicU64,
     messages_drained: AtomicU64,
 
-    // Security counters
+    // Security counters (atomics for test getter access)
     auth_failures_total: AtomicU64,
     auth_failures_missing_header: AtomicU64,
     auth_failures_invalid_token: AtomicU64,
@@ -72,7 +81,7 @@ pub struct Metrics {
     body_size_rejected_total: AtomicU64,
     tls_handshake_failures_total: AtomicU64,
 
-    // Gauges
+    // Gauge atomics (for scaling read-back)
     batch_queue_size: AtomicU64,
     batch_queue_bytes: AtomicU64,
     spool_bytes: AtomicU64,
@@ -91,9 +100,16 @@ pub struct Metrics {
     // Scaling pressure engine (from hyperi-rustlib)
     scaling: ScalingPressure,
 
-    // Standard DFE metrics (dual-emit `dfe_*` alongside `receiver_*`).
+    // Standard DFE metrics (dual-emit `dfe_*` alongside `dfe_receiver_*`).
     // None in tests (no global recorder); Some in prod after MetricsManager.
     dfe: Option<DfeMetrics>,
+
+    // Rustlib metric groups (None in tests without MetricsManager)
+    app_group: Option<AppMetrics>,
+    buffer_group: Option<BufferMetrics>,
+    sink_group: Option<SinkMetrics>,
+    cb_group: Option<CircuitBreakerMetrics>,
+    bp_group: Option<BackpressureMetrics>,
 }
 
 impl std::fmt::Debug for Metrics {
@@ -118,8 +134,7 @@ impl std::fmt::Debug for Metrics {
 impl Metrics {
     /// Create a new metrics collector with scaling pressure engine.
     ///
-    /// `dfe` is `None` — use [`with_dfe_metrics`] in production after
-    /// the global `MetricsManager` recorder is installed.
+    /// No MetricsManager — use for tests or standalone contexts.
     pub fn with_scaling(scaling: ScalingPressure) -> Self {
         Self {
             requests_total: AtomicU64::new(0),
@@ -154,53 +169,113 @@ impl Metrics {
             rate_window: RateWindow::new(Duration::from_secs(60)),
             scaling,
             dfe: None,
+            app_group: None,
+            buffer_group: None,
+            sink_group: None,
+            cb_group: None,
+            bp_group: None,
         }
     }
 
-    /// Create a metrics collector with standard DFE metrics enabled.
+    /// Create a metrics collector with standard DFE metrics and metric groups.
     ///
-    /// Calls `DfeMetrics::register()` to describe all `dfe_*` metric names
-    /// with the global recorder. Must be called **after** `MetricsManager::new()`
-    /// installs the Prometheus recorder.
+    /// Creates a `MetricsManager` with namespace `dfe_receiver`, registers
+    /// all metric groups, and calls `DfeMetrics::register()` for platform metrics.
+    /// Must be called once — the `MetricsManager` installs the global Prometheus
+    /// recorder.
     pub fn with_dfe_metrics(scaling: ScalingPressure) -> Self {
+        let manager = MetricsManager::new("dfe_receiver");
+
+        let app = AppMetrics::new(&manager, env!("CARGO_PKG_VERSION"), "dev");
+        let buffer = BufferMetrics::new(&manager);
+        let sink = SinkMetrics::new(&manager);
+        let cb = CircuitBreakerMetrics::new(&manager);
+        let bp = BackpressureMetrics::new(&manager);
+        let dfe = DfeMetrics::register();
+
+        // Describe receiver-specific metrics with transport labels
+        describe_receiver_metrics();
+
         let mut metrics = Self::with_scaling(scaling);
-        metrics.dfe = Some(DfeMetrics::register());
+        metrics.dfe = Some(dfe);
+        metrics.app_group = Some(app);
+        metrics.buffer_group = Some(buffer);
+        metrics.sink_group = Some(sink);
+        metrics.cb_group = Some(cb);
+        metrics.bp_group = Some(bp);
         metrics
     }
+
+    // ======================================================================
+    // Request counters (with transport label)
+    // ======================================================================
 
     /// Increment total requests counter.
     /// Rate window sampled every 100 requests to reduce write lock contention.
     #[inline]
-    pub fn inc_requests_total(&self) {
+    pub fn inc_requests_total(&self, transport: &str) {
         let count = self.requests_total.fetch_add(1, Ordering::Relaxed) + 1;
         if count.is_multiple_of(100) {
             self.rate_window.record(count);
         }
+        metrics::counter!("dfe_receiver_requests_total", "transport" => transport.to_string())
+            .increment(1);
         if let Some(ref dfe) = self.dfe {
             dfe.records_received(1);
+        }
+        if let Some(ref app) = self.app_group {
+            app.record_received(1);
         }
     }
 
     /// Increment successful requests counter.
     #[inline]
-    pub fn inc_requests_success(&self) {
+    pub fn inc_requests_success(&self, transport: &str) {
         self.requests_success.fetch_add(1, Ordering::Relaxed);
+        metrics::counter!(
+            "dfe_receiver_requests_success_total",
+            "transport" => transport.to_string()
+        )
+        .increment(1);
         if let Some(ref dfe) = self.dfe {
             dfe.records_delivered(1);
+        }
+        if let Some(ref app) = self.app_group {
+            app.record_processed(1);
         }
     }
 
     /// Increment error requests counter.
     #[inline]
-    pub fn inc_requests_error(&self) {
+    pub fn inc_requests_error(&self, transport: &str) {
         self.requests_error.fetch_add(1, Ordering::Relaxed);
+        metrics::counter!(
+            "dfe_receiver_requests_error_total",
+            "transport" => transport.to_string()
+        )
+        .increment(1);
+        if let Some(ref app) = self.app_group {
+            app.record_error(1);
+        }
     }
 
     /// Add bytes received.
     #[inline]
-    pub fn add_bytes_received(&self, bytes: u64) {
+    pub fn add_bytes_received(&self, transport: &str, bytes: u64) {
         self.bytes_received.fetch_add(bytes, Ordering::Relaxed);
+        metrics::counter!(
+            "dfe_receiver_bytes_received_total",
+            "transport" => transport.to_string()
+        )
+        .increment(bytes);
+        if let Some(ref app) = self.app_group {
+            app.record_bytes_received(bytes);
+        }
     }
+
+    // ======================================================================
+    // Pipeline counters (no transport label)
+    // ======================================================================
 
     /// Increment messages batched counter.
     #[inline]
@@ -248,16 +323,26 @@ impl Metrics {
         self.messages_drained.fetch_add(count, Ordering::Relaxed);
     }
 
+    // ======================================================================
+    // Gauges
+    // ======================================================================
+
     /// Set batch queue size gauge.
     #[inline]
     pub fn set_batch_queue_size(&self, size: u64) {
         self.batch_queue_size.store(size, Ordering::Relaxed);
+        if let Some(ref buf) = self.buffer_group {
+            buf.buffer_records.set(size as f64);
+        }
     }
 
     /// Set batch queue bytes gauge.
     #[inline]
     pub fn set_batch_queue_bytes(&self, bytes: u64) {
         self.batch_queue_bytes.store(bytes, Ordering::Relaxed);
+        if let Some(ref buf) = self.buffer_group {
+            buf.buffer_bytes.set(bytes as f64);
+        }
     }
 
     /// Set spool bytes gauge.
@@ -295,11 +380,14 @@ impl Metrics {
     pub fn set_memory_usage(&self, used: u64, limit: u64) {
         self.memory_used_bytes.store(used, Ordering::Relaxed);
         self.memory_limit_bytes.store(limit, Ordering::Relaxed);
+        if let Some(ref app) = self.app_group {
+            app.set_memory(used, limit);
+        }
     }
 
-    // ==========================================================================
+    // ======================================================================
     // Security metrics
-    // ==========================================================================
+    // ======================================================================
 
     /// Record an auth failure with reason.
     #[inline]
@@ -322,6 +410,11 @@ impl Metrics {
                 "invalid_header"
             }
         };
+        metrics::counter!(
+            "dfe_receiver_auth_failures_total",
+            "reason" => reason_str.to_string()
+        )
+        .increment(1);
         if let Some(ref dfe) = self.dfe {
             dfe.auth_failure(reason_str);
         }
@@ -344,6 +437,11 @@ impl Metrics {
                 "missing_field"
             }
         };
+        metrics::counter!(
+            "dfe_receiver_validation_failures_total",
+            "reason" => reason_str.to_string()
+        )
+        .increment(1);
         if let Some(ref dfe) = self.dfe {
             dfe.validation_failure(reason_str);
         }
@@ -353,6 +451,7 @@ impl Metrics {
     #[inline]
     pub fn inc_request_timeout(&self) {
         self.request_timeouts_total.fetch_add(1, Ordering::Relaxed);
+        metrics::counter!("dfe_receiver_request_timeouts_total").increment(1);
     }
 
     /// Record a body size rejection (413).
@@ -360,6 +459,7 @@ impl Metrics {
     pub fn inc_body_size_rejected(&self) {
         self.body_size_rejected_total
             .fetch_add(1, Ordering::Relaxed);
+        metrics::counter!("dfe_receiver_body_size_rejected_total").increment(1);
     }
 
     /// Record a TLS handshake failure.
@@ -367,11 +467,36 @@ impl Metrics {
     pub fn inc_tls_handshake_failure(&self) {
         self.tls_handshake_failures_total
             .fetch_add(1, Ordering::Relaxed);
+        metrics::counter!("dfe_receiver_tls_handshake_failures_total").increment(1);
     }
 
-    // ==========================================================================
-    // Gauge getters (for pipeline metric updates)
-    // ==========================================================================
+    // ======================================================================
+    // Gauge getters (for pipeline metric updates and tests)
+    // ======================================================================
+
+    /// Get total requests count.
+    #[inline]
+    pub fn get_requests_total(&self) -> u64 {
+        self.requests_total.load(Ordering::Relaxed)
+    }
+
+    /// Get successful requests count.
+    #[inline]
+    pub fn get_requests_success(&self) -> u64 {
+        self.requests_success.load(Ordering::Relaxed)
+    }
+
+    /// Get error requests count.
+    #[inline]
+    pub fn get_requests_error(&self) -> u64 {
+        self.requests_error.load(Ordering::Relaxed)
+    }
+
+    /// Get total bytes received.
+    #[inline]
+    pub fn get_bytes_received(&self) -> u64 {
+        self.bytes_received.load(Ordering::Relaxed)
+    }
 
     /// Get batch queue size.
     #[inline]
@@ -397,21 +522,49 @@ impl Metrics {
         self.messages_drained.load(Ordering::Relaxed)
     }
 
-    // ==========================================================================
+    /// Get active connections count.
+    #[inline]
+    pub fn get_active_connections(&self) -> u64 {
+        self.active_connections.load(Ordering::Relaxed)
+    }
+
+    /// Get auth failure count.
+    #[inline]
+    pub fn get_auth_failures_total(&self) -> u64 {
+        self.auth_failures_total.load(Ordering::Relaxed)
+    }
+
+    /// Get validation failure count.
+    #[inline]
+    pub fn get_validation_failures_total(&self) -> u64 {
+        self.validation_failures_total.load(Ordering::Relaxed)
+    }
+
+    /// Get TLS handshake failure count.
+    #[inline]
+    pub fn get_tls_handshake_failures_total(&self) -> u64 {
+        self.tls_handshake_failures_total.load(Ordering::Relaxed)
+    }
+
+    // ======================================================================
     // Circuit breaker metrics
-    // ==========================================================================
+    // ======================================================================
 
     /// Set circuit breaker state. 0=Closed, 1=Open, 2=HalfOpen.
     #[inline]
     pub fn set_circuit_state(&self, state: crate::buffer::CircuitState, failures: u32) {
-        let code = match state {
-            crate::buffer::CircuitState::Closed => 0,
-            crate::buffer::CircuitState::Open => 1,
-            crate::buffer::CircuitState::HalfOpen => 2,
+        let (code, state_str) = match state {
+            crate::buffer::CircuitState::Closed => (0, "closed"),
+            crate::buffer::CircuitState::Open => (1, "open"),
+            crate::buffer::CircuitState::HalfOpen => (2, "half_open"),
         };
         self.circuit_state.store(code, Ordering::Relaxed);
         self.circuit_consecutive_failures
             .store(u64::from(failures), Ordering::Relaxed);
+        if let Some(ref cb) = self.cb_group {
+            cb.set_state("kafka", code);
+            cb.record_transition("kafka", state_str);
+        }
     }
 
     /// Check if circuit breaker is open (sink down).
@@ -420,24 +573,26 @@ impl Metrics {
         self.circuit_state.load(Ordering::Relaxed) == 1
     }
 
-    /// Get circuit breaker state as string.
-    fn circuit_state_str(&self) -> &'static str {
-        match self.circuit_state.load(Ordering::Relaxed) {
-            0 => "closed",
-            1 => "open",
-            2 => "half_open",
-            _ => "unknown",
-        }
-    }
-
     /// Get request rate per second.
     pub fn request_rate(&self) -> f64 {
         self.rate_window.rate_per_second()
     }
 
-    // ==========================================================================
+    // ======================================================================
+    // Backpressure metrics
+    // ======================================================================
+
+    /// Record a backpressure event.
+    #[inline]
+    pub fn record_backpressure(&self) {
+        if let Some(ref bp) = self.bp_group {
+            bp.record_event();
+        }
+    }
+
+    // ======================================================================
     // Scaling pressure (delegated to hyperi-rustlib ScalingPressure engine)
-    // ==========================================================================
+    // ======================================================================
 
     /// Sync current metric values into the scaling pressure engine.
     ///
@@ -487,223 +642,54 @@ impl Metrics {
     pub fn scaling_pressure(&self) -> f64 {
         self.scaling.calculate()
     }
+}
 
-    /// Render metrics in Prometheus format.
-    #[allow(clippy::too_many_lines)]
-    pub fn render(&self) -> String {
-        let mut output = String::with_capacity(4096);
-
-        // Counters
-        output.push_str("# HELP receiver_requests_total Total number of requests received\n");
-        output.push_str("# TYPE receiver_requests_total counter\n");
-        output.push_str(&format!(
-            "receiver_requests_total {}\n",
-            self.requests_total.load(Ordering::Relaxed)
-        ));
-
-        output.push_str("# HELP receiver_requests_success Total successful requests\n");
-        output.push_str("# TYPE receiver_requests_success counter\n");
-        output.push_str(&format!(
-            "receiver_requests_success {}\n",
-            self.requests_success.load(Ordering::Relaxed)
-        ));
-
-        output.push_str("# HELP receiver_requests_error Total failed requests\n");
-        output.push_str("# TYPE receiver_requests_error counter\n");
-        output.push_str(&format!(
-            "receiver_requests_error {}\n",
-            self.requests_error.load(Ordering::Relaxed)
-        ));
-
-        output.push_str("# HELP receiver_bytes_received_total Total bytes received\n");
-        output.push_str("# TYPE receiver_bytes_received_total counter\n");
-        output.push_str(&format!(
-            "receiver_bytes_received_total {}\n",
-            self.bytes_received.load(Ordering::Relaxed)
-        ));
-
-        output.push_str("# HELP receiver_messages_batched_total Total messages batched\n");
-        output.push_str("# TYPE receiver_messages_batched_total counter\n");
-        output.push_str(&format!(
-            "receiver_messages_batched_total {}\n",
-            self.messages_batched.load(Ordering::Relaxed)
-        ));
-
-        output.push_str("# HELP receiver_messages_sent_kafka_total Messages sent to Kafka\n");
-        output.push_str("# TYPE receiver_messages_sent_kafka_total counter\n");
-        output.push_str(&format!(
-            "receiver_messages_sent_kafka_total {}\n",
-            self.messages_sent_kafka.load(Ordering::Relaxed)
-        ));
-
-        output.push_str("# HELP receiver_messages_sent_loader_total Messages sent to loader\n");
-        output.push_str("# TYPE receiver_messages_sent_loader_total counter\n");
-        output.push_str(&format!(
-            "receiver_messages_sent_loader_total {}\n",
-            self.messages_sent_loader.load(Ordering::Relaxed)
-        ));
-
-        output.push_str("# HELP receiver_messages_dlq_total Messages sent to DLQ\n");
-        output.push_str("# TYPE receiver_messages_dlq_total counter\n");
-        output.push_str(&format!(
-            "receiver_messages_dlq_total {}\n",
-            self.messages_dlq.load(Ordering::Relaxed)
-        ));
-
-        output.push_str("# HELP receiver_messages_spilled_total Messages spilled to disk\n");
-        output.push_str("# TYPE receiver_messages_spilled_total counter\n");
-        output.push_str(&format!(
-            "receiver_messages_spilled_total {}\n",
-            self.messages_spilled.load(Ordering::Relaxed)
-        ));
-
-        output.push_str("# HELP receiver_messages_drained_total Messages drained from spool\n");
-        output.push_str("# TYPE receiver_messages_drained_total counter\n");
-        output.push_str(&format!(
-            "receiver_messages_drained_total {}\n",
-            self.messages_drained.load(Ordering::Relaxed)
-        ));
-
-        // Gauges
-        output.push_str("# HELP receiver_batch_queue_size Current messages in batch queue\n");
-        output.push_str("# TYPE receiver_batch_queue_size gauge\n");
-        output.push_str(&format!(
-            "receiver_batch_queue_size {}\n",
-            self.batch_queue_size.load(Ordering::Relaxed)
-        ));
-
-        output.push_str("# HELP receiver_batch_queue_bytes Current bytes in batch queue\n");
-        output.push_str("# TYPE receiver_batch_queue_bytes gauge\n");
-        output.push_str(&format!(
-            "receiver_batch_queue_bytes {}\n",
-            self.batch_queue_bytes.load(Ordering::Relaxed)
-        ));
-
-        output.push_str("# HELP receiver_spool_bytes Current bytes in disk spool\n");
-        output.push_str("# TYPE receiver_spool_bytes gauge\n");
-        output.push_str(&format!(
-            "receiver_spool_bytes {}\n",
-            self.spool_bytes.load(Ordering::Relaxed)
-        ));
-
-        output.push_str("# HELP receiver_spool_messages Current messages in disk spool\n");
-        output.push_str("# TYPE receiver_spool_messages gauge\n");
-        output.push_str(&format!(
-            "receiver_spool_messages {}\n",
-            self.spool_messages.load(Ordering::Relaxed)
-        ));
-
-        output.push_str("# HELP receiver_active_connections Current active connections\n");
-        output.push_str("# TYPE receiver_active_connections gauge\n");
-        output.push_str(&format!(
-            "receiver_active_connections {}\n",
-            self.active_connections.load(Ordering::Relaxed)
-        ));
-
-        output.push_str("# HELP receiver_memory_used_bytes Current memory usage\n");
-        output.push_str("# TYPE receiver_memory_used_bytes gauge\n");
-        output.push_str(&format!(
-            "receiver_memory_used_bytes {}\n",
-            self.memory_used_bytes.load(Ordering::Relaxed)
-        ));
-
-        output.push_str("# HELP receiver_memory_limit_bytes Memory limit\n");
-        output.push_str("# TYPE receiver_memory_limit_bytes gauge\n");
-        output.push_str(&format!(
-            "receiver_memory_limit_bytes {}\n",
-            self.memory_limit_bytes.load(Ordering::Relaxed)
-        ));
-
-        // Circuit breaker
-        output.push_str(
-            "# HELP receiver_circuit_breaker_state Circuit breaker state (0=closed, 1=open, 2=half_open)\n",
-        );
-        output.push_str("# TYPE receiver_circuit_breaker_state gauge\n");
-        output.push_str(&format!(
-            "receiver_circuit_breaker_state{{state=\"{}\"}} {}\n",
-            self.circuit_state_str(),
-            self.circuit_state.load(Ordering::Relaxed)
-        ));
-
-        output.push_str("# HELP receiver_circuit_breaker_failures Consecutive sink failures\n");
-        output.push_str("# TYPE receiver_circuit_breaker_failures gauge\n");
-        output.push_str(&format!(
-            "receiver_circuit_breaker_failures {}\n",
-            self.circuit_consecutive_failures.load(Ordering::Relaxed)
-        ));
-
-        // Scaling pressure
-        output.push_str(
-            "# HELP receiver_scaling_pressure Gated scaling pressure for autoscaling (0-100)\n",
-        );
-        output.push_str("# TYPE receiver_scaling_pressure gauge\n");
-        output.push_str(&format!(
-            "receiver_scaling_pressure {:.2}\n",
-            self.scaling_pressure()
-        ));
-
-        output.push_str("# HELP receiver_request_rate_per_second Current request rate\n");
-        output.push_str("# TYPE receiver_request_rate_per_second gauge\n");
-        output.push_str(&format!(
-            "receiver_request_rate_per_second {:.2}\n",
-            self.request_rate()
-        ));
-
-        // Security metrics
-        output.push_str("# HELP receiver_auth_failures_total Authentication failures by reason\n");
-        output.push_str("# TYPE receiver_auth_failures_total counter\n");
-        output.push_str(&format!(
-            "receiver_auth_failures_total{{reason=\"missing_header\"}} {}\n",
-            self.auth_failures_missing_header.load(Ordering::Relaxed)
-        ));
-        output.push_str(&format!(
-            "receiver_auth_failures_total{{reason=\"invalid_token\"}} {}\n",
-            self.auth_failures_invalid_token.load(Ordering::Relaxed)
-        ));
-        output.push_str(&format!(
-            "receiver_auth_failures_total{{reason=\"invalid_header\"}} {}\n",
-            self.auth_failures_invalid_header.load(Ordering::Relaxed)
-        ));
-
-        output
-            .push_str("# HELP receiver_validation_failures_total Validation failures by reason\n");
-        output.push_str("# TYPE receiver_validation_failures_total counter\n");
-        output.push_str(&format!(
-            "receiver_validation_failures_total{{reason=\"invalid_json\"}} {}\n",
-            self.validation_failures_invalid_json
-                .load(Ordering::Relaxed)
-        ));
-        output.push_str(&format!(
-            "receiver_validation_failures_total{{reason=\"missing_field\"}} {}\n",
-            self.validation_failures_missing_field
-                .load(Ordering::Relaxed)
-        ));
-
-        output.push_str(
-            "# HELP receiver_request_timeouts_total Request timeouts (slow loris indicator)\n",
-        );
-        output.push_str("# TYPE receiver_request_timeouts_total counter\n");
-        output.push_str(&format!(
-            "receiver_request_timeouts_total {}\n",
-            self.request_timeouts_total.load(Ordering::Relaxed)
-        ));
-
-        output.push_str("# HELP receiver_body_size_rejected_total Oversized body rejections\n");
-        output.push_str("# TYPE receiver_body_size_rejected_total counter\n");
-        output.push_str(&format!(
-            "receiver_body_size_rejected_total {}\n",
-            self.body_size_rejected_total.load(Ordering::Relaxed)
-        ));
-
-        output.push_str("# HELP receiver_tls_handshake_failures_total TLS handshake failures\n");
-        output.push_str("# TYPE receiver_tls_handshake_failures_total counter\n");
-        output.push_str(&format!(
-            "receiver_tls_handshake_failures_total {}\n",
-            self.tls_handshake_failures_total.load(Ordering::Relaxed)
-        ));
-
-        output
-    }
+/// Describe receiver-specific metrics that take labels.
+fn describe_receiver_metrics() {
+    metrics::describe_counter!(
+        "dfe_receiver_requests_total",
+        "Total requests received by transport"
+    );
+    metrics::describe_counter!(
+        "dfe_receiver_requests_success_total",
+        "Total successful requests by transport"
+    );
+    metrics::describe_counter!(
+        "dfe_receiver_requests_error_total",
+        "Total failed requests by transport"
+    );
+    metrics::describe_counter!(
+        "dfe_receiver_bytes_received_total",
+        "Total bytes received by transport"
+    );
+    metrics::describe_counter!(
+        "dfe_receiver_auth_failures_total",
+        "Authentication failures by reason"
+    );
+    metrics::describe_counter!(
+        "dfe_receiver_validation_failures_total",
+        "Validation failures by reason"
+    );
+    metrics::describe_counter!(
+        "dfe_receiver_request_timeouts_total",
+        "Request timeouts (slow loris indicator)"
+    );
+    metrics::describe_counter!(
+        "dfe_receiver_body_size_rejected_total",
+        "Oversized body rejections"
+    );
+    metrics::describe_counter!(
+        "dfe_receiver_tls_handshake_failures_total",
+        "TLS handshake failures"
+    );
+    metrics::describe_counter!(
+        "dfe_receiver_messages_spilled_total",
+        "Messages spilled to disk"
+    );
+    metrics::describe_counter!(
+        "dfe_receiver_messages_drained_total",
+        "Messages drained from spool"
+    );
 }
 
 impl Default for Metrics {
@@ -720,13 +706,12 @@ mod tests {
     fn test_metrics_counters() {
         let metrics = Metrics::default();
 
-        metrics.inc_requests_total();
-        metrics.inc_requests_total();
-        metrics.inc_requests_success();
+        metrics.inc_requests_total("test");
+        metrics.inc_requests_total("test");
+        metrics.inc_requests_success("test");
 
-        let output = metrics.render();
-        assert!(output.contains("receiver_requests_total 2"));
-        assert!(output.contains("receiver_requests_success 1"));
+        assert_eq!(metrics.get_requests_total(), 2);
+        assert_eq!(metrics.get_requests_success(), 1);
     }
 
     #[test]
@@ -736,11 +721,8 @@ mod tests {
         metrics.set_batch_queue_size(100);
         metrics.set_batch_queue_bytes(1024);
 
+        assert_eq!(metrics.get_batch_queue_size(), 100);
         assert_eq!(metrics.get_batch_queue_bytes(), 1024);
-
-        let output = metrics.render();
-        assert!(output.contains("receiver_batch_queue_size 100"));
-        assert!(output.contains("receiver_batch_queue_bytes 1024"));
     }
 
     #[test]
@@ -781,7 +763,7 @@ mod tests {
         metrics.update_scaling();
 
         let metric = metrics.scaling_pressure();
-        // Memory gate fires at 100% → returns 100.0
+        // Memory gate fires at 100% -> returns 100.0
         assert!(metric <= 100.0);
     }
 
@@ -792,19 +774,45 @@ mod tests {
         metrics.add_messages_spilled(10);
         metrics.add_messages_drained(5);
 
-        let output = metrics.render();
-        assert!(output.contains("receiver_messages_spilled_total 10"));
-        assert!(output.contains("receiver_messages_drained_total 5"));
+        assert_eq!(metrics.get_messages_spilled(), 10);
+        assert_eq!(metrics.get_messages_drained(), 5);
     }
 
     #[test]
     fn test_memory_metrics() {
         let metrics = Metrics::default();
-
         metrics.set_memory_usage(500_000, 1_000_000);
+        // Verify via scaling engine read-back (atomics)
+        assert_eq!(metrics.memory_used_bytes.load(Ordering::Relaxed), 500_000);
+        assert_eq!(
+            metrics.memory_limit_bytes.load(Ordering::Relaxed),
+            1_000_000
+        );
+    }
 
-        let output = metrics.render();
-        assert!(output.contains("receiver_memory_used_bytes 500000"));
-        assert!(output.contains("receiver_memory_limit_bytes 1000000"));
+    #[test]
+    fn test_security_counters() {
+        let metrics = Metrics::default();
+
+        metrics.inc_auth_failure(AuthFailureReason::MissingHeader);
+        metrics.inc_auth_failure(AuthFailureReason::InvalidToken);
+        metrics.inc_validation_failure(ValidationFailureReason::InvalidJson);
+        metrics.inc_tls_handshake_failure();
+
+        assert_eq!(metrics.get_auth_failures_total(), 2);
+        assert_eq!(metrics.get_validation_failures_total(), 1);
+        assert_eq!(metrics.get_tls_handshake_failures_total(), 1);
+    }
+
+    #[test]
+    fn test_transport_label_counters() {
+        let metrics = Metrics::default();
+
+        metrics.inc_requests_total("http");
+        metrics.inc_requests_total("grpc");
+        metrics.inc_requests_total("http");
+
+        // Atomics aggregate all transports
+        assert_eq!(metrics.get_requests_total(), 3);
     }
 }

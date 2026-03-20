@@ -281,7 +281,7 @@ async fn test_receiver_kafka_sink() {
 #[tokio::test]
 #[ignore = "requires Kafka - run with --ignored"]
 async fn test_full_pipeline_to_kafka() {
-    use dfe_receiver::config::{Config, SharedConfig};
+    use dfe_receiver::config::SharedConfig;
     use dfe_receiver::pipeline::PipelineState;
 
     if !kafka_available().await {
@@ -345,7 +345,6 @@ async fn test_full_pipeline_to_kafka() {
 #[tokio::test]
 #[ignore = "requires Kafka - run with --ignored"]
 async fn test_http_to_kafka() {
-    use dfe_receiver::config::Config;
     use dfe_receiver::metrics::Metrics;
     use dfe_receiver::pipeline::Orchestrator;
     use dfe_receiver::server::http;
@@ -448,7 +447,7 @@ async fn test_http_to_kafka() {
 #[tokio::test]
 #[ignore = "requires Kafka - run with --ignored"]
 async fn test_category_routing() {
-    use dfe_receiver::config::{Config, SharedConfig};
+    use dfe_receiver::config::SharedConfig;
     use dfe_receiver::pipeline::PipelineState;
 
     if !kafka_available().await {
@@ -528,7 +527,7 @@ async fn test_category_routing() {
 #[tokio::test]
 #[ignore = "requires Kafka - run with --ignored"]
 async fn test_dlq_routing() {
-    use dfe_receiver::config::{Config, SharedConfig};
+    use dfe_receiver::config::SharedConfig;
     use dfe_receiver::pipeline::PipelineState;
 
     if !kafka_available().await {

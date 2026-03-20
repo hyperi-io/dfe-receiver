@@ -113,26 +113,16 @@ async fn start_fluent_handler(config: Config) -> (CancellationToken, Arc<Metrics
     (shutdown, metrics)
 }
 
-fn metric_value(metrics: &Metrics, name: &str) -> u64 {
-    let output = metrics.render();
-    for line in output.lines() {
-        if line.starts_with(name) && !line.starts_with('#') {
-            return line.trim_start_matches(name).trim().parse().unwrap_or(0);
-        }
-    }
-    0
-}
-
 fn requests_total(metrics: &Metrics) -> u64 {
-    metric_value(metrics, "receiver_requests_total ")
+    metrics.get_requests_total()
 }
 
 fn requests_success(metrics: &Metrics) -> u64 {
-    metric_value(metrics, "receiver_requests_success ")
+    metrics.get_requests_success()
 }
 
 fn bytes_received(metrics: &Metrics) -> u64 {
-    metric_value(metrics, "receiver_bytes_received_total ")
+    metrics.get_bytes_received()
 }
 
 /// Write a Fluent Bit config to a file.

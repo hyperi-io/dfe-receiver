@@ -90,19 +90,9 @@ async fn start_hec_handler(config: Config) -> (CancellationToken, Arc<Metrics>, 
     (shutdown, metrics, url)
 }
 
-/// Check metrics render output for received events.
+/// Get total events received from metrics.
 fn events_received(metrics: &Metrics) -> u64 {
-    let output = metrics.render();
-    for line in output.lines() {
-        if line.starts_with("receiver_requests_total ") {
-            return line
-                .trim_start_matches("receiver_requests_total ")
-                .trim()
-                .parse()
-                .unwrap_or(0);
-        }
-    }
-    0
+    metrics.get_requests_total()
 }
 
 // =============================================================================
