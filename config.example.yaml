@@ -9,6 +9,18 @@ server:
   bind_address: "0.0.0.0:8080"
   max_body_size: 10485760  # 10MB
   request_timeout_ms: 30000
+  max_concurrent_requests: 10000  # max in-flight requests; 0 = unlimited
+
+  # Per-IP rate limiting (GCRA algorithm via tower-governor)
+  rate_limit:
+    enabled: false           # opt-in; enable for internet-facing deployments
+    requests_per_second: 100 # sustained rate per source IP
+    burst: 500               # burst capacity above sustained rate
+
+  # IP filter (allowlist or denylist by CIDR)
+  ip_filter:
+    mode: "disabled"         # disabled, allowlist, denylist
+    cidrs: []                # e.g., ["10.0.0.0/8", "172.16.0.0/12"]
 
   tls:
     enabled: false
@@ -261,6 +273,11 @@ loader:
 buffer:
   memory_limit: 0  # 0 = auto-detect (67% available)
   pressure_threshold: 0.8
+  spillover:
+    enabled: false  # opt-in disk spillover via rustlib TieredSink
+    path: /var/spool/dfe-receiver
+    max_usage_percent: 0.8  # pause spool writes when disk exceeds 80%
+    poll_interval_secs: 5
 
 file_sink:
   enabled: false  # set true to write all processed messages to a file (debug only)

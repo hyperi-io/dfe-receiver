@@ -135,8 +135,10 @@ impl DfeApp for App {
     async fn run_service(&self, config: Self::Config) -> Result<(), CliError> {
         info!(version = env!("CARGO_PKG_VERSION"), "Starting dfe-receiver");
 
-        // Initialise metrics with scaling pressure engine
-        let metrics = Arc::new(Metrics::with_scaling(config.scaling.build_pressure()));
+        // Initialise metrics with scaling pressure engine + standard DFE metrics.
+        // DfeMetrics::register() describes dfe_* names with the global recorder
+        // (installed by the DfeApp lifecycle before run_service is called).
+        let metrics = Arc::new(Metrics::with_dfe_metrics(config.scaling.build_pressure()));
 
         // Create cancellation token for coordinated shutdown
         let shutdown_token = CancellationToken::new();
@@ -224,8 +226,11 @@ impl DfeApp for App {
         // Spawn metrics server
         let metrics_token = shutdown_token.clone();
         let metrics_clone = metrics.clone();
+        let pipeline_state = orchestrator.state();
         tokio::spawn(async move {
-            if let Err(e) = run_metrics_server(metrics_addr, metrics_clone, metrics_token).await {
+            if let Err(e) =
+                run_metrics_server(metrics_addr, metrics_clone, pipeline_state, metrics_token).await
+            {
                 error!(error = %e, "Metrics server error");
             }
         });
@@ -300,15 +305,27 @@ fn reload_config_from_path(
 async fn run_metrics_server(
     addr: SocketAddr,
     metrics: Arc<Metrics>,
+    pipeline: Arc<dfe_receiver::pipeline::PipelineState>,
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
     use axum::Router;
+    use axum::http::StatusCode;
     use axum::routing::get;
 
+    let ready_pipeline = pipeline.clone();
     let app = Router::new()
         .route("/metrics", get(move || async move { metrics.render() }))
         .route("/health/live", get(|| async { "OK" }))
-        .route("/health/ready", get(|| async { "OK" }));
+        .route(
+            "/health/ready",
+            get(move || async move {
+                if ready_pipeline.is_ready() {
+                    (StatusCode::OK, "OK")
+                } else {
+                    (StatusCode::SERVICE_UNAVAILABLE, "NOT_READY")
+                }
+            }),
+        );
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!(addr = %addr, "Metrics server listening");

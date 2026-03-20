@@ -117,6 +117,83 @@ sinks:
     address: "localhost:6000"
 ```
 
+### Example: StatsD / DogStatsD
+
+Collect StatsD metrics on UDP :8125 and forward to receiver.
+
+```toml
+# vector.toml
+[sources.statsd]
+type = "statsd"
+mode = "udp"
+address = "0.0.0.0:8125"
+
+[transforms.to_json]
+type = "remap"
+inputs = ["statsd"]
+source = '''
+.source = "statsd"
+.timestamp = now()
+'''
+
+[sinks.receiver]
+type = "vector"
+inputs = ["to_json"]
+address = "localhost:6000"
+```
+
+### Example: Windows Event Log
+
+> **Reference only — requires a Windows Vector agent.** Run Vector on the
+> Windows host and push to receiver over the network.
+
+```toml
+# vector.toml (Windows host)
+[sources.windows_events]
+type = "windows_event_log"
+channels = ["Application", "Security", "System"]
+
+[transforms.enrich]
+type = "remap"
+inputs = ["windows_events"]
+source = '''
+.source = "windows_event_log"
+.host = get_hostname!()
+'''
+
+[sinks.receiver]
+type = "vector"
+inputs = ["enrich"]
+address = "dfe-receiver.example.com:6000"
+```
+
+### Example: Kafka as Source
+
+Useful for cross-cluster routing or reprocessing events from an existing
+Kafka topic into a different pipeline.
+
+```toml
+# vector.toml
+[sources.kafka_source]
+type = "kafka"
+bootstrap_servers = "kafka-broker:9092"
+group_id = "dfe-reprocess"
+topics = ["raw_events"]
+auto_offset_reset = "earliest"
+
+[transforms.tag]
+type = "remap"
+inputs = ["kafka_source"]
+source = '''
+.source = "kafka_reprocess"
+'''
+
+[sinks.receiver]
+type = "vector"
+inputs = ["tag"]
+address = "localhost:6000"
+```
+
 ## Alternative: Fluent Bit Sidecar
 
 [Fluent Bit](https://fluentbit.io/) is a lightweight log processor that
@@ -222,3 +299,128 @@ The sidecar communicates with receiver via `localhost:6000` (gRPC) or
 | Best transport to receiver | gRPC (Vector native) | Fluent Forward | HTTP JSON |
 | Language | Rust | C | Any |
 | When to use | Most cases | Minimal footprint, file tailing | Novel/proprietary protocols |
+
+## Troubleshooting
+
+### Connection refused
+
+- Receiver may not be ready yet — add a startup delay or use an `initContainer` (see below).
+- Wrong port — gRPC ingest is `:6000`, HTTP is `:8080`. Confirm the sidecar config matches.
+- Firewall or Kubernetes NetworkPolicy blocking loopback or pod-to-pod traffic. Within a pod, `localhost` is always reachable — check NetworkPolicy only for cross-pod setups.
+
+### Auth failures
+
+- **Bearer token mismatch** — the token in the sidecar sink config must exactly match one of the tokens in receiver's `auth.bearer_tokens` list (or the secret source).
+- **TLS certificate issues** — if receiver has TLS enabled, the sidecar must trust receiver's CA. Mount the CA cert and set `tls.ca_file` in the Vector sink.
+- **mTLS** — receiver's `auth.mtls` requires a client certificate. Set `tls.crt_file` and `tls.key_file` in the sidecar sink config.
+
+### Payload too large
+
+Receiver's default `max_body_size` is 16 MiB per request. Large batches from Vector's `batch.max_bytes` can exceed this.
+
+Options:
+- Increase receiver's limit: set `server.max_body_size: "64MiB"` in receiver config.
+- Reduce Vector's batch size: set `batch.max_bytes = 8388608` (8 MiB) in the sink.
+
+### TLS between sidecar and receiver
+
+```toml
+# vector.toml — TLS sink config
+[sinks.receiver]
+type = "vector"
+inputs = ["my_source"]
+address = "localhost:6000"
+
+[sinks.receiver.tls]
+enabled = true
+ca_file = "/etc/ssl/certs/receiver-ca.pem"   # Trust receiver's CA
+# mTLS — only required if receiver has mtls enabled:
+crt_file = "/etc/ssl/certs/sidecar-client.pem"
+key_file = "/etc/ssl/private/sidecar-client.key"
+```
+
+## Performance Sizing
+
+### When one sidecar is enough
+
+A single Vector sidecar handles most workloads up to roughly:
+- ~50,000 events/sec on a modern CPU core
+- ~100 MB/s of log throughput
+
+Beyond that, consider deploying Vector as a separate Deployment (DaemonSet for node-level collection, Deployment for protocol aggregation) rather than a per-pod sidecar.
+
+### Sidecar container resource starting point
+
+```yaml
+resources:
+  requests:
+    cpu: 100m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+```
+
+Increase `cpu` limit if you see throttling under load. Increase `memory` limit if Vector buffers events to disk during backpressure spikes.
+
+### Backpressure behaviour
+
+When receiver is overloaded it returns `503 Service Unavailable`. Vector responds by:
+1. Pausing event ingestion from the source.
+2. Buffering events to its disk buffer (configure `data_dir` and `buffer.max_size`).
+3. Retrying delivery with exponential backoff.
+
+This means the sidecar is self-regulating — set an appropriate disk buffer size to absorb short bursts, and rely on KEDA / HPA to scale receiver for sustained high load.
+
+## Health Check Integration
+
+### Sidecar readiness depending on receiver
+
+The sidecar should not be marked ready until receiver is accepting connections.
+Use an `initContainer` to wait for receiver's health endpoint:
+
+```yaml
+# pod spec
+initContainers:
+  - name: wait-for-receiver
+    image: curlimages/curl:8.6.0
+    command:
+      - sh
+      - -c
+      - |
+        until curl -sf http://localhost:8080/healthz; do
+          echo "waiting for receiver..."
+          sleep 2
+        done
+
+containers:
+  - name: dfe-receiver
+    # ...
+
+  - name: vector-sidecar
+    # ...
+    readinessProbe:
+      httpGet:
+        path: /health
+        port: 8686        # Vector's internal API port
+      initialDelaySeconds: 5
+      periodSeconds: 10
+```
+
+### Docker Compose ordering
+
+```yaml
+services:
+  dfe-receiver:
+    image: ghcr.io/hyperi-io/dfe-receiver:latest
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/healthz"]
+      interval: 5s
+      start_period: 10s
+
+  vector-sidecar:
+    image: timberio/vector:0.54.0-alpine
+    depends_on:
+      dfe-receiver:
+        condition: service_healthy
+```

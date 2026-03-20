@@ -20,9 +20,13 @@ use parking_lot::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use hyperi_rustlib::dlq::{Dlq, DlqEntry};
+/// State-change flag for memory pressure log deduplication.
+static PRESSURE_LOGGED: AtomicBool = AtomicBool::new(false);
 
-use crate::buffer::{BufferManager, MemoryPressure, TieredSink};
+use hyperi_rustlib::dlq::{Dlq, DlqEntry};
+use hyperi_rustlib::logger::security;
+
+use crate::buffer::{InMemoryBuffer, MemoryGuard, MemoryGuardConfig, MemoryPressure, SinkBackend};
 use crate::config::{Config, SharedConfig};
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
@@ -39,11 +43,11 @@ pub struct PipelineState {
     shared_config: SharedConfig,
     validator: RwLock<Validator>,
     router: RwLock<Router>,
-    kafka_sink: Option<Arc<TieredSink<KafkaSink>>>,
-    loader_sink: Option<Arc<TieredSink<LoaderSink>>>,
-    grpc_loader_sink: Option<Arc<TieredSink<GrpcSink>>>,
+    kafka_sink: Option<Arc<SinkBackend<KafkaSink>>>,
+    loader_sink: Option<Arc<SinkBackend<LoaderSink>>>,
+    grpc_loader_sink: Option<Arc<SinkBackend<GrpcSink>>>,
     file_sink: Option<Arc<FileSink>>,
-    buffer_manager: Arc<BufferManager>,
+    memory_guard: Arc<MemoryGuard>,
     dlq: Option<Arc<Dlq>>,
     ready: AtomicBool,
 }
@@ -58,12 +62,20 @@ impl PipelineState {
             &config.destinations,
             config.server.auth.include_common_header,
         );
-        let buffer_manager = Arc::new(BufferManager::new(&config.buffer));
+        // Memory guard: env vars take precedence, then YAML config, then auto-detect
+        let mut mg_config = MemoryGuardConfig::from_env("DFE_RECEIVER");
+        if config.buffer.memory_limit > 0 && mg_config.limit_bytes == 0 {
+            mg_config.limit_bytes = config.buffer.memory_limit as u64;
+        }
+        if (config.buffer.pressure_threshold - 0.8).abs() > f64::EPSILON {
+            mg_config.pressure_threshold = config.buffer.pressure_threshold;
+        }
+        let memory_guard = Arc::new(MemoryGuard::new(mg_config));
 
-        // Initialise Kafka sink with tiered wrapper if brokers configured
+        // Initialise Kafka sink with buffer wrapper if brokers configured
         let kafka_sink = if !config.kafka.brokers.is_empty() {
             let primary = KafkaSink::new(&config.kafka)?;
-            Some(Arc::new(TieredSink::new(primary, &config.buffer)))
+            Some(Arc::new(build_sink_backend(primary, &config.buffer).await?))
         } else {
             None
         };
@@ -76,19 +88,19 @@ impl PipelineState {
                 .iter()
                 .any(|r| r.destination == "loader");
 
-        // Initialise loader or gRPC loader sink with tiered wrapper
+        // Initialise loader or gRPC loader sink with buffer wrapper
         let (loader_sink, grpc_loader_sink) = if loader_destination_active {
             if config.loader.transport == "grpc" {
                 let endpoint = config.loader.effective_grpc_endpoint();
                 let primary = GrpcSink::new(&endpoint).await?;
                 (
                     None,
-                    Some(Arc::new(TieredSink::new(primary, &config.buffer))),
+                    Some(Arc::new(build_sink_backend(primary, &config.buffer).await?)),
                 )
             } else {
                 let primary = LoaderSink::new(&config.loader, &config.kafka)?;
                 (
-                    Some(Arc::new(TieredSink::new(primary, &config.buffer))),
+                    Some(Arc::new(build_sink_backend(primary, &config.buffer).await?)),
                     None,
                 )
             }
@@ -136,7 +148,7 @@ impl PipelineState {
             loader_sink,
             grpc_loader_sink,
             file_sink,
-            buffer_manager,
+            memory_guard,
             dlq,
             ready: AtomicBool::new(true),
         })
@@ -159,7 +171,7 @@ impl PipelineState {
         }
 
         // Not ready under high memory pressure
-        if self.buffer_manager.is_under_pressure() {
+        if self.memory_guard.under_pressure() {
             return false;
         }
 
@@ -187,12 +199,12 @@ impl PipelineState {
 
     /// Get memory pressure level.
     pub fn memory_pressure(&self) -> MemoryPressure {
-        self.buffer_manager.pressure()
+        self.memory_guard.pressure()
     }
 
     /// Check if backpressure should be applied.
     pub fn should_apply_backpressure(&self) -> bool {
-        self.buffer_manager.is_under_pressure()
+        self.memory_guard.under_pressure()
     }
 
     /// Process a message through the pipeline.
@@ -202,18 +214,24 @@ impl PipelineState {
     pub async fn process(&self, payload: Bytes) -> Result<()> {
         // Check for backpressure
         if self.should_apply_backpressure() {
-            warn!("Memory pressure high, applying backpressure");
+            if hyperi_rustlib::logger::log_state_change(&PRESSURE_LOGGED, true) {
+                warn!("Memory pressure HIGH — backpressure active");
+            }
             return Err(Error::Buffer("server under memory pressure".into()));
+        }
+        // Log recovery when pressure drops
+        if hyperi_rustlib::logger::log_state_change(&PRESSURE_LOGGED, false) {
+            info!("Memory pressure recovered");
         }
 
         // Track memory
         let payload_size = payload.len() as u64;
-        self.buffer_manager.add_bytes(payload_size);
+        self.memory_guard.add_bytes(payload_size);
 
         let result = self.process_inner(payload).await;
 
         // Release memory tracking on completion
-        self.buffer_manager.remove_bytes(payload_size);
+        self.memory_guard.release(payload_size);
 
         result
     }
@@ -266,9 +284,11 @@ impl PipelineState {
             ValidationResult::Valid => {}
             ValidationResult::Dlq(reason) => {
                 debug!(reason = %reason, "Message validation failed, routing to DLQ");
+                security::input_validation_failure("json_validate", &reason, None);
                 return self.send_to_dlq(&payload, &reason).await;
             }
             ValidationResult::Reject(reason) => {
+                security::input_validation_failure("json_validate", &reason, None);
                 return Err(Error::Validation(reason));
             }
         }
@@ -312,13 +332,19 @@ impl PipelineState {
     pub async fn process_to_topic(&self, payload: Bytes, topic: &str) -> Result<()> {
         // Check for backpressure
         if self.should_apply_backpressure() {
-            warn!("Memory pressure high, applying backpressure");
+            if hyperi_rustlib::logger::log_state_change(&PRESSURE_LOGGED, true) {
+                warn!("Memory pressure HIGH — backpressure active");
+            }
             return Err(Error::Buffer("server under memory pressure".into()));
+        }
+        // Log recovery when pressure drops
+        if hyperi_rustlib::logger::log_state_change(&PRESSURE_LOGGED, false) {
+            info!("Memory pressure recovered");
         }
 
         // Track memory
         let payload_size = payload.len() as u64;
-        self.buffer_manager.add_bytes(payload_size);
+        self.memory_guard.add_bytes(payload_size);
 
         // Validate (acquire and release lock before any await)
         let validation = self.validator.read().validate(&payload);
@@ -326,13 +352,17 @@ impl PipelineState {
             ValidationResult::Valid => self.send_to_kafka(topic, payload).await,
             ValidationResult::Dlq(reason) => {
                 debug!(reason = %reason, "Message validation failed, routing to DLQ");
+                security::input_validation_failure("json_validate", &reason, None);
                 self.send_to_dlq(&payload, &reason).await
             }
-            ValidationResult::Reject(reason) => Err(Error::Validation(reason)),
+            ValidationResult::Reject(reason) => {
+                security::input_validation_failure("json_validate", &reason, None);
+                Err(Error::Validation(reason))
+            }
         };
 
         // Release memory tracking on completion
-        self.buffer_manager.remove_bytes(payload_size);
+        self.memory_guard.release(payload_size);
 
         result
     }
@@ -385,9 +415,9 @@ impl PipelineState {
         }
     }
 
-    /// Get buffer manager for external access.
-    pub fn buffer_manager(&self) -> &Arc<BufferManager> {
-        &self.buffer_manager
+    /// Get memory guard for external access.
+    pub fn memory_guard(&self) -> &Arc<MemoryGuard> {
+        &self.memory_guard
     }
 
     /// Snapshot pipeline state into metrics gauges.
@@ -397,8 +427,8 @@ impl PipelineState {
     pub async fn update_metrics(&self, metrics: &Metrics) {
         // Memory usage
         metrics.set_memory_usage(
-            self.buffer_manager.total_bytes(),
-            self.buffer_manager.memory_limit(),
+            self.memory_guard.current_bytes(),
+            self.memory_guard.limit_bytes(),
         );
 
         // Kafka sink stats
@@ -436,6 +466,11 @@ impl PipelineState {
 
         // Update shared config (bumps version, notifies subscribers)
         self.shared_config.update(new_config);
+        security::config_changed(
+            "config_reload",
+            "system",
+            "pipeline config reloaded (router + validator)",
+        );
 
         let version = self.shared_config.version();
         info!(version, "Configuration reloaded successfully");
@@ -457,6 +492,45 @@ impl PipelineState {
 
         *self.router.write() = new_router;
         *self.validator.write() = new_validator;
+    }
+}
+
+/// Build the appropriate `SinkBackend` based on spillover configuration.
+///
+/// When `spillover.enabled` is true, wraps the primary sink in rustlib's `TieredSink`
+/// with disk spillover. Otherwise, uses the default in-memory buffer.
+async fn build_sink_backend<S: crate::sink::Sink + 'static>(
+    primary: S,
+    buffer_config: &crate::config::BufferConfig,
+) -> Result<SinkBackend<S>> {
+    if buffer_config.spillover.enabled {
+        let adapter = crate::buffer::adapter::RustlibSinkAdapter::new(Arc::new(primary));
+        let spillover = &buffer_config.spillover;
+
+        let mut tiered_config = hyperi_rustlib::tiered_sink::TieredSinkConfig::new(&spillover.path);
+
+        // Configure disk-aware capacity management
+        tiered_config.disk_aware = Some(hyperi_rustlib::tiered_sink::DiskAwareConfig {
+            max_usage_percent: spillover.max_usage_percent,
+            poll_interval_secs: spillover.poll_interval_secs,
+        });
+
+        let tiered = hyperi_rustlib::tiered_sink::TieredSink::new(adapter, tiered_config)
+            .await
+            .map_err(|e| Error::Config(format!("failed to create tiered sink: {e}")))?;
+
+        info!(
+            path = %spillover.path.display(),
+            max_usage_percent = spillover.max_usage_percent,
+            "Disk spillover enabled"
+        );
+
+        Ok(SinkBackend::Tiered(tiered))
+    } else {
+        Ok(SinkBackend::InMemory(InMemoryBuffer::new(
+            primary,
+            buffer_config,
+        )))
     }
 }
 

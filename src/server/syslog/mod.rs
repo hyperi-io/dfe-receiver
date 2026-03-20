@@ -18,6 +18,7 @@ pub mod framing;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -26,6 +27,9 @@ use tokio::time::timeout;
 use tokio_util::codec::FramedRead;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
+
+/// Debounced timestamp for syslog UDP recv error warnings (1 per 5s).
+static SYSLOG_UDP_WARN: AtomicU64 = AtomicU64::new(0);
 
 use crate::config::SyslogConfig;
 use crate::error::{Error, Result};
@@ -70,7 +74,9 @@ async fn run_udp(
                 let (len, peer_addr) = match result {
                     Ok(r) => r,
                     Err(e) => {
-                        warn!(error = %e, "Syslog UDP recv error");
+                        if hyperi_rustlib::logger::log_debounced(&SYSLOG_UDP_WARN, 5000) {
+                            warn!(error = %e, "Syslog UDP recv error (throttled to 1/5s)");
+                        }
                         continue;
                     }
                 };

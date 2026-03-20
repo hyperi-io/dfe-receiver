@@ -16,6 +16,7 @@ pub mod fluent;
 pub mod gelf;
 pub mod grpc;
 pub mod http;
+pub mod ip_filter;
 pub mod lumberjack;
 #[cfg(feature = "otlp")]
 pub mod otlp;

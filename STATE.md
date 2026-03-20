@@ -134,18 +134,12 @@ Native Rust receiver that:
 **Rationale:** Avoids pulling in the full `opentelemetry-proto` crate which depends on the entire OTel SDK (opentelemetry, opentelemetry_sdk, etc.). Vendoring keeps the dependency tree minimal and matches the existing Vector proto pattern.
 **Alternatives considered:** `opentelemetry-proto` crate (rejected -- brings in full OTel SDK as transitive deps)
 
-### No Disk Spillover
+### Optional Disk Spillover (Opt-In)
 
-**Decision:** Use in-memory buffering only, no disk spillover
-**Rationale:** For PB/s scale ingestion:
-
-1. K8s memory limits trigger OOMKill -> KEDA scales up (desired behavior)
-2. Vector clients have their own disk buffer for retries
-3. Circuit breaker + 503 responses propagate backpressure upstream
-4. Disk I/O would bottleneck the hot path at scale
-5. Simpler architecture, no persistent volumes needed
-
-**Alternatives considered:** Disk spillover via hyperi-rustlib Spool (rejected - adds complexity without benefit when clients handle retries)
+**Decision:** Disk spillover is available but disabled by default (`buffer.spillover.enabled: false`)
+**Rationale:** In-memory buffering is the default for PB/s scale ingestion where K8s OOMKill + KEDA handles scaling. However, for deployments that need crash-resilient buffering or operate outside K8s, disk spillover via rustlib's `TieredSink` is available as opt-in.
+**Implementation:** `SinkBackend` enum in `src/buffer/mod.rs` wraps either `InMemoryBuffer` (default) or rustlib's `TieredSink` with a `RustlibSinkAdapter` that encodes topic+payload as `[u32 LE topic_len][topic][payload]` for spool storage.
+**Config:** `buffer.spillover.enabled`, `buffer.spillover.path`, `buffer.spillover.max_usage_percent`
 
 ---
 
