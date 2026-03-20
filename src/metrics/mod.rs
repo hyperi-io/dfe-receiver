@@ -23,7 +23,7 @@
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 use hyperi_rustlib::metrics::DfeMetrics;
-use hyperi_rustlib::scaling::ScalingPressure;
+use hyperi_rustlib::scaling::{RateWindow, ScalingPressure};
 
 /// Reason for authentication failure (for metrics labels).
 #[derive(Debug, Clone, Copy)]
@@ -44,9 +44,7 @@ pub enum ValidationFailureReason {
     /// Required field is missing.
     MissingField,
 }
-use std::time::{Duration, Instant};
-
-use parking_lot::RwLock;
+use std::time::Duration;
 
 /// Metrics collector for dfe-receiver.
 pub struct Metrics {
@@ -88,7 +86,7 @@ pub struct Metrics {
     circuit_consecutive_failures: AtomicU64,
 
     // Rate tracking
-    rate_window: RwLock<RateWindow>,
+    rate_window: RateWindow,
 
     // Scaling pressure engine (from hyperi-rustlib)
     scaling: ScalingPressure,
@@ -96,53 +94,6 @@ pub struct Metrics {
     // Standard DFE metrics (dual-emit `dfe_*` alongside `receiver_*`).
     // None in tests (no global recorder); Some in prod after MetricsManager.
     dfe: Option<DfeMetrics>,
-}
-
-/// Sliding window for rate calculation.
-#[derive(Debug)]
-struct RateWindow {
-    samples: Vec<(Instant, u64)>,
-    window_size: Duration,
-}
-
-impl RateWindow {
-    fn new(window_size: Duration) -> Self {
-        Self {
-            samples: Vec::with_capacity(60),
-            window_size,
-        }
-    }
-
-    fn add_sample(&mut self, value: u64) {
-        let now = Instant::now();
-        self.samples.push((now, value));
-
-        // Remove old samples
-        if let Some(cutoff) = now.checked_sub(self.window_size) {
-            self.samples.retain(|(t, _)| *t > cutoff);
-        }
-    }
-
-    fn rate_per_second(&self) -> f64 {
-        if self.samples.len() < 2 {
-            return 0.0;
-        }
-
-        let Some(first) = self.samples.first() else {
-            return 0.0;
-        };
-        let Some(last) = self.samples.last() else {
-            return 0.0;
-        };
-
-        let duration = last.0.duration_since(first.0);
-        if duration.is_zero() {
-            return 0.0;
-        }
-
-        let delta = last.1.saturating_sub(first.1);
-        delta as f64 / duration.as_secs_f64()
-    }
 }
 
 impl std::fmt::Debug for Metrics {
@@ -200,7 +151,7 @@ impl Metrics {
             memory_limit_bytes: AtomicU64::new(0),
             circuit_state: AtomicU8::new(0),
             circuit_consecutive_failures: AtomicU64::new(0),
-            rate_window: RwLock::new(RateWindow::new(Duration::from_secs(60))),
+            rate_window: RateWindow::new(Duration::from_secs(60)),
             scaling,
             dfe: None,
         }
@@ -223,7 +174,7 @@ impl Metrics {
     pub fn inc_requests_total(&self) {
         let count = self.requests_total.fetch_add(1, Ordering::Relaxed) + 1;
         if count.is_multiple_of(100) {
-            self.rate_window.write().add_sample(count);
+            self.rate_window.record(count);
         }
         if let Some(ref dfe) = self.dfe {
             dfe.records_received(1);
@@ -481,7 +432,7 @@ impl Metrics {
 
     /// Get request rate per second.
     pub fn request_rate(&self) -> f64 {
-        self.rate_window.read().rate_per_second()
+        self.rate_window.rate_per_second()
     }
 
     // ==========================================================================
