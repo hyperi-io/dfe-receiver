@@ -24,7 +24,6 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL_MIMALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -155,11 +154,11 @@ impl DfeApp for App {
         });
 
         // Parse metrics server address
-        let default_metrics_addr: SocketAddr = SocketAddr::from(([0, 0, 0, 0], 9090));
-        let metrics_addr: SocketAddr = self.common.metrics_addr.parse().unwrap_or_else(|_| {
-            warn!(addr = %self.common.metrics_addr, "Invalid metrics address, using default");
-            default_metrics_addr
-        });
+        let metrics_addr: std::net::SocketAddr =
+            self.common.metrics_addr.parse().unwrap_or_else(|_| {
+                warn!(addr = %self.common.metrics_addr, "Invalid metrics address, using default");
+                std::net::SocketAddr::from(([0, 0, 0, 0], 9090))
+            });
 
         // Create and run the pipeline orchestrator
         let orchestrator =
@@ -223,17 +222,16 @@ impl DfeApp for App {
         // Create HTTP/gRPC server
         let server = Server::new(orchestrator.state(), metrics.clone());
 
-        // Spawn metrics server
-        let metrics_token = shutdown_token.clone();
-        let metrics_clone = metrics.clone();
-        let pipeline_state = orchestrator.state();
-        tokio::spawn(async move {
-            if let Err(e) =
-                run_metrics_server(metrics_addr, metrics_clone, pipeline_state, metrics_token).await
-            {
-                error!(error = %e, "Metrics server error");
-            }
-        });
+        // Start metrics server via MetricsManager (provides /metrics, /health/live, /health/ready)
+        let pipeline_for_ready = orchestrator.state();
+        let mut metrics_manager = hyperi_rustlib::metrics::MetricsManager::new("dfe_receiver");
+        metrics_manager.set_readiness_check(move || pipeline_for_ready.is_ready());
+        if let Err(e) = metrics_manager
+            .start_server(&metrics_addr.to_string())
+            .await
+        {
+            error!(error = %e, "Metrics server error");
+        }
 
         // Run main server (blocks until shutdown)
         if let Err(e) = server.run(shutdown_token.clone()).await {
@@ -299,40 +297,4 @@ fn reload_config_from_path(
         ..Config::default()
     };
     reload_config(&placeholder).map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
-}
-
-/// Run the Prometheus metrics HTTP server.
-async fn run_metrics_server(
-    addr: SocketAddr,
-    metrics: Arc<Metrics>,
-    pipeline: Arc<dfe_receiver::pipeline::PipelineState>,
-    shutdown: CancellationToken,
-) -> anyhow::Result<()> {
-    use axum::Router;
-    use axum::http::StatusCode;
-    use axum::routing::get;
-
-    let ready_pipeline = pipeline.clone();
-    let app = Router::new()
-        .route("/metrics", get(move || async move { metrics.render() }))
-        .route("/health/live", get(|| async { "OK" }))
-        .route(
-            "/health/ready",
-            get(move || async move {
-                if ready_pipeline.is_ready() {
-                    (StatusCode::OK, "OK")
-                } else {
-                    (StatusCode::SERVICE_UNAVAILABLE, "NOT_READY")
-                }
-            }),
-        );
-
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    info!(addr = %addr, "Metrics server listening");
-
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown.cancelled_owned())
-        .await?;
-
-    Ok(())
 }

@@ -528,8 +528,8 @@ async fn ingest_handler(
 ) -> std::result::Result<impl axum::response::IntoResponse, Error> {
     // Shed load when pipeline is not ready (memory pressure, sink down, draining)
     if !state.pipeline.is_ready() {
-        state.metrics.inc_requests_total();
-        state.metrics.inc_requests_error();
+        state.metrics.inc_requests_total("http");
+        state.metrics.inc_requests_error("http");
         return Ok((
             StatusCode::SERVICE_UNAVAILABLE,
             [("retry-after", "5")],
@@ -539,8 +539,8 @@ async fn ingest_handler(
     }
 
     // Record metrics
-    state.metrics.inc_requests_total();
-    state.metrics.add_bytes_received(body.len() as u64);
+    state.metrics.inc_requests_total("http");
+    state.metrics.add_bytes_received("http", body.len() as u64);
 
     // Note: Auth is validated in middleware layer (token_auth_middleware)
     // No additional validation here - middleware handles all auth modes
@@ -548,11 +548,11 @@ async fn ingest_handler(
     // Process through pipeline
     match state.pipeline.process(body).await {
         Ok(()) => {
-            state.metrics.inc_requests_success();
+            state.metrics.inc_requests_success("http");
             Ok(StatusCode::ACCEPTED.into_response())
         }
         Err(e) => {
-            state.metrics.inc_requests_error();
+            state.metrics.inc_requests_error("http");
             Err(e)
         }
     }
