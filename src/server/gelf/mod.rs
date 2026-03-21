@@ -128,21 +128,21 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
             result = StreamExt::next(&mut framed) => {
                 match result {
                     Some(Ok(raw)) => {
-                        metrics.inc_requests_total();
-                        metrics.add_bytes_received(raw.len() as u64);
+                        metrics.inc_requests_total("gelf");
+                        metrics.add_bytes_received("gelf", raw.len() as u64);
 
                         match gelf_to_json(&raw) {
                             Ok(payload) => {
                                 if let Err(e) = pipeline.process(payload).await {
                                     debug!(peer = %peer_addr, error = %e, "Failed to process GELF event");
-                                    metrics.inc_requests_error();
+                                    metrics.inc_requests_error("gelf");
                                 } else {
-                                    metrics.inc_requests_success();
+                                    metrics.inc_requests_success("gelf");
                                 }
                             }
                             Err(e) => {
                                 debug!(peer = %peer_addr, error = %e, "GELF parse error");
-                                metrics.inc_requests_error();
+                                metrics.inc_requests_error("gelf");
                             }
                         }
                     }

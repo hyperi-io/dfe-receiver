@@ -118,11 +118,12 @@ impl OtlpService {
         payloads: Vec<convert::ConvertedPayload>,
     ) -> std::result::Result<(), Status> {
         for payload in payloads {
-            self.metrics.add_bytes_received(payload.json.len() as u64);
+            self.metrics
+                .add_bytes_received("otlp", payload.json.len() as u64);
 
             if let Err(e) = self.pipeline.process(payload.json).await {
                 warn!(error = %e, signal = ?payload.signal, "Failed to process OTLP payload");
-                self.metrics.inc_requests_error();
+                self.metrics.inc_requests_error("otlp");
                 return Err(Status::internal(e.to_string()));
             }
         }
@@ -137,14 +138,14 @@ impl LogsService for OtlpService {
         request: Request<pb::collector::logs::v1::ExportLogsServiceRequest>,
     ) -> std::result::Result<Response<pb::collector::logs::v1::ExportLogsServiceResponse>, Status>
     {
-        self.metrics.inc_requests_total();
+        self.metrics.inc_requests_total("otlp");
         let req = request.into_inner();
 
         let payloads = convert::convert_logs(&req, self.mode)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
         self.process_payloads(payloads).await?;
-        self.metrics.inc_requests_success();
+        self.metrics.inc_requests_success("otlp");
 
         Ok(Response::new(
             pb::collector::logs::v1::ExportLogsServiceResponse {
@@ -161,14 +162,14 @@ impl TraceService for OtlpService {
         request: Request<pb::collector::trace::v1::ExportTraceServiceRequest>,
     ) -> std::result::Result<Response<pb::collector::trace::v1::ExportTraceServiceResponse>, Status>
     {
-        self.metrics.inc_requests_total();
+        self.metrics.inc_requests_total("otlp");
         let req = request.into_inner();
 
         let payloads = convert::convert_traces(&req, self.mode)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
         self.process_payloads(payloads).await?;
-        self.metrics.inc_requests_success();
+        self.metrics.inc_requests_success("otlp");
 
         Ok(Response::new(
             pb::collector::trace::v1::ExportTraceServiceResponse {
@@ -187,14 +188,14 @@ impl MetricsService for OtlpService {
         Response<pb::collector::metrics::v1::ExportMetricsServiceResponse>,
         Status,
     > {
-        self.metrics.inc_requests_total();
+        self.metrics.inc_requests_total("otlp");
         let req = request.into_inner();
 
         let payloads = convert::convert_metrics(&req, self.mode)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
         self.process_payloads(payloads).await?;
-        self.metrics.inc_requests_success();
+        self.metrics.inc_requests_success("otlp");
 
         Ok(Response::new(
             pb::collector::metrics::v1::ExportMetricsServiceResponse {
@@ -359,8 +360,8 @@ async fn run_http_server(
         headers: HeaderMap,
         body: Bytes,
     ) -> std::result::Result<StatusCode, Error> {
-        state.metrics.inc_requests_total();
-        state.metrics.add_bytes_received(body.len() as u64);
+        state.metrics.inc_requests_total("otlp");
+        state.metrics.add_bytes_received("otlp", body.len() as u64);
 
         let request = decode_otlp_request::<pb::collector::logs::v1::ExportLogsServiceRequest>(
             &headers, &body,
@@ -371,7 +372,7 @@ async fn run_http_server(
             state.pipeline.process(payload.json).await?;
         }
 
-        state.metrics.inc_requests_success();
+        state.metrics.inc_requests_success("otlp");
         Ok(StatusCode::OK)
     }
 
@@ -381,8 +382,8 @@ async fn run_http_server(
         headers: HeaderMap,
         body: Bytes,
     ) -> std::result::Result<StatusCode, Error> {
-        state.metrics.inc_requests_total();
-        state.metrics.add_bytes_received(body.len() as u64);
+        state.metrics.inc_requests_total("otlp");
+        state.metrics.add_bytes_received("otlp", body.len() as u64);
 
         let request = decode_otlp_request::<pb::collector::trace::v1::ExportTraceServiceRequest>(
             &headers, &body,
@@ -393,7 +394,7 @@ async fn run_http_server(
             state.pipeline.process(payload.json).await?;
         }
 
-        state.metrics.inc_requests_success();
+        state.metrics.inc_requests_success("otlp");
         Ok(StatusCode::OK)
     }
 
@@ -403,8 +404,8 @@ async fn run_http_server(
         headers: HeaderMap,
         body: Bytes,
     ) -> std::result::Result<StatusCode, Error> {
-        state.metrics.inc_requests_total();
-        state.metrics.add_bytes_received(body.len() as u64);
+        state.metrics.inc_requests_total("otlp");
+        state.metrics.add_bytes_received("otlp", body.len() as u64);
 
         let request = decode_otlp_request::<pb::collector::metrics::v1::ExportMetricsServiceRequest>(
             &headers, &body,
@@ -415,7 +416,7 @@ async fn run_http_server(
             state.pipeline.process(payload.json).await?;
         }
 
-        state.metrics.inc_requests_success();
+        state.metrics.inc_requests_success("otlp");
         Ok(StatusCode::OK)
     }
 

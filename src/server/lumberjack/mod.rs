@@ -91,17 +91,17 @@ async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin>(
                 last_sequence = sequence;
                 events_in_window += 1;
 
-                metrics.inc_requests_total();
-                metrics.add_bytes_received(payload.len() as u64);
+                metrics.inc_requests_total("lumberjack");
+                metrics.add_bytes_received("lumberjack", payload.len() as u64);
 
                 if let Err(e) = pipeline.process(payload).await {
                     if hyperi_rustlib::logger::log_sampled(&LUMBERJACK_ERRORS, 100) {
                         let total = LUMBERJACK_ERRORS.load(Ordering::Relaxed);
                         warn!(peer = %peer_addr, seq = sequence, error = %e, total_errors = total, "Lumberjack event error (1 in 100)");
                     }
-                    metrics.inc_requests_error();
+                    metrics.inc_requests_error("lumberjack");
                 } else {
-                    metrics.inc_requests_success();
+                    metrics.inc_requests_success("lumberjack");
                 }
 
                 // ACK after window is complete
@@ -135,17 +135,17 @@ async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin>(
                             last_sequence = sequence;
                             events_in_window += 1;
 
-                            metrics.inc_requests_total();
-                            metrics.add_bytes_received(payload.len() as u64);
+                            metrics.inc_requests_total("lumberjack");
+                            metrics.add_bytes_received("lumberjack", payload.len() as u64);
 
                             if let Err(e) = pipeline.process(payload).await {
                                 if hyperi_rustlib::logger::log_sampled(&LUMBERJACK_ERRORS, 100) {
                                     let total = LUMBERJACK_ERRORS.load(Ordering::Relaxed);
                                     warn!(peer = %peer_addr, seq = sequence, error = %e, total_errors = total, "Lumberjack event error (1 in 100)");
                                 }
-                                metrics.inc_requests_error();
+                                metrics.inc_requests_error("lumberjack");
                             } else {
-                                metrics.inc_requests_success();
+                                metrics.inc_requests_success("lumberjack");
                             }
                         }
                         Frame::Compressed { .. } => {

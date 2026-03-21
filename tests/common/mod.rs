@@ -52,10 +52,6 @@ pub struct KafkaTestConfig {
 }
 
 impl KafkaTestConfig {
-    pub fn has_sasl(&self) -> bool {
-        self.sasl_mechanism.is_some() && self.sasl_user.is_some()
-    }
-
     /// Apply SASL settings to an rdkafka ClientConfig (if configured).
     pub fn apply_sasl(&self, config: &mut rdkafka::ClientConfig) {
         config.set("security.protocol", &self.security_protocol);

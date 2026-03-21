@@ -81,14 +81,14 @@ async fn run_udp(
                     }
                 };
 
-                metrics.inc_requests_total();
-                metrics.add_bytes_received(len as u64);
+                metrics.inc_requests_total("syslog");
+                metrics.add_bytes_received("syslog", len as u64);
 
                 let raw = match std::str::from_utf8(&buf[..len]) {
                     Ok(s) => s,
                     Err(e) => {
                         debug!(peer = %peer_addr, error = %e, "Syslog UDP: invalid UTF-8");
-                        metrics.inc_requests_error();
+                        metrics.inc_requests_error("syslog");
                         continue;
                     }
                 };
@@ -97,14 +97,14 @@ async fn run_udp(
                     Ok(payload) => {
                         if let Err(e) = pipeline.process(payload).await {
                             debug!(peer = %peer_addr, error = %e, "Failed to process syslog UDP event");
-                            metrics.inc_requests_error();
+                            metrics.inc_requests_error("syslog");
                         } else {
-                            metrics.inc_requests_success();
+                            metrics.inc_requests_success("syslog");
                         }
                     }
                     Err(e) => {
                         debug!(peer = %peer_addr, error = %e, "Syslog UDP parse error");
-                        metrics.inc_requests_error();
+                        metrics.inc_requests_error("syslog");
                     }
                 }
             }
@@ -140,21 +140,21 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
             result = StreamExt::next(&mut framed) => {
                 match result {
                     Some(Ok(raw)) => {
-                        metrics.inc_requests_total();
-                        metrics.add_bytes_received(raw.len() as u64);
+                        metrics.inc_requests_total("syslog");
+                        metrics.add_bytes_received("syslog", raw.len() as u64);
 
                         match syslog_to_json(&raw) {
                             Ok(payload) => {
                                 if let Err(e) = pipeline.process(payload).await {
                                     debug!(peer = %peer_addr, error = %e, "Failed to process syslog TCP event");
-                                    metrics.inc_requests_error();
+                                    metrics.inc_requests_error("syslog");
                                 } else {
-                                    metrics.inc_requests_success();
+                                    metrics.inc_requests_success("syslog");
                                 }
                             }
                             Err(e) => {
                                 debug!(peer = %peer_addr, error = %e, "Syslog TCP parse error");
-                                metrics.inc_requests_error();
+                                metrics.inc_requests_error("syslog");
                             }
                         }
                     }
