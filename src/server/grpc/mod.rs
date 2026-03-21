@@ -71,28 +71,29 @@ impl Vector for VectorService {
     ) -> std::result::Result<Response<PushEventsResponse>, Status> {
         // Shed load when pipeline is not ready (memory pressure, sink down, draining)
         if !self.pipeline.is_ready() {
-            self.metrics.inc_requests_total();
-            self.metrics.inc_requests_error();
+            self.metrics.inc_requests_total("grpc");
+            self.metrics.inc_requests_error("grpc");
             return Err(Status::unavailable("server is overloaded"));
         }
 
         let req = request.into_inner();
-        self.metrics.inc_requests_total();
+        self.metrics.inc_requests_total("grpc");
 
         for event in &req.events {
             let json_bytes = convert::event_wrapper_to_json(event)
                 .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
-            self.metrics.add_bytes_received(json_bytes.len() as u64);
+            self.metrics
+                .add_bytes_received("grpc", json_bytes.len() as u64);
 
             if let Err(e) = self.pipeline.process(json_bytes).await {
                 warn!(error = %e, "Failed to process gRPC event");
-                self.metrics.inc_requests_error();
+                self.metrics.inc_requests_error("grpc");
                 return Err(Status::internal(e.to_string()));
             }
         }
 
-        self.metrics.inc_requests_success();
+        self.metrics.inc_requests_success("grpc");
         Ok(Response::new(PushEventsResponse {}))
     }
 

@@ -209,11 +209,13 @@ async fn write_handler(
     State(state): State<RwState>,
     body: Bytes,
 ) -> std::result::Result<StatusCode, RwError> {
-    state.metrics.inc_requests_total();
-    state.metrics.add_bytes_received(body.len() as u64);
+    state.metrics.inc_requests_total("prometheus_rw");
+    state
+        .metrics
+        .add_bytes_received("prometheus_rw", body.len() as u64);
 
     if body.is_empty() {
-        state.metrics.inc_requests_error();
+        state.metrics.inc_requests_error("prometheus_rw");
         return Err(RwError::bad_request("empty request body"));
     }
 
@@ -221,26 +223,26 @@ async fn write_handler(
     let decompressed = snap::raw::Decoder::new()
         .decompress_vec(&body)
         .map_err(|e| {
-            state.metrics.inc_requests_error();
+            state.metrics.inc_requests_error("prometheus_rw");
             RwError::bad_request(&format!("snappy decompression failed: {e}"))
         })?;
 
     // Protobuf decode
     let request = proto::WriteRequest::decode(decompressed.as_slice()).map_err(|e| {
-        state.metrics.inc_requests_error();
+        state.metrics.inc_requests_error("prometheus_rw");
         RwError::bad_request(&format!("protobuf decode failed: {e}"))
     })?;
 
     // Convert to JSON events
     let events = write_request_to_json(request, state.mode).map_err(|e| {
-        state.metrics.inc_requests_error();
+        state.metrics.inc_requests_error("prometheus_rw");
         RwError::internal(&e.to_string())
     })?;
 
     // Process each event through the pipeline
     for event in events {
         state.pipeline.process(event).await.map_err(|e| {
-            state.metrics.inc_requests_error();
+            state.metrics.inc_requests_error("prometheus_rw");
             if e.to_string().contains("pressure") {
                 RwError::service_unavailable("backpressure")
             } else {
@@ -249,7 +251,7 @@ async fn write_handler(
         })?;
     }
 
-    state.metrics.inc_requests_success();
+    state.metrics.inc_requests_success("prometheus_rw");
     Ok(StatusCode::NO_CONTENT)
 }
 

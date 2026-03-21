@@ -85,30 +85,19 @@ async fn start_syslog_handler(config: Config) -> (CancellationToken, Arc<Metrics
     (shutdown, metrics)
 }
 
-/// Extract a counter value from rendered Prometheus metrics.
-fn metric_value(metrics: &Metrics, name: &str) -> u64 {
-    let output = metrics.render();
-    for line in output.lines() {
-        if line.starts_with(name) && !line.starts_with('#') {
-            return line.trim_start_matches(name).trim().parse().unwrap_or(0);
-        }
-    }
-    0
-}
-
-/// Get requests_total from rendered metrics.
+/// Get requests_total from metrics.
 fn requests_total(metrics: &Metrics) -> u64 {
-    metric_value(metrics, "receiver_requests_total ")
+    metrics.get_requests_total()
 }
 
 /// Get requests_success from rendered metrics.
 fn requests_success(metrics: &Metrics) -> u64 {
-    metric_value(metrics, "receiver_requests_success ")
+    metrics.get_requests_success()
 }
 
 /// Get bytes_received_total from rendered metrics.
 fn bytes_received(metrics: &Metrics) -> u64 {
-    metric_value(metrics, "receiver_bytes_received_total ")
+    metrics.get_bytes_received()
 }
 
 // ---------------------------------------------------------------------------
