@@ -100,21 +100,20 @@ fn router_benchmark(c: &mut Criterion) {
     group.finish();
 }
 
-fn metrics_render_benchmark(c: &mut Criterion) {
+fn metrics_increment_benchmark(c: &mut Criterion) {
     use dfe_receiver::metrics::Metrics;
 
-    let mut group = c.benchmark_group("metrics_render");
+    let mut group = c.benchmark_group("metrics_increment");
 
     let metrics = Metrics::default();
-    // Populate with sample data so render has realistic work
-    for _ in 0..100 {
-        metrics.inc_requests_total();
-        metrics.add_bytes_received(1024);
-    }
 
     group.throughput(Throughput::Elements(1));
-    group.bench_function("render_prometheus", |b| {
-        b.iter(|| black_box(metrics.render()));
+    group.bench_function("inc_requests_total", |b| {
+        b.iter(|| metrics.inc_requests_total(black_box("http")));
+    });
+
+    group.bench_function("add_bytes_received", |b| {
+        b.iter(|| metrics.add_bytes_received(black_box("http"), 1024));
     });
 
     group.finish();
@@ -125,6 +124,6 @@ criterion_group!(
     json_validation_benchmark,
     field_extraction_benchmark,
     router_benchmark,
-    metrics_render_benchmark,
+    metrics_increment_benchmark,
 );
 criterion_main!(benches);

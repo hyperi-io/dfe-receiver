@@ -1260,43 +1260,43 @@ async fn test_metrics_contains_expected_names() {
     let metrics = Metrics::default();
 
     // Record some data so metrics are non-zero
-    metrics.inc_requests_total();
-    metrics.inc_requests_success();
+    metrics.inc_requests_total("test");
+    metrics.inc_requests_success("test");
 
-    let output = metrics.render();
-
-    // Core receiver metrics
-    assert!(
-        output.contains("receiver_requests_total"),
-        "Metrics should contain receiver_requests_total"
+    // Verify counters via getter methods (no render() needed)
+    assert_eq!(
+        metrics.get_requests_total(),
+        1,
+        "requests_total should be 1"
+    );
+    assert_eq!(
+        metrics.get_requests_success(),
+        1,
+        "requests_success should be 1"
+    );
+    assert_eq!(
+        metrics.get_requests_error(),
+        0,
+        "requests_error should be 0"
+    );
+    assert_eq!(
+        metrics.get_bytes_received(),
+        0,
+        "bytes_received should be 0"
     );
     assert!(
-        output.contains("receiver_requests_success"),
-        "Metrics should contain receiver_requests_success"
+        metrics.scaling_pressure() >= 0.0,
+        "scaling_pressure should be non-negative"
     );
-    assert!(
-        output.contains("receiver_requests_error"),
-        "Metrics should contain receiver_requests_error"
+    assert_eq!(
+        metrics.get_auth_failures_total(),
+        0,
+        "auth_failures should be 0"
     );
-    assert!(
-        output.contains("receiver_bytes_received_total"),
-        "Metrics should contain receiver_bytes_received_total"
-    );
-
-    // Scaling pressure
-    assert!(
-        output.contains("receiver_scaling_pressure"),
-        "Metrics should contain receiver_scaling_pressure"
-    );
-
-    // Security metrics
-    assert!(
-        output.contains("receiver_auth_failures_total"),
-        "Metrics should contain receiver_auth_failures_total"
-    );
-    assert!(
-        output.contains("receiver_tls_handshake_failures_total"),
-        "Metrics should contain receiver_tls_handshake_failures_total"
+    assert_eq!(
+        metrics.get_tls_handshake_failures_total(),
+        0,
+        "tls_failures should be 0"
     );
 }
 
@@ -1319,17 +1319,20 @@ async fn test_metrics_security_counters() {
     // Record TLS failure
     metrics.inc_tls_handshake_failure();
 
-    let output = metrics.render();
-
-    // Auth failures should be tracked
-    assert!(
-        output.contains("receiver_auth_failures_total"),
-        "Should contain auth failure metrics"
+    // Verify via getter methods
+    assert_eq!(
+        metrics.get_auth_failures_total(),
+        3,
+        "Should have 3 auth failures"
     );
-
-    // TLS failures should be tracked
-    assert!(
-        output.contains("receiver_tls_handshake_failures_total"),
-        "Should contain TLS failure metrics"
+    assert_eq!(
+        metrics.get_validation_failures_total(),
+        2,
+        "Should have 2 validation failures"
+    );
+    assert_eq!(
+        metrics.get_tls_handshake_failures_total(),
+        1,
+        "Should have 1 TLS failure"
     );
 }

@@ -77,7 +77,7 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
                 };
 
                 pending.extend_from_slice(&buf[..n]);
-                metrics.add_bytes_received(n as u64);
+                metrics.add_bytes_received("fluent", n as u64);
 
                 // Try to decode complete msgpack values from the buffer
                 loop {
@@ -90,7 +90,7 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
                     };
 
                     let consumed = start_len - cursor.len();
-                    metrics.inc_requests_total();
+                    metrics.inc_requests_total("fluent");
 
                     // Check for chunk ACK before processing
                     let chunk_id = extract_chunk_id(&msg);
@@ -101,17 +101,17 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
                             for payload in payloads {
                                 if let Err(e) = pipeline.process(payload).await {
                                     debug!(peer = %peer_addr, error = %e, "Failed to process Fluent event");
-                                    metrics.inc_requests_error();
+                                    metrics.inc_requests_error("fluent");
                                     all_ok = false;
                                 }
                             }
                             if all_ok {
-                                metrics.inc_requests_success();
+                                metrics.inc_requests_success("fluent");
                             }
                         }
                         Err(e) => {
                             debug!(peer = %peer_addr, error = %e, "Fluent Forward parse error");
-                            metrics.inc_requests_error();
+                            metrics.inc_requests_error("fluent");
                         }
                     }
 

@@ -296,16 +296,18 @@ async fn event_handler(
     State(state): State<HecState>,
     body: Bytes,
 ) -> std::result::Result<Json<HecResponse>, HecError> {
-    state.metrics.inc_requests_total();
-    state.metrics.add_bytes_received(body.len() as u64);
+    state.metrics.inc_requests_total("splunk_hec");
+    state
+        .metrics
+        .add_bytes_received("splunk_hec", body.len() as u64);
 
     if body.is_empty() {
-        state.metrics.inc_requests_error();
+        state.metrics.inc_requests_error("splunk_hec");
         return Err(HecError::no_data());
     }
 
     let events = parse_hec_events(&body).map_err(|e| {
-        state.metrics.inc_requests_error();
+        state.metrics.inc_requests_error("splunk_hec");
         let msg = e.to_string();
         if msg.contains("blank") {
             HecError::event_required()
@@ -318,12 +320,12 @@ async fn event_handler(
 
     for event in events {
         let json = hec_event_to_json(event).map_err(|e| {
-            state.metrics.inc_requests_error();
+            state.metrics.inc_requests_error("splunk_hec");
             HecError::invalid_data(&e.to_string())
         })?;
 
         state.pipeline.process(json).await.map_err(|e| {
-            state.metrics.inc_requests_error();
+            state.metrics.inc_requests_error("splunk_hec");
             if e.to_string().contains("pressure") {
                 HecError::server_busy()
             } else {
@@ -332,7 +334,7 @@ async fn event_handler(
         })?;
     }
 
-    state.metrics.inc_requests_success();
+    state.metrics.inc_requests_success("splunk_hec");
     Ok(Json(HecResponse::success()))
 }
 
@@ -344,11 +346,13 @@ async fn raw_handler(
     Query(params): Query<HashMap<String, String>>,
     body: Bytes,
 ) -> std::result::Result<Json<HecResponse>, HecError> {
-    state.metrics.inc_requests_total();
-    state.metrics.add_bytes_received(body.len() as u64);
+    state.metrics.inc_requests_total("splunk_hec");
+    state
+        .metrics
+        .add_bytes_received("splunk_hec", body.len() as u64);
 
     if body.is_empty() {
-        state.metrics.inc_requests_error();
+        state.metrics.inc_requests_error("splunk_hec");
         return Err(HecError::no_data());
     }
 
@@ -379,11 +383,11 @@ async fn raw_handler(
         }
 
         let json = raw_to_json(line, &metadata).map_err(|e| {
-            state.metrics.inc_requests_error();
+            state.metrics.inc_requests_error("splunk_hec");
             HecError::internal(&e.to_string())
         })?;
         state.pipeline.process(json).await.map_err(|e| {
-            state.metrics.inc_requests_error();
+            state.metrics.inc_requests_error("splunk_hec");
             if e.to_string().contains("pressure") {
                 HecError::server_busy()
             } else {
@@ -392,7 +396,7 @@ async fn raw_handler(
         })?;
     }
 
-    state.metrics.inc_requests_success();
+    state.metrics.inc_requests_success("splunk_hec");
     Ok(Json(HecResponse::success()))
 }
 
