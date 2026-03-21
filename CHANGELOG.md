@@ -1,3 +1,11 @@
+## [1.14.2](https://github.com/hyperi-io/dfe-receiver/compare/v1.14.1...v1.14.2) (2026-03-21)
+
+
+### Bug Fixes
+
+* align VERSION file with latest release tag ([2f831f7](https://github.com/hyperi-io/dfe-receiver/commit/2f831f7335d2f310a60b67776670cf2561563c98))
+* trigger release for metrics migration ([fabe429](https://github.com/hyperi-io/dfe-receiver/commit/fabe429117b9381f509c68487505890725959d85))
+
 ## [1.14.1](https://github.com/hyperi-io/dfe-receiver/compare/v1.14.0...v1.14.1) (2026-03-19)
 
 
