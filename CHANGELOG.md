@@ -1,3 +1,10 @@
+# [1.14.0-dev.5](https://github.com/hyperi-io/dfe-receiver/compare/v1.14.0-dev.4...v1.14.0-dev.5) (2026-03-22)
+
+
+### Bug Fixes
+
+* inline Renovate config (preset resolution broken) ([a94c02c](https://github.com/hyperi-io/dfe-receiver/commit/a94c02cb1990fad73ab3121964dd32f8cc165bcb))
+
 # [1.14.0-dev.4](https://github.com/hyperi-io/dfe-receiver/compare/v1.14.0-dev.3...v1.14.0-dev.4) (2026-03-21)
 
 
