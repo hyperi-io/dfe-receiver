@@ -32,8 +32,6 @@
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
 
-mod common;
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -44,7 +42,7 @@ use rdkafka::message::Message;
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
 use tokio::time::timeout;
 
-use common::{kafka_test_config, test_topic};
+use super::common::{kafka_test_config, test_topic};
 
 /// Check if Kafka is available (uses dual-mode config).
 async fn kafka_available() -> bool {
@@ -104,7 +102,7 @@ async fn test_kafka_connectivity() {
     if !kafka_available().await {
         eprintln!(
             "Skipping: Kafka not available (TEST_MODE={:?})",
-            common::TestMode::detect()
+            super::common::TestMode::detect()
         );
         return;
     }

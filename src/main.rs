@@ -135,9 +135,11 @@ impl DfeApp for App {
         info!(version = env!("CARGO_PKG_VERSION"), "Starting dfe-receiver");
 
         // Initialise metrics with scaling pressure engine + standard DFE metrics.
-        // DfeMetrics::register() describes dfe_* names with the global recorder
-        // (installed by the DfeApp lifecycle before run_service is called).
-        let metrics = Arc::new(Metrics::with_dfe_metrics(config.scaling.build_pressure()));
+        // Returns the MetricsManager for reuse — creating a second one would panic
+        // (global Prometheus recorder can only be installed once).
+        let (metrics_instance, metrics_manager) =
+            Metrics::with_dfe_metrics(config.scaling.build_pressure());
+        let metrics = Arc::new(metrics_instance);
 
         // Create cancellation token for coordinated shutdown
         let shutdown_token = CancellationToken::new();
@@ -222,9 +224,9 @@ impl DfeApp for App {
         // Create HTTP/gRPC server
         let server = Server::new(orchestrator.state(), metrics.clone());
 
-        // Start metrics server via MetricsManager (provides /metrics, /health/live, /health/ready)
+        // Start metrics server (reuses the MetricsManager from Metrics::with_dfe_metrics)
         let pipeline_for_ready = orchestrator.state();
-        let mut metrics_manager = hyperi_rustlib::metrics::MetricsManager::new("dfe_receiver");
+        let mut metrics_manager = metrics_manager;
         metrics_manager.set_readiness_check(move || pipeline_for_ready.is_ready());
         if let Err(e) = metrics_manager
             .start_server(&metrics_addr.to_string())
