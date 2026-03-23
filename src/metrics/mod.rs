@@ -181,9 +181,10 @@ impl Metrics {
     ///
     /// Creates a `MetricsManager` with namespace `dfe_receiver`, registers
     /// all metric groups, and calls `DfeMetrics::register()` for platform metrics.
-    /// Must be called once — the `MetricsManager` installs the global Prometheus
-    /// recorder.
-    pub fn with_dfe_metrics(scaling: ScalingPressure) -> Self {
+    /// Returns both the `Metrics` and the `MetricsManager` — caller must use the
+    /// returned manager for `start_server()`. Creating a second `MetricsManager`
+    /// will panic (global Prometheus recorder can only be installed once).
+    pub fn with_dfe_metrics(scaling: ScalingPressure) -> (Self, MetricsManager) {
         let manager = MetricsManager::new("dfe_receiver");
 
         let app = AppMetrics::new(&manager, env!("CARGO_PKG_VERSION"), "dev");
@@ -203,7 +204,7 @@ impl Metrics {
         metrics.sink_group = Some(sink);
         metrics.cb_group = Some(cb);
         metrics.bp_group = Some(bp);
-        metrics
+        (metrics, manager)
     }
 
     // ======================================================================

@@ -255,12 +255,13 @@ Log spam fixes:
 - [ ] `src/server/lumberjack/mod.rs:94,135` — frame parse error → sampled (1/100)
 
 Metrics migration:
-- [ ] Replace hand-rolled `Metrics` struct + `render()` with rustlib `DfeMetrics`
-- [ ] Emit standard `dfe_transport_*{transport="kafka|grpc|loader|file"}` metrics
-- [ ] Emit standard `dfe_records_*`, `dfe_pipeline_*`, `dfe_scaling_*`, `dfe_spool_*`
+- [x] Replace hand-rolled `Metrics` struct + `render()` with rustlib `DfeMetrics` + metric groups
+- [x] Migrate prefix from `receiver_*` to `dfe_receiver_*` with transport labels
+- [x] Wire AppMetrics, BufferMetrics, SinkMetrics, CircuitBreakerMetrics, BackpressureMetrics
+- [x] Remove custom metrics HTTP server — use rustlib MetricsManager
+- [x] Fix counter naming (_total suffix)
 - [ ] Add histograms: `dfe_transport_send_duration_seconds`
-- [ ] Dual-emit old `receiver_*` names during transition, remove in next release
-- [ ] Update KEDA ScaledObject PromQL to `dfe_scaling_pressure`
+- [x] Update KEDA ScaledObject PromQL to `dfe_scaling_pressure`
 
 **dfe-loader:**
 
@@ -327,9 +328,9 @@ from the universal standards — they belong in TODO.md, not in standards.
 
 - [x] `apply_env_overrides()` replaced with rustlib `ApplyFlatEnv` trait
 - [x] Security logging via rustlib `SecurityEvent` (not bespoke)
-- [ ] Hand-rolled `Metrics` struct — still used for `receiver_*` names (dual-emit). Remove after Phase 6 drops old names.
-- [ ] `RateWindow` — still bespoke. Consider moving to rustlib if other projects need it.
-- [ ] `BufferManager` memory detection — uses `sysinfo::System::new()` directly. rustlib's `MetricsManager` auto-detects container memory.
+- [x] Hand-rolled `Metrics` struct — replaced with metric groups + MetricsManager (v1.14.2)
+- [x] `RateWindow` — replaced with rustlib `scaling::RateWindow` (v1.14.1)
+- [x] `BufferManager` memory detection — replaced with rustlib `MemoryGuard` (v1.14.1)
 
 ### Security Logging Standard (rustlib) [DONE]
 
@@ -365,6 +366,9 @@ from the universal standards — they belong in TODO.md, not in standards.
 
 ### Medium Priority
 
+- [ ] Update `hyperi-ai` submodule to latest before any work
+- [ ] Documentation review using `/doco` skill — full audit against code reality
+- [ ] Re-build and re-test using updated `hyperi-ci` (prod/test change separation)
 - [ ] Fix Helm `chart/templates/secret.yaml` — `bearer-tokens` hyphen in Go template field name
 - [x] Remove `[patch.crates-io]` from Cargo.toml — done, building against crates.io `v1.16.3`
 - [ ] Documentation for deployment
@@ -373,7 +377,7 @@ from the universal standards — they belong in TODO.md, not in standards.
 
 ### Low Priority
 
-- [ ] Phase 2 removes need for this: Migrate hand-rolled Prometheus text render to `metrics-exporter-prometheus` crate
+- [x] Migrate hand-rolled Prometheus text render to rustlib MetricsManager (done in metrics migration v1.14.2)
 
 ---
 
