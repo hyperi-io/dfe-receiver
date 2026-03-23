@@ -1,3 +1,10 @@
+# [1.14.0-dev.6](https://github.com/hyperi-io/dfe-receiver/compare/v1.14.0-dev.5...v1.14.0-dev.6) (2026-03-23)
+
+
+### Bug Fixes
+
+* replace invalid Renovate preset :pinActionsToFullSha with helpers:pinGitHubActionDigestsToSemver ([92b00bc](https://github.com/hyperi-io/dfe-receiver/commit/92b00bc4665d83e7e7af422ce2935afc32e6b198))
+
 # [1.14.0-dev.5](https://github.com/hyperi-io/dfe-receiver/compare/v1.14.0-dev.4...v1.14.0-dev.5) (2026-03-22)
 
 
