@@ -12,6 +12,7 @@
 //! One entry point with submodules = 1 link cycle = ~3x faster test compilation.
 
 #[path = "common/mod.rs"]
+#[allow(dead_code)]
 mod common;
 
 #[path = "integration/fluent.rs"]
