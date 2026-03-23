@@ -125,33 +125,37 @@ pub fn test_topic(suffix: &str) -> String {
 impl KafkaTestConfig {
     /// Build a `dfe_receiver::config::KafkaConfig` from the test config.
     pub fn to_receiver_kafka_config(&self) -> dfe_receiver::config::KafkaConfig {
-        let mut config = dfe_receiver::config::KafkaConfig::default();
-        config.brokers = self
-            .brokers
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .collect();
-        config.client_id = "dfe-receiver-test".to_string();
-
-        if let (Some(mechanism), Some(user), Some(password)) =
+        let sasl = if let (Some(mechanism), Some(user), Some(password)) =
             (&self.sasl_mechanism, &self.sasl_user, &self.sasl_password)
         {
-            config.sasl = Some(dfe_receiver::config::SaslConfig {
+            Some(dfe_receiver::config::SaslConfig {
                 enabled: true,
                 mechanism: mechanism.clone(),
                 username: user.clone(),
                 password: password.clone(),
-            });
-        }
+            })
+        } else {
+            None
+        };
 
-        config
+        dfe_receiver::config::KafkaConfig {
+            brokers: self
+                .brokers
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .collect(),
+            client_id: "dfe-receiver-test".to_string(),
+            sasl,
+            ..Default::default()
+        }
     }
 
     /// Build a `dfe_receiver::config::Config` with Kafka configured.
     pub fn to_receiver_config(&self) -> dfe_receiver::config::Config {
-        let mut config = dfe_receiver::config::Config::default();
-        config.kafka = self.to_receiver_kafka_config();
-        config
+        dfe_receiver::config::Config {
+            kafka: self.to_receiver_kafka_config(),
+            ..Default::default()
+        }
     }
 }
 

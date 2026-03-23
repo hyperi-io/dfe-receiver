@@ -10,6 +10,7 @@
 //! Run with: `cargo nextest run --test e2e` or `cargo nextest run -- --ignored`
 
 #[path = "common/mod.rs"]
+#[allow(dead_code)]
 mod common;
 
 #[path = "e2e/kafka.rs"]
