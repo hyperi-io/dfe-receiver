@@ -1,3 +1,15 @@
+## [1.14.3](https://github.com/hyperi-io/dfe-receiver/compare/v1.14.2...v1.14.3) (2026-03-24)
+
+
+### Bug Fixes
+
+* clippy field_reassign_with_default and expect_used in tests ([06bfd0b](https://github.com/hyperi-io/dfe-receiver/commit/06bfd0b76b8b800fb9d34223689c46c9aec59d39))
+* inline Renovate config (preset resolution broken) ([a94c02c](https://github.com/hyperi-io/dfe-receiver/commit/a94c02cb1990fad73ab3121964dd32f8cc165bcb))
+* prevent double MetricsManager init panic, restructure tests ([e9b02f4](https://github.com/hyperi-io/dfe-receiver/commit/e9b02f4fc8e70e2f776c3067584bbbd9f8dbe6de)), closes [#19](https://github.com/hyperi-io/dfe-receiver/issues/19)
+* replace invalid Renovate preset :pinActionsToFullSha with helpers:pinGitHubActionDigestsToSemver ([92b00bc](https://github.com/hyperi-io/dfe-receiver/commit/92b00bc4665d83e7e7af422ce2935afc32e6b198))
+* suppress dead_code warnings on shared test helpers ([88fdde0](https://github.com/hyperi-io/dfe-receiver/commit/88fdde059c67eb0890a411487a1ae90e0e0a6fa4))
+* update rustls-webpki 0.103.9 → 0.103.10 (GHSA-pwjx-qhcg-rvj4) ([3e92bc6](https://github.com/hyperi-io/dfe-receiver/commit/3e92bc6519d43451ec0f9149616518dad4f7ff46))
+
 ## [1.14.2](https://github.com/hyperi-io/dfe-receiver/compare/v1.14.1...v1.14.2) (2026-03-21)
 
 
