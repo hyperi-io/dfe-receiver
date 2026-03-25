@@ -1,3 +1,10 @@
+# [1.14.0-dev.8](https://github.com/hyperi-io/dfe-receiver/compare/v1.14.0-dev.7...v1.14.0-dev.8) (2026-03-25)
+
+
+### Bug Fixes
+
+* add version check on startup, document crates.io-only rustlib rule ([7021222](https://github.com/hyperi-io/dfe-receiver/commit/70212224338907a7f3701bb8cc5f92a9ad54783f))
+
 # [1.14.0-dev.7](https://github.com/hyperi-io/dfe-receiver/compare/v1.14.0-dev.6...v1.14.0-dev.7) (2026-03-24)
 
 
