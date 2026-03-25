@@ -132,6 +132,14 @@ impl DfeApp for App {
     }
 
     async fn run_service(&self, config: Self::Config) -> Result<(), CliError> {
+        // Fire-and-forget version check
+        hyperi_rustlib::VersionCheck::new(hyperi_rustlib::VersionCheckConfig {
+            product: "dfe-receiver".into(),
+            current_version: env!("CARGO_PKG_VERSION").into(),
+            ..Default::default()
+        })
+        .check_on_startup();
+
         info!(version = env!("CARGO_PKG_VERSION"), "Starting dfe-receiver");
 
         // Initialise metrics with scaling pressure engine + standard DFE metrics.
