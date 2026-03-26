@@ -23,7 +23,7 @@ doctest = false
 
 [dependencies]
 # HyperI shared library (crates.io)
-hyperi-rustlib = { version = ">=1.18.0", features = [
+hyperi-rustlib = { version = ">=1.20.0", features = [
     "config",
     "config-reload",
     "logger",

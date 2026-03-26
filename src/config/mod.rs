@@ -1184,10 +1184,10 @@ pub struct KafkaConfig {
 impl Default for KafkaConfig {
     fn default() -> Self {
         let mut overrides = std::collections::HashMap::new();
-        // Disable rdkafka statistics by default — the HighThroughput profile
-        // enables 1s stats, but dfe-receiver doesn't use StatsContext so the
-        // stats just spam the log at INFO level (see GH #3).
-        overrides.insert("statistics.interval.ms".to_string(), "0".to_string());
+        // Enable rdkafka statistics at 5s intervals for Prometheus metrics.
+        // The KafkaProducer's ProducerContext parses the stats JSON callback
+        // and exposes broker RTT, queue depth, etc. via the global recorder.
+        overrides.insert("statistics.interval.ms".to_string(), "5000".to_string());
 
         Self {
             brokers: vec![],
@@ -1754,12 +1754,12 @@ mod tests {
     }
 
     #[test]
-    fn test_kafka_default_disables_stats() {
+    fn test_kafka_default_enables_stats() {
         let config = KafkaConfig::default();
         assert_eq!(
             config.librdkafka_overrides.get("statistics.interval.ms"),
-            Some(&"0".to_string()),
-            "stats must be disabled by default to prevent log spam"
+            Some(&"5000".to_string()),
+            "stats at 5s intervals for Prometheus scraping"
         );
     }
 
@@ -1776,7 +1776,7 @@ mod tests {
         let rustlib = config.to_rustlib_kafka_config_for_producer();
         assert_eq!(
             rustlib.librdkafka_overrides.get("statistics.interval.ms"),
-            Some(&"0".to_string()),
+            Some(&"5000".to_string()),
         );
         assert_eq!(
             rustlib.librdkafka_overrides.get("message.max.bytes"),

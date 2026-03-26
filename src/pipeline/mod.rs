@@ -453,6 +453,9 @@ impl PipelineState {
 
         metrics.set_batch_queue_size(total_queue);
 
+        // EPS gauge — events per second from the rate window
+        metrics::gauge!("dfe_receiver_events_per_second").set(metrics.request_rate());
+
         // Sync all metrics into the scaling pressure engine
         metrics.update_scaling();
     }
