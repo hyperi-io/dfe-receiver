@@ -10,8 +10,11 @@
 //!
 //! Delegates all batching and compression to librdkafka via
 //! `KafkaProducer::HighThroughput` profile (256KB batches, 100ms linger, LZ4).
+//! Emits per-send duration histogram and send/error counters via the global
+//! metrics recorder.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Instant;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -55,12 +58,20 @@ impl KafkaSink {
 impl Sink for KafkaSink {
     /// Send a message to a topic (non-blocking, librdkafka batches internally).
     async fn send(&self, topic: &str, payload: Bytes) -> Result<()> {
+        let start = Instant::now();
+        let bytes = payload.len() as u64;
+
         match self.producer.send(topic, None, &payload) {
             Ok(()) => {
+                let elapsed = start.elapsed().as_secs_f64();
+                metrics::histogram!("dfe_receiver_kafka_send_duration_seconds").record(elapsed);
+                metrics::counter!("dfe_receiver_kafka_sends_total").increment(1);
+                metrics::counter!("dfe_receiver_kafka_bytes_sent_total").increment(bytes);
                 self.healthy.store(true, Ordering::Relaxed);
                 Ok(())
             }
             Err(e) => {
+                metrics::counter!("dfe_receiver_kafka_send_errors_total").increment(1);
                 if hyperi_rustlib::logger::log_sampled(&KAFKA_ERRORS, 1000) {
                     let total = KAFKA_ERRORS.load(Ordering::Relaxed);
                     error!(error = %e, topic, total_errors = total, "Kafka send failed (1 in 1000)");

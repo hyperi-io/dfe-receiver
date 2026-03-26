@@ -691,6 +691,24 @@ fn describe_receiver_metrics() {
         "dfe_receiver_messages_drained_total",
         "Messages drained from spool"
     );
+
+    // Kafka outbound
+    metrics::describe_histogram!(
+        "dfe_receiver_kafka_send_duration_seconds",
+        "Kafka producer send latency"
+    );
+    metrics::describe_counter!("dfe_receiver_kafka_sends_total", "Total Kafka sends");
+    metrics::describe_counter!(
+        "dfe_receiver_kafka_bytes_sent_total",
+        "Total bytes sent to Kafka"
+    );
+    metrics::describe_counter!("dfe_receiver_kafka_send_errors_total", "Kafka send errors");
+
+    // EPS
+    metrics::describe_gauge!(
+        "dfe_receiver_events_per_second",
+        "Current events per second (1s sample)"
+    );
 }
 
 impl Default for Metrics {
