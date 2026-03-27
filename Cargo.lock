@@ -572,7 +572,7 @@ dependencies = [
 
 [[package]]
 name = "dfe-receiver"
-version = "1.14.0-dev.7"
+version = "1.14.4"
 dependencies = [
  "anyhow",
  "async-trait",

@@ -17,8 +17,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use hyperi_rustlib::transport::{TransportBase, TransportSender};
 use hyperi_rustlib::transport::{GrpcConfig, GrpcTransport, SendResult};
+use hyperi_rustlib::transport::{TransportBase, TransportSender};
 use tracing::{debug, error, info};
 
 use crate::error::{Error, Result};

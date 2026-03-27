@@ -97,6 +97,49 @@ All protocols follow: receive -> convert to JSON -> validate -> route -> Kafka/d
 
 ## Active Tasks
 
+### Migrate to Single Versioning on Main [IN PROGRESS]
+
+**Goal:** Remove release branch, publish from main via `hyperi-ci release <tag>`
+**Guide:** `/projects/hyperi-ci/docs/MIGRATION-GUIDE.md`
+**Reference:** `/projects/hyperi-rustlib/.releaserc.yaml`, `.github/workflows/ci.yml`
+
+- [ ] Replace `.releaserc.json` (JSON, dual-branch) with `.releaserc.yaml` (YAML, main only)
+  - Remove `@semantic-release/github` plugin
+  - Add all commit types from CI standards
+  - Use `scripts/set-version.py` in prepareCmd
+- [ ] Create `scripts/set-version.py` (updates VERSION + Cargo.toml)
+- [ ] Update `.github/workflows/ci.yml` — add `workflow_dispatch.inputs.tag`, pass to reusable workflow, fix publish-target to `both`
+- [ ] Fix `VERSION` to `1.14.4` (latest GA tag), fix `Cargo.toml` version to `1.14.4`
+- [ ] Create `.githooks/commit-msg` (conventional commit validation)
+- [ ] Commit: `fix: migrate to single versioning on main`
+- [ ] `hyperi-ci check` passes locally
+- [ ] Push to main
+- [ ] Force-move tag: `git tag -f v1.14.4 HEAD && git push origin v1.14.4 --force`
+- [ ] CI green on main
+- [ ] Delete release branch: `gh api -X DELETE repos/hyperi-io/dfe-receiver/git/refs/heads/release`
+- [ ] Clean up stale merge branches on remote
+
+### ~~Consume hyperi-rustlib v1.20.0~~ [DONE]
+
+- [x] Bump hyperi-rustlib to `>=1.20.0` (commit `09fc01f`)
+- [x] Fix Transport trait split (TransportBase, TransportSender, TransportReceiver)
+- [x] Add version check on startup (commit `7021222`)
+
+### Code Review
+
+- [ ] Run `/review` skill — fix any findings
+- [ ] Commit fixes if needed
+
+### Release
+
+- [ ] Verify semantic-release creates clean version (not `-dev.N`)
+- [ ] `hyperi-ci release --list` to see unpublished tags
+- [ ] `hyperi-ci release <tag>` to publish
+
+---
+
+### ~~Previously Active~~
+
 - [x] Remove dead `#[cfg(feature = "plugins")]` code — already removed in prior session (commit `4a453fb`)
 
 ### ~~Consume hyperi-rustlib v1.16.0 (Dynamic Linking)~~ [DONE]
