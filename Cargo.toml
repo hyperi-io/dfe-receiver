@@ -10,7 +10,6 @@
 name = "dfe-receiver"
 version = "1.14.4"
 edition = "2024"
-rust-version = "1.94"
 description = "High-performance HTTP/gRPC receiver for PB/s scale data ingestion"
 license = "FSL-1.1-ALv2"
 repository = "https://github.com/hyperi-io/dfe-receiver"
