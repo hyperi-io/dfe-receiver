@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Conventional commit validation hook
+# Install: git config core.hooksPath .githooks
+
+set -euo pipefail
+
+validate_commit() {
+    if command -v hyperi-ci >/dev/null 2>&1; then
+        hyperi-ci check-commit "$1" 2>/dev/null && return 0
+    fi
+    if command -v uvx >/dev/null 2>&1; then
+        uvx hyperi-ci check-commit "$1" 2>/dev/null && return 0
+    fi
+    # Fallback: basic conventional commit regex
+    if grep -qE '^(feat|fix|perf|hotfix|security|sec|docs|test|refactor|style|build|ci|chore|deps|revert|wip|cleanup|data|debt|design|infra|meta|ops|review|spike|ui)(\(.+\))?: .{3,100}' "$1"; then
+        return 0
+    fi
+    echo "Error: commit message must follow conventional format: <type>: <description>" >&2
+    echo "Accepted types: feat, fix, perf, hotfix, sec, docs, test, refactor, chore, ci, build, deps, revert, wip" >&2
+    return 1
+}
+
+validate_commit "$1"
