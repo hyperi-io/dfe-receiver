@@ -664,10 +664,18 @@ mod tests {
     async fn test_pipeline_validation_reject() {
         let state = test_state().await;
 
-        // Invalid JSON with dlq_on_invalid=true goes to DLQ (success since it's routed)
+        // Invalid JSON with dlq_on_invalid=true attempts DLQ routing, but no Kafka/DLQ
+        // sink is configured in test state — expect config error from the fallback path
         let result = state.process(Bytes::from("not json")).await;
-        // Either succeeds (DLQ) or fails depending on config
-        assert!(result.is_ok() || result.is_err());
+        assert!(
+            result.is_err(),
+            "expected error without DLQ sink: {result:?}"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Kafka sink not configured"),
+            "expected Kafka sink error, got: {err}"
+        );
     }
 
     #[tokio::test]
