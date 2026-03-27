@@ -1,3 +1,10 @@
+## [1.14.5](https://github.com/hyperi-io/dfe-receiver/compare/v1.14.4...v1.14.5) (2026-03-27)
+
+
+### Bug Fixes
+
+* update hyperi-ai submodule to latest standards ([9e3570b](https://github.com/hyperi-io/dfe-receiver/commit/9e3570baa7ef41cbb7f7d43c377eb30dea324a5f))
+
 # [1.14.0-dev.8](https://github.com/hyperi-io/dfe-receiver/compare/v1.14.0-dev.7...v1.14.0-dev.8) (2026-03-25)
 
 
