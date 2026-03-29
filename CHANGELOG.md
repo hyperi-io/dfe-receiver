@@ -1,3 +1,10 @@
+## [1.14.6](https://github.com/hyperi-io/dfe-receiver/compare/v1.14.5...v1.14.6) (2026-03-29)
+
+
+### Bug Fixes
+
+* add request duration histogram, active connections gauge, hot path optimisations ([04eae99](https://github.com/hyperi-io/dfe-receiver/commit/04eae9993b9280900aeb50fb195ad3a8181e0ba6))
+
 ## [1.14.5](https://github.com/hyperi-io/dfe-receiver/compare/v1.14.4...v1.14.5) (2026-03-27)
 
 
