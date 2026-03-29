@@ -253,103 +253,19 @@ implemented in hyperi-rustlib and consumed by each project.
 - [x] 14 hardening tests added (rate limit, IP filter, backpressure, slowloris, metrics)
 - [x] CI green, 404 tests passing
 
-#### Phase 4: Other dfe-* Rust Projects (apply same pattern)
+#### dfe-receiver Log Spam Fixes (remaining)
 
-- [ ] dfe-loader: replace `prometheus` crate with rustlib `DfeMetrics`, fix coercion warn spam
-- [ ] dfe-fetcher: replace hand-rolled metrics with rustlib, fix container stderr spam
-- [ ] dfe-archiver: already uses MetricsManager — align metric names to `dfe_*`
-
-#### Phase 5: hyperi-pylib — Mirror Rust Patterns for Python
-
-- [ ] Add `RateLimitFilter` to `hyperi_pylib.logging.setup()` — opt-in global safety net
-- [ ] Add helper classes: `StateLogger`, `SampledLogger` to `hyperi_pylib.logging`
-- [ ] Add `DfeMetrics` wrapper to `hyperi_pylib.metrics` with standard `dfe_*` metric registration
-- [ ] Apply to dfe-engine (FastAPI) — standard metrics + log spam protection
-- [ ] Load Python standards (`hyperi-ai/standards/languages/PYTHON.md`) before implementation
-
-#### Phase 6: Remediate All dfe-* Projects (Log Spam + Metrics)
-
-Two-part remediation per project: (A) fix identified log spam sites, (B) replace
-existing metrics with rustlib `DfeMetrics` standard `dfe_*` names.
-
-**dfe-receiver:**
-
-Log spam fixes:
 - [ ] `src/pipeline/mod.rs:205,315` — memory pressure warn → state-transition
 - [ ] `src/sink/kafka/mod.rs:61` — Kafka send error → sampled (1/1000) + metric
 - [ ] `src/sink/loader/mod.rs:95` — loader send error → sampled (1/1000) + metric
 - [ ] `src/server/syslog/mod.rs:73` — UDP recv error → debounced (5s)
 - [ ] `src/server/lumberjack/mod.rs:94,135` — frame parse error → sampled (1/100)
 
-Metrics migration:
-- [x] Replace hand-rolled `Metrics` struct + `render()` with rustlib `DfeMetrics` + metric groups
-- [x] Migrate prefix from `receiver_*` to `dfe_receiver_*` with transport labels
-- [x] Wire AppMetrics, BufferMetrics, SinkMetrics, CircuitBreakerMetrics, BackpressureMetrics
-- [x] Remove custom metrics HTTP server — use rustlib MetricsManager
-- [x] Fix counter naming (_total suffix)
+#### dfe-receiver Metrics (remaining)
+
 - [ ] Add histograms: `dfe_transport_send_duration_seconds`
-- [x] Update KEDA ScaledObject PromQL to `dfe_scaling_pressure`
-
-**dfe-loader:**
-
-Log spam fixes:
-- [ ] `src/transform/coerce.rs:103` — type coercion warn per-row → sampled (1/1000) + log batch total
-- [ ] `src/clickhouse/inserter.rs:338,358` — retry warn → state-transition (first failure + recovery)
-- [ ] `src/pipeline/orchestrator.rs:783,786` — DLQ channel full → debounced (5s)
-- [ ] `src/kafka/consumer.rs:219` — consumer error → debounced (5s)
-
-Metrics migration:
-- [ ] Replace `prometheus` crate `Registry` with rustlib `DfeMetrics`
-- [ ] Replace bespoke `hyper` metrics server with rustlib `MetricsManager::start_server()`
-- [ ] Emit standard `dfe_*` names instead of `loader_*`
-- [ ] Register `dfe_scaling_pressure` properly (currently appended as raw text)
-
-**dfe-fetcher:**
-
-Log spam fixes:
-- [ ] `src/extractor/container/mod.rs:152` — container stderr warn per-line → sampled (1/100) + count
-- [ ] `src/scheduler/mod.rs:118` — source not ready → debounced (10s)
-- [ ] `src/output.rs:143` — transport send error → sampled (1/1000) + metric
-- [ ] `src/pipeline/mod.rs:253` — DLQ send failure → debounced (5s)
-
-Metrics migration:
-- [ ] Replace hand-rolled `Metrics` struct + `render()` with rustlib `DfeMetrics`
-- [ ] Resolve `dfe_pipeline_ready` collision with dfe-transform-vector (use `job` label)
-- [ ] Add `dfe_scaling_pressure` (currently missing — no KEDA integration)
-
-**dfe-archiver:**
-
-Log spam fixes:
-- [ ] `crates/archiver/src/archiver.rs:168` — routing failure → sampled (1/1000) + metric
-- [ ] `crates/archiver/src/archiver.rs:191` — buffer push under pressure → state-transition
-- [ ] `crates/core/src/buffer/tiered.rs:225,242` — spool full → state-transition
-- [ ] `crates/archiver/src/archiver.rs:134` — Kafka recv error → debounced (5s)
-
-Metrics migration:
-- [ ] Already uses `MetricsManager` — align metric names from `dfe_archiver_*` to `dfe_*`
-- [ ] Replace manual scaling pressure with rustlib `ScalingPressure`
-
-**dfe-engine (Python):**
-
-Log spam fixes:
-- [ ] Audit all `logger.warning`/`logger.error` sites for per-request spam potential
-- [ ] Apply `RateLimitFilter` globally via pylib
-- [ ] Fix identified sites with `StateLogger`/`SampledLogger`
-
-Metrics migration:
-- [ ] Apply pylib `DfeMetrics` wrapper with standard `dfe_*` names
-- [ ] Emit `dfe_transport_*`, `dfe_records_*`, `dfe_pipeline_ready`
-
-#### Phase 7: Clean Up Standards Docs
-
-After all remediations are complete, remove project-specific audit findings
-from the universal standards — they belong in TODO.md, not in standards.
-
-- [ ] `hyperi-ai/standards/universal/LOG-FLOODING.md` — remove "Current State", "Worst Offenders" table, and per-project audit from DFE section
-- [ ] `hyperi-ai/standards/universal/METRICS.md` — remove "Migration" section (will be done) and any stale per-project references
-- [ ] `dfe-receiver/docs/LOG-SPAMMING.md` — remove or archive (audit data moves to git history)
-- [ ] `dfe-receiver/docs/METRICS.md` — remove migration section, keep as operational reference
-- [ ] Revert `.claude/settings.local.json` to project-scoped permissions (remove broad `/projects/**` access)
+- [ ] Add `request_duration_seconds` histogram with `transport` label
+- [ ] Wire `active_connections` gauge to Prometheus
 
 ### Bespoke Code Dedup (receiver vs rustlib) [PARTIAL]
 
@@ -359,11 +275,10 @@ from the universal standards — they belong in TODO.md, not in standards.
 - [x] `RateWindow` — replaced with rustlib `scaling::RateWindow` (v1.14.1)
 - [x] `BufferManager` memory detection — replaced with rustlib `MemoryGuard` (v1.14.1)
 
-### Security Logging Standard (rustlib) [DONE]
+### ~~Security Logging Standard (rustlib)~~ [DONE]
 
 - [x] `SecurityEvent` builder + convenience functions in rustlib
 - [x] Wired into dfe-receiver (auth, TLS, config reload, validation, token rotation)
-- [ ] Add `SECURITY-LOGGING.md` to `hyperi-ai/standards/universal/` (standards doc not yet written)
 
 ### Smart Log Combining (rustlib enhancement)
 
@@ -393,13 +308,8 @@ from the universal standards — they belong in TODO.md, not in standards.
 
 ### Medium Priority
 
-- [ ] Update `hyperi-ai` submodule to latest before any work
-- [ ] Documentation review using `/doco` skill — full audit against code reality
-- [ ] Re-build and re-test using updated `hyperi-ci` (prod/test change separation)
 - [ ] Fix Helm `chart/templates/secret.yaml` — `bearer-tokens` hyphen in Go template field name
 - [x] Remove `[patch.crates-io]` from Cargo.toml — done, building against crates.io `v1.16.3`
-- [ ] Documentation for deployment
-- [ ] Write `SECURITY-LOGGING.md` universal standard for `hyperi-ai/standards/universal/`
 - [ ] `#[derive(FlatEnvOverrides)]` proc macro (Phase 2 of flat env spec — currently manual impls)
 
 ### Low Priority
