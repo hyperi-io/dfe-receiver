@@ -545,8 +545,14 @@ async fn ingest_handler(
     // Note: Auth is validated in middleware layer (token_auth_middleware)
     // No additional validation here - middleware handles all auth modes
 
-    // Process through pipeline
-    match state.pipeline.process(body).await {
+    // Process through pipeline (timed)
+    let start = std::time::Instant::now();
+    let result = state.pipeline.process(body).await;
+    state
+        .metrics
+        .record_request_duration("http", start.elapsed().as_secs_f64());
+
+    match result {
         Ok(()) => {
             state.metrics.inc_requests_success("http");
             Ok(StatusCode::ACCEPTED.into_response())

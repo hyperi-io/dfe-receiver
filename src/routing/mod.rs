@@ -34,11 +34,11 @@ pub enum RouteResult {
 pub struct Router {
     /// Source rules (first match wins).
     source_rules: Vec<SourceRule>,
-    /// Default source when no rule matches.
-    default_source: String,
     /// Topic suffix (e.g., "_land").
     topic_suffix: String,
-    /// Source-to-topic remapping.
+    /// Pre-computed default topic (avoids format!() on every message).
+    default_topic: String,
+    /// Source-to-topic remapping (pre-computed with suffix).
     source_to_topic: FxHashMap<String, String>,
     /// DLQ topic.
     dlq_topic: String,
@@ -46,15 +46,17 @@ pub struct Router {
     dlq_enabled: bool,
     /// Default destination.
     default_destination: String,
-    /// Destination routing rules.
+    /// Destination routing rules with pre-split field paths.
     destination_rules: Vec<DestinationRule>,
     /// Whether enrichment (source rules) is enabled.
     enrichment_enabled: bool,
 }
 
-/// Internal destination rule representation.
+/// Internal destination rule representation with pre-split field paths.
 struct DestinationRule {
     match_field: String,
+    /// Pre-split field path for nested lookups (avoids split('.') per message).
+    match_field_parts: Vec<String>,
     match_value: String,
     destination: String,
 }
@@ -66,18 +68,22 @@ impl Router {
         destinations: &DestinationsConfig,
         enrichment_enabled: bool,
     ) -> Self {
-        // Convert HashMap to FxHashMap for faster lookups
+        // Pre-compute source-to-topic with suffix applied
         let source_to_topic: FxHashMap<String, String> = routing
             .source_to_topic
             .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|(k, v)| (k.clone(), format!("{v}{}", routing.topic_suffix)))
             .collect();
 
-        // Convert destination rules
+        // Pre-compute default topic (avoids format!() on every message)
+        let default_topic = format!("{}{}", routing.default_source, routing.topic_suffix);
+
+        // Convert destination rules with pre-split field paths
         let destination_rules = destinations
             .rules
             .iter()
             .map(|r| DestinationRule {
+                match_field_parts: r.match_field.split('.').map(String::from).collect(),
                 match_field: r.match_field.clone(),
                 match_value: r.match_value.clone(),
                 destination: r.destination.clone(),
@@ -86,8 +92,8 @@ impl Router {
 
         Self {
             source_rules: routing.effective_source_rules(),
-            default_source: routing.default_source.clone(),
             topic_suffix: routing.topic_suffix.clone(),
+            default_topic,
             source_to_topic,
             dlq_topic: routing.dlq.topic.clone(),
             dlq_enabled: routing.dlq.enabled,
@@ -121,8 +127,7 @@ impl Router {
         if self.dlq_enabled {
             RouteResult::Dlq(self.dlq_topic.clone())
         } else {
-            // Fall back to default topic if DLQ disabled
-            RouteResult::Kafka(format!("{}{}", self.default_source, self.topic_suffix))
+            RouteResult::Kafka(self.default_topic.clone())
         }
     }
 
@@ -130,7 +135,8 @@ impl Router {
     #[inline]
     fn determine_destination(&self, payload: &Bytes) -> &str {
         for rule in &self.destination_rules {
-            if let Some(value) = Self::extract_field_cow(payload, &rule.match_field)
+            if let Some(value) =
+                Self::extract_field_with_parts(payload, &rule.match_field, &rule.match_field_parts)
                 && value.as_ref() == rule.match_value
             {
                 return &rule.destination;
@@ -177,17 +183,34 @@ impl Router {
     /// Extract the topic from the payload using source rules.
     #[inline]
     fn extract_topic(&self, payload: &Bytes) -> String {
-        let source = self
-            .evaluate_source(payload)
-            .unwrap_or_else(|| self.default_source.clone());
+        let source = match self.evaluate_source(payload) {
+            Some(s) => s,
+            None => return self.default_topic.clone(),
+        };
 
-        let topic = self
-            .source_to_topic
-            .get(&source)
-            .map(String::as_str)
-            .unwrap_or(&source);
+        // Check pre-computed source-to-topic map (already has suffix)
+        if let Some(topic) = self.source_to_topic.get(&source) {
+            return topic.clone();
+        }
 
-        format!("{topic}{}", self.topic_suffix)
+        // Dynamic source: append suffix
+        format!("{source}{}", self.topic_suffix)
+    }
+
+    /// Extract a field value using pre-split parts (avoids split('.') per message).
+    #[inline]
+    fn extract_field_with_parts<'a>(
+        payload: &'a Bytes,
+        field: &str,
+        parts: &[String],
+    ) -> Option<Cow<'a, str>> {
+        let lazy: LazyValue = if parts.len() > 1 {
+            let refs: Vec<&str> = parts.iter().map(String::as_str).collect();
+            get_from_slice(payload, refs.as_slice()).ok()?
+        } else {
+            get_from_slice(payload, [field].as_slice()).ok()?
+        };
+        Self::lazy_to_cow(lazy)
     }
 
     /// Extract a field value using zero-copy when possible.
@@ -202,24 +225,25 @@ impl Router {
         } else {
             get_from_slice(payload, [field].as_slice()).ok()?
         };
+        Self::lazy_to_cow(lazy)
+    }
 
-        // Check if it's a string
+    /// Convert a LazyValue to Cow<str> with zero-copy when possible.
+    #[inline]
+    #[allow(clippy::needless_pass_by_value)]
+    fn lazy_to_cow(lazy: LazyValue<'_>) -> Option<Cow<'_, str>> {
         if !lazy.is_str() {
             return None;
         }
 
-        // Get the raw JSON text
         let raw_cow = lazy.as_raw_cow();
 
         match raw_cow {
             Cow::Borrowed(s) if s.len() >= 2 => {
-                // Strip quotes from JSON string
                 let inner = &s[1..s.len() - 1];
                 if inner.contains('\\') {
-                    // Has escapes - need to parse
                     lazy.as_str().map(|s| Cow::Owned(s.to_string()))
                 } else {
-                    // Zero-copy borrow
                     Some(Cow::Borrowed(inner))
                 }
             }
@@ -240,8 +264,8 @@ impl Default for Router {
     fn default() -> Self {
         Self {
             source_rules: vec![],
-            default_source: "default".to_string(),
             topic_suffix: "_land".to_string(),
+            default_topic: "default_land".to_string(),
             source_to_topic: FxHashMap::default(),
             dlq_topic: "dlq_land".to_string(),
             dlq_enabled: true,
@@ -261,8 +285,8 @@ mod tests {
 
     fn default_routing_config() -> RoutingConfig {
         RoutingConfig {
-            source_rules: vec![],
             default_source: "default".to_string(),
+            source_rules: vec![],
             topic_suffix: "_land".to_string(),
             source_to_topic: HashMap::new(),
             legacy_compat: false,

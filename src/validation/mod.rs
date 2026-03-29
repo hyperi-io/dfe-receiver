@@ -27,15 +27,34 @@ pub enum ValidationResult {
     Reject(String),
 }
 
+/// Pre-split field path for efficient nested lookups.
+struct FieldPath {
+    raw: String,
+    parts: Vec<String>,
+}
+
 /// Validator for incoming payloads.
 pub struct Validator {
     config: ValidationConfig,
+    /// Pre-split required field paths (avoids split('.') per message).
+    required_field_paths: Vec<FieldPath>,
 }
 
 impl Validator {
     /// Create a new validator with the given configuration.
     pub fn new(config: ValidationConfig) -> Self {
-        Self { config }
+        let required_field_paths = config
+            .required_fields
+            .iter()
+            .map(|f| FieldPath {
+                parts: f.split('.').map(String::from).collect(),
+                raw: f.clone(),
+            })
+            .collect();
+        Self {
+            config,
+            required_field_paths,
+        }
     }
 
     /// Validate a payload.
@@ -54,10 +73,10 @@ impl Validator {
             };
         }
 
-        // Check required fields
-        for field in &self.config.required_fields {
-            if !Self::has_field(payload, field) {
-                let reason = format!("missing required field: {field}");
+        // Check required fields (using pre-split paths)
+        for fp in &self.required_field_paths {
+            if !Self::has_field_parts(payload, &fp.parts) {
+                let reason = format!("missing required field: {}", fp.raw);
                 return if self.config.dlq_on_invalid {
                     ValidationResult::Dlq(reason)
                 } else {
@@ -87,17 +106,14 @@ impl Validator {
         }
     }
 
-    /// Check if a field exists in the payload.
-    ///
-    /// Uses on-demand extraction for zero-copy field access.
+    /// Check if a field exists using pre-split parts.
     #[inline]
-    fn has_field(payload: &Bytes, field: &str) -> bool {
-        // Handle nested fields (dot notation)
-        if field.contains('.') {
-            let parts: Vec<&str> = field.split('.').collect();
-            sonic_rs::get_from_slice(payload, parts.as_slice()).is_ok()
+    fn has_field_parts(payload: &Bytes, parts: &[String]) -> bool {
+        if parts.len() > 1 {
+            let refs: Vec<&str> = parts.iter().map(String::as_str).collect();
+            sonic_rs::get_from_slice(payload, refs.as_slice()).is_ok()
         } else {
-            sonic_rs::get_from_slice(payload, [field].as_slice()).is_ok()
+            sonic_rs::get_from_slice(payload, [parts[0].as_str()].as_slice()).is_ok()
         }
     }
 }

@@ -366,14 +366,37 @@ impl Metrics {
 
     /// Increment active connections.
     #[inline]
-    pub fn inc_active_connections(&self) {
-        self.active_connections.fetch_add(1, Ordering::Relaxed);
+    pub fn inc_active_connections(&self, transport: &str) {
+        let count = self.active_connections.fetch_add(1, Ordering::Relaxed) + 1;
+        metrics::gauge!(
+            "dfe_receiver_active_connections",
+            "transport" => transport.to_string()
+        )
+        .set(count as f64);
     }
 
     /// Decrement active connections.
     #[inline]
-    pub fn dec_active_connections(&self) {
-        self.active_connections.fetch_sub(1, Ordering::Relaxed);
+    pub fn dec_active_connections(&self, transport: &str) {
+        let count = self
+            .active_connections
+            .fetch_sub(1, Ordering::Relaxed)
+            .saturating_sub(1);
+        metrics::gauge!(
+            "dfe_receiver_active_connections",
+            "transport" => transport.to_string()
+        )
+        .set(count as f64);
+    }
+
+    /// Record request duration.
+    #[inline]
+    pub fn record_request_duration(&self, transport: &str, duration_secs: f64) {
+        metrics::histogram!(
+            "dfe_receiver_request_duration_seconds",
+            "transport" => transport.to_string()
+        )
+        .record(duration_secs);
     }
 
     /// Set memory usage.
@@ -692,6 +715,16 @@ fn describe_receiver_metrics() {
         "Messages drained from spool"
     );
 
+    // Request latency
+    metrics::describe_histogram!(
+        "dfe_receiver_request_duration_seconds",
+        "End-to-end request processing latency"
+    );
+    metrics::describe_gauge!(
+        "dfe_receiver_active_connections",
+        "Currently active inbound connections"
+    );
+
     // Kafka outbound
     metrics::describe_histogram!(
         "dfe_receiver_kafka_send_duration_seconds",
@@ -776,7 +809,7 @@ mod tests {
         metrics.set_memory_usage(1_000_000, 1_000_000);
 
         for _ in 0..1000 {
-            metrics.inc_active_connections();
+            metrics.inc_active_connections("test");
         }
 
         metrics.update_scaling();

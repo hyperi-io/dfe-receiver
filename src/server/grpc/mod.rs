@@ -79,6 +79,7 @@ impl Vector for VectorService {
         let req = request.into_inner();
         self.metrics.inc_requests_total("grpc");
 
+        let start = std::time::Instant::now();
         for event in &req.events {
             let json_bytes = convert::event_wrapper_to_json(event)
                 .map_err(|e| Status::invalid_argument(e.to_string()))?;
@@ -89,10 +90,14 @@ impl Vector for VectorService {
             if let Err(e) = self.pipeline.process(json_bytes).await {
                 warn!(error = %e, "Failed to process gRPC event");
                 self.metrics.inc_requests_error("grpc");
+                self.metrics
+                    .record_request_duration("grpc", start.elapsed().as_secs_f64());
                 return Err(Status::internal(e.to_string()));
             }
         }
 
+        self.metrics
+            .record_request_duration("grpc", start.elapsed().as_secs_f64());
         self.metrics.inc_requests_success("grpc");
         Ok(Response::new(PushEventsResponse {}))
     }
