@@ -1098,7 +1098,7 @@ impl KafkaConfig {
             config.security_protocol = protocol.to_string();
             config.sasl_mechanism = Some(sasl.mechanism.to_uppercase());
             config.sasl_username = Some(sasl.username.clone());
-            config.sasl_password = Some(sasl.password.clone());
+            config.sasl_password = Some(sasl.password.clone().into());
         }
 
         // TLS
