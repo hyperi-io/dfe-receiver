@@ -192,7 +192,7 @@ impl Metrics {
         let sink = SinkMetrics::new(&manager);
         let cb = CircuitBreakerMetrics::new(&manager);
         let bp = BackpressureMetrics::new(&manager);
-        let dfe = DfeMetrics::register();
+        let dfe = DfeMetrics::register(&manager);
 
         // Describe receiver-specific metrics with transport labels
         describe_receiver_metrics();
