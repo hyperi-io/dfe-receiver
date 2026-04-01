@@ -572,7 +572,7 @@ dependencies = [
 
 [[package]]
 name = "dfe-receiver"
-version = "1.14.5"
+version = "1.14.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1247,6 +1247,7 @@ dependencies = [
  "prost",
  "prost-build",
  "prost-types",
+ "rayon",
  "rdkafka 0.39.0",
  "reqwest",
  "rmp-serde",
