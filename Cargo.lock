@@ -572,7 +572,7 @@ dependencies = [
 
 [[package]]
 name = "dfe-receiver"
-version = "1.14.4"
+version = "1.14.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1225,9 +1225,9 @@ dependencies = [
 
 [[package]]
 name = "hyperi-rustlib"
-version = "1.20.1"
+version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b8dc89125f702eb17fae7ab778ea34888432cc0ed719b6da31f4c036ad1a7ae"
+checksum = "87e1c28ccaf224662a9d45752dc835ee1f7c654fead97ee987f3d6cee314854e"
 dependencies = [
  "async-trait",
  "axum",

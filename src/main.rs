@@ -32,8 +32,6 @@ use clap::{Parser, Subcommand};
 use hyperi_rustlib::cli::{CliError, CommonArgs, DfeApp, StandardCommand, VersionInfo, run_app};
 use hyperi_rustlib::config::reloader::{ConfigReloader, ReloaderConfig};
 use hyperi_rustlib::deployment::{generate_chart, generate_compose_fragment, generate_dockerfile};
-use tokio::signal;
-use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use dfe_receiver::config::{Config, reload_config};
@@ -131,37 +129,22 @@ impl DfeApp for App {
         Ok(config)
     }
 
-    async fn run_service(&self, config: Self::Config) -> Result<(), CliError> {
-        // Fire-and-forget version check
-        hyperi_rustlib::VersionCheck::new(hyperi_rustlib::VersionCheckConfig {
-            product: "dfe-receiver".into(),
-            current_version: env!("CARGO_PKG_VERSION").into(),
-            ..Default::default()
-        })
-        .check_on_startup();
-
+    async fn run_service(
+        &self,
+        config: Self::Config,
+        runtime: hyperi_rustlib::cli::ServiceRuntime,
+    ) -> Result<(), CliError> {
         info!(version = env!("CARGO_PKG_VERSION"), "Starting dfe-receiver");
 
         // Initialise metrics with scaling pressure engine + standard DFE metrics.
-        // Returns the MetricsManager for reuse — creating a second one would panic
-        // (global Prometheus recorder can only be installed once).
+        // ServiceRuntime already registered DfeMetrics, but receiver has its own
+        // custom Metrics struct with scaling pressure. Keep using it for now.
         let (metrics_instance, metrics_manager) =
             Metrics::with_dfe_metrics(config.scaling.build_pressure());
         let metrics = Arc::new(metrics_instance);
 
-        // Create cancellation token for coordinated shutdown
-        let shutdown_token = CancellationToken::new();
-
-        // Spawn signal handler for graceful shutdown
-        let signal_token = shutdown_token.clone();
-        tokio::spawn(async move {
-            if let Err(e) = signal::ctrl_c().await {
-                warn!(error = %e, "Failed to listen for SIGINT");
-                return;
-            }
-            info!("Received SIGINT, initiating shutdown");
-            signal_token.cancel();
-        });
+        // Use runtime's shutdown token (signal handler + K8s pre-stop delay)
+        let shutdown_token = runtime.shutdown.clone();
 
         // Parse metrics server address
         let metrics_addr: std::net::SocketAddr =
