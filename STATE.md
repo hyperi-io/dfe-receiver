@@ -81,6 +81,13 @@ Native Rust receiver that:
 
 ## Key Decisions
 
+### hyperi-rustlib: crates.io ONLY
+
+**Decision:** NEVER use path dependencies or `[patch.crates-io]` for hyperi-rustlib
+**Rationale:** Path deps break CI, create works-on-my-machine bugs, and bypass version control. Always publish to crates.io first, then bump the version requirement.
+**Read for reference:** `/projects/hyperi-rustlib` is available for reading code and documentation — NEVER reference it in Cargo.toml
+**Rule:** `hyperi-rustlib = { version = ">=X.Y.Z", features = [...] }` — version from crates.io, never `path = "..."`
+
 ### No MSRV Pinning (Pre-OSS)
 
 **Decision:** Remove `rust-version` from Cargo.toml — build against latest stable Rust

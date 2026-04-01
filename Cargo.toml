@@ -41,6 +41,7 @@ hyperi-rustlib = { version = ">=2.0.0", features = [
     "cli",
     "deployment",
     "version-check",
+    "worker",
 ] }
 
 # Prometheus metrics (direct dep for counter!/gauge! macros with labels)
