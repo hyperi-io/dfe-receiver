@@ -528,8 +528,13 @@ async fn ingest_handler(
 ) -> std::result::Result<impl axum::response::IntoResponse, Error> {
     // Shed load when pipeline is not ready (memory pressure, sink down, draining)
     if !state.pipeline.is_ready() {
+        debug!(
+            transport = "http",
+            "Request rejected — pipeline not ready (backpressure)"
+        );
         state.metrics.inc_requests_total("http");
         state.metrics.inc_requests_error("http");
+        state.metrics.record_backpressure();
         return Ok((
             StatusCode::SERVICE_UNAVAILABLE,
             [("retry-after", "5")],
@@ -538,9 +543,16 @@ async fn ingest_handler(
             .into_response());
     }
 
+    let body_len = body.len();
+    debug!(
+        transport = "http",
+        bytes = body_len,
+        "HTTP ingest request received"
+    );
+
     // Record metrics
     state.metrics.inc_requests_total("http");
-    state.metrics.add_bytes_received("http", body.len() as u64);
+    state.metrics.add_bytes_received("http", body_len as u64);
 
     // Note: Auth is validated in middleware layer (token_auth_middleware)
     // No additional validation here - middleware handles all auth modes
@@ -548,16 +560,30 @@ async fn ingest_handler(
     // Process through pipeline (timed)
     let start = std::time::Instant::now();
     let result = state.pipeline.process(body).await;
+    let elapsed = start.elapsed();
     state
         .metrics
-        .record_request_duration("http", start.elapsed().as_secs_f64());
+        .record_request_duration("http", elapsed.as_secs_f64());
 
     match result {
         Ok(()) => {
+            debug!(
+                transport = "http",
+                bytes = body_len,
+                duration_us = elapsed.as_micros(),
+                "HTTP ingest request accepted"
+            );
             state.metrics.inc_requests_success("http");
             Ok(StatusCode::ACCEPTED.into_response())
         }
         Err(e) => {
+            debug!(
+                transport = "http",
+                bytes = body_len,
+                duration_us = elapsed.as_micros(),
+                error = %e,
+                "HTTP ingest request failed"
+            );
             state.metrics.inc_requests_error("http");
             Err(e)
         }

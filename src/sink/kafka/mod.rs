@@ -19,7 +19,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 use bytes::Bytes;
 use hyperi_rustlib::transport::kafka::{KafkaProducer, ProducerProfile};
-use tracing::{error, info};
+use tracing::{debug, error, info, trace};
 
 use crate::config::KafkaConfig;
 use crate::error::{Error, Result};
@@ -61,12 +61,22 @@ impl Sink for KafkaSink {
         let start = Instant::now();
         let bytes = payload.len() as u64;
 
+        trace!(topic, bytes, "Kafka produce enqueue");
+
         match self.producer.send(topic, None, &payload) {
             Ok(()) => {
-                let elapsed = start.elapsed().as_secs_f64();
-                metrics::histogram!("dfe_receiver_kafka_send_duration_seconds").record(elapsed);
+                let elapsed = start.elapsed();
+                let elapsed_secs = elapsed.as_secs_f64();
+                metrics::histogram!("dfe_receiver_kafka_send_duration_seconds")
+                    .record(elapsed_secs);
                 metrics::counter!("dfe_receiver_kafka_sends_total").increment(1);
                 metrics::counter!("dfe_receiver_kafka_bytes_sent_total").increment(bytes);
+                debug!(
+                    topic,
+                    bytes,
+                    duration_us = elapsed.as_micros(),
+                    "Kafka message enqueued"
+                );
                 self.healthy.store(true, Ordering::Relaxed);
                 Ok(())
             }

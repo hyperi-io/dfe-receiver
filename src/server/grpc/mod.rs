@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
-use tracing::{info, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::config::Config;
 use crate::error::{Error, Result};
@@ -71,12 +71,24 @@ impl Vector for VectorService {
     ) -> std::result::Result<Response<PushEventsResponse>, Status> {
         // Shed load when pipeline is not ready (memory pressure, sink down, draining)
         if !self.pipeline.is_ready() {
+            debug!(
+                transport = "grpc",
+                "gRPC push_events rejected — pipeline not ready (backpressure)"
+            );
             self.metrics.inc_requests_total("grpc");
             self.metrics.inc_requests_error("grpc");
+            self.metrics.record_backpressure();
             return Err(Status::unavailable("server is overloaded"));
         }
 
         let req = request.into_inner();
+        let event_count = req.events.len();
+        debug!(
+            transport = "grpc",
+            events = event_count,
+            "gRPC push_events received"
+        );
+
         self.metrics.inc_requests_total("grpc");
 
         let start = std::time::Instant::now();
@@ -84,11 +96,17 @@ impl Vector for VectorService {
             let json_bytes = convert::event_wrapper_to_json(event)
                 .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
+            trace!(
+                transport = "grpc",
+                bytes = json_bytes.len(),
+                "Dispatching gRPC event to pipeline"
+            );
+
             self.metrics
                 .add_bytes_received("grpc", json_bytes.len() as u64);
 
             if let Err(e) = self.pipeline.process(json_bytes).await {
-                warn!(error = %e, "Failed to process gRPC event");
+                warn!(error = %e, transport = "grpc", "Failed to process gRPC event");
                 self.metrics.inc_requests_error("grpc");
                 self.metrics
                     .record_request_duration("grpc", start.elapsed().as_secs_f64());
@@ -96,8 +114,15 @@ impl Vector for VectorService {
             }
         }
 
+        let elapsed = start.elapsed();
+        debug!(
+            transport = "grpc",
+            events = event_count,
+            duration_us = elapsed.as_micros(),
+            "gRPC push_events completed"
+        );
         self.metrics
-            .record_request_duration("grpc", start.elapsed().as_secs_f64());
+            .record_request_duration("grpc", elapsed.as_secs_f64());
         self.metrics.inc_requests_success("grpc");
         Ok(Response::new(PushEventsResponse {}))
     }
