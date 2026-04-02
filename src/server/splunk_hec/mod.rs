@@ -33,7 +33,7 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
-use tracing::{debug, info, trace};
+use tracing::{debug, info};
 
 use crate::config::SplunkHecConfig;
 use crate::error::{Error, Result};
@@ -337,32 +337,38 @@ async fn event_handler(
         "HEC events parsed, dispatching to pipeline"
     );
 
-    let start = std::time::Instant::now();
+    // Convert all events to JSON payloads first, then batch-process.
+    // Amortises backpressure check and memory tracking across all events.
+    let mut payloads = Vec::with_capacity(events.len());
     for event in events {
         let json = hec_event_to_json(event).map_err(|e| {
             state.metrics.inc_requests_error("splunk_hec");
             HecError::invalid_data(&e.to_string())
         })?;
+        payloads.push(json);
+    }
 
-        trace!(
+    let start = std::time::Instant::now();
+    let (success, first_err) = state.pipeline.process_batch(&payloads).await;
+
+    if let Some(ref e) = first_err {
+        let failed = event_count - success;
+        debug!(
             transport = "splunk_hec",
-            bytes = json.len(),
-            "Dispatching HEC event to pipeline"
+            success = success,
+            failed = failed,
+            error = %e,
+            "HEC batch partially failed"
         );
-
-        state.pipeline.process(json).await.map_err(|e| {
+        if success == 0 {
             state.metrics.inc_requests_error("splunk_hec");
-            if e.to_string().contains("pressure") {
-                debug!(
-                    transport = "splunk_hec",
-                    "HEC event rejected — pipeline backpressure"
-                );
-                HecError::server_busy()
+            return if e.to_string().contains("pressure") {
+                Err(HecError::server_busy())
             } else {
-                debug!(transport = "splunk_hec", error = %e, "HEC event pipeline error");
-                HecError::internal(&e.to_string())
-            }
-        })?;
+                Err(HecError::internal(&e.to_string()))
+            };
+        }
+        // Partial success — report success to client (events are fire-and-forget)
     }
 
     debug!(
@@ -424,39 +430,40 @@ async fn raw_handler(
             .or_else(|| header_str(&headers, "x-splunk-request-index")),
     };
 
-    let start = std::time::Instant::now();
-    let mut line_count = 0usize;
-
-    // Split raw body by newlines and process each line
+    // Convert all lines to JSON payloads first, then batch-process.
+    let mut payloads = Vec::new();
     for line in body.split(|&b| b == b'\n') {
         if line.is_empty() {
             continue;
         }
-
-        trace!(
-            transport = "splunk_hec_raw",
-            bytes = line.len(),
-            "Dispatching HEC raw line to pipeline"
-        );
-
         let json = raw_to_json(line, &metadata).map_err(|e| {
             state.metrics.inc_requests_error("splunk_hec");
             HecError::internal(&e.to_string())
         })?;
-        state.pipeline.process(json).await.map_err(|e| {
+        payloads.push(json);
+    }
+    let line_count = payloads.len();
+
+    let start = std::time::Instant::now();
+    let (success, first_err) = state.pipeline.process_batch(&payloads).await;
+
+    if let Some(ref e) = first_err {
+        let failed = line_count - success;
+        debug!(
+            transport = "splunk_hec_raw",
+            success = success,
+            failed = failed,
+            error = %e,
+            "HEC raw batch partially failed"
+        );
+        if success == 0 {
             state.metrics.inc_requests_error("splunk_hec");
-            if e.to_string().contains("pressure") {
-                debug!(
-                    transport = "splunk_hec_raw",
-                    "HEC raw line rejected — pipeline backpressure"
-                );
-                HecError::server_busy()
+            return if e.to_string().contains("pressure") {
+                Err(HecError::server_busy())
             } else {
-                debug!(transport = "splunk_hec_raw", error = %e, "HEC raw line pipeline error");
-                HecError::internal(&e.to_string())
-            }
-        })?;
-        line_count += 1;
+                Err(HecError::internal(&e.to_string()))
+            };
+        }
     }
 
     debug!(

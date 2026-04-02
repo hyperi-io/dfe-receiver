@@ -97,15 +97,12 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
 
                     match fluent_to_json(&msg) {
                         Ok(payloads) => {
-                            let mut all_ok = true;
-                            for payload in payloads {
-                                if let Err(e) = pipeline.process(payload).await {
-                                    debug!(peer = %peer_addr, error = %e, "Failed to process Fluent event");
-                                    metrics.inc_requests_error("fluent");
-                                    all_ok = false;
-                                }
-                            }
-                            if all_ok {
+                            let (success, first_err) = pipeline.process_batch(&payloads).await;
+                            if first_err.is_some() {
+                                let failed = payloads.len() - success;
+                                debug!(peer = %peer_addr, success = success, failed = failed, "Fluent batch partially failed");
+                                metrics.inc_requests_error("fluent");
+                            } else {
                                 metrics.inc_requests_success("fluent");
                             }
                         }
