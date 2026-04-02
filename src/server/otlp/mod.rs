@@ -117,12 +117,21 @@ impl OtlpService {
         &self,
         payloads: Vec<convert::ConvertedPayload>,
     ) -> std::result::Result<(), Status> {
-        for payload in payloads {
-            self.metrics
-                .add_bytes_received("otlp", payload.json.len() as u64);
+        let total_bytes: u64 = payloads.iter().map(|p| p.json.len() as u64).sum();
+        self.metrics.add_bytes_received("otlp", total_bytes);
 
-            if let Err(e) = self.pipeline.process(payload.json).await {
-                warn!(error = %e, signal = ?payload.signal, "Failed to process OTLP payload");
+        let jsons: Vec<bytes::Bytes> = payloads.iter().map(|p| p.json.clone()).collect();
+        let (success, first_err) = self.pipeline.process_batch(&jsons).await;
+
+        if let Some(e) = first_err {
+            let failed = payloads.len() - success;
+            warn!(
+                success = success,
+                failed = failed,
+                error = %e,
+                "OTLP batch partially failed"
+            );
+            if success == 0 {
                 self.metrics.inc_requests_error("otlp");
                 return Err(Status::internal(e.to_string()));
             }
@@ -368,8 +377,10 @@ async fn run_http_server(
         )?;
 
         let payloads = convert::convert_logs(&request, state.mode)?;
-        for payload in payloads {
-            state.pipeline.process(payload.json).await?;
+        let jsons: Vec<Bytes> = payloads.into_iter().map(|p| p.json).collect();
+        let (_, first_err) = state.pipeline.process_batch(&jsons).await;
+        if let Some(e) = first_err {
+            return Err(e);
         }
 
         state.metrics.inc_requests_success("otlp");
@@ -390,8 +401,10 @@ async fn run_http_server(
         )?;
 
         let payloads = convert::convert_traces(&request, state.mode)?;
-        for payload in payloads {
-            state.pipeline.process(payload.json).await?;
+        let jsons: Vec<Bytes> = payloads.into_iter().map(|p| p.json).collect();
+        let (_, first_err) = state.pipeline.process_batch(&jsons).await;
+        if let Some(e) = first_err {
+            return Err(e);
         }
 
         state.metrics.inc_requests_success("otlp");
@@ -412,8 +425,10 @@ async fn run_http_server(
         )?;
 
         let payloads = convert::convert_metrics(&request, state.mode)?;
-        for payload in payloads {
-            state.pipeline.process(payload.json).await?;
+        let jsons: Vec<Bytes> = payloads.into_iter().map(|p| p.json).collect();
+        let (_, first_err) = state.pipeline.process_batch(&jsons).await;
+        if let Some(e) = first_err {
+            return Err(e);
         }
 
         state.metrics.inc_requests_success("otlp");

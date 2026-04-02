@@ -239,16 +239,17 @@ async fn write_handler(
         RwError::internal(&e.to_string())
     })?;
 
-    // Process each event through the pipeline
-    for event in events {
-        state.pipeline.process(event).await.map_err(|e| {
-            state.metrics.inc_requests_error("prometheus_rw");
-            if e.to_string().contains("pressure") {
-                RwError::service_unavailable("backpressure")
-            } else {
-                RwError::internal(&e.to_string())
-            }
-        })?;
+    // Batch-process all events through the pipeline
+    let (success, first_err) = state.pipeline.process_batch(&events).await;
+    if let Some(ref e) = first_err
+        && success == 0
+    {
+        state.metrics.inc_requests_error("prometheus_rw");
+        return if e.to_string().contains("pressure") {
+            Err(RwError::service_unavailable("backpressure"))
+        } else {
+            Err(RwError::internal(&e.to_string()))
+        };
     }
 
     state.metrics.inc_requests_success("prometheus_rw");

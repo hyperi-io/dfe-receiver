@@ -239,6 +239,57 @@ impl PipelineState {
         result
     }
 
+    /// Process a batch of messages through the pipeline.
+    ///
+    /// Amortises overhead: single backpressure check, single memory tracking
+    /// update, and per-message process_inner() calls. Each message is processed
+    /// independently — a failure in one does not stop the rest.
+    ///
+    /// Returns the count of successfully processed messages and the first error
+    /// (if any). Callers can use the success count for metrics.
+    pub async fn process_batch(&self, payloads: &[Bytes]) -> (usize, Option<Error>) {
+        if payloads.is_empty() {
+            return (0, None);
+        }
+
+        // Single backpressure check for the entire batch
+        if self.should_apply_backpressure() {
+            if hyperi_rustlib::logger::log_state_change(&PRESSURE_LOGGED, true) {
+                warn!("Memory pressure HIGH — backpressure active (batch)");
+            }
+            return (
+                0,
+                Some(Error::Buffer("server under memory pressure".into())),
+            );
+        }
+        if hyperi_rustlib::logger::log_state_change(&PRESSURE_LOGGED, false) {
+            info!("Memory pressure recovered");
+        }
+
+        // Track memory for the entire batch at once
+        let total_bytes: u64 = payloads.iter().map(|p| p.len() as u64).sum();
+        self.memory_guard.add_bytes(total_bytes);
+
+        let mut success_count = 0usize;
+        let mut first_error: Option<Error> = None;
+
+        for payload in payloads {
+            match self.process_inner(payload.clone()).await {
+                Ok(()) => success_count += 1,
+                Err(e) => {
+                    if first_error.is_none() {
+                        first_error = Some(e);
+                    }
+                }
+            }
+        }
+
+        // Release memory for the entire batch
+        self.memory_guard.release(total_bytes);
+
+        (success_count, first_error)
+    }
+
     /// Check if enrichment (timestamp injection, source rules) is enabled.
     #[inline]
     fn enrichment_enabled(&self) -> bool {
