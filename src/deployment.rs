@@ -12,7 +12,7 @@
 //! to produce Dockerfile, Helm chart, and Docker Compose fragments.
 
 use hyperi_rustlib::deployment::{
-    DeploymentContract, HealthContract, ImageProfile, KedaContract, NativeDepsContract,
+    DeploymentContract, HealthContract, ImageProfile, KedaContract, NativeDepsContract, OciLabels,
     PortContract, SecretEnvContract, SecretGroupContract,
 };
 
@@ -204,6 +204,12 @@ pub fn contract() -> DeploymentContract {
             }
         })),
         depends_on: vec!["kafka".into()],
+        schema_version: 2,
+        oci_labels: OciLabels {
+            title: "dfe-receiver".into(),
+            description: "High-performance HTTP/gRPC receiver for PB/s scale data ingestion".into(),
+            ..OciLabels::default()
+        },
         keda: Some(KedaContract {
             min_replicas: 1,
             max_replicas: 10,

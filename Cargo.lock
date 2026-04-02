@@ -1225,15 +1225,17 @@ dependencies = [
 
 [[package]]
 name = "hyperi-rustlib"
-version = "2.4.0"
+version = "2.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "87e1c28ccaf224662a9d45752dc835ee1f7c654fead97ee987f3d6cee314854e"
+checksum = "99e1ce2d4647bde478d9543029599ccc4e560e7c2886e489e5a9c5ed2a37ffc6"
 dependencies = [
  "async-trait",
  "axum",
  "base64",
+ "bytes",
  "chrono",
  "clap",
+ "dashmap",
  "dirs",
  "dotenvy",
  "figment",
@@ -1249,12 +1251,14 @@ dependencies = [
  "prost-types",
  "rayon",
  "rdkafka 0.39.0",
+ "regex",
  "reqwest",
  "rmp-serde",
  "serde",
  "serde_json",
  "serde_yaml_ng",
  "snap",
+ "sonic-rs",
  "sysinfo 0.38.4",
  "thiserror 2.0.18",
  "tokio",
