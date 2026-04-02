@@ -1,3 +1,17 @@
+## [1.14.7](https://github.com/hyperi-io/dfe-receiver/compare/v1.14.6...v1.14.7) (2026-04-02)
+
+
+### Bug Fixes
+
+* add debug and trace logging for request handling, routing, and sinks ([9dc8d2a](https://github.com/hyperi-io/dfe-receiver/commit/9dc8d2a06cfcb36b1fa5ff41ea7cadab3c7e3c14))
+* add receiver batching design spec for Phase 2 ([5983766](https://github.com/hyperi-io/dfe-receiver/commit/598376647bdb120a53627c5fad71777fef863297))
+* add worker feature for future parallel batch validation ([0e5c607](https://github.com/hyperi-io/dfe-receiver/commit/0e5c6076b7261a715ff411dd8d680c7fcca09d27))
+* bump hyperi-rustlib to >=2.4.3 and add DeploymentContract fields ([9f84f29](https://github.com/hyperi-io/dfe-receiver/commit/9f84f29754ed20a99d9bf0391050e97c7a415773))
+* Mismatched type error ([1d1ad8e](https://github.com/hyperi-io/dfe-receiver/commit/1d1ad8e6d2a1701b072b552582d09929d27ecefa))
+* update DfeMetrics::register() to pass &MetricsManager for manifest ([b1def36](https://github.com/hyperi-io/dfe-receiver/commit/b1def36341915b098374847d002fd5198c8bde40))
+* update to rustlib v2.x ServiceRuntime + releaserc breaking rule ([6db440c](https://github.com/hyperi-io/dfe-receiver/commit/6db440cf73c3415c9ed8c2d9346aacedcf57c4ef))
+* use ServiceRuntime metrics manager to avoid double recorder panic ([b50755d](https://github.com/hyperi-io/dfe-receiver/commit/b50755d3ef7a26d20d174000356e995b6036d70e))
+
 ## [1.14.6](https://github.com/hyperi-io/dfe-receiver/compare/v1.14.5...v1.14.6) (2026-03-29)
 
 

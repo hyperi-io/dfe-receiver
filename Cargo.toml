@@ -8,7 +8,7 @@
 
 [package]
 name = "dfe-receiver"
-version = "1.14.6"
+version = "1.14.7"
 edition = "2024"
 description = "High-performance HTTP/gRPC receiver for PB/s scale data ingestion"
 license = "FSL-1.1-ALv2"
