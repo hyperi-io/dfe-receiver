@@ -32,7 +32,7 @@ use clap::{Parser, Subcommand};
 use hyperi_rustlib::cli::{CliError, CommonArgs, DfeApp, StandardCommand, VersionInfo, run_app};
 use hyperi_rustlib::config::reloader::{ConfigReloader, ReloaderConfig};
 use hyperi_rustlib::deployment::{generate_chart, generate_compose_fragment, generate_dockerfile};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 use dfe_receiver::config::{Config, reload_config};
 use dfe_receiver::deployment;
@@ -132,7 +132,7 @@ impl DfeApp for App {
     async fn run_service(
         &self,
         config: Self::Config,
-        runtime: hyperi_rustlib::cli::ServiceRuntime,
+        mut runtime: hyperi_rustlib::cli::ServiceRuntime,
     ) -> Result<(), CliError> {
         info!(version = env!("CARGO_PKG_VERSION"), "Starting dfe-receiver");
 
@@ -148,22 +148,15 @@ impl DfeApp for App {
             "Config resolved"
         );
 
-        // Initialise metrics with scaling pressure engine + standard DFE metrics.
-        // ServiceRuntime already registered DfeMetrics, but receiver has its own
-        // custom Metrics struct with scaling pressure. Keep using it for now.
-        let (metrics_instance, metrics_manager) =
-            Metrics::with_dfe_metrics(config.scaling.build_pressure());
-        let metrics = Arc::new(metrics_instance);
+        // Register receiver-specific metric groups on the runtime's existing manager.
+        // ServiceRuntime already installed the global recorder and DfeMetrics.
+        let metrics = Arc::new(Metrics::register_on(
+            config.scaling.build_pressure(),
+            &runtime.metrics,
+        ));
 
         // Use runtime's shutdown token (signal handler + K8s pre-stop delay)
         let shutdown_token = runtime.shutdown.clone();
-
-        // Parse metrics server address
-        let metrics_addr: std::net::SocketAddr =
-            self.common.metrics_addr.parse().unwrap_or_else(|_| {
-                warn!(addr = %self.common.metrics_addr, "Invalid metrics address, using default");
-                std::net::SocketAddr::from(([0, 0, 0, 0], 9090))
-            });
 
         // Create and run the pipeline orchestrator
         let orchestrator =
@@ -227,16 +220,9 @@ impl DfeApp for App {
         // Create HTTP/gRPC server
         let server = Server::new(orchestrator.state(), metrics.clone());
 
-        // Start metrics server (reuses the MetricsManager from Metrics::with_dfe_metrics)
+        // Set readiness check on runtime's metrics manager (already serving)
         let pipeline_for_ready = orchestrator.state();
-        let mut metrics_manager = metrics_manager;
-        metrics_manager.set_readiness_check(move || pipeline_for_ready.is_ready());
-        if let Err(e) = metrics_manager
-            .start_server(&metrics_addr.to_string())
-            .await
-        {
-            error!(error = %e, "Metrics server error");
-        }
+        runtime.set_readiness_check(move || pipeline_for_ready.is_ready());
 
         // Run main server (blocks until shutdown)
         if let Err(e) = server.run(shutdown_token.clone()).await {

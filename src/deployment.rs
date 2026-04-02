@@ -25,6 +25,7 @@ use hyperi_rustlib::deployment::{
 #[allow(clippy::too_many_lines)]
 pub fn contract() -> DeploymentContract {
     DeploymentContract {
+        schema_version: 2,
         app_name: "dfe-receiver".into(),
         binary_name: "dfe-receiver".into(),
         base_image: "ubuntu:24.04".into(),
@@ -220,6 +221,7 @@ pub fn contract() -> DeploymentContract {
             cpu_enabled: true,
             cpu_threshold: 80,
         }),
+        oci_labels: OciLabels::default(),
     }
 }
 
