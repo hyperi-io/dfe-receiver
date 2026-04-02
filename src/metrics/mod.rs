@@ -186,15 +186,22 @@ impl Metrics {
     /// will panic (global Prometheus recorder can only be installed once).
     pub fn with_dfe_metrics(scaling: ScalingPressure) -> (Self, MetricsManager) {
         let manager = MetricsManager::new("dfe_receiver");
+        let metrics = Self::register_on(scaling, &manager);
+        (metrics, manager)
+    }
 
-        let app = AppMetrics::new(&manager, env!("CARGO_PKG_VERSION"), "dev");
-        let buffer = BufferMetrics::new(&manager);
-        let sink = SinkMetrics::new(&manager);
-        let cb = CircuitBreakerMetrics::new(&manager);
-        let bp = BackpressureMetrics::new(&manager);
-        let dfe = DfeMetrics::register(&manager);
+    /// Register receiver metric groups on an existing `MetricsManager`.
+    ///
+    /// Use this when `ServiceRuntime` has already created the manager and
+    /// installed the global Prometheus recorder.
+    pub fn register_on(scaling: ScalingPressure, manager: &MetricsManager) -> Self {
+        let app = AppMetrics::new(manager, env!("CARGO_PKG_VERSION"), "dev");
+        let buffer = BufferMetrics::new(manager);
+        let sink = SinkMetrics::new(manager);
+        let cb = CircuitBreakerMetrics::new(manager);
+        let bp = BackpressureMetrics::new(manager);
+        let dfe = DfeMetrics::register(manager);
 
-        // Describe receiver-specific metrics with transport labels
         describe_receiver_metrics();
 
         let mut metrics = Self::with_scaling(scaling);
@@ -204,7 +211,7 @@ impl Metrics {
         metrics.sink_group = Some(sink);
         metrics.cb_group = Some(cb);
         metrics.bp_group = Some(bp);
-        (metrics, manager)
+        metrics
     }
 
     // ======================================================================
