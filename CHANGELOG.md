@@ -1,3 +1,13 @@
+## [1.14.8](https://github.com/hyperi-io/dfe-receiver/compare/v1.14.7...v1.14.8) (2026-04-02)
+
+
+### Bug Fixes
+
+* remove duplicate schema_version and oci_labels fields ([10b5541](https://github.com/hyperi-io/dfe-receiver/commit/10b55410099e1fd3b601ac84edcb198766fa297c))
+* remove orphan ci submodule reference — breaks checkout on CI ([3dddaf3](https://github.com/hyperi-io/dfe-receiver/commit/3dddaf3fa0f13d412d4c0bfa32fee1f676d49f78))
+* remove tracked target symlink — breaks CI runners ([bc46a99](https://github.com/hyperi-io/dfe-receiver/commit/bc46a99fadd62481b6e48f2dbe3ad0d60899ab82))
+* retrigger CI after runner reset ([3fb275d](https://github.com/hyperi-io/dfe-receiver/commit/3fb275ddcf0cdbf04ab01079b020eaaca476d476))
+
 ## [1.14.7](https://github.com/hyperi-io/dfe-receiver/compare/v1.14.6...v1.14.7) (2026-04-02)
 
 
