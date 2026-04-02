@@ -33,7 +33,7 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
-use tracing::info;
+use tracing::{debug, info, trace};
 
 use crate::config::SplunkHecConfig;
 use crate::error::{Error, Result};
@@ -296,12 +296,23 @@ async fn event_handler(
     State(state): State<HecState>,
     body: Bytes,
 ) -> std::result::Result<Json<HecResponse>, HecError> {
+    let body_len = body.len();
+    debug!(
+        transport = "splunk_hec",
+        bytes = body_len,
+        "HEC event request received"
+    );
+
     state.metrics.inc_requests_total("splunk_hec");
     state
         .metrics
-        .add_bytes_received("splunk_hec", body.len() as u64);
+        .add_bytes_received("splunk_hec", body_len as u64);
 
     if body.is_empty() {
+        debug!(
+            transport = "splunk_hec",
+            "HEC event request rejected — empty body"
+        );
         state.metrics.inc_requests_error("splunk_hec");
         return Err(HecError::no_data());
     }
@@ -309,6 +320,7 @@ async fn event_handler(
     let events = parse_hec_events(&body).map_err(|e| {
         state.metrics.inc_requests_error("splunk_hec");
         let msg = e.to_string();
+        debug!(transport = "splunk_hec", error = %msg, "HEC event parse failed");
         if msg.contains("blank") {
             HecError::event_required()
         } else if msg.contains("no data") {
@@ -318,22 +330,47 @@ async fn event_handler(
         }
     })?;
 
+    let event_count = events.len();
+    debug!(
+        transport = "splunk_hec",
+        events = event_count,
+        "HEC events parsed, dispatching to pipeline"
+    );
+
+    let start = std::time::Instant::now();
     for event in events {
         let json = hec_event_to_json(event).map_err(|e| {
             state.metrics.inc_requests_error("splunk_hec");
             HecError::invalid_data(&e.to_string())
         })?;
 
+        trace!(
+            transport = "splunk_hec",
+            bytes = json.len(),
+            "Dispatching HEC event to pipeline"
+        );
+
         state.pipeline.process(json).await.map_err(|e| {
             state.metrics.inc_requests_error("splunk_hec");
             if e.to_string().contains("pressure") {
+                debug!(
+                    transport = "splunk_hec",
+                    "HEC event rejected — pipeline backpressure"
+                );
                 HecError::server_busy()
             } else {
+                debug!(transport = "splunk_hec", error = %e, "HEC event pipeline error");
                 HecError::internal(&e.to_string())
             }
         })?;
     }
 
+    debug!(
+        transport = "splunk_hec",
+        events = event_count,
+        duration_us = start.elapsed().as_micros(),
+        "HEC event request completed"
+    );
     state.metrics.inc_requests_success("splunk_hec");
     Ok(Json(HecResponse::success()))
 }
@@ -346,12 +383,23 @@ async fn raw_handler(
     Query(params): Query<HashMap<String, String>>,
     body: Bytes,
 ) -> std::result::Result<Json<HecResponse>, HecError> {
+    let body_len = body.len();
+    debug!(
+        transport = "splunk_hec_raw",
+        bytes = body_len,
+        "HEC raw request received"
+    );
+
     state.metrics.inc_requests_total("splunk_hec");
     state
         .metrics
-        .add_bytes_received("splunk_hec", body.len() as u64);
+        .add_bytes_received("splunk_hec", body_len as u64);
 
     if body.is_empty() {
+        debug!(
+            transport = "splunk_hec_raw",
+            "HEC raw request rejected — empty body"
+        );
         state.metrics.inc_requests_error("splunk_hec");
         return Err(HecError::no_data());
     }
@@ -376,11 +424,20 @@ async fn raw_handler(
             .or_else(|| header_str(&headers, "x-splunk-request-index")),
     };
 
+    let start = std::time::Instant::now();
+    let mut line_count = 0usize;
+
     // Split raw body by newlines and process each line
     for line in body.split(|&b| b == b'\n') {
         if line.is_empty() {
             continue;
         }
+
+        trace!(
+            transport = "splunk_hec_raw",
+            bytes = line.len(),
+            "Dispatching HEC raw line to pipeline"
+        );
 
         let json = raw_to_json(line, &metadata).map_err(|e| {
             state.metrics.inc_requests_error("splunk_hec");
@@ -389,13 +446,26 @@ async fn raw_handler(
         state.pipeline.process(json).await.map_err(|e| {
             state.metrics.inc_requests_error("splunk_hec");
             if e.to_string().contains("pressure") {
+                debug!(
+                    transport = "splunk_hec_raw",
+                    "HEC raw line rejected — pipeline backpressure"
+                );
                 HecError::server_busy()
             } else {
+                debug!(transport = "splunk_hec_raw", error = %e, "HEC raw line pipeline error");
                 HecError::internal(&e.to_string())
             }
         })?;
+        line_count += 1;
     }
 
+    debug!(
+        transport = "splunk_hec_raw",
+        lines = line_count,
+        bytes = body_len,
+        duration_us = start.elapsed().as_micros(),
+        "HEC raw request completed"
+    );
     state.metrics.inc_requests_success("splunk_hec");
     Ok(Json(HecResponse::success()))
 }

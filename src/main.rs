@@ -32,7 +32,7 @@ use clap::{Parser, Subcommand};
 use hyperi_rustlib::cli::{CliError, CommonArgs, DfeApp, StandardCommand, VersionInfo, run_app};
 use hyperi_rustlib::config::reloader::{ConfigReloader, ReloaderConfig};
 use hyperi_rustlib::deployment::{generate_chart, generate_compose_fragment, generate_dockerfile};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use dfe_receiver::config::{Config, reload_config};
 use dfe_receiver::deployment;
@@ -135,6 +135,18 @@ impl DfeApp for App {
         runtime: hyperi_rustlib::cli::ServiceRuntime,
     ) -> Result<(), CliError> {
         info!(version = env!("CARGO_PKG_VERSION"), "Starting dfe-receiver");
+
+        // Log resolved config at debug level (sensitive fields already redacted by SensitiveString)
+        debug!(
+            bind_address = %config.server.bind_address,
+            grpc_enabled = config.grpc.enabled,
+            kafka_brokers = ?config.kafka.brokers,
+            routing_default_source = %config.routing.default_source,
+            routing_default_destination = %config.destinations.default,
+            buffer_memory_limit = config.buffer.memory_limit,
+            config_reload_secs = config.config_reload_secs,
+            "Config resolved"
+        );
 
         // Initialise metrics with scaling pressure engine + standard DFE metrics.
         // ServiceRuntime already registered DfeMetrics, but receiver has its own

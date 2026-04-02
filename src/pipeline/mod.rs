@@ -38,6 +38,9 @@ use crate::sink::kafka::KafkaSink;
 use crate::sink::loader::LoaderSink;
 use crate::validation::{ValidationResult, Validator};
 
+// Trace-level logging imports (only used for per-message tracing)
+use tracing::trace;
+
 /// Shared pipeline state accessible from handlers.
 pub struct PipelineState {
     shared_config: SharedConfig,
@@ -278,16 +281,21 @@ impl PipelineState {
     /// Inner processing logic (after backpressure check).
     #[inline]
     async fn process_inner(&self, payload: Bytes) -> Result<()> {
+        trace!(bytes = payload.len(), "Processing message");
+
         // Validate (read guard dropped before any .await)
         let validation = self.validator.read().validate(&payload);
         match validation {
-            ValidationResult::Valid => {}
+            ValidationResult::Valid => {
+                trace!(bytes = payload.len(), "Message validation passed");
+            }
             ValidationResult::Dlq(reason) => {
-                debug!(reason = %reason, "Message validation failed, routing to DLQ");
+                debug!(reason = %reason, bytes = payload.len(), "Message validation failed, routing to DLQ");
                 security::input_validation_failure("json_validate", &reason, None);
                 return self.send_to_dlq(&payload, &reason).await;
             }
             ValidationResult::Reject(reason) => {
+                debug!(reason = %reason, bytes = payload.len(), "Message rejected by validator");
                 security::input_validation_failure("json_validate", &reason, None);
                 return Err(Error::Validation(reason));
             }
@@ -295,7 +303,12 @@ impl PipelineState {
 
         // Enrich (only when common header / enrichment enabled)
         let payload = if self.enrichment_enabled() {
-            Self::enrich_payload(payload)
+            let enriched = Self::enrich_payload(payload);
+            trace!(
+                bytes = enriched.len(),
+                "Enriched payload with receiver timestamp"
+            );
+            enriched
         } else {
             payload
         };
@@ -303,14 +316,43 @@ impl PipelineState {
         // Route (read guard dropped before any .await)
         let route = self.router.read().route(&payload);
         match route {
+            RouteResult::Kafka(ref topic) => {
+                trace!(topic = %topic, bytes = payload.len(), "Routing message to Kafka");
+            }
+            RouteResult::Loader => {
+                trace!(bytes = payload.len(), "Routing message to loader");
+            }
+            RouteResult::Dlq(ref topic) => {
+                trace!(topic = %topic, bytes = payload.len(), "Routing message to DLQ topic");
+            }
+        }
+        let dispatch_start = std::time::Instant::now();
+        match route {
             RouteResult::Kafka(topic) => {
                 self.send_to_kafka(&topic, payload.clone()).await?;
+                trace!(
+                    topic = %topic,
+                    bytes = payload.len(),
+                    duration_us = dispatch_start.elapsed().as_micros(),
+                    "Dispatched to Kafka"
+                );
             }
             RouteResult::Loader => {
                 self.send_to_loader(payload.clone()).await?;
+                trace!(
+                    bytes = payload.len(),
+                    duration_us = dispatch_start.elapsed().as_micros(),
+                    "Dispatched to loader"
+                );
             }
             RouteResult::Dlq(topic) => {
                 self.send_to_kafka(&topic, payload.clone()).await?;
+                trace!(
+                    topic = %topic,
+                    bytes = payload.len(),
+                    duration_us = dispatch_start.elapsed().as_micros(),
+                    "Dispatched DLQ message to Kafka topic"
+                );
             }
         }
 
