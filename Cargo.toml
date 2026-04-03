@@ -85,11 +85,11 @@ tower_governor = { version = "0.8", features = ["axum"] }
 
 # IP filtering (CIDR allowlist/denylist)
 ipnet = "2"
-ipnet-trie = "0.2"
+ipnet-trie = "0.3"
 
 # Performance
 rustc-hash = "2"
-compact_str = "0.8"
+compact_str = "0.9"
 parking_lot = "0.12"
 
 # Error handling
@@ -128,13 +128,13 @@ mimalloc = { version = "0.1", optional = true }
 tonic-prost-build = "0.14"
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 tempfile = "3"
 proptest = "1"
 tokio-test = "0.4"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.13", features = ["json"] }
 dotenvy = "0.15"
-rdkafka = { version = "0.38", features = ["cmake-build", "ssl", "sasl"] }
+rdkafka = { version = "0.39", features = ["cmake-build", "ssl", "sasl"] }
 temp-env = "0.3"
 
 [features]
