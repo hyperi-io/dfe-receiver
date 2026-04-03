@@ -41,3 +41,4 @@ coverage.lcov
 .tmp/
 docs/superpowers/
 ci
+# Phase 2 batch integration
