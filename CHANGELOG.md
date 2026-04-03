@@ -1,3 +1,13 @@
+## [1.14.9](https://github.com/hyperi-io/dfe-receiver/compare/v1.14.8...v1.14.9) (2026-04-03)
+
+
+### Bug Fixes
+
+* add gitignore entry to trigger CI for semantic-release ([6cb0b39](https://github.com/hyperi-io/dfe-receiver/commit/6cb0b39eb40e49b82723e25d156e99dd2f85ba38))
+* add process_batch() for multi-message handler batching ([0ee57df](https://github.com/hyperi-io/dfe-receiver/commit/0ee57df098f04f1751eb62490025fa81d636abe6))
+* force CI for semantic-release — process_batch integration ([333d515](https://github.com/hyperi-io/dfe-receiver/commit/333d515c696f95c825c0ad0dc13a34276cf5c244))
+* re-trigger semantic-release for process_batch changes ([08c0806](https://github.com/hyperi-io/dfe-receiver/commit/08c0806f38ad85e1cc445f49a1bc6fc8c68fdc9d))
+
 ## [1.14.8](https://github.com/hyperi-io/dfe-receiver/compare/v1.14.7...v1.14.8) (2026-04-02)
 
 
