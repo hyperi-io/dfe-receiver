@@ -14,21 +14,27 @@
 
 use std::env;
 
-/// Test backend mode.
+/// Test backend mode — live services preferred, testcontainers fallback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TestMode {
-    /// Use remote endpoints from env vars. Skip if unreachable.
-    Remote,
-    /// Use dfe-docker infra profile (localhost, no auth, no TLS).
+    /// Use live endpoints from env vars / `.env` (preferred — more realistic
+    /// and faster than spinning up containers). Falls back to `Testcontainers`
+    /// if the live endpoint is unreachable or auth fails.
+    Live,
+    /// Use a local docker-compose stack from `docker-compose.test.yaml`.
     Docker,
+    /// Use ephemeral testcontainers-rs containers (CI / no live infra).
+    Testcontainers,
 }
 
 impl TestMode {
+    /// Detect preferred test mode from env. Defaults to `Live`.
     pub fn detect() -> Self {
         load_dotenv();
         match env::var("TEST_MODE").unwrap_or_default().as_str() {
             "docker" => Self::Docker,
-            _ => Self::Remote,
+            "testcontainers" => Self::Testcontainers,
+            _ => Self::Live,
         }
     }
 }
@@ -83,8 +89,9 @@ impl KafkaTestConfig {
 
 /// Returns Kafka connection config for the active test mode.
 ///
+/// Live mode: from env vars (KAFKA_BROKERS, KAFKA_SASL_*, etc.)
 /// Docker mode: `localhost:19092`, PLAINTEXT, no SASL.
-/// Remote mode: from env vars (KAFKA_BROKERS, KAFKA_SASL_*, etc.)
+/// Testcontainers mode: callers should use [`start_kafka_container`] directly.
 pub fn kafka_test_config() -> KafkaTestConfig {
     load_dotenv();
     match TestMode::detect() {
@@ -95,7 +102,7 @@ pub fn kafka_test_config() -> KafkaTestConfig {
             sasl_user: None,
             sasl_password: None,
         },
-        TestMode::Remote => KafkaTestConfig {
+        TestMode::Live | TestMode::Testcontainers => KafkaTestConfig {
             brokers: env::var("KAFKA_BROKERS").unwrap_or_else(|_| "localhost:9092".into()),
             security_protocol: env::var("KAFKA_SECURITY_PROTOCOL")
                 .unwrap_or_else(|_| "SASL_PLAINTEXT".into()),
@@ -497,4 +504,81 @@ pub fn kafka_plain_config(bootstrap: &str) -> KafkaTestConfig {
         sasl_user: None,
         sasl_password: None,
     }
+}
+
+/// Kafka-container lifecycle handle: holds either a testcontainers container
+/// (dropped → stopped) or nothing when using live/docker infrastructure.
+///
+/// The `Container` variant is boxed to equalise variant sizes (avoids
+/// `clippy::large_enum_variant`).
+#[allow(dead_code)]
+pub enum KafkaHandle {
+    /// Testcontainers-managed Kafka; container stops on drop.
+    Container(Box<testcontainers::ContainerAsync<testcontainers_modules::kafka::apache::Kafka>>),
+    /// External Kafka (live or docker-compose); nothing to manage.
+    External,
+}
+
+/// Obtain a Kafka backend for tests, preferring live/docker over testcontainers.
+///
+/// Resolution order (fastest, most realistic first):
+///
+/// 1. `TEST_MODE=live` (default) and `KAFKA_BROKERS` is reachable AND auth
+///    works: use the live cluster. Returns (`KafkaHandle::External`, config).
+/// 2. `TEST_MODE=docker`: use `docker-compose.test.yaml` on localhost:19092.
+/// 3. `TEST_MODE=testcontainers` OR fallback on live unreachable: spin up a
+///    fresh Kafka container. Caller drops the handle to stop it.
+///
+/// Tests that *require* a specific mode can use [`start_kafka_container`]
+/// or [`kafka_test_config`] directly.
+pub async fn kafka_backend() -> Option<(KafkaHandle, KafkaTestConfig)> {
+    let mode = TestMode::detect();
+
+    // Try live first (unless forced to testcontainers)
+    if matches!(mode, TestMode::Live | TestMode::Docker) {
+        let cfg = kafka_test_config();
+        if cfg.is_reachable() && kafka_auth_works(&cfg).await {
+            return Some((KafkaHandle::External, cfg));
+        }
+        if matches!(mode, TestMode::Docker) {
+            // Docker mode is explicit — don't silently fall back
+            return None;
+        }
+    }
+
+    // Fall back to testcontainers
+    match start_kafka_container().await {
+        Ok((container, bootstrap)) => Some((
+            KafkaHandle::Container(Box::new(container)),
+            kafka_plain_config(&bootstrap),
+        )),
+        Err(_) => None,
+    }
+}
+
+/// Quick auth sanity check: issue a `fetch_metadata` call. Returns true if
+/// SASL/TLS handshake succeeds within 5 seconds.
+async fn kafka_auth_works(cfg: &KafkaTestConfig) -> bool {
+    use rdkafka::config::ClientConfig;
+    use rdkafka::consumer::{Consumer, StreamConsumer};
+
+    let mut client_config = ClientConfig::new();
+    client_config
+        .set("bootstrap.servers", &cfg.brokers)
+        .set("group.id", format!("auth-probe-{}", uuid::Uuid::new_v4()))
+        .set("session.timeout.ms", "6000")
+        .set("socket.timeout.ms", "5000");
+    cfg.apply_sasl(&mut client_config);
+
+    let Ok(consumer) = client_config.create::<StreamConsumer>() else {
+        return false;
+    };
+
+    tokio::task::spawn_blocking(move || {
+        consumer
+            .fetch_metadata(None, std::time::Duration::from_secs(5))
+            .is_ok()
+    })
+    .await
+    .unwrap_or(false)
 }

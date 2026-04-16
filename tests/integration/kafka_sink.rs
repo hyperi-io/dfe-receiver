@@ -26,34 +26,26 @@ use bytes::Bytes;
 use dfe_receiver::sink::Sink;
 use dfe_receiver::sink::kafka::KafkaSink;
 
-use crate::common::{
-    kafka_consume_next, kafka_consumer, kafka_plain_config, start_kafka_container, test_topic,
-};
-use crate::skip_if_no_docker;
+use crate::common::{kafka_backend, kafka_consume_next, kafka_consumer, test_topic};
 
-/// Build a KafkaSink pointed at the given bootstrap address (no auth/TLS).
-fn make_sink(bootstrap: &str) -> KafkaSink {
-    let cfg = kafka_plain_config(bootstrap).to_receiver_kafka_config();
+/// Build a KafkaSink pointed at the given test backend config.
+fn make_sink(kf: &crate::common::KafkaTestConfig) -> KafkaSink {
+    let cfg = kf.to_receiver_kafka_config();
     KafkaSink::new(&cfg).expect("KafkaSink creation failed")
 }
 
 #[tokio::test]
 async fn test_kafka_sink_send_and_consume() {
-    skip_if_no_docker!();
-    let (_container, bootstrap) = match start_kafka_container().await {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("Skipping: {e}");
-            return;
-        }
+    let Some((_handle, kf)) = kafka_backend().await else {
+        eprintln!("Skipping: no Kafka backend available (live auth failed and Docker unreachable)");
+        return;
     };
 
-    let kf = kafka_plain_config(&bootstrap);
     let topic = test_topic("send");
     let consumer = kafka_consumer(&kf, &topic).expect("consumer setup");
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let sink = make_sink(&bootstrap);
+    let sink = make_sink(&kf);
     let payload = format!(
         r#"{{"test":"kafka-sink","ts":"{}","id":{}}}"#,
         chrono::Utc::now().to_rfc3339(),
@@ -75,22 +67,17 @@ async fn test_kafka_sink_send_and_consume() {
 
 #[tokio::test]
 async fn test_kafka_sink_send_many() {
-    skip_if_no_docker!();
-    let (_container, bootstrap) = match start_kafka_container().await {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("Skipping: {e}");
-            return;
-        }
+    let Some((_handle, kf)) = kafka_backend().await else {
+        eprintln!("Skipping: no Kafka backend available (live auth failed and Docker unreachable)");
+        return;
     };
 
-    let kf = kafka_plain_config(&bootstrap);
     let topic = test_topic("batch");
     // Subscribe and wait for consumer to actually join the group
     let consumer = kafka_consumer(&kf, &topic).expect("consumer setup");
     tokio::time::sleep(Duration::from_millis(2000)).await;
 
-    let sink = make_sink(&bootstrap);
+    let sink = make_sink(&kf);
 
     for i in 0..100 {
         let payload = format!(r#"{{"seq":{i},"data":"batch-test"}}"#);
@@ -120,21 +107,16 @@ async fn test_kafka_sink_send_many() {
 
 #[tokio::test]
 async fn test_kafka_sink_binary_payload() {
-    skip_if_no_docker!();
-    let (_container, bootstrap) = match start_kafka_container().await {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("Skipping: {e}");
-            return;
-        }
+    let Some((_handle, kf)) = kafka_backend().await else {
+        eprintln!("Skipping: no Kafka backend available (live auth failed and Docker unreachable)");
+        return;
     };
 
-    let kf = kafka_plain_config(&bootstrap);
     let topic = test_topic("binary");
     let consumer = kafka_consumer(&kf, &topic).expect("consumer setup");
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let sink = make_sink(&bootstrap);
+    let sink = make_sink(&kf);
     // Binary payload (null bytes, high bytes) must survive Kafka
     let payload: Vec<u8> = (0..=255u8).cycle().take(4096).collect();
     sink.send(&topic, Bytes::from(payload.clone()))
@@ -150,21 +132,16 @@ async fn test_kafka_sink_binary_payload() {
 
 #[tokio::test]
 async fn test_kafka_sink_large_payload() {
-    skip_if_no_docker!();
-    let (_container, bootstrap) = match start_kafka_container().await {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("Skipping: {e}");
-            return;
-        }
+    let Some((_handle, kf)) = kafka_backend().await else {
+        eprintln!("Skipping: no Kafka backend available (live auth failed and Docker unreachable)");
+        return;
     };
 
-    let kf = kafka_plain_config(&bootstrap);
     let topic = test_topic("large");
     let consumer = kafka_consumer(&kf, &topic).expect("consumer setup");
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let sink = make_sink(&bootstrap);
+    let sink = make_sink(&kf);
     // 512 KiB — exercises librdkafka's internal batching/chunking
     let payload: Vec<u8> = (0..512 * 1024).map(|i| (i % 256) as u8).collect();
     sink.send(&topic, Bytes::from(payload.clone()))
@@ -181,16 +158,11 @@ async fn test_kafka_sink_large_payload() {
 
 #[tokio::test]
 async fn test_kafka_sink_multiple_topics() {
-    skip_if_no_docker!();
-    let (_container, bootstrap) = match start_kafka_container().await {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("Skipping: {e}");
-            return;
-        }
+    let Some((_handle, kf)) = kafka_backend().await else {
+        eprintln!("Skipping: no Kafka backend available (live auth failed and Docker unreachable)");
+        return;
     };
 
-    let kf = kafka_plain_config(&bootstrap);
     let topics = [
         test_topic("multi-a"),
         test_topic("multi-b"),
@@ -203,7 +175,7 @@ async fn test_kafka_sink_multiple_topics() {
         .collect();
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let sink = make_sink(&bootstrap);
+    let sink = make_sink(&kf);
     for (i, topic) in topics.iter().enumerate() {
         let payload = format!(r#"{{"topic_idx":{i}}}"#);
         sink.send(topic, Bytes::from(payload))
@@ -226,16 +198,12 @@ async fn test_kafka_sink_multiple_topics() {
 
 #[tokio::test]
 async fn test_kafka_sink_invalid_topic_recoverable() {
-    skip_if_no_docker!();
-    let (_container, bootstrap) = match start_kafka_container().await {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("Skipping: {e}");
-            return;
-        }
+    let Some((_handle, kf)) = kafka_backend().await else {
+        eprintln!("Skipping: no Kafka backend available (live auth failed and Docker unreachable)");
+        return;
     };
 
-    let sink = make_sink(&bootstrap);
+    let sink = make_sink(&kf);
     // Null bytes in topic name are invalid. The sink must surface as error
     // (not panic) and remain usable for subsequent sends.
     let _ = sink.send("topic\0with\0nulls", Bytes::from(r#"{}"#)).await;

@@ -97,6 +97,16 @@ All protocols follow: receive -> convert to JSON -> validate -> route -> Kafka/d
 
 ## Active Tasks
 
+### Performance Review
+
+Audit applicable optimisations from [dfe-loader/docs/PERFORMANCE.md](/projects/dfe-loader/docs/PERFORMANCE.md).
+
+- [ ] Allocator: enable `jemalloc` or `mimalloc` feature, benchmark vs system glibc on representative workload
+- [ ] Build profile: confirm `lto = "thin"`, `codegen-units = 1`, `panic = "abort"`, `strip = true` in release
+- [ ] Profile under load (perf, flamegraph, jeprof) — record baseline for regression detection
+- [ ] PGO + BOLT: evaluate ROI for production binary (10-20% + 5-15% gain)
+- [ ] Batch tuning: validate buffer/flush thresholds align with rustlib Kafka transport (10K recv / 20K prefetch)
+
 ### Security Hardening + Test Coverage + Dep Update [DONE]
 
 **rustlib bump and compile fixes**
@@ -177,26 +187,55 @@ All protocols follow: receive -> convert to JSON -> validate -> route -> Kafka/d
 
 ### Environment / Credentials notes for operator (DEREK)
 
-**Remote Kafka credentials are stale**. From `.env`:
+**Verified stale credentials (2026-04-16, tested via `kcat` / `bao`):**
 
-- `KAFKA_BROKERS="kafka.devex.hyperi.io:32089"` — broker reachable ✓
-- `KAFKA_SASL_USER="admin"` — auth rejected by broker ✗
-- `KAFKA_SASL_PASSWORD` in `.env` — **stale** (redacted here; rotate in-place)
+| Secret | Location | Status | Fix |
+|---|---|---|---|
+| `KAFKA_SASL_PASSWORD` | `.env` (admin user) | ❌ Rejected by broker | Rotate SCRAM-SHA-512 at broker, update `.env` |
+| `VAULT_TOKEN` / `OPENBAO_TOKEN` | shell env | ❌ 403 on `lookup-self` | Run `bao login -method=oidc` to get fresh OIDC token |
 
-To re-establish long-lived test credentials:
+**Kafka brokers reachable** at `kafka.devex.hyperi.io:32089` (TCP OK), only auth
+layer failing. **OpenBao server reachable** at `bao.devex.hyperi.io:8200` but
+token lacks permissions (likely expired; OpenBao default token TTL is 32 days).
 
-1. `kubectl -n kafka exec -it my-cluster-kafka-0 -c kafka -- \
-     bash -c 'bin/kafka-configs.sh --bootstrap-server localhost:9092 \
-     --entity-type users --entity-name admin --alter --add-config \
-     SCRAM-SHA-512=[password=<NEW_PW>]'`
-2. Update `.env` with the new password
-3. Consider using a dedicated `dfe-receiver-test` SCRAM user rather than
-   `admin` (principle of least privilege; limit to `dfe-receiver-test-*`
-   topic pattern via Kafka ACLs).
+**To re-establish credentials:**
 
-Test suite no longer depends on these credentials — integration tests use
-testcontainers-rs with auto-lifecycle management. The `.env` values are
-only used when `TEST_MODE=remote` is explicitly set.
+1. **OpenBao** (do this first — everything else comes from here):
+   ```bash
+   unset OPENBAO_TOKEN VAULT_TOKEN
+   bao login -method=oidc
+   # Then export the new token into shell rc files
+   ```
+
+2. **Kafka SCRAM password** (kept under `services/kafka:admin_password` in
+   OpenBao per `/projects/hyperi-infra/ansible/inventories/prod/group_vars/all/vault.yml`):
+   ```bash
+   bao kv get -field=admin_password services/kafka
+   # Update dfe-receiver/.env KAFKA_SASL_PASSWORD with value
+   ```
+   If the bao value is also stale, rotate at the broker:
+   ```bash
+   kubectl -n kafka exec -it my-cluster-kafka-0 -c kafka -- \
+     bin/kafka-configs.sh --bootstrap-server localhost:9092 \
+     --entity-type users --entity-name admin --alter \
+     --add-config 'SCRAM-SHA-512=[password=<NEW_PW>]'
+   bao kv put services/kafka admin_password=<NEW_PW>
+   ```
+
+3. **Consider dedicated test user**: create `dfe-receiver-test` SCRAM user
+   with ACLs limited to `dfe-receiver-test-*` topics (principle of least
+   privilege) instead of reusing `admin`.
+
+**Impact on test suite today:** none. Tests use `kafka_backend()` which tries
+live Kafka first, then auto-falls-back to a fresh testcontainers Kafka.
+Live creds becoming valid again will make tests run faster (skip container
+startup). Containers are dropped at test end — no leftover Docker state.
+
+**Credentials policy going forward:**
+- All credentials **only** in project `.env` (never in code, docs, or CLAUDE.md)
+- `.env` is in `.gitignore`; `.env.example` may be committed with empty values
+- Tests read from env + `.env` (via `dotenvy`), never hardcoded
+- Gitleaks runs as part of `hyperi-ci check` — catches accidental commits
 
 ## Previously Active
 

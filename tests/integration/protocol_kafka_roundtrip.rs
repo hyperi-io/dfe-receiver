@@ -34,23 +34,20 @@ use dfe_receiver::server::traits::ProtocolHandler;
 use prost::Message;
 use tokio_util::sync::CancellationToken;
 
-use crate::common::{
-    kafka_consume_next, kafka_consumer, kafka_plain_config, start_kafka_container, test_topic,
-};
-use crate::skip_if_no_docker;
+use crate::common::{kafka_backend, kafka_consume_next, kafka_consumer, test_topic};
 
 fn random_port() -> u16 {
     30000 + (uuid::Uuid::new_v4().as_u128() % 20000) as u16
 }
 
 /// Build a config wired to route via Kafka (rather than the in-memory loader).
-fn kafka_config(bootstrap: &str, topic: &str) -> Config {
+fn kafka_config(kf: &crate::common::KafkaTestConfig, topic: &str) -> Config {
     let mut config = Config::default();
     let http_port = random_port();
     config.server.bind_address = format!("127.0.0.1:{http_port}");
     config.server.auth.mode = "none".to_string();
 
-    config.kafka = kafka_plain_config(bootstrap).to_receiver_kafka_config();
+    config.kafka = kf.to_receiver_kafka_config();
     config.destinations.default = "kafka".to_string();
     // Route all traffic to the test topic (no _land suffix by overriding default_source)
     config.routing.default_source = topic.trim_end_matches("_land").to_string();
@@ -70,17 +67,13 @@ fn kafka_config(bootstrap: &str, topic: &str) -> Config {
 
 #[tokio::test]
 async fn test_prometheus_rw_to_kafka_roundtrip() {
-    skip_if_no_docker!();
-    let (_kafka, bootstrap) = match start_kafka_container().await {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("Skipping: {e}");
-            return;
-        }
+    let Some((_handle, kf)) = kafka_backend().await else {
+        eprintln!("Skipping: no Kafka backend available");
+        return;
     };
 
     let topic = test_topic("promrw");
-    let mut config = kafka_config(&bootstrap, &topic);
+    let mut config = kafka_config(&kf, &topic);
     let rw_port = random_port();
     config.prometheus_rw.enabled = true;
     config.prometheus_rw.bind_address = format!("127.0.0.1:{rw_port}");
@@ -88,7 +81,6 @@ async fn test_prometheus_rw_to_kafka_roundtrip() {
     config.prometheus_rw.auth.mode = "none".to_string();
 
     // Subscribe BEFORE sending
-    let kf = kafka_plain_config(&bootstrap);
     let consumer = kafka_consumer(&kf, &topic).expect("consumer setup");
     tokio::time::sleep(Duration::from_millis(1000)).await;
 
@@ -171,24 +163,19 @@ async fn test_prometheus_rw_to_kafka_roundtrip() {
 
 #[tokio::test]
 async fn test_splunk_hec_to_kafka_roundtrip() {
-    skip_if_no_docker!();
-    let (_kafka, bootstrap) = match start_kafka_container().await {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("Skipping: {e}");
-            return;
-        }
+    let Some((_handle, kf)) = kafka_backend().await else {
+        eprintln!("Skipping: no Kafka backend available");
+        return;
     };
 
     let topic = test_topic("hec");
-    let mut config = kafka_config(&bootstrap, &topic);
+    let mut config = kafka_config(&kf, &topic);
     let hec_port = random_port();
     config.splunk_hec.enabled = true;
     config.splunk_hec.bind_address = format!("127.0.0.1:{hec_port}");
     config.splunk_hec.auth.mode = "none".to_string();
 
     // Subscribe to Kafka
-    let kf = kafka_plain_config(&bootstrap);
     let consumer = kafka_consumer(&kf, &topic).expect("consumer setup");
     tokio::time::sleep(Duration::from_millis(1000)).await;
 
@@ -245,19 +232,14 @@ async fn test_splunk_hec_to_kafka_roundtrip() {
 
 #[tokio::test]
 async fn test_http_to_kafka_roundtrip() {
-    skip_if_no_docker!();
-    let (_kafka, bootstrap) = match start_kafka_container().await {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("Skipping: {e}");
-            return;
-        }
+    let Some((_handle, kf)) = kafka_backend().await else {
+        eprintln!("Skipping: no Kafka backend available");
+        return;
     };
 
     let topic = test_topic("http");
-    let config = kafka_config(&bootstrap, &topic);
+    let config = kafka_config(&kf, &topic);
 
-    let kf = kafka_plain_config(&bootstrap);
     let consumer = kafka_consumer(&kf, &topic).expect("consumer setup");
     tokio::time::sleep(Duration::from_millis(1000)).await;
 
