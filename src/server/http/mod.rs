@@ -183,7 +183,7 @@ pub fn spawn_auth_reload_watcher(
                         if let Some(ref provider) = auth_state.bearer_provider
                             && new_auth.bearer.tokens != current_auth.bearer.tokens
                         {
-                            provider.update_tokens(new_auth.bearer.tokens.clone());
+                            provider.update_tokens(&new_auth.bearer.tokens);
                             info!(
                                 count = new_auth.bearer.tokens.len(),
                                 "Bearer tokens reloaded from config"

@@ -219,7 +219,21 @@ async fn write_handler(
         return Err(RwError::bad_request("empty request body"));
     }
 
-    // Snappy block decompress
+    // Snappy block decompress (with decompression bomb guard)
+    const MAX_DECOMPRESSED_SIZE: usize = 64 * 1024 * 1024; // 64 MiB
+
+    let expected_len = snap::raw::decompress_len(&body).map_err(|e| {
+        state.metrics.inc_requests_error("prometheus_rw");
+        RwError::bad_request(&format!("snappy decompression failed: {e}"))
+    })?;
+
+    if expected_len > MAX_DECOMPRESSED_SIZE {
+        state.metrics.inc_requests_error("prometheus_rw");
+        return Err(RwError::bad_request(&format!(
+            "decompressed size {expected_len} exceeds limit {MAX_DECOMPRESSED_SIZE}"
+        )));
+    }
+
     let decompressed = snap::raw::Decoder::new()
         .decompress_vec(&body)
         .map_err(|e| {

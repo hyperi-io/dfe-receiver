@@ -51,6 +51,7 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
     metrics: Arc<Metrics>,
     shutdown: CancellationToken,
     peer_addr: SocketAddr,
+    max_buffer_size: usize,
 ) {
     use tokio::io::AsyncReadExt;
 
@@ -78,6 +79,17 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
 
                 pending.extend_from_slice(&buf[..n]);
                 metrics.add_bytes_received("fluent", n as u64);
+
+                // Guard against unbounded buffer growth (OOM prevention)
+                if pending.len() > max_buffer_size {
+                    warn!(
+                        peer = %peer_addr,
+                        size = pending.len(),
+                        limit = max_buffer_size,
+                        "Fluent Forward buffer exceeded max size, closing connection"
+                    );
+                    break;
+                }
 
                 // Try to decode complete msgpack values from the buffer
                 loop {
@@ -144,6 +156,7 @@ async fn run_tcp(
     metrics: Arc<Metrics>,
     shutdown: CancellationToken,
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
+    max_buffer_size: usize,
 ) -> Result<()> {
     let listener = TcpListener::bind(bind_addr)
         .await
@@ -191,12 +204,14 @@ async fn run_tcp(
 
                         handle_tcp_connection(
                             tls_stream, pipeline, metrics, conn_shutdown, peer_addr,
+                            max_buffer_size,
                         ).await;
                     });
                 } else {
                     tokio::spawn(async move {
                         handle_tcp_connection(
                             stream, pipeline, metrics, conn_shutdown, peer_addr,
+                            max_buffer_size,
                         ).await;
                     });
                 }
@@ -255,9 +270,19 @@ impl ProtocolHandler for FluentHandler {
         let pipeline = self.pipeline.clone();
         let metrics = self.metrics.clone();
         let tcp_shutdown = shutdown.clone();
+        let max_buffer_size = self.config.max_message_size;
 
         let tcp_handle = tokio::spawn(async move {
-            if let Err(e) = run_tcp(addr, pipeline, metrics, tcp_shutdown, tls_acceptor).await {
+            if let Err(e) = run_tcp(
+                addr,
+                pipeline,
+                metrics,
+                tcp_shutdown,
+                tls_acceptor,
+                max_buffer_size,
+            )
+            .await
+            {
                 error!(error = %e, "Fluent Forward listener failed");
             }
         });

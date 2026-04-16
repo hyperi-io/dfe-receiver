@@ -1201,7 +1201,7 @@ impl Default for KafkaConfig {
 }
 
 /// SASL authentication configuration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct SaslConfig {
     /// Enable SASL.
     pub enabled: bool,
@@ -1212,8 +1212,19 @@ pub struct SaslConfig {
     /// Username.
     pub username: String,
 
-    /// Password.
+    /// Password (redacted in Debug/Display output).
     pub password: String,
+}
+
+impl std::fmt::Debug for SaslConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SaslConfig")
+            .field("enabled", &self.enabled)
+            .field("mechanism", &self.mechanism)
+            .field("username", &self.username)
+            .field("password", &"***REDACTED***")
+            .finish()
+    }
 }
 
 /// Kafka TLS configuration.

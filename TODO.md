@@ -97,6 +97,25 @@ All protocols follow: receive -> convert to JSON -> validate -> route -> Kafka/d
 
 ## Active Tasks
 
+### Bump hyperi-rustlib to >=2.5.4 [IN PROGRESS]
+
+- [x] Bump version requirement from `>=2.4.3` to `>=2.5.4` in Cargo.toml
+- [x] Handle new `SendResult::FilteredDlq` variant in `src/sink/grpc/mod.rs`
+- [x] `cargo clippy` clean, 408 tests passing
+- [ ] Code review (running)
+- [ ] Security review (running)
+- [ ] Fix review findings
+- [ ] Push and release
+
+### Clean Up Stale Branches [DONE]
+
+- [x] Delete local branches: `release`, `chore/merge-to-release-v1.14.2`, `fix/merge-to-release`, `fix/merge-to-release-v1.15`
+- [x] Prune stale remote refs (`git remote prune origin`)
+
+---
+
+## Previously Active
+
 ### ~~Migrate to Single Versioning on Main~~ [DONE]
 
 - [x] Replace `.releaserc.json` with `.releaserc.yaml` (main only, all commit types)
@@ -113,16 +132,14 @@ All protocols follow: receive -> convert to JSON -> validate -> route -> Kafka/d
 - [x] Fix Transport trait split (TransportBase, TransportSender, TransportReceiver)
 - [x] Add version check on startup
 
-### ~~Code Review~~ [DONE]
+### ~~Code Review (v1.14.5)~~ [DONE]
 
 - [x] Run code review — found 1 critical, 5 important, 4 suggestions
 - [x] Remove `rust-version` from Cargo.toml (matches no-MSRV-pin decision)
 - [x] Fix tautological test `test_pipeline_validation_reject`
 - Tracked for later: request_duration_seconds histogram, active_connections gauge wiring
 
----
-
-### ~~Previously Active~~
+### ~~Remove dead plugin code~~ [DONE]
 
 - [x] Remove dead `#[cfg(feature = "plugins")]` code — already removed in prior session (commit `4a453fb`)
 

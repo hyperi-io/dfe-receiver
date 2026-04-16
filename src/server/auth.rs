@@ -31,6 +31,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use hyperi_rustlib::logger::security;
 use parking_lot::RwLock;
+use ring::digest;
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
@@ -106,6 +107,22 @@ impl AuthState {
     }
 }
 
+/// SHA-256 hash of a bearer token, stored as a fixed-size array.
+///
+/// Tokens are hashed before storage to prevent timing-attack side channels
+/// (hash lookup is constant-time per bucket) and to avoid holding plaintext
+/// tokens in memory where they could appear in core dumps.
+type TokenHash = [u8; 32];
+
+/// Hash a bearer token using SHA-256.
+#[inline]
+fn hash_token(token: &str) -> TokenHash {
+    let d = digest::digest(&digest::SHA256, token.as_bytes());
+    let mut out = [0u8; 32];
+    out.copy_from_slice(d.as_ref());
+    out
+}
+
 /// Bearer token provider with dynamic secret loading.
 ///
 /// Supports loading tokens from:
@@ -113,21 +130,24 @@ impl AuthState {
 /// - OpenBao/Vault
 /// - AWS Secrets Manager
 /// - Files (K8s secrets)
+///
+/// Tokens are stored as SHA-256 hashes to prevent timing-attack side channels
+/// and avoid holding plaintext tokens in memory.
 pub struct BearerTokenProvider {
-    /// Current valid tokens (thread-safe for hot reloading).
-    tokens: RwLock<HashSet<String>>,
+    /// SHA-256 hashes of valid tokens (thread-safe for hot reloading).
+    token_hashes: RwLock<HashSet<TokenHash>>,
     /// Shutdown signal for background refresh.
     shutdown_tx: broadcast::Sender<()>,
 }
 
 impl BearerTokenProvider {
     /// Create a new bearer token provider with static tokens.
-    pub fn new(tokens: Vec<String>) -> Self {
-        let token_set: HashSet<String> = tokens.into_iter().collect();
+    pub fn new(tokens: &[String]) -> Self {
+        let hash_set: HashSet<TokenHash> = tokens.iter().map(|t| hash_token(t)).collect();
         let (shutdown_tx, _) = broadcast::channel(1);
 
         Self {
-            tokens: RwLock::new(token_set),
+            token_hashes: RwLock::new(hash_set),
             shutdown_tx,
         }
     }
@@ -137,7 +157,7 @@ impl BearerTokenProvider {
     /// If `secret_source` is configured, tokens will be loaded dynamically.
     /// Otherwise, static tokens from config are used.
     pub async fn from_config(config: &BearerConfig) -> Result<Self> {
-        let provider = Self::new(config.tokens.clone());
+        let provider = Self::new(&config.tokens);
 
         // If secret source is configured, load tokens from secret manager
         if let Some(ref source) = config.secret_source
@@ -219,16 +239,17 @@ impl BearerTokenProvider {
 
         // Parse tokens (newline or comma separated)
         let content = secret_value.as_str()?;
-        let new_tokens: HashSet<String> = content
+        let new_hashes: HashSet<TokenHash> = content
             .lines()
             .flat_map(|line| line.split(','))
-            .map(|s| s.trim().to_string())
+            .map(str::trim)
             .filter(|s| !s.is_empty())
+            .map(hash_token)
             .collect();
 
-        let count = new_tokens.len();
+        let count = new_hashes.len();
         info!(count, source = %source, "Loaded bearer tokens from secret");
-        *self.tokens.write() = new_tokens;
+        *self.token_hashes.write() = new_hashes;
 
         security::token_rotated(
             "bearer_refresh",
@@ -270,25 +291,26 @@ impl BearerTokenProvider {
         });
     }
 
-    /// Check if a token is valid.
+    /// Check if a token is valid (constant-time via hash lookup).
     #[inline]
     pub fn is_valid(&self, token: &str) -> bool {
-        self.tokens.read().contains(token)
+        let candidate = hash_token(token);
+        self.token_hashes.read().contains(&candidate)
     }
 
     /// Update tokens (for rotation callbacks).
-    pub fn update_tokens(&self, tokens: Vec<String>) {
-        let token_set: HashSet<String> = tokens.into_iter().collect();
-        let count = token_set.len();
+    pub fn update_tokens(&self, tokens: &[String]) {
+        let hash_set: HashSet<TokenHash> = tokens.iter().map(|t| hash_token(t)).collect();
+        let count = hash_set.len();
         info!(count, "Bearer tokens updated");
-        *self.tokens.write() = token_set;
+        *self.token_hashes.write() = hash_set;
 
         security::token_rotated("bearer_update", &format!("{count} tokens loaded"));
     }
 
     /// Get current token count.
     pub fn token_count(&self) -> usize {
-        self.tokens.read().len()
+        self.token_hashes.read().len()
     }
 
     /// Shutdown the refresh task.
@@ -744,7 +766,7 @@ mod tests {
     #[test]
     fn test_bearer_provider_new() {
         let tokens = vec!["token1".to_string(), "token2".to_string()];
-        let provider = BearerTokenProvider::new(tokens);
+        let provider = BearerTokenProvider::new(&tokens);
 
         assert_eq!(provider.token_count(), 2);
         assert!(provider.is_valid("token1"));
@@ -754,11 +776,11 @@ mod tests {
 
     #[test]
     fn test_bearer_provider_update_tokens() {
-        let provider = BearerTokenProvider::new(vec!["old-token".to_string()]);
+        let provider = BearerTokenProvider::new(&["old-token".to_string()]);
         assert!(provider.is_valid("old-token"));
         assert!(!provider.is_valid("new-token"));
 
-        provider.update_tokens(vec!["new-token".to_string()]);
+        provider.update_tokens(&["new-token".to_string()]);
         assert!(!provider.is_valid("old-token"));
         assert!(provider.is_valid("new-token"));
     }
@@ -766,7 +788,7 @@ mod tests {
     #[test]
     fn test_validate_bearer_auth_valid() {
         let config = bearer_config();
-        let provider = BearerTokenProvider::new(config.bearer.tokens.clone());
+        let provider = BearerTokenProvider::new(&config.bearer.tokens);
         let auth = AuthState::with_bearer_provider(config, provider);
 
         let mut headers = HeaderMap::new();
@@ -778,7 +800,7 @@ mod tests {
     #[test]
     fn test_validate_bearer_auth_lowercase_bearer() {
         let config = bearer_config();
-        let provider = BearerTokenProvider::new(config.bearer.tokens.clone());
+        let provider = BearerTokenProvider::new(&config.bearer.tokens);
         let auth = AuthState::with_bearer_provider(config, provider);
 
         let mut headers = HeaderMap::new();
@@ -790,7 +812,7 @@ mod tests {
     #[test]
     fn test_validate_bearer_auth_invalid_token() {
         let config = bearer_config();
-        let provider = BearerTokenProvider::new(config.bearer.tokens.clone());
+        let provider = BearerTokenProvider::new(&config.bearer.tokens);
         let auth = AuthState::with_bearer_provider(config, provider);
 
         let mut headers = HeaderMap::new();
@@ -804,7 +826,7 @@ mod tests {
     #[test]
     fn test_validate_bearer_auth_missing_header() {
         let config = bearer_config();
-        let provider = BearerTokenProvider::new(config.bearer.tokens.clone());
+        let provider = BearerTokenProvider::new(&config.bearer.tokens);
         let auth = AuthState::with_bearer_provider(config, provider);
 
         let headers = HeaderMap::new();
@@ -817,7 +839,7 @@ mod tests {
     #[test]
     fn test_validate_bearer_auth_wrong_format() {
         let config = bearer_config();
-        let provider = BearerTokenProvider::new(config.bearer.tokens.clone());
+        let provider = BearerTokenProvider::new(&config.bearer.tokens);
         let auth = AuthState::with_bearer_provider(config, provider);
 
         let mut headers = HeaderMap::new();
@@ -857,11 +879,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_bearer_token_update() {
-        let provider = BearerTokenProvider::new(vec!["old_token".to_string()]);
+        let provider = BearerTokenProvider::new(&["old_token".to_string()]);
         assert!(provider.is_valid("old_token"));
         assert!(!provider.is_valid("new_token"));
 
-        provider.update_tokens(vec!["new_token".to_string()]);
+        provider.update_tokens(&["new_token".to_string()]);
         assert!(provider.is_valid("new_token"));
         assert!(!provider.is_valid("old_token"));
     }
@@ -874,13 +896,13 @@ mod tests {
         let shared = SharedConfig::new(config);
 
         // Simulate initial token load
-        let provider = BearerTokenProvider::new(vec!["initial".to_string()]);
+        let provider = BearerTokenProvider::new(&["initial".to_string()]);
         assert!(provider.is_valid("initial"));
 
         // Simulate what the reload watcher does on config change
         let new_config = shared.get();
         let new_tokens = vec!["rotated".to_string()];
-        provider.update_tokens(new_tokens);
+        provider.update_tokens(&new_tokens);
         assert!(provider.is_valid("rotated"));
         assert!(!provider.is_valid("initial"));
 
