@@ -1,3 +1,11 @@
+## [1.14.10](https://github.com/hyperi-io/dfe-receiver/compare/v1.14.9...v1.14.10) (2026-04-16)
+
+
+### Bug Fixes
+
+* bump hyperi-rustlib to >=2.5.4, handle FilteredDlq variant ([e11f834](https://github.com/hyperi-io/dfe-receiver/commit/e11f834d2d7b7ac6bcddc0be3a426aee78270cda))
+* security hardening and dependency updates ([763ab97](https://github.com/hyperi-io/dfe-receiver/commit/763ab9706e4a3b84e7a3528475dc4367bcb55c9d))
+
 ## [1.14.9](https://github.com/hyperi-io/dfe-receiver/compare/v1.14.8...v1.14.9) (2026-04-03)
 
 
