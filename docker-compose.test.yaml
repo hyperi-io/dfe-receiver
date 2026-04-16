@@ -15,7 +15,7 @@
 
 services:
   kafka:
-    image: quay.io/strimzi/kafka:0.44.0-kafka-3.8.1
+    image: quay.io/strimzi/kafka:0.45.2-kafka-3.8.1@sha256:4f52fd8232e61385f928539f6e2aa2d23c9ba9ce18390ee735f55f9ae110ecdc
     container_name: dfe-receiver-kafka
     command:
       - sh
@@ -52,7 +52,7 @@ services:
 
   # Optional: Kafbat UI for debugging
   kafbat-ui:
-    image: ghcr.io/kafbat/kafka-ui:latest
+    image: ghcr.io/kafbat/kafka-ui:latest@sha256:8dd62c9b18a01b732824cae91c6fe5203fac8e931448a2a639bd20270b8fed2b
     container_name: dfe-receiver-kafbat
     ports:
       - "8080:8080"

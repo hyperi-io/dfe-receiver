@@ -5,7 +5,7 @@
 # License:   FSL-1.1-ALv2
 # Copyright: (c) 2026 HYPERI PTY LIMITED
 
-FROM ubuntu:24.04
+FROM ubuntu:24.04@sha256:186072bba1b2f436cbb91ef2567abca677337cfc786c86e107d25b7072feef0c
 
 LABEL io.hyperi.profile="production"
 
