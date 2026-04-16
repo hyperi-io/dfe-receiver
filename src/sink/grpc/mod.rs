@@ -57,7 +57,7 @@ impl Sink for GrpcSink {
     /// uses it for routing.
     async fn send(&self, topic: &str, payload: Bytes) -> Result<()> {
         match self.transport.send(topic, &payload).await {
-            SendResult::Ok => {
+            SendResult::Ok | SendResult::FilteredDlq => {
                 debug!(topic = %topic, bytes = payload.len(), "Sent to loader via gRPC");
                 self.healthy.store(true, Ordering::Relaxed);
                 Ok(())
