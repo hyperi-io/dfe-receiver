@@ -97,22 +97,106 @@ All protocols follow: receive -> convert to JSON -> validate -> route -> Kafka/d
 
 ## Active Tasks
 
-### Bump hyperi-rustlib to >=2.5.4 [IN PROGRESS]
+### Security Hardening + Test Coverage + Dep Update [DONE]
 
-- [x] Bump version requirement from `>=2.4.3` to `>=2.5.4` in Cargo.toml
+**rustlib bump and compile fixes**
+
+- [x] Bump `hyperi-rustlib` from `>=2.4.3` to `>=2.5.4` (resolves to 2.5.4)
 - [x] Handle new `SendResult::FilteredDlq` variant in `src/sink/grpc/mod.rs`
-- [x] `cargo clippy` clean, 408 tests passing
-- [ ] Code review (running)
-- [ ] Security review (running)
-- [ ] Fix review findings
-- [ ] Push and release
+
+**Security fixes (from code + security review)**
+
+- [x] **Critical**: bearer token validation — store SHA-256 hashes instead
+      of plaintext tokens (eliminates timing-attack side channel; uses
+      `ring::digest`)
+- [x] **Critical**: Fluent Forward unbounded buffer guard (OOM prevention;
+      respects `max_message_size`)
+- [x] **Important**: Prometheus RW snappy decompression bomb guard
+      (64 MiB cap via `snap::decompress_len` pre-check)
+- [x] **Important**: SASL password redaction in `Debug` output
+      (custom `Debug` impl emits `***REDACTED***`)
+
+**Dependency updates**
+
+- [x] `compact_str` 0.8 → 0.9, `criterion` 0.5 → 0.8 (breaking — required
+      `std::hint::black_box` migration), `ipnet-trie` 0.2 → 0.3,
+      `reqwest` 0.12 → 0.13 (dev), `rdkafka` 0.39 (dev), `cargo update`
+      for aws-lc, clap, hyper
+- [x] Renovate PRs handled: #27 merged, #20 merged, #21 closed
+      (superseded), #28 auto-closed
+- [x] Dependabot alerts handled: #1/#2/#3 (aws-lc-sys) fixed by update,
+      #5 (rand) dismissed — we're on 0.9.4, past 0.9.3 patch
+
+**Test coverage (408 → 489 tests)**
+
+- [x] Unit: timing-attack resistance, hash consistency, unicode tokens,
+      SASL Debug redaction, Snappy bomb simulation, OTLP convert (13 new),
+      Pipeline edge cases (12 new), Error response mapping (10 new)
+- [x] Integration via testcontainers-rs (auto-lifecycle, no manual cleanup):
+    - Kafka sink round-trip (6 tests: send, batch, binary, large,
+      multi-topic, recovery)
+    - gRPC loader sink with in-process server (6 tests: delivery, order,
+      large payload, unreachable, recovery, concurrency)
+    - Vault bearer tokens (9 tests: file provider variants + live Vault
+      container)
+    - MinIO S3 container smoke (2 tests)
+    - Protocol → Kafka roundtrip: Prom RW, Splunk HEC, HTTP (3 tests)
+- [x] Test helper `tests/common/mod.rs` extended with live-or-testcontainers
+      pattern (env detection → Docker fallback, skip gracefully if no Docker)
 
 ### Clean Up Stale Branches [DONE]
 
-- [x] Delete local branches: `release`, `chore/merge-to-release-v1.14.2`, `fix/merge-to-release`, `fix/merge-to-release-v1.15`
+- [x] Delete local branches: `release`, `chore/merge-to-release-v1.14.2`,
+      `fix/merge-to-release`, `fix/merge-to-release-v1.15`
 - [x] Prune stale remote refs (`git remote prune origin`)
 
 ---
+
+## Follow-up / Tracked (Not this session)
+
+### Security hardening (tracked for follow-up)
+
+- [ ] X-Forwarded-For trusted-proxy config (currently trusts unconditionally).
+      Requires new config field `server.trusted_proxies: Vec<IpNet>` and
+      update to `extract_client_ip` + rate limiter key extractor.
+- [ ] Apply `IpFilter` to Splunk HEC + Prometheus RW handlers (currently
+      they call `IpFilter::disabled()`). Pass server-level filter through.
+- [ ] Slowloris protection for Splunk HEC + Prom RW plain-HTTP paths
+      (currently fall back to bare `axum::serve`; should use
+      `hardened_http_builder`).
+- [ ] Connection semaphore for Syslog/Fluent/GELF TCP listeners (unbounded
+      concurrent connections today).
+- [ ] TLS 1.3-only / cipher-suite config for FIPS/CNSA 2.0 compliance.
+
+### Coverage gaps (can be closed with more integration work)
+
+- [ ] End-to-end TLS/mTLS cert rotation integration tests
+- [ ] Full HTTP server integration tests (currently handler-level only)
+- [ ] Syslog UDP/TCP/TLS integration tests (fluent-bit/logger binary based,
+      exists but coverage could expand)
+
+### Environment / Credentials notes for operator (DEREK)
+
+**Remote Kafka credentials are stale**. From `.env`:
+
+- `KAFKA_BROKERS="kafka.devex.hyperi.io:32089"` — broker reachable ✓
+- `KAFKA_SASL_USER="admin"` — auth rejected by broker ✗
+- `KAFKA_SASL_PASSWORD` in `.env` — **stale** (redacted here; rotate in-place)
+
+To re-establish long-lived test credentials:
+
+1. `kubectl -n kafka exec -it my-cluster-kafka-0 -c kafka -- \
+     bash -c 'bin/kafka-configs.sh --bootstrap-server localhost:9092 \
+     --entity-type users --entity-name admin --alter --add-config \
+     SCRAM-SHA-512=[password=<NEW_PW>]'`
+2. Update `.env` with the new password
+3. Consider using a dedicated `dfe-receiver-test` SCRAM user rather than
+   `admin` (principle of least privilege; limit to `dfe-receiver-test-*`
+   topic pattern via Kafka ACLs).
+
+Test suite no longer depends on these credentials — integration tests use
+testcontainers-rs with auto-lifecycle management. The `.env` values are
+only used when `TEST_MODE=remote` is explicitly set.
 
 ## Previously Active
 

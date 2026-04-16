@@ -1,0 +1,249 @@
+// Project:   dfe-receiver
+// File:      tests/integration/kafka_sink.rs
+// Purpose:   End-to-end Kafka sink tests via testcontainers
+// Language:  Rust
+//
+// License:   FSL-1.1-ALv2
+// Copyright: (c) 2026 HYPERI PTY LIMITED
+
+//! Kafka sink integration tests.
+//!
+//! These tests spin up a fresh Kafka container per test via testcontainers-rs,
+//! produce a message via `Sink::send`, then consume it back and verify the
+//! payload round-trips correctly.
+//!
+//! Containers are stopped automatically when the test function returns (via
+//! `ContainerAsync`'s `Drop` impl).
+//!
+//! Tests skip (not fail) when Docker is unavailable.
+
+#![allow(clippy::unwrap_used)]
+#![allow(clippy::expect_used)]
+
+use std::time::Duration;
+
+use bytes::Bytes;
+use dfe_receiver::sink::Sink;
+use dfe_receiver::sink::kafka::KafkaSink;
+
+use crate::common::{
+    kafka_consume_next, kafka_consumer, kafka_plain_config, start_kafka_container, test_topic,
+};
+use crate::skip_if_no_docker;
+
+/// Build a KafkaSink pointed at the given bootstrap address (no auth/TLS).
+fn make_sink(bootstrap: &str) -> KafkaSink {
+    let cfg = kafka_plain_config(bootstrap).to_receiver_kafka_config();
+    KafkaSink::new(&cfg).expect("KafkaSink creation failed")
+}
+
+#[tokio::test]
+async fn test_kafka_sink_send_and_consume() {
+    skip_if_no_docker!();
+    let (_container, bootstrap) = match start_kafka_container().await {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+
+    let kf = kafka_plain_config(&bootstrap);
+    let topic = test_topic("send");
+    let consumer = kafka_consumer(&kf, &topic).expect("consumer setup");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let sink = make_sink(&bootstrap);
+    let payload = format!(
+        r#"{{"test":"kafka-sink","ts":"{}","id":{}}}"#,
+        chrono::Utc::now().to_rfc3339(),
+        uuid::Uuid::new_v4()
+    );
+
+    sink.send(&topic, Bytes::from(payload.clone()))
+        .await
+        .expect("send failed");
+    sink.flush().await.expect("flush failed");
+
+    let received = kafka_consume_next(&consumer, Duration::from_secs(30))
+        .await
+        .expect("message never arrived on topic");
+
+    assert_eq!(received, payload.as_bytes(), "round-trip payload mismatch");
+    assert!(sink.is_healthy(), "sink should be healthy after success");
+}
+
+#[tokio::test]
+async fn test_kafka_sink_send_many() {
+    skip_if_no_docker!();
+    let (_container, bootstrap) = match start_kafka_container().await {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+
+    let kf = kafka_plain_config(&bootstrap);
+    let topic = test_topic("batch");
+    // Subscribe and wait for consumer to actually join the group
+    let consumer = kafka_consumer(&kf, &topic).expect("consumer setup");
+    tokio::time::sleep(Duration::from_millis(2000)).await;
+
+    let sink = make_sink(&bootstrap);
+
+    for i in 0..100 {
+        let payload = format!(r#"{{"seq":{i},"data":"batch-test"}}"#);
+        sink.send(&topic, Bytes::from(payload))
+            .await
+            .expect("batch send failed");
+    }
+    sink.flush().await.expect("flush failed");
+
+    // Collect messages with generous timeout — librdkafka may take a few
+    // seconds to materialise all 100 records to the consumer.
+    let mut count = 0;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    while tokio::time::Instant::now() < deadline && count < 100 {
+        match kafka_consume_next(&consumer, Duration::from_secs(5)).await {
+            Some(_) => count += 1,
+            None => {
+                // No message in 5s — break early if we've already collected most
+                if count >= 80 {
+                    break;
+                }
+            }
+        }
+    }
+    assert!(count >= 80, "expected ≥80 messages, got {count}/100");
+}
+
+#[tokio::test]
+async fn test_kafka_sink_binary_payload() {
+    skip_if_no_docker!();
+    let (_container, bootstrap) = match start_kafka_container().await {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+
+    let kf = kafka_plain_config(&bootstrap);
+    let topic = test_topic("binary");
+    let consumer = kafka_consumer(&kf, &topic).expect("consumer setup");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let sink = make_sink(&bootstrap);
+    // Binary payload (null bytes, high bytes) must survive Kafka
+    let payload: Vec<u8> = (0..=255u8).cycle().take(4096).collect();
+    sink.send(&topic, Bytes::from(payload.clone()))
+        .await
+        .expect("binary send failed");
+    sink.flush().await.expect("flush failed");
+
+    let received = kafka_consume_next(&consumer, Duration::from_secs(30))
+        .await
+        .expect("binary payload never arrived");
+    assert_eq!(received, payload, "binary payload corrupted in transit");
+}
+
+#[tokio::test]
+async fn test_kafka_sink_large_payload() {
+    skip_if_no_docker!();
+    let (_container, bootstrap) = match start_kafka_container().await {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+
+    let kf = kafka_plain_config(&bootstrap);
+    let topic = test_topic("large");
+    let consumer = kafka_consumer(&kf, &topic).expect("consumer setup");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let sink = make_sink(&bootstrap);
+    // 512 KiB — exercises librdkafka's internal batching/chunking
+    let payload: Vec<u8> = (0..512 * 1024).map(|i| (i % 256) as u8).collect();
+    sink.send(&topic, Bytes::from(payload.clone()))
+        .await
+        .expect("large send failed");
+    sink.flush().await.expect("flush failed");
+
+    let received = kafka_consume_next(&consumer, Duration::from_secs(60))
+        .await
+        .expect("large payload never arrived");
+    assert_eq!(received.len(), payload.len(), "large payload size mismatch");
+    assert_eq!(received, payload, "large payload content mismatch");
+}
+
+#[tokio::test]
+async fn test_kafka_sink_multiple_topics() {
+    skip_if_no_docker!();
+    let (_container, bootstrap) = match start_kafka_container().await {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+
+    let kf = kafka_plain_config(&bootstrap);
+    let topics = [
+        test_topic("multi-a"),
+        test_topic("multi-b"),
+        test_topic("multi-c"),
+    ];
+
+    let consumers: Vec<_> = topics
+        .iter()
+        .map(|t| kafka_consumer(&kf, t).expect("consumer setup"))
+        .collect();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let sink = make_sink(&bootstrap);
+    for (i, topic) in topics.iter().enumerate() {
+        let payload = format!(r#"{{"topic_idx":{i}}}"#);
+        sink.send(topic, Bytes::from(payload))
+            .await
+            .expect("multi-topic send failed");
+    }
+    sink.flush().await.expect("flush failed");
+
+    for (i, (topic, consumer)) in topics.iter().zip(consumers.iter()).enumerate() {
+        let received = kafka_consume_next(consumer, Duration::from_secs(30))
+            .await
+            .unwrap_or_else(|| panic!("topic {topic} has no message"));
+        let text = String::from_utf8_lossy(&received);
+        assert!(
+            text.contains(&format!("\"topic_idx\":{i}")),
+            "topic {topic} got wrong payload: {text}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_kafka_sink_invalid_topic_recoverable() {
+    skip_if_no_docker!();
+    let (_container, bootstrap) = match start_kafka_container().await {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+
+    let sink = make_sink(&bootstrap);
+    // Null bytes in topic name are invalid. The sink must surface as error
+    // (not panic) and remain usable for subsequent sends.
+    let _ = sink.send("topic\0with\0nulls", Bytes::from(r#"{}"#)).await;
+
+    // Recovery test: valid send should still work
+    let good_topic = test_topic("recovery");
+    sink.send(&good_topic, Bytes::from(r#"{"recovered":true}"#))
+        .await
+        .expect("sink unusable after invalid topic attempt");
+    sink.flush().await.expect("flush should succeed");
+}

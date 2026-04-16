@@ -1851,4 +1851,75 @@ kafka:
         );
         assert_eq!(config.config_reload_secs, original.config_reload_secs);
     }
+
+    // ---------------------------------------------------------------------
+    // Security: SASL password redaction in Debug output
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn test_sasl_debug_redacts_password() {
+        let sasl = SaslConfig {
+            enabled: true,
+            mechanism: "SCRAM-SHA-512".to_string(),
+            username: "kafka-admin".to_string(),
+            password: "super-secret-production-password".to_string(),
+        };
+        let debug_output = format!("{sasl:?}");
+
+        // Username and mechanism remain visible for operational debugging
+        assert!(
+            debug_output.contains("kafka-admin"),
+            "username should be visible in debug: {debug_output}"
+        );
+        assert!(
+            debug_output.contains("SCRAM-SHA-512"),
+            "mechanism should be visible in debug: {debug_output}"
+        );
+
+        // Password must never appear, even partially
+        assert!(
+            !debug_output.contains("super-secret-production-password"),
+            "password leaked in debug output: {debug_output}"
+        );
+        assert!(
+            !debug_output.contains("super-secret"),
+            "password prefix leaked in debug output: {debug_output}"
+        );
+        assert!(
+            debug_output.contains("REDACTED"),
+            "debug should explicitly mark redacted field: {debug_output}"
+        );
+    }
+
+    #[test]
+    fn test_sasl_debug_redacts_empty_password() {
+        // Edge case: empty password is still redacted (never expose field content)
+        let sasl = SaslConfig {
+            enabled: false,
+            mechanism: String::new(),
+            username: String::new(),
+            password: String::new(),
+        };
+        let debug_output = format!("{sasl:?}");
+        assert!(debug_output.contains("REDACTED"));
+        // Empty password must not render as `password: ""` anywhere
+        assert!(!debug_output.contains("password: \"\""));
+    }
+
+    #[test]
+    fn test_sasl_debug_nested_in_kafka_config() {
+        // Verify redaction survives nested Debug formatting
+        let kafka = KafkaConfig {
+            sasl: Some(SaslConfig {
+                enabled: true,
+                mechanism: "PLAIN".to_string(),
+                username: "u".to_string(),
+                password: "leakable-password-xyz".to_string(),
+            }),
+            ..KafkaConfig::default()
+        };
+        let debug_output = format!("{kafka:?}");
+        assert!(!debug_output.contains("leakable-password-xyz"));
+        assert!(debug_output.contains("REDACTED"));
+    }
 }

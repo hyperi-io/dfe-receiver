@@ -19,17 +19,27 @@ mod common;
 mod fluent;
 #[path = "integration/gelf.rs"]
 mod gelf;
+#[path = "integration/grpc_sink.rs"]
+mod grpc_sink;
 #[path = "integration/http_security.rs"]
 mod http_security;
+#[path = "integration/kafka_sink.rs"]
+mod kafka_sink;
 #[path = "integration/lumberjack.rs"]
 mod lumberjack;
+#[path = "integration/minio_spool.rs"]
+mod minio_spool;
 #[path = "integration/otlp.rs"]
 mod otlp;
 #[path = "integration/prometheus_rw.rs"]
 mod prometheus_rw;
+#[path = "integration/protocol_kafka_roundtrip.rs"]
+mod protocol_kafka_roundtrip;
 #[path = "integration/splunk_hec.rs"]
 mod splunk_hec;
 #[path = "integration/syslog.rs"]
 mod syslog;
+#[path = "integration/vault_auth.rs"]
+mod vault_auth;
 #[path = "integration/vector.rs"]
 mod vector;

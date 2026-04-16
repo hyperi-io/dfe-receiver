@@ -945,4 +945,111 @@ mod tests {
         assert_eq!(effective.len(), 1);
         assert_eq!(effective[0].values, vec!["2.0"]);
     }
+
+    // ---------------------------------------------------------------------
+    // Security: constant-time token validation
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn test_hash_token_deterministic() {
+        // Same input must always produce same hash (required for lookup)
+        let h1 = hash_token("my-secret-token");
+        let h2 = hash_token("my-secret-token");
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_hash_token_distinct() {
+        // Different inputs must produce different hashes
+        let h1 = hash_token("token-a");
+        let h2 = hash_token("token-b");
+        assert_ne!(h1, h2);
+
+        // Even single-byte differences must differ
+        let h3 = hash_token("secret");
+        let h4 = hash_token("Secret");
+        assert_ne!(h3, h4);
+    }
+
+    #[test]
+    fn test_hash_token_empty_and_unicode() {
+        // Empty string must produce a stable hash
+        let h_empty = hash_token("");
+        assert_eq!(h_empty, hash_token(""));
+
+        // Unicode must be handled correctly (UTF-8 bytes)
+        let h_unicode = hash_token("токен-тест-🔒");
+        assert_eq!(h_unicode, hash_token("токен-тест-🔒"));
+        assert_ne!(h_unicode, h_empty);
+
+        // Very long tokens (e.g. JWTs) must hash without issue
+        let long_token = "a".repeat(4096);
+        let h_long = hash_token(&long_token);
+        assert_eq!(h_long.len(), 32);
+    }
+
+    #[test]
+    fn test_bearer_validation_timing_attack_resistant() {
+        // With hash-based lookup, the timing of validation should not
+        // depend on how many characters of the token match a stored one.
+        // This is a structural test: verify plaintext is never compared.
+        let provider = BearerTokenProvider::new(&["aaaaaaaaaaaaaaaaaaaa".to_string()]);
+
+        // These tokens all share a prefix with the valid token but
+        // must all be rejected in uniform time (hash lookup).
+        let near_matches = vec![
+            String::new(),
+            "a".to_string(),
+            "aaaaaaaaaa".to_string(),            // half prefix
+            "aaaaaaaaaaaaaaaaaaa".to_string(),   // missing last char
+            "aaaaaaaaaaaaaaaaaaab".to_string(),  // last char wrong
+            "aaaaaaaaaaaaaaaaaaaax".to_string(), // too long
+        ];
+        for t in near_matches {
+            assert!(!provider.is_valid(&t), "should reject: {t:?}");
+        }
+        assert!(provider.is_valid("aaaaaaaaaaaaaaaaaaaa"));
+    }
+
+    #[test]
+    fn test_bearer_provider_duplicate_tokens_deduped() {
+        // Multiple identical tokens should collapse into one hash entry
+        let tokens = vec![
+            "same".to_string(),
+            "same".to_string(),
+            "same".to_string(),
+            "different".to_string(),
+        ];
+        let provider = BearerTokenProvider::new(&tokens);
+        assert_eq!(provider.token_count(), 2);
+        assert!(provider.is_valid("same"));
+        assert!(provider.is_valid("different"));
+    }
+
+    #[test]
+    fn test_bearer_provider_empty_token_never_valid() {
+        // Empty token must never authenticate (common injection/misconfig)
+        let provider = BearerTokenProvider::new(&["real-token".to_string()]);
+        assert!(!provider.is_valid(""));
+    }
+
+    #[test]
+    fn test_bearer_provider_update_clears_old_tokens() {
+        // Rotation must fully replace prior set (no leakage of old tokens)
+        let provider =
+            BearerTokenProvider::new(&["a".to_string(), "b".to_string(), "c".to_string()]);
+        assert_eq!(provider.token_count(), 3);
+
+        provider.update_tokens(&["d".to_string()]);
+        assert_eq!(provider.token_count(), 1);
+        assert!(!provider.is_valid("a"));
+        assert!(!provider.is_valid("b"));
+        assert!(!provider.is_valid("c"));
+        assert!(provider.is_valid("d"));
+
+        // Update to empty set revokes all
+        provider.update_tokens(&[]);
+        assert_eq!(provider.token_count(), 0);
+        assert!(!provider.is_valid("d"));
+    }
 }

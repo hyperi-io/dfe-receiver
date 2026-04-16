@@ -138,6 +138,12 @@ impl KafkaTestConfig {
             None
         };
 
+        // TLS is derived from security_protocol: SASL_SSL or SSL imply TLS on.
+        let tls_enabled = matches!(
+            self.security_protocol.to_uppercase().as_str(),
+            "SASL_SSL" | "SSL"
+        );
+
         dfe_receiver::config::KafkaConfig {
             brokers: self
                 .brokers
@@ -146,6 +152,10 @@ impl KafkaTestConfig {
                 .collect(),
             client_id: "dfe-receiver-test".to_string(),
             sasl,
+            tls: dfe_receiver::config::KafkaTlsConfig {
+                enabled: tls_enabled,
+                ..Default::default()
+            },
             ..Default::default()
         }
     }
@@ -173,4 +183,318 @@ macro_rules! skip_if_no_kafka {
             return;
         }
     };
+}
+
+// ---------------------------------------------------------------------------
+// Kafka consumer helper
+// ---------------------------------------------------------------------------
+
+/// Build a consumer subscribed to `topic` with a unique group. Caller can
+/// then poll `recv()` for messages. The consumer must be created *before*
+/// producing to avoid race conditions with librdkafka's metadata refresh.
+pub fn kafka_consumer(
+    cfg: &KafkaTestConfig,
+    topic: &str,
+) -> Option<rdkafka::consumer::StreamConsumer> {
+    use rdkafka::config::ClientConfig;
+    use rdkafka::consumer::{Consumer, StreamConsumer};
+
+    let mut client_config = ClientConfig::new();
+    client_config
+        .set("bootstrap.servers", &cfg.brokers)
+        .set("group.id", format!("test-{}", uuid::Uuid::new_v4()))
+        .set("enable.auto.commit", "false")
+        .set("auto.offset.reset", "earliest")
+        .set("session.timeout.ms", "10000")
+        .set("allow.auto.create.topics", "true");
+
+    cfg.apply_sasl(&mut client_config);
+
+    let consumer: StreamConsumer = client_config.create().ok()?;
+    consumer.subscribe(&[topic]).ok()?;
+    Some(consumer)
+}
+
+/// Poll a consumer for a single message payload until timeout.
+pub async fn kafka_consume_next(
+    consumer: &rdkafka::consumer::StreamConsumer,
+    timeout: std::time::Duration,
+) -> Option<Vec<u8>> {
+    use rdkafka::Message;
+
+    let deadline = tokio::time::Instant::now() + timeout;
+    while tokio::time::Instant::now() < deadline {
+        let remaining = deadline - tokio::time::Instant::now();
+        match tokio::time::timeout(remaining, consumer.recv()).await {
+            Ok(Ok(msg)) => return msg.payload().map(<[u8]>::to_vec),
+            Ok(Err(_)) => {}
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+/// Create a consumer, subscribe, and poll until message found or timeout.
+///
+/// Note: caller should prefer [`kafka_consumer`] + [`kafka_consume_next`] when
+/// the test controls the producer, so the consumer can subscribe *before*
+/// the producer sends. This helper is for tests that don't control ordering.
+pub async fn kafka_consume_one(
+    cfg: &KafkaTestConfig,
+    topic: &str,
+    timeout: std::time::Duration,
+) -> Option<Vec<u8>> {
+    let consumer = kafka_consumer(cfg, topic)?;
+    // Brief warm-up so consumer group is joined before producer sends
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    kafka_consume_next(&consumer, timeout).await
+}
+
+// ---------------------------------------------------------------------------
+// MinIO / S3 (for disk spillover / archival tests)
+// ---------------------------------------------------------------------------
+
+/// S3-compatible storage connection config.
+pub struct S3TestConfig {
+    pub endpoint: String,
+    pub access_key: String,
+    pub secret_key: String,
+    pub region: String,
+}
+
+impl S3TestConfig {
+    /// Detect S3/MinIO availability from env vars or docker MinIO on localhost:9000.
+    pub fn detect() -> Option<Self> {
+        load_dotenv();
+        // Env var set for remote S3
+        if let Ok(endpoint) = env::var("S3_ENDPOINT") {
+            return Some(Self {
+                endpoint,
+                access_key: env::var("S3_ACCESS_KEY").unwrap_or_default(),
+                secret_key: env::var("S3_SECRET_KEY").unwrap_or_default(),
+                region: env::var("S3_REGION").unwrap_or_else(|_| "us-east-1".into()),
+            });
+        }
+        // Fallback: try docker MinIO on localhost:9000
+        if tcp_reachable("localhost:9000", std::time::Duration::from_secs(2)) {
+            return Some(Self {
+                endpoint: "http://localhost:9000".into(),
+                access_key: "minioadmin".into(),
+                secret_key: "minioadmin".into(),
+                region: "us-east-1".into(),
+            });
+        }
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Vault / OpenBao (for bearer-token / secret tests)
+// ---------------------------------------------------------------------------
+
+/// Vault connection config for dev-mode tests.
+pub struct VaultTestConfig {
+    pub address: String,
+    pub token: String,
+}
+
+impl VaultTestConfig {
+    /// Detect Vault/OpenBao availability from env vars or localhost dev mode.
+    pub fn detect() -> Option<Self> {
+        load_dotenv();
+        if let Ok(address) = env::var("VAULT_ADDR") {
+            return Some(Self {
+                address,
+                token: env::var("VAULT_TOKEN").unwrap_or_default(),
+            });
+        }
+        // Fallback: localhost:8200 (Vault dev default)
+        if tcp_reachable("localhost:8200", std::time::Duration::from_secs(2)) {
+            return Some(Self {
+                address: "http://localhost:8200".into(),
+                token: env::var("VAULT_DEV_ROOT_TOKEN_ID").unwrap_or_else(|_| "root".into()),
+            });
+        }
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TCP reachability helper
+// ---------------------------------------------------------------------------
+
+fn tcp_reachable(addr: &str, timeout: std::time::Duration) -> bool {
+    use std::net::ToSocketAddrs;
+    addr.to_socket_addrs()
+        .ok()
+        .and_then(|mut addrs| addrs.next())
+        .map(|a| std::net::TcpStream::connect_timeout(&a, timeout).is_ok())
+        .unwrap_or(false)
+}
+
+/// Skip test if S3/MinIO is not available.
+#[macro_export]
+macro_rules! skip_if_no_s3 {
+    () => {
+        match $crate::common::S3TestConfig::detect() {
+            Some(cfg) => cfg,
+            None => {
+                eprintln!("Skipping: no S3/MinIO available (set S3_ENDPOINT or run MinIO on localhost:9000)");
+                return;
+            }
+        }
+    };
+}
+
+/// Skip test if Vault is not available.
+#[macro_export]
+macro_rules! skip_if_no_vault {
+    () => {
+        match $crate::common::VaultTestConfig::detect() {
+            Some(cfg) => cfg,
+            None => {
+                eprintln!("Skipping: no Vault available (set VAULT_ADDR or run Vault dev on localhost:8200)");
+                return;
+            }
+        }
+    };
+}
+
+// ---------------------------------------------------------------------------
+// testcontainers-rs helpers (auto-lifecycle: containers stop when dropped)
+// ---------------------------------------------------------------------------
+//
+// Tests that need a guaranteed-clean backend (rather than relying on live
+// services with potentially stale credentials) use testcontainers-rs. The
+// returned ContainerAsync is dropped at the end of each test, which
+// triggers Docker to stop and remove the container automatically.
+//
+// Tests skip gracefully when Docker is unavailable.
+
+/// Check if Docker daemon is reachable.
+pub fn docker_available() -> bool {
+    std::process::Command::new("docker")
+        .arg("info")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Skip test if Docker is not available.
+#[macro_export]
+macro_rules! skip_if_no_docker {
+    () => {
+        if !$crate::common::docker_available() {
+            eprintln!("Skipping: Docker daemon not available");
+            return;
+        }
+    };
+}
+
+/// Start a Kafka container and return (container_handle, bootstrap_address).
+///
+/// The returned handle holds the container alive; drop it to stop the container.
+///
+/// # Errors
+///
+/// Returns an error if Docker is unavailable or the container fails to start.
+pub async fn start_kafka_container() -> Result<
+    (
+        testcontainers::ContainerAsync<testcontainers_modules::kafka::apache::Kafka>,
+        String,
+    ),
+    String,
+> {
+    use testcontainers::runners::AsyncRunner;
+    use testcontainers_modules::kafka::apache;
+
+    let node = apache::Kafka::default()
+        .start()
+        .await
+        .map_err(|e| format!("failed to start Kafka container: {e}"))?;
+
+    let port = node
+        .get_host_port_ipv4(apache::KAFKA_PORT)
+        .await
+        .map_err(|e| format!("failed to get Kafka port: {e}"))?;
+
+    let bootstrap = format!("127.0.0.1:{port}");
+    Ok((node, bootstrap))
+}
+
+/// Start a Vault (hashicorp_vault) container in dev mode.
+///
+/// Returns (container_handle, url, root_token). The Vault image defaults to
+/// root token "myroot" in dev mode (not production-safe, for tests only).
+pub async fn start_vault_container() -> Result<
+    (
+        testcontainers::ContainerAsync<testcontainers_modules::hashicorp_vault::HashicorpVault>,
+        String,
+        String,
+    ),
+    String,
+> {
+    use testcontainers::runners::AsyncRunner;
+    use testcontainers_modules::hashicorp_vault::HashicorpVault;
+
+    let node = HashicorpVault::default()
+        .start()
+        .await
+        .map_err(|e| format!("failed to start Vault container: {e}"))?;
+
+    let port = node
+        .get_host_port_ipv4(8200)
+        .await
+        .map_err(|e| format!("failed to get Vault port: {e}"))?;
+
+    let url = format!("http://127.0.0.1:{port}");
+    // Vault's default dev root token when using the official image
+    Ok((node, url, "myroot".to_string()))
+}
+
+/// Start a MinIO container and return (handle, endpoint, access_key, secret_key).
+pub async fn start_minio_container() -> Result<
+    (
+        testcontainers::ContainerAsync<testcontainers_modules::minio::MinIO>,
+        String,
+        String,
+        String,
+    ),
+    String,
+> {
+    use testcontainers::runners::AsyncRunner;
+    use testcontainers_modules::minio::MinIO;
+
+    let node = MinIO::default()
+        .start()
+        .await
+        .map_err(|e| format!("failed to start MinIO container: {e}"))?;
+
+    let port = node
+        .get_host_port_ipv4(9000)
+        .await
+        .map_err(|e| format!("failed to get MinIO port: {e}"))?;
+
+    let endpoint = format!("http://127.0.0.1:{port}");
+    // MinIO's default credentials are minioadmin/minioadmin
+    Ok((
+        node,
+        endpoint,
+        "minioadmin".to_string(),
+        "minioadmin".to_string(),
+    ))
+}
+
+/// Build a test Kafka config from a bootstrap address (no SASL/TLS).
+#[must_use]
+pub fn kafka_plain_config(bootstrap: &str) -> KafkaTestConfig {
+    KafkaTestConfig {
+        brokers: bootstrap.to_string(),
+        security_protocol: "PLAINTEXT".to_string(),
+        sasl_mechanism: None,
+        sasl_user: None,
+        sasl_password: None,
+    }
 }

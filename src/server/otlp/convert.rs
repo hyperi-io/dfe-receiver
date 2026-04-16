@@ -1013,4 +1013,410 @@ mod tests {
         assert_eq!(json["_signal"], "log");
         assert_eq!(json["body"], "error occurred");
     }
+
+    // =========================================================================
+    // Extended conversion tests (edge cases, all variants, malformed input)
+    // =========================================================================
+
+    // ---- AnyValue conversion: every variant ----
+
+    #[test]
+    fn test_any_value_all_primitive_variants() {
+        use pb::common::v1::{AnyValue, any_value::Value};
+
+        // String
+        let sv = AnyValue {
+            value: Some(Value::StringValue("hello".to_string())),
+        };
+        assert_eq!(any_value_to_string_value(&sv), serde_json::json!("hello"));
+
+        // Int
+        let iv = AnyValue {
+            value: Some(Value::IntValue(-9999)),
+        };
+        assert_eq!(any_value_to_string_value(&iv), serde_json::json!("-9999"));
+
+        // Double
+        let dv = AnyValue {
+            value: Some(Value::DoubleValue(2.5)),
+        };
+        // Double → string representation (implementation-defined format)
+        let s = any_value_to_string_value(&dv);
+        assert!(s.as_str().unwrap().contains("2.5"));
+
+        // Bool
+        let bv = AnyValue {
+            value: Some(Value::BoolValue(true)),
+        };
+        let s = any_value_to_string_value(&bv);
+        assert!(s.as_str().unwrap() == "true");
+
+        // Bytes
+        let bsv = AnyValue {
+            value: Some(Value::BytesValue(vec![0xde, 0xad, 0xbe, 0xef])),
+        };
+        let s = any_value_to_string_value(&bsv);
+        // bytes should render as hex or base64 — implementation-defined
+        let text = s.as_str().unwrap();
+        assert!(
+            text.contains("deadbeef") || !text.is_empty(),
+            "bytes should convert to non-empty string: {text}"
+        );
+
+        // None (no inner value)
+        let nv = AnyValue { value: None };
+        let result = any_value_to_string_value(&nv);
+        assert!(matches!(result, serde_json::Value::Null) || result == serde_json::json!(""));
+    }
+
+    #[test]
+    fn test_any_value_array_and_kv_list() {
+        use pb::common::v1::{AnyValue, ArrayValue, KeyValue, KeyValueList, any_value::Value};
+
+        // Array of strings
+        let array = AnyValue {
+            value: Some(Value::ArrayValue(ArrayValue {
+                values: vec![
+                    AnyValue {
+                        value: Some(Value::StringValue("a".to_string())),
+                    },
+                    AnyValue {
+                        value: Some(Value::IntValue(1)),
+                    },
+                ],
+            })),
+        };
+        let result = any_value_to_json(&array);
+        // Array converts to JSON array (or JSON-stringified array)
+        assert!(result.is_array() || result.is_string());
+
+        // Key-value list (map)
+        let kv = AnyValue {
+            value: Some(Value::KvlistValue(KeyValueList {
+                values: vec![KeyValue {
+                    key: "nested".to_string(),
+                    value: Some(AnyValue {
+                        value: Some(Value::StringValue("deep".to_string())),
+                    }),
+                }],
+            })),
+        };
+        let result = any_value_to_json(&kv);
+        // Should not crash, should produce something
+        assert!(!matches!(result, serde_json::Value::Null));
+    }
+
+    // ---- Logs: hyperdx mode with attributes ----
+
+    #[test]
+    fn test_convert_logs_hyperdx_with_attributes_and_trace() {
+        let trace_id = vec![1u8; 16];
+        let span_id = vec![2u8; 8];
+        let request = pb::collector::logs::v1::ExportLogsServiceRequest {
+            resource_logs: vec![pb::logs::v1::ResourceLogs {
+                resource: Some(pb::resource::v1::Resource {
+                    attributes: vec![
+                        pb::common::v1::KeyValue {
+                            key: "service.name".to_string(),
+                            value: Some(pb::common::v1::AnyValue {
+                                value: Some(pb::common::v1::any_value::Value::StringValue(
+                                    "api".to_string(),
+                                )),
+                            }),
+                        },
+                        pb::common::v1::KeyValue {
+                            key: "deployment.environment".to_string(),
+                            value: Some(pb::common::v1::AnyValue {
+                                value: Some(pb::common::v1::any_value::Value::StringValue(
+                                    "prod".to_string(),
+                                )),
+                            }),
+                        },
+                    ],
+                    dropped_attributes_count: 0,
+                }),
+                scope_logs: vec![pb::logs::v1::ScopeLogs {
+                    scope: None,
+                    log_records: vec![pb::logs::v1::LogRecord {
+                        time_unix_nano: 1_771_459_200_000_000_000,
+                        observed_time_unix_nano: 1_771_459_200_000_000_000,
+                        severity_number: 17,
+                        severity_text: "ERROR".to_string(),
+                        body: Some(pb::common::v1::AnyValue {
+                            value: Some(pb::common::v1::any_value::Value::StringValue(
+                                "db timeout".to_string(),
+                            )),
+                        }),
+                        attributes: vec![pb::common::v1::KeyValue {
+                            key: "error.code".to_string(),
+                            value: Some(pb::common::v1::AnyValue {
+                                value: Some(pb::common::v1::any_value::Value::IntValue(500)),
+                            }),
+                        }],
+                        dropped_attributes_count: 0,
+                        flags: 1,
+                        trace_id,
+                        span_id,
+                        event_name: "db.query".to_string(),
+                    }],
+                    schema_url: String::new(),
+                }],
+                schema_url: String::new(),
+            }],
+        };
+
+        let payloads = convert_logs(&request, OtlpMode::HyperDx).unwrap();
+        assert_eq!(payloads.len(), 1);
+        let json: serde_json::Value = serde_json::from_slice(&payloads[0].json).unwrap();
+
+        // Trace correlation fields should be hex-encoded
+        let tid = json["TraceId"].as_str().unwrap();
+        let sid = json["SpanId"].as_str().unwrap();
+        assert_eq!(tid.len(), 32, "TraceId should be 32 hex chars: {tid}");
+        assert_eq!(sid.len(), 16, "SpanId should be 16 hex chars: {sid}");
+        assert_eq!(json["ServiceName"], "api");
+        assert_eq!(json["SeverityText"], "ERROR");
+    }
+
+    #[test]
+    fn test_convert_logs_multiple_records() {
+        // Multiple scope_logs × multiple log_records → multiple payloads
+        let make_log = |body: &str| pb::logs::v1::LogRecord {
+            time_unix_nano: 1_771_459_200_000_000_000,
+            observed_time_unix_nano: 0,
+            severity_number: 9,
+            severity_text: "INFO".to_string(),
+            body: Some(pb::common::v1::AnyValue {
+                value: Some(pb::common::v1::any_value::Value::StringValue(
+                    body.to_string(),
+                )),
+            }),
+            attributes: vec![],
+            dropped_attributes_count: 0,
+            flags: 0,
+            trace_id: vec![],
+            span_id: vec![],
+            event_name: String::new(),
+        };
+
+        let request = pb::collector::logs::v1::ExportLogsServiceRequest {
+            resource_logs: vec![pb::logs::v1::ResourceLogs {
+                resource: None,
+                scope_logs: vec![pb::logs::v1::ScopeLogs {
+                    scope: None,
+                    log_records: vec![make_log("one"), make_log("two"), make_log("three")],
+                    schema_url: String::new(),
+                }],
+                schema_url: String::new(),
+            }],
+        };
+
+        let payloads = convert_logs(&request, OtlpMode::HyperDx).unwrap();
+        assert_eq!(payloads.len(), 3);
+    }
+
+    #[test]
+    fn test_convert_logs_empty_request() {
+        let request = pb::collector::logs::v1::ExportLogsServiceRequest {
+            resource_logs: vec![],
+        };
+        let payloads = convert_logs(&request, OtlpMode::HyperDx).unwrap();
+        assert!(payloads.is_empty());
+    }
+
+    // ---- Traces ----
+
+    #[test]
+    fn test_convert_traces_hyperdx_basic() {
+        let request = pb::collector::trace::v1::ExportTraceServiceRequest {
+            resource_spans: vec![pb::trace::v1::ResourceSpans {
+                resource: Some(pb::resource::v1::Resource {
+                    attributes: vec![pb::common::v1::KeyValue {
+                        key: "service.name".to_string(),
+                        value: Some(pb::common::v1::AnyValue {
+                            value: Some(pb::common::v1::any_value::Value::StringValue(
+                                "my-service".to_string(),
+                            )),
+                        }),
+                    }],
+                    dropped_attributes_count: 0,
+                }),
+                scope_spans: vec![pb::trace::v1::ScopeSpans {
+                    scope: None,
+                    spans: vec![pb::trace::v1::Span {
+                        trace_id: vec![0xaa; 16],
+                        span_id: vec![0xbb; 8],
+                        trace_state: String::new(),
+                        parent_span_id: vec![],
+                        flags: 0,
+                        name: "GET /api/v1/users".to_string(),
+                        kind: 2, // SERVER
+                        start_time_unix_nano: 1_771_459_200_000_000_000,
+                        end_time_unix_nano: 1_771_459_200_100_000_000,
+                        attributes: vec![],
+                        dropped_attributes_count: 0,
+                        events: vec![],
+                        dropped_events_count: 0,
+                        links: vec![],
+                        dropped_links_count: 0,
+                        status: Some(pb::trace::v1::Status {
+                            message: String::new(),
+                            code: 1, // OK
+                        }),
+                    }],
+                    schema_url: String::new(),
+                }],
+                schema_url: String::new(),
+            }],
+        };
+
+        let payloads = convert_traces(&request, OtlpMode::HyperDx).unwrap();
+        assert_eq!(payloads.len(), 1);
+        let json: serde_json::Value = serde_json::from_slice(&payloads[0].json).unwrap();
+
+        // HyperDX schema uses PascalCase
+        assert_eq!(json["SpanName"], "GET /api/v1/users");
+        assert_eq!(json["ServiceName"], "my-service");
+        let tid = json["TraceId"].as_str().unwrap();
+        assert_eq!(tid.len(), 32);
+        assert!(tid.chars().all(|c| c == 'a'));
+    }
+
+    #[test]
+    fn test_convert_traces_generic_mode() {
+        let request = pb::collector::trace::v1::ExportTraceServiceRequest {
+            resource_spans: vec![pb::trace::v1::ResourceSpans {
+                resource: None,
+                scope_spans: vec![pb::trace::v1::ScopeSpans {
+                    scope: None,
+                    spans: vec![pb::trace::v1::Span {
+                        trace_id: vec![],
+                        span_id: vec![],
+                        trace_state: String::new(),
+                        parent_span_id: vec![],
+                        flags: 0,
+                        name: "op".to_string(),
+                        kind: 0,
+                        start_time_unix_nano: 0,
+                        end_time_unix_nano: 0,
+                        attributes: vec![],
+                        dropped_attributes_count: 0,
+                        events: vec![],
+                        dropped_events_count: 0,
+                        links: vec![],
+                        dropped_links_count: 0,
+                        status: None,
+                    }],
+                    schema_url: String::new(),
+                }],
+                schema_url: String::new(),
+            }],
+        };
+
+        let payloads = convert_traces(&request, OtlpMode::Generic).unwrap();
+        assert_eq!(payloads.len(), 1);
+        let json: serde_json::Value = serde_json::from_slice(&payloads[0].json).unwrap();
+        assert_eq!(json["_signal"], "trace");
+    }
+
+    // ---- Metrics ----
+
+    #[test]
+    fn test_convert_metrics_gauge() {
+        let request = pb::collector::metrics::v1::ExportMetricsServiceRequest {
+            resource_metrics: vec![pb::metrics::v1::ResourceMetrics {
+                resource: None,
+                scope_metrics: vec![pb::metrics::v1::ScopeMetrics {
+                    scope: None,
+                    metrics: vec![pb::metrics::v1::Metric {
+                        name: "cpu_usage".to_string(),
+                        description: "CPU usage".to_string(),
+                        unit: "percent".to_string(),
+                        metadata: vec![],
+                        data: Some(pb::metrics::v1::metric::Data::Gauge(
+                            pb::metrics::v1::Gauge {
+                                data_points: vec![pb::metrics::v1::NumberDataPoint {
+                                    attributes: vec![],
+                                    start_time_unix_nano: 0,
+                                    time_unix_nano: 1_771_459_200_000_000_000,
+                                    exemplars: vec![],
+                                    flags: 0,
+                                    value: Some(
+                                        pb::metrics::v1::number_data_point::Value::AsDouble(42.5),
+                                    ),
+                                }],
+                            },
+                        )),
+                    }],
+                    schema_url: String::new(),
+                }],
+                schema_url: String::new(),
+            }],
+        };
+
+        let payloads = convert_metrics(&request, OtlpMode::HyperDx).unwrap();
+        assert!(!payloads.is_empty());
+    }
+
+    #[test]
+    fn test_convert_metrics_empty() {
+        let request = pb::collector::metrics::v1::ExportMetricsServiceRequest {
+            resource_metrics: vec![],
+        };
+        let payloads = convert_metrics(&request, OtlpMode::HyperDx).unwrap();
+        assert!(payloads.is_empty());
+    }
+
+    // ---- nanos_to_rfc3339 edge cases ----
+
+    #[test]
+    fn test_nanos_to_rfc3339_edge_cases() {
+        // Very small timestamp (near unix epoch)
+        let early = nanos_to_rfc3339(1_000_000); // 1 ms past epoch
+        assert!(early.starts_with("1970-01-01"));
+
+        // Specific nanosecond precision
+        let precise = nanos_to_rfc3339(1_771_459_200_123_456_789);
+        // Should include fractional seconds
+        assert!(precise.contains("123456789") || precise.contains(".123"));
+    }
+
+    #[test]
+    fn test_bytes_to_hex_various_lengths() {
+        assert_eq!(bytes_to_hex(&[]), "");
+        assert_eq!(bytes_to_hex(&[0x00]), "00");
+        assert_eq!(bytes_to_hex(&[0xff]), "ff");
+        assert_eq!(bytes_to_hex(&[0x01, 0x23, 0x45, 0x67, 0x89]), "0123456789");
+        // 16-byte trace ID
+        let trace = [0x42u8; 16];
+        let hex = bytes_to_hex(&trace);
+        assert_eq!(hex.len(), 32);
+        assert!(hex.chars().all(|c| c == '4' || c == '2'));
+    }
+
+    #[test]
+    fn test_severity_number_range() {
+        // Known mappings
+        assert_eq!(severity_number_to_text(1), "TRACE");
+        assert_eq!(severity_number_to_text(5), "DEBUG");
+        assert_eq!(severity_number_to_text(9), "INFO");
+        assert_eq!(severity_number_to_text(13), "WARN");
+        assert_eq!(severity_number_to_text(17), "ERROR");
+        assert_eq!(severity_number_to_text(21), "FATAL");
+
+        // Unknown / unspecified returns empty
+        assert_eq!(severity_number_to_text(0), "");
+        // Out-of-range (OTLP defines 1..=24) should not panic
+        let _ = severity_number_to_text(255);
+    }
+
+    #[test]
+    fn test_otlp_mode_case_insensitive() {
+        // mode parsing should accept various forms
+        assert_eq!(OtlpMode::from_str("hyperdx"), OtlpMode::HyperDx);
+        assert_eq!(OtlpMode::from_str("generic"), OtlpMode::Generic);
+        // Unknown defaults to HyperDx (matches existing test)
+        assert_eq!(OtlpMode::from_str(""), OtlpMode::HyperDx);
+        assert_eq!(OtlpMode::from_str("invalid-mode"), OtlpMode::HyperDx);
+    }
 }

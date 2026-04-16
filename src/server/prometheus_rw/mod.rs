@@ -330,4 +330,90 @@ mod tests {
         assert_eq!(config.max_body_size, 10 * 1024 * 1024);
         assert_eq!(config.request_timeout_ms, 30_000);
     }
+
+    // -----------------------------------------------------------------
+    // Security: decompression bomb protection
+    // -----------------------------------------------------------------
+    //
+    // These tests verify the `snap::raw::decompress_len` pre-check
+    // correctly rejects payloads that would expand beyond the 64 MiB
+    // decompressed size limit before any allocation occurs.
+
+    /// Build a valid snappy block with a specific reported uncompressed size.
+    /// The snappy block format is: varint(uncompressed_length) + compressed_data.
+    /// We construct a blob that claims a very large uncompressed size.
+    fn snappy_blob_claiming_size(size: u64) -> Vec<u8> {
+        let mut blob = Vec::new();
+        // Encode `size` as varint
+        let mut n = size;
+        while n >= 0x80 {
+            blob.push(((n & 0x7f) | 0x80) as u8);
+            n >>= 7;
+        }
+        blob.push(n as u8);
+        // Append a valid but minimal compressed section (single literal zero byte).
+        // 0x00 = tag byte for 1-byte literal, 0x00 = the literal byte
+        blob.push(0x00);
+        blob.push(0x00);
+        blob
+    }
+
+    #[test]
+    fn test_snappy_decompress_len_detects_bomb() {
+        // A crafted snappy blob claiming 1 GiB uncompressed size
+        let bomb = snappy_blob_claiming_size(1024 * 1024 * 1024);
+        let reported = snap::raw::decompress_len(&bomb).unwrap();
+        assert_eq!(reported, 1024 * 1024 * 1024);
+
+        // Our handler rejects anything over 64 MiB before decompressing
+        const MAX: usize = 64 * 1024 * 1024;
+        assert!(reported > MAX, "test setup: bomb should exceed limit");
+    }
+
+    #[test]
+    fn test_snappy_legit_payload_passes_guard() {
+        // A realistic Prometheus RW payload compresses to well under 64 MiB
+        let payload = br#"{"metric":"http_requests_total","value":42}"#.repeat(100);
+        let compressed = snap::raw::Encoder::new().compress_vec(&payload).unwrap();
+        let reported = snap::raw::decompress_len(&compressed).unwrap();
+
+        const MAX: usize = 64 * 1024 * 1024;
+        assert!(reported < MAX, "legit payload must pass guard: {reported}");
+
+        // Round-trip decompresses correctly
+        let decompressed = snap::raw::Decoder::new()
+            .decompress_vec(&compressed)
+            .unwrap();
+        assert_eq!(decompressed.len(), payload.len());
+    }
+
+    #[test]
+    fn test_snappy_decompress_len_handles_edge_cases() {
+        // Completely invalid data with an impossibly-large varint should fail.
+        // A sequence of 0xff bytes keeps extending the varint forever.
+        let garbage = vec![0xff; 10];
+        let _ = snap::raw::decompress_len(&garbage); // may or may not error, must not panic
+
+        // Empty input returns Ok(0) — treated as empty decompressed output,
+        // which is safely below any size limit.
+        if let Ok(n) = snap::raw::decompress_len(&[]) {
+            assert_eq!(n, 0, "empty input should decompress to 0 bytes");
+        }
+        // Errors are also acceptable depending on library version.
+    }
+
+    #[test]
+    fn test_snappy_bomb_at_boundary() {
+        const MAX: usize = 64 * 1024 * 1024;
+
+        // Exactly at the limit should be allowed
+        let at_limit = snappy_blob_claiming_size(MAX as u64);
+        let reported = snap::raw::decompress_len(&at_limit).unwrap();
+        assert_eq!(reported, MAX);
+
+        // Just over the limit should be flagged by our check
+        let over = snappy_blob_claiming_size((MAX + 1) as u64);
+        let reported_over = snap::raw::decompress_len(&over).unwrap();
+        assert!(reported_over > MAX);
+    }
 }

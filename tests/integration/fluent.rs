@@ -379,3 +379,61 @@ pipeline:
 
     shutdown.cancel();
 }
+
+// ---------------------------------------------------------------------------
+// Security: buffer size enforcement (OOM protection)
+// ---------------------------------------------------------------------------
+
+/// Verify the Fluent Forward handler closes a connection when the pending
+/// buffer would exceed `max_message_size`. An attacker could otherwise
+/// send a stream of incomplete msgpack data to cause unbounded growth.
+///
+/// This test uses a raw TCP client (no fluent-bit needed) so it always runs.
+#[tokio::test]
+async fn test_fluent_buffer_size_enforcement() {
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpStream;
+
+    let fluent_port = random_port();
+    let mut config = test_config(fluent_port);
+    // Small limit to make the test fast and predictable
+    config.fluent.max_message_size = 64 * 1024; // 64 KiB
+
+    let (shutdown, _metrics) = start_fluent_handler(config).await;
+
+    let mut stream = TcpStream::connect(("127.0.0.1", fluent_port))
+        .await
+        .expect("connect to fluent listener");
+
+    // 0xc1 is a reserved marker in msgpack — rmpv returns an error on it,
+    // which the server treats as "incomplete, wait for more data". The bytes
+    // are never consumed from `pending`, so the buffer grows unboundedly
+    // unless our size guard closes the connection.
+    let garbage_chunk = vec![0xc1_u8; 8192]; // 8 KiB of invalid markers
+    let mut total_sent = 0usize;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+
+    // Generous cutoff to account for OS TCP buffers (up to ~512 KB on Linux
+    // per-direction). Without the guard, we would be able to send unlimited
+    // data; with the guard, the server closes at 64 KB (plus OS buffers).
+    let abort_at = 8 * 1024 * 1024; // 8 MiB hard cap
+    while tokio::time::Instant::now() < deadline && total_sent < abort_at {
+        match tokio::time::timeout(Duration::from_millis(500), stream.write_all(&garbage_chunk))
+            .await
+        {
+            Ok(Ok(())) => total_sent += garbage_chunk.len(),
+            Ok(Err(_)) => break, // Connection closed by server (expected)
+            Err(_) => break,     // Timeout on write (server stopped reading)
+        }
+    }
+
+    // Without the guard, we'd easily send the full 8 MiB. With the guard,
+    // the server closes the connection once `pending` exceeds 64 KiB.
+    // Some slack is needed for OS TCP send buffers (~512 KiB typical).
+    assert!(
+        total_sent < abort_at,
+        "server accepted unlimited incomplete data: {total_sent} bytes sent (OOM guard failed)"
+    );
+
+    shutdown.cancel();
+}

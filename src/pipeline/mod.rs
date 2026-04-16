@@ -901,4 +901,160 @@ mod tests {
         rx.changed().await.expect("should receive notification");
         assert_eq!(*rx.borrow(), 1);
     }
+
+    // ---------------------------------------------------------------------
+    // Additional edge-case tests (non-trivial paths)
+    // ---------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_pipeline_batch_processes_all() {
+        // Batch processing: all-valid payloads should all succeed
+        let state = test_state().await;
+        let payloads = vec![
+            Bytes::from(r#"{"id":1}"#),
+            Bytes::from(r#"{"id":2}"#),
+            Bytes::from(r#"{"id":3}"#),
+        ];
+        let (success_count, first_err) = state.process_batch(&payloads).await;
+        assert_eq!(success_count, 3, "all 3 items should succeed");
+        assert!(first_err.is_none(), "no errors expected");
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_batch_with_invalid_items() {
+        // Batch with mixed valid/invalid — valid ones should still dispatch.
+        // process_batch returns (success_count, first_error). Invalid JSON
+        // with no DLQ sink triggers an error.
+        let state = test_state().await;
+        let payloads = vec![
+            Bytes::from(r#"{"ok":1}"#),
+            Bytes::from("not json"),
+            Bytes::from(r#"{"ok":2}"#),
+        ];
+        let (success_count, first_err) = state.process_batch(&payloads).await;
+        // Valid items succeed; invalid item errors out
+        assert_eq!(success_count, 2, "2 valid items should succeed");
+        assert!(first_err.is_some(), "invalid item must produce error");
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_large_payload() {
+        // Large valid JSON should process without issue
+        let state = test_state().await;
+        let mut large = String::from(r#"{"data":""#);
+        large.push_str(&"x".repeat(100_000));
+        large.push_str(r#""}"#);
+        let result = state.process(Bytes::from(large)).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_empty_object() {
+        let state = test_state().await;
+        let result = state.process(Bytes::from(r"{}")).await;
+        assert!(result.is_ok(), "empty JSON object is valid");
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_nested_json() {
+        let state = test_state().await;
+        let nested =
+            Bytes::from(r#"{"a":{"b":{"c":{"d":{"e":{"f":"deep"}}}}},"arr":[1,2,3,[4,[5]]]}"#);
+        let result = state.process(nested).await;
+        assert!(result.is_ok(), "deeply nested JSON should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_unicode_payload() {
+        let state = test_state().await;
+        let unicode = Bytes::from(r#"{"msg":"日本語🎉émojí","emoji":"🔥"}"#);
+        let result = state.process(unicode).await;
+        assert!(result.is_ok(), "unicode should process correctly");
+    }
+
+    #[tokio::test]
+    async fn test_enrich_payload_preserves_existing_timestamp_field() {
+        // If the payload already has a _timestamp_receiver field, enrichment
+        // injects a new one (implementation currently prepends) — verify
+        // the result is still valid JSON
+        let payload = Bytes::from(r#"{"_timestamp_receiver":"old","key":"val"}"#);
+        let enriched = PipelineState::enrich_payload(payload);
+        // Must still parse as JSON
+        let parsed = serde_json::from_slice::<serde_json::Value>(&enriched);
+        assert!(parsed.is_ok(), "enriched JSON must remain parseable");
+    }
+
+    #[tokio::test]
+    async fn test_enrich_payload_array_root_not_supported() {
+        // Top-level arrays are not valid for enrichment (expects object).
+        // Verify it doesn't panic — either passes through or returns as-is.
+        let payload = Bytes::from("[1,2,3]");
+        let enriched = PipelineState::enrich_payload(payload.clone());
+        // Should not panic; result is implementation-defined for non-object roots
+        assert!(!enriched.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_memory_pressure_tracking() {
+        // Memory pressure starts low and can be queried
+        let state = test_state().await;
+        let initial = state.memory_pressure();
+        assert!(matches!(
+            initial,
+            MemoryPressure::Low | MemoryPressure::Medium
+        ));
+
+        // should_apply_backpressure returns false in low pressure
+        assert!(!state.should_apply_backpressure());
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_reload_preserves_ready_state() {
+        // Config reload must not leave the pipeline in an unusable state
+        let state = test_state().await;
+        assert!(state.is_ready());
+
+        let new_config = test_config();
+        state.reload_config(new_config).unwrap();
+
+        // Pipeline should remain ready after reload
+        assert!(state.is_ready());
+
+        // And continue to process payloads
+        let result = state.process(Bytes::from(r#"{"ok":true}"#)).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_multiple_reloads() {
+        // Repeated reloads should not leak resources or stuck state
+        let state = test_state().await;
+        for i in 0..10 {
+            let mut cfg = test_config();
+            cfg.routing.default_source = format!("src-{i}");
+            state.reload_config(cfg).unwrap();
+        }
+        // After many reloads, pipeline must still work
+        let result = state.process(Bytes::from(r#"{"final":true}"#)).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_malformed_utf8_rejected() {
+        // Invalid UTF-8 bytes must not cause a panic
+        let state = test_state().await;
+        let bad = Bytes::from(vec![0xff, 0xfe, 0xfd, 0xfc, 0x00, 0x01]);
+        let result = state.process(bad).await;
+        // Must return an error, not panic
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_truncated_json() {
+        // Truncated JSON (common in network corruption) should be rejected cleanly
+        let state = test_state().await;
+        let truncated = Bytes::from(r#"{"key":"val"#);
+        let result = state.process(truncated).await;
+        assert!(result.is_err());
+    }
 }

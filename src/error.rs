@@ -126,17 +126,195 @@ impl IntoResponse for Error {
 
 #[cfg(test)]
 mod tests {
+    use axum::body::to_bytes;
+
     use super::*;
 
     #[test]
-    fn test_error_display() {
-        let err = Error::Validation("invalid JSON".to_string());
-        assert_eq!(err.to_string(), "JSON validation failed: invalid JSON");
+    fn test_error_display_all_variants() {
+        // Every variant must produce a sensible Display format
+        let cases = vec![
+            (Error::Config("c".into()), "configuration error: c"),
+            (Error::Validation("v".into()), "JSON validation failed: v"),
+            (Error::Routing("r".into()), "routing error: r"),
+            (Error::Kafka("k".into()), "Kafka error: k"),
+            (Error::Tls("t".into()), "TLS error: t"),
+            (Error::Auth("a".into()), "authentication failed: a"),
+            (Error::Server("s".into()), "server error: s"),
+            (Error::Transport("tp".into()), "transport error: tp"),
+            (Error::Buffer("b".into()), "buffer error: b"),
+            (Error::Shutdown, "shutdown requested"),
+        ];
+        for (err, expected) in cases {
+            assert_eq!(err.to_string(), expected);
+        }
     }
 
     #[test]
     fn test_error_from_string() {
         let err: Error = "test error".into();
         assert!(matches!(err, Error::Config(_)));
+    }
+
+    #[test]
+    fn test_error_from_str() {
+        let err: Error = String::from("owned error").into();
+        assert!(matches!(err, Error::Config(_)));
+    }
+
+    #[test]
+    fn test_error_from_serde_json() {
+        // Real serde_json parse error
+        let json_err = serde_json::from_str::<serde_json::Value>("not json").unwrap_err();
+        let err: Error = json_err.into();
+        assert!(matches!(err, Error::Validation(_)));
+        assert!(err.to_string().contains("JSON"));
+    }
+
+    #[test]
+    fn test_error_from_serde_yaml() {
+        let yaml_err =
+            serde_yaml_ng::from_str::<serde_yaml_ng::Value>("::: invalid :::").unwrap_err();
+        let err: Error = yaml_err.into();
+        assert!(matches!(err, Error::Config(_)));
+        assert!(err.to_string().contains("YAML"));
+    }
+
+    #[test]
+    fn test_error_from_io() {
+        let io_err = std::io::Error::other("disk full");
+        let err: Error = io_err.into();
+        assert!(matches!(err, Error::Io(_)));
+        assert!(err.to_string().contains("I/O"));
+    }
+
+    // ---------------------------------------------------------------------
+    // HTTP response mapping — verify security-critical status codes
+    // ---------------------------------------------------------------------
+
+    async fn response_status_and_body(err: Error) -> (StatusCode, String) {
+        let resp = err.into_response();
+        let status = resp.status();
+        let body = to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        (status, text)
+    }
+
+    #[tokio::test]
+    async fn test_response_validation_returns_400_with_detail() {
+        let (status, body) =
+            response_status_and_body(Error::Validation("malformed JSON at offset 42".into())).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // Validation errors may surface user-facing detail
+        assert!(body.contains("malformed JSON"));
+    }
+
+    #[tokio::test]
+    async fn test_response_auth_returns_401() {
+        let (status, body) =
+            response_status_and_body(Error::Auth("missing bearer token".into())).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(body.contains("missing bearer"));
+    }
+
+    #[tokio::test]
+    async fn test_response_routing_does_not_leak_details() {
+        // Routing errors should NOT leak internal details to clients
+        let (status, body) = response_status_and_body(Error::Routing(
+            "internal topic_not_found: secret_config_topic_42".into(),
+        ))
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // Internal secrets must not appear in client response
+        assert!(
+            !body.contains("secret_config_topic"),
+            "internal routing details leaked: {body}"
+        );
+        assert!(body.contains("routing error"));
+    }
+
+    #[tokio::test]
+    async fn test_response_kafka_masked_as_service_unavailable() {
+        // Kafka errors should NOT leak broker addresses or topic names
+        let (status, body) = response_status_and_body(Error::Kafka(
+            "broker kafka-internal.svc.cluster.local:9092 timeout".into(),
+        ))
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            !body.contains("kafka-internal"),
+            "internal broker address leaked: {body}"
+        );
+        assert!(
+            !body.contains("cluster.local"),
+            "cluster details leaked: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_response_transport_masked() {
+        let (status, body) = response_status_and_body(Error::Transport(
+            "connection refused to grpc://loader.internal:6000".into(),
+        ))
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(!body.contains("loader.internal"));
+        assert!(!body.contains("grpc://"));
+    }
+
+    #[tokio::test]
+    async fn test_response_buffer_returns_503() {
+        let (status, body) =
+            response_status_and_body(Error::Buffer("memory exhausted at 4GB".into())).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        // Memory limits are sensitive infra info
+        assert!(!body.contains("4GB"));
+    }
+
+    #[tokio::test]
+    async fn test_response_shutdown_returns_503() {
+        let (status, body) = response_status_and_body(Error::Shutdown).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(body.contains("shutting down"));
+    }
+
+    #[tokio::test]
+    async fn test_response_config_returns_500_without_detail() {
+        // Config errors are internal — should never expose config contents
+        let (status, body) = response_status_and_body(Error::Config(
+            "failed to parse DATABASE_URL=postgres://secret:pass@host/db".into(),
+        ))
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            !body.contains("DATABASE_URL"),
+            "env var name leaked: {body}"
+        );
+        assert!(!body.contains("secret"), "credential leaked: {body}");
+        assert!(!body.contains("pass@host"), "credential leaked: {body}");
+    }
+
+    #[tokio::test]
+    async fn test_response_tls_returns_500_without_detail() {
+        // TLS errors should NOT leak cert paths or key details
+        let (status, body) = response_status_and_body(Error::Tls(
+            "/etc/secrets/private-key.pem: permission denied".into(),
+        ))
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!body.contains("private-key.pem"), "key path leaked: {body}");
+        assert!(!body.contains("/etc/secrets"));
+    }
+
+    #[tokio::test]
+    async fn test_response_io_returns_500_without_path() {
+        let io_err = std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "/var/secret/config.yaml: not found",
+        );
+        let err: Error = io_err.into();
+        let (status, body) = response_status_and_body(err).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!body.contains("/var/secret"));
     }
 }
