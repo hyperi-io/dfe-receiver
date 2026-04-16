@@ -495,3 +495,89 @@ This file is the **single source of truth** for tasks and progress.
 - `[IN PROGRESS]` - Currently working on
 - `[BLOCKED]` - Waiting on something
 - `[x]` - Completed (checkbox checked)
+
+---
+
+## Rust Release-Track Optimisation (hyperi-ci Tier 1/2)
+
+**Context:** hyperi-ci is shipping channel-gated build optimisations for Rust
+binaries. See `hyperi-ai/standards/languages/RUST.md` — *Release-Track Build
+Optimisation (hyperi-ci)* — and `hyperi-ai/standards/infrastructure/CI.md` —
+*Channel-Tiered Build Optimisation*. Local `cargo build` is unaffected.
+
+### Tier 1 prep (automatic at beta+/release once hyperi-ci ships)
+
+Current state: **✅ READY — no source changes required.**
+
+- [x] `Cargo.toml` has `[features] jemalloc` + `mimalloc` declared
+- [x] `main.rs` wires `#[global_allocator]` under `#[cfg(feature = "jemalloc")]`
+- [x] `default = ["otlp"]` — no allocator in default (clean)
+- [x] `[profile.release] lto = "thin"` — CI overrides to `fat` on beta+
+
+**Next release push will automatically build with:**
+- `--features jemalloc` at `beta` / `release` channels
+- `CARGO_PROFILE_RELEASE_LTO=fat` at `beta` / `release` channels
+
+No action required from the project team. Just verify the next `release`-channel
+binary is jemalloc-linked (`nm target/<target>/release/dfe-receiver | grep -i
+jemalloc` should show symbols).
+
+### Tier 2 opt-in (PGO + BOLT — release channel only)
+
+Current state: **⚠️ NOT CONFIGURED — opt-in required.**
+
+- [ ] Decide whether PGO is worth the +30-60 min release build time
+- [ ] If yes: write `scripts/pgo-workload.sh` that performs **actual HTTP/gRPC
+      traffic** against the receiver — at least 5 min sustained load with
+      representative message mix (syslog, OTel, Vector protocols)
+- [ ] **PGO workload MUST NOT be a port check or startup probe** — a bad
+      workload causes NEGATIVE PGO gains (the compiler optimises for the wrong
+      hot paths). Send realistic payloads at realistic rates.
+- [ ] Add to `.hyperi-ci.yaml`:
+  ```yaml
+  build:
+    rust:
+      optimize:
+        pgo:
+          enabled: true
+          workload_cmd: "bash scripts/pgo-workload.sh"
+          duration_secs: 300
+        bolt:
+          enabled: true    # Linux only, +5-15% on top of PGO
+  ```
+
+---
+
+## Role: Canary Test Project for hyperi-ci Release-Track Optimisation
+
+**dfe-receiver is the designated end-to-end test project for the new hyperi-ci
+channel-tiered build optimisation feature.** It was chosen because:
+
+- It's a real shipped binary (not a library, not a dev tool)
+- Its `Cargo.toml` + `main.rs` are already correctly prepared for Tier 1
+- Its release pipeline (GH Releases + R2) is proven and stable
+- Its workflow is representative of other DFE binaries — lessons learned here
+  apply across dfe-loader, dfe-archiver, dfe-fetcher, etc.
+
+### What this means in practice
+
+- [ ] Once hyperi-ci ships the Tier 1 feature, push a trivial change
+      (comment-only is fine) and verify the `release`-channel publish binary
+      has jemalloc linked
+- [ ] Validate: `nm target/<target>/release/dfe-receiver | grep -i jemalloc`
+      should show jemalloc symbols on the published binary
+- [ ] Validate: build logs should show
+      `CARGO_PROFILE_RELEASE_LTO=fat` and `--features jemalloc` on the
+      `release` channel build
+- [ ] Any bugs found in the hyperi-ci optimisation handler (wrong flag, wrong
+      env var, feature detection issues, etc.) are fixable directly in
+      **hyperi-ci** — this project is authorised to change hyperi-ci's
+      `src/hyperi_ci/languages/rust/build.py` and related code to unblock the
+      test. Fixes should be committed to hyperi-ci main, published, then
+      retested here.
+- [ ] Record observations in this TODO.md under a new "Canary run notes"
+      subsection as each test cycle runs
+
+### Canary run notes
+<!-- Add dated observations from each test cycle below -->
+
