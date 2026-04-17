@@ -581,3 +581,49 @@ channel-tiered build optimisation feature.** It was chosen because:
 ### Canary run notes
 <!-- Add dated observations from each test cycle below -->
 
+
+---
+
+## POLICY UPDATE 2026-04-17 — Jemalloc at every channel, drop mimalloc
+
+**Allocator policy changed:** DFE binaries now standardise on jemalloc at
+**every** channel (spike/alpha/beta/release). mimalloc is no longer a
+supported option in DFE projects. See:
+
+- `hyperi-ai/standards/languages/RUST.md` — *Allocator Policy* section
+- `hyperi-ai/standards/rules/rust.md` — updated tier table
+
+### Action items for this project
+
+- [ ] Remove `mimalloc = ["dep:mimalloc"]` from `[features]` in `Cargo.toml`
+- [ ] Remove `mimalloc = { version = "0.1", optional = true }` from `[dependencies]` in `Cargo.toml`
+- [ ] Remove the `#[cfg(all(feature = "mimalloc", not(feature = "jemalloc")))]` fallback block from `src/main.rs` — keep only the jemalloc wiring
+- [ ] Run `cargo build --release --features jemalloc` to verify the crate still builds
+- [ ] Update code comments that reference mimalloc as an alternative
+
+### What changes in CI behaviour
+
+Previously: jemalloc was only applied at `beta`/`release` channels (spike
+and alpha used system allocator).
+Now: jemalloc is applied at **every** channel including spike/alpha.
+Trade-off: +10s extra compile time per spike/alpha CI run in exchange
+for consistent perf-trace symbols and unified `jeprof` tooling across
+all builds.
+
+### Learnings reference
+
+Binary-size + verification learnings captured from past receiver canary work
+are in `hyperi-ci/docs/RUST-RELEASE-TRACK-OPTIMISATION.md` (upstream):
+
+- **Binary size:** jemalloc adds ~491 KB (+3.5%) on a 14 MB stripped baseline
+- **Verification:** use `strings <binary> | grep -ciE 'jemalloc|je_mallctl'`
+  NOT `nm` — release binaries are stripped
+- **Cross-compile:** PGO profiles are arch-specific; amd64 CI workers
+  produce profiles that don't generalise to arm64. PGO on arm64 cross-compile
+  targets is currently skipped by hyperi-ci (logged)
+- Troubleshooting table in that doc covers "allocator requested but feature
+  not declared", "PGO profile data too small", BOLT skip reasons, etc.
+
+Supersedes the earlier validation guidance in this file's *Role: Canary
+Test Project* section that said to use `nm | grep jemalloc` — use
+`strings` instead.
