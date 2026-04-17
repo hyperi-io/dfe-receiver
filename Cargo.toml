@@ -127,6 +127,9 @@ async-trait = "0.1"
 tikv-jemallocator = { version = "0.6", optional = true }
 mimalloc = { version = "0.1", optional = true }
 
+# Optional pgo-driver dependencies (feature-gated)
+reqwest = { version = "0.13", features = ["json"], optional = true }
+
 [build-dependencies]
 tonic-prost-build = "0.14"
 
@@ -147,6 +150,9 @@ default = ["otlp"]
 otlp = []
 jemalloc = ["dep:tikv-jemallocator"]
 mimalloc = ["dep:mimalloc"]
+# PGO/profiling workload driver; not built by default. Used by
+# scripts/pgo-workload.sh during hyperi-ci Tier 2 builds.
+pgo-driver = ["dep:reqwest"]
 
 [profile.release]
 lto = "thin"
@@ -167,6 +173,11 @@ strip = false
 [[bench]]
 name = "throughput"
 harness = false
+
+[[bin]]
+name = "pgo-driver"
+path = "src/bin/pgo-driver.rs"
+required-features = ["pgo-driver"]
 
 [lints.rust]
 unsafe_code = "forbid"
