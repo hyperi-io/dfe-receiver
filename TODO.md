@@ -579,8 +579,74 @@ channel-tiered build optimisation feature.** It was chosen because:
       subsection as each test cycle runs
 
 ### Canary run notes
-<!-- Add dated observations from each test cycle below -->
 
+#### 2026-04-17 — Tier 1 local validation + PGO workload shipped (local)
+
+Context: this session closed the canary loop from "ready in theory"
+(v1.14.5-era claim) to "ready in practice with concrete numbers".
+hyperi-ci v1.8.0 shipped the Tier 1+2 handler code around this work;
+dfe-receiver's `.hyperi-ci.yaml` opt-in + PGO workload are committed
+locally (not pushed — waiting for hyperi-ci to be production-released).
+
+**Binary + symbol validation (on v1.14.10 source)**:
+
+| Allocator | Binary size | Delta | Linkage detection |
+|---|---|---|---|
+| System (glibc) | 14,051,296 B (13.4 MB) | baseline | 0 strings |
+| **jemalloc** | **14,542,432 B (13.9 MB)** | **+491 KB (+3.5%)** | 39 `jemalloc`/`je_mallctl` strings (static) |
+| mimalloc | 14,185,664 B (13.5 MB) | +134 KB (+1.0%) | 7 `mimalloc`/`mi_option` strings (static) |
+
+**Method note:** `strip = true` in `[profile.release]` means `nm` returns 0
+symbols. Use `strings <binary> | grep -ciE 'jemalloc|je_mallctl'` (`> 0`
+on a jemalloc build) or `strings | grep -ciE 'mimalloc|mi_option'`
+(for mimalloc).
+
+**Criterion micro-bench deltas** (jemalloc vs system, same hardware):
+
+- `json_validation/small`:  −4.4%
+- `json_validation/medium`: −1.9%
+- `json_validation/large`:  **−7.2%**
+- `field_extraction/nested`: −3.7%
+- `field_extraction/top_level`: +4.5% (within noise)
+- `router/route_default`: +1.2% (within noise)
+
+Headline: jemalloc wins on allocation-heavy paths (json parse),
+within noise on zero-alloc paths (router). Confirms standardising
+on jemalloc (DFE-wide policy) over mimalloc, which showed smaller
+wins on the same benches.
+
+**PGO workload shape** (shipped in this session):
+
+- `scripts/pgo-workload.sh` — bash orchestrator: spins up
+  apache/kafka KRaft container, writes ephemeral all-listeners
+  config, starts the instrumented binary, waits for `/health/ready`,
+  runs the driver for `PGO_WORKLOAD_DURATION_SECS` (default 300,
+  hard floor 60), cleans up on EXIT trap
+- `src/bin/pgo-driver.rs` — feature-gated (`pgo-driver`) Rust binary,
+  drives HTTP JSON, Prometheus RW (snappy+protobuf), Splunk HEC,
+  OTLP HTTP (protobuf), Syslog UDP/TCP. Uses the project's own
+  vendored OTLP + Prom RW proto types for zero schema duplication.
+  6 MB release binary.
+- `docs/PERFORMANCE.md` — full audit vs dfe-loader's PERFORMANCE.md
+  with Applied/Applicable/Loader-specific/Tracked classification.
+
+**Propagated to other DFE Rust projects** (local commits in each
+repo): dfe-loader, dfe-archiver, dfe-fetcher, dfe-transform-wasm,
+dfe-transform-vrl, dfe-transform-vector — each TODO.md now has the
+dated lessons block pointing at the hyperi-ci consumer docs +
+workload templates.
+
+**Pending (deferred to hyperi-ci release readiness)**:
+
+- [ ] Push dfe-receiver's locally committed opt-in (`.hyperi-ci.yaml`
+      PGO/BOLT enabled; `docs/PERFORMANCE.md`; `scripts/pgo-workload.sh`;
+      `src/bin/pgo-driver.rs`)
+- [ ] Trigger a release-channel dfe-receiver build and verify:
+      `--features jemalloc` in cargo invocation,
+      `CARGO_PROFILE_RELEASE_LTO=fat` in env,
+      `cargo pgo build` + `cargo pgo optimize` steps,
+      (Linux) `cargo pgo bolt` step,
+      `strings <binary> | grep jemalloc` non-empty on published binary
 
 ---
 
