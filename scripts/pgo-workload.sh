@@ -142,10 +142,14 @@ KAFKA_CID=$(docker run -d --rm \
 
 echo "pgo-workload: Kafka container: $KAFKA_CID"
 
-# Wait for Kafka to accept connections
+# Wait for Kafka to accept connections on the host-mapped port.
+# We can't `docker exec kafka-topics.sh` here because the broker's
+# advertised listener is `localhost:19092` (the host-side mapping) and
+# that port doesn't exist inside the container.
 for attempt in $(seq 1 30); do
-    if docker exec "$KAFKA_CID" /opt/kafka/bin/kafka-topics.sh \
-        --bootstrap-server localhost:9092 --list >/dev/null 2>&1; then
+    if (echo > /dev/tcp/127.0.0.1/19092) 2>/dev/null; then
+        # TCP accept — give the broker a beat to finish RAFT bootstrap
+        sleep 2
         echo "pgo-workload: Kafka ready (attempt $attempt)"
         break
     fi
@@ -206,8 +210,10 @@ splunk_hec:
 
 syslog:
   enabled: true
-  udp_bind_address: "127.0.0.1:514"
-  tcp_bind_address: "127.0.0.1:514"
+  # Unprivileged ports — port 514 requires root / CAP_NET_BIND_SERVICE
+  # which we don't have in a typical local/CI workload context.
+  udp_bind_address: "127.0.0.1:5514"
+  tcp_bind_address: "127.0.0.1:5515"
   tls_bind_address: "127.0.0.1:6514"
   max_message_size: 65536
   tls:
@@ -302,8 +308,8 @@ PGO_DRIVER_HTTP_URL="http://127.0.0.1:8080/" \
 PGO_DRIVER_PROM_RW_URL="http://127.0.0.1:9091/api/v1/write" \
 PGO_DRIVER_HEC_URL="http://127.0.0.1:8088/services/collector/event" \
 PGO_DRIVER_OTLP_HTTP_URL="http://127.0.0.1:4318/v1/logs" \
-PGO_DRIVER_SYSLOG_UDP="127.0.0.1:514" \
-PGO_DRIVER_SYSLOG_TCP="127.0.0.1:514" \
+PGO_DRIVER_SYSLOG_UDP="127.0.0.1:5514" \
+PGO_DRIVER_SYSLOG_TCP="127.0.0.1:5515" \
     "$PGO_DRIVER_PATH"
 
 echo "pgo-workload: driver complete"
