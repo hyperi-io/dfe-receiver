@@ -227,7 +227,7 @@ async fn test_syslog_udp_multiple_messages() {
         assert!(output.status.success(), "logger {i} failed: {:?}", output);
     }
 
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
     let total = requests_total(&metrics);
     assert!(total >= 5, "Expected at least 5 requests, got {total}");

@@ -155,10 +155,8 @@ impl Router {
         }
         for rule in &self.source_rules {
             match rule.mode.as_str() {
-                "key_present" => {
-                    if Self::extract_field_cow(payload, &rule.field).is_some() {
-                        return rule.source.clone();
-                    }
+                "key_present" if Self::extract_field_cow(payload, &rule.field).is_some() => {
+                    return rule.source.clone();
                 }
                 "key_value_set" => {
                     if let (Some(val), Some(match_val)) = (

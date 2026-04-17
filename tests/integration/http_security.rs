@@ -641,7 +641,7 @@ async fn test_bearer_auth_file_refresh() {
     std::fs::write(&token_path, "refreshed-token\n").expect("Failed to write refreshed token");
 
     // Wait for refresh (1s interval + generous buffer for CI/slow machines)
-    tokio::time::sleep(Duration::from_millis(5000)).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
 
     // Fresh client — old keep-alive connections may have been closed by
     // server-side header_read_timeout (5s) during the sleep above.

@@ -166,7 +166,7 @@ impl Metrics {
             memory_limit_bytes: AtomicU64::new(0),
             circuit_state: AtomicU8::new(0),
             circuit_consecutive_failures: AtomicU64::new(0),
-            rate_window: RateWindow::new(Duration::from_secs(60)),
+            rate_window: RateWindow::new(Duration::from_mins(1)),
             scaling,
             dfe: None,
             app_group: None,

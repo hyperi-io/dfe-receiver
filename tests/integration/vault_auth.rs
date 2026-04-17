@@ -188,7 +188,7 @@ async fn test_bearer_tokens_loaded_from_vault_container() {
     };
 
     // Wait for Vault to be fully ready
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
     // Write a secret via Vault HTTP API (KV v2 engine is mounted at `secret/` in dev mode)
     let secret_path = format!("test/bearer-{}", uuid::Uuid::new_v4());

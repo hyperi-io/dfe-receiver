@@ -75,7 +75,7 @@ async fn test_kafka_sink_send_many() {
     let topic = test_topic("batch");
     // Subscribe and wait for consumer to actually join the group
     let consumer = kafka_consumer(&kf, &topic).expect("consumer setup");
-    tokio::time::sleep(Duration::from_millis(2000)).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
 
     let sink = make_sink(&kf);
 
@@ -90,7 +90,7 @@ async fn test_kafka_sink_send_many() {
     // Collect messages with generous timeout — librdkafka may take a few
     // seconds to materialise all 100 records to the consumer.
     let mut count = 0;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let deadline = tokio::time::Instant::now() + Duration::from_mins(1);
     while tokio::time::Instant::now() < deadline && count < 100 {
         match kafka_consume_next(&consumer, Duration::from_secs(5)).await {
             Some(_) => count += 1,
@@ -149,7 +149,7 @@ async fn test_kafka_sink_large_payload() {
         .expect("large send failed");
     sink.flush().await.expect("flush failed");
 
-    let received = kafka_consume_next(&consumer, Duration::from_secs(60))
+    let received = kafka_consume_next(&consumer, Duration::from_mins(1))
         .await
         .expect("large payload never arrived");
     assert_eq!(received.len(), payload.len(), "large payload size mismatch");

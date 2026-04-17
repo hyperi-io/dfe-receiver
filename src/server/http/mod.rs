@@ -61,7 +61,7 @@ const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Idle connection timeout — close connections with no active streams.
-const CONNECTION_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const CONNECTION_IDLE_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// Build a hyper HTTP connection builder with hardened timeouts.
 ///

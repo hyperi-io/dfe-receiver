@@ -82,7 +82,7 @@ async fn test_prometheus_rw_to_kafka_roundtrip() {
 
     // Subscribe BEFORE sending
     let consumer = kafka_consumer(&kf, &topic).expect("consumer setup");
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
     // Start receiver
     let metrics = Arc::new(Metrics::default());
@@ -177,7 +177,7 @@ async fn test_splunk_hec_to_kafka_roundtrip() {
 
     // Subscribe to Kafka
     let consumer = kafka_consumer(&kf, &topic).expect("consumer setup");
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
     // Start HEC handler
     let metrics = Arc::new(Metrics::default());
@@ -241,7 +241,7 @@ async fn test_http_to_kafka_roundtrip() {
     let config = kafka_config(&kf, &topic);
 
     let consumer = kafka_consumer(&kf, &topic).expect("consumer setup");
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
     // Process payload directly through the pipeline (skipping the HTTP server
     // since we have no HTTP handler to spin up here easily — the goal is
