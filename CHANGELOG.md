@@ -1,3 +1,10 @@
+## [1.15.1](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.0...v1.15.1) (2026-04-18)
+
+
+### Bug Fixes
+
+* retrigger Tier 2 canary on hyperi-ci v1.9.4 channel resolver ([9e36479](https://github.com/hyperi-io/dfe-receiver/commit/9e36479dd56b34992e7291007aa304ba45cfddf3))
+
 # [1.15.0](https://github.com/hyperi-io/dfe-receiver/compare/v1.14.10...v1.15.0) (2026-04-18)
 
 
