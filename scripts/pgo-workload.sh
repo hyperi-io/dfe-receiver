@@ -319,3 +319,4 @@ sleep 3
 
 echo "pgo-workload: done (receiver logs: $CONFIG_DIR/receiver.log)"
 # pgo-workload validated locally 2026-04-18: 879 rps, 0 errors, all 6 protocols clean
+# retrigger on hyperi-ci v1.9.2 published to PyPI
