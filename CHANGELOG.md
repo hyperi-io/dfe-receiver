@@ -1,3 +1,10 @@
+## [1.15.3](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.2...v1.15.3) (2026-04-18)
+
+
+### Bug Fixes
+
+* Tier 2 canary on hyperi-ci v1.9.6 workload-arg contract ([a3bd00b](https://github.com/hyperi-io/dfe-receiver/commit/a3bd00bf416e9fca75af6c1506f3a15996677519))
+
 ## [1.15.2](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.1...v1.15.2) (2026-04-18)
 
 
