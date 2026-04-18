@@ -322,3 +322,4 @@ echo "pgo-workload: done (receiver logs: $CONFIG_DIR/receiver.log)"
 # retrigger on hyperi-ci v1.9.2 published to PyPI
 # retrigger on hyperi-ci v1.9.4 channel resolver fix
 # Tier 2 canary retrigger on hyperi-ci v1.9.5 cargo-pgo PATH fix
+# Tier 2 canary on hyperi-ci v1.9.6 (workload binary as $1)
