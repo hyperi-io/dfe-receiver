@@ -1,3 +1,17 @@
+# [1.15.0](https://github.com/hyperi-io/dfe-receiver/compare/v1.14.10...v1.15.0) (2026-04-18)
+
+
+### Bug Fixes
+
+* **ci:** unpin hyperi-ci workflow from v1.5.0 digest to [@main](https://github.com/main) ([068a92a](https://github.com/hyperi-io/dfe-receiver/commit/068a92af900fd2f0525ee2170d308c911dbb1f9e)), closes [#27](https://github.com/hyperi-io/dfe-receiver/issues/27)
+* clippy lints introduced in Rust 1.95 ([74515db](https://github.com/hyperi-io/dfe-receiver/commit/74515dbf107c873801d648c6624404681e70b772))
+* opt in to hyperi-ci Tier 2 PGO + BOLT on release channel ([89b5941](https://github.com/hyperi-io/dfe-receiver/commit/89b5941cd896cbf561cacf5a145e0b71035d0803))
+
+
+### Features
+
+* add PGO workload driver + performance docs ([a31d9b2](https://github.com/hyperi-io/dfe-receiver/commit/a31d9b2aed8bc954318e88041b1de37ee77c8773))
+
 ## [1.14.10](https://github.com/hyperi-io/dfe-receiver/compare/v1.14.9...v1.14.10) (2026-04-16)
 
 
