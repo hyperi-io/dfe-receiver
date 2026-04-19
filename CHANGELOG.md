@@ -1,3 +1,10 @@
+## [1.15.6](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.5...v1.15.6) (2026-04-19)
+
+
+### Bug Fixes
+
+* Tier 2 canary on hyperi-ci v1.10.1 (extended workload grace) ([8ecd308](https://github.com/hyperi-io/dfe-receiver/commit/8ecd30831873a7f00917ec7eb181e58c07b7ca1c))
+
 ## [1.15.5](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.4...v1.15.5) (2026-04-19)
 
 
