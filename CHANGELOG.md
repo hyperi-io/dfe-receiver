@@ -1,3 +1,10 @@
+## [1.15.7](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.6...v1.15.7) (2026-04-19)
+
+
+### Bug Fixes
+
+* retry grpc_sink test sends on transient backpressure ([1e44441](https://github.com/hyperi-io/dfe-receiver/commit/1e4444149356e098deaea0dc7766c34095daf071))
+
 ## [1.15.6](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.5...v1.15.6) (2026-04-19)
 
 
