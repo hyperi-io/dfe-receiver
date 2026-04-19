@@ -1,3 +1,10 @@
+## [1.15.4](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.3...v1.15.4) (2026-04-19)
+
+
+### Bug Fixes
+
+* **pgo:** build pgo-driver on-demand during workload orchestration ([f9108d2](https://github.com/hyperi-io/dfe-receiver/commit/f9108d25a9d79ffa6f612196debe113825e2c67f))
+
 ## [1.15.3](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.2...v1.15.3) (2026-04-18)
 
 
