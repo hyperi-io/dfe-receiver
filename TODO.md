@@ -580,6 +580,29 @@ channel-tiered build optimisation feature.** It was chosen because:
 
 ### Canary run notes
 
+#### 2026-04-19 — Tier 2 v1.15.7 release: PGO green, BOLT silently skipped
+
+Full release-channel dispatch through hyperi-ci v1.10.1 completed successfully end-to-end (Quality → Test → Build amd64 + arm64 → Container → Publish). Build log confirmed:
+
+- `Rust build optimisation: channel=release, allocator=jemalloc, lto=fat, pgo=on, bolt=on`
+- `cargo pgo build` instrumented build: 5m 31s
+- Workload ran 300s (pgo-driver against real testcontainer Kafka)
+- Profile size: 5.17 MiB (well above `min_profile_bytes` guard)
+- `cargo pgo optimize` final build: 4m 04s ✓
+- **BOLT step: `llvm-bolt not installed — skipping BOLT step`**
+
+Shipped binary (`dfe-receiver-linux-amd64`, 11.9 MB):
+- jemalloc strings present (`jemalloc_bg_thd`, `jemalloc`, `<jemalloc>` format markers) — **Tier 1 + PGO confirmed**
+- BOLT-specific sections stripped (`strip = true`) — can't verify from binary, log is authoritative
+
+Root cause of BOLT skip: Ubuntu noble's `llvm` metapackage doesn't ship the `llvm-bolt` binary. It lives in the separate `bolt-NN` package (post-link optimizer) at `/usr/bin/llvm-bolt-NN` with version suffix only — no unversioned symlink. `shutil.which("llvm-bolt")` returns None, so `_ensure_llvm_bolt_available()` returns False and BOLT was (correctly, non-fatally) skipped.
+
+**Fix shipped to hyperi-ci v1.10.2**:
+- `native-deps/rust.yaml`: replace `llvm` → `bolt-21` (latest LLVM/BOLT for Rust; C++/ClickHouse fork keeps its own pinned toolchain)
+- `pgo.py`: `_ensure_llvm_bolt_available()` now falls back to versioned names (llvm-bolt-18..30), creates `~/.local/bin/llvm-bolt` symlink pointing at whichever it finds, and prepends to PATH so cargo-pgo's bolt subcommand resolves the unversioned name it invokes
+
+Re-dispatch with hyperi-ci v1.10.2 expected to complete full Tier 2 (PGO + BOLT) with ~1.5 min additional build time from the BOLT apply step.
+
 #### 2026-04-17 — Tier 1 local validation + PGO workload shipped (local)
 
 Context: this session closed the canary loop from "ready in theory"
