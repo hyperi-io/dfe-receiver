@@ -1,3 +1,10 @@
+## [1.15.5](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.4...v1.15.5) (2026-04-19)
+
+
+### Bug Fixes
+
+* Tier 2 canary on hyperi-ci v1.10.0 (universal tool install) ([37b60cc](https://github.com/hyperi-io/dfe-receiver/commit/37b60cc89ed5f99bb69e28487a41d0cafb51606e))
+
 ## [1.15.4](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.3...v1.15.4) (2026-04-19)
 
 
