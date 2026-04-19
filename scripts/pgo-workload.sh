@@ -62,7 +62,10 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Locate pgo-driver binary (built as a feature-gated [[bin]])
+# Locate pgo-driver binary (built as a feature-gated [[bin]]).
+# On-demand build if missing: hyperi-ci's release build only produces the
+# main binary, not the pgo-driver (which requires --features pgo-driver).
+# Building here is cheap (~1 min, deps already compiled via cargo cache).
 PGO_DRIVER_PATH="${PGO_DRIVER_PATH:-}"
 if [[ -z "$PGO_DRIVER_PATH" ]]; then
     for candidate in \
@@ -75,9 +78,14 @@ if [[ -z "$PGO_DRIVER_PATH" ]]; then
     done
 fi
 if [[ -z "$PGO_DRIVER_PATH" || ! -x "$PGO_DRIVER_PATH" ]]; then
-    echo "error: pgo-driver binary not found. Build with:" >&2
-    echo "  cargo build --release --features pgo-driver --bin pgo-driver" >&2
-    exit 1
+    echo "pgo-workload: pgo-driver not found, building..." >&2
+    (cd "$PROJECT_ROOT" && cargo build --release --features pgo-driver --bin pgo-driver) \
+        || { echo "error: failed to build pgo-driver" >&2; exit 1; }
+    PGO_DRIVER_PATH="$PROJECT_ROOT/target/release/pgo-driver"
+    if [[ ! -x "$PGO_DRIVER_PATH" ]]; then
+        echo "error: pgo-driver still missing after build at $PGO_DRIVER_PATH" >&2
+        exit 1
+    fi
 fi
 
 # ----------------------------------------------------------------------------
