@@ -332,3 +332,4 @@ echo "pgo-workload: done (receiver logs: $CONFIG_DIR/receiver.log)"
 # Tier 2 canary retrigger on hyperi-ci v1.9.5 cargo-pgo PATH fix
 # Tier 2 canary on hyperi-ci v1.9.6 (workload binary as $1)
 # Tier 2 canary on hyperi-ci v1.10.0 universal tooling install
+# Tier 2 canary on hyperi-ci v1.10.1 (extended workload grace)
