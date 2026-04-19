@@ -23,12 +23,34 @@ use std::time::Duration;
 use bytes::Bytes;
 use dfe_receiver::sink::Sink;
 use dfe_receiver::sink::grpc::GrpcSink;
+use dfe_receiver::{Error, Result};
 use hyperi_rustlib::transport::TransportReceiver;
 use hyperi_rustlib::transport::grpc::{GrpcConfig, GrpcTransport};
 
 /// Allocate a random port for test isolation.
 fn random_port() -> u16 {
     30000 + (uuid::Uuid::new_v4().as_u128() % 20000) as u16
+}
+
+/// Send with retry on transient backpressure.
+///
+/// `GrpcSink::send` surfaces backpressure as `Err(Transport("...backpressured"))`
+/// by contract — callers are expected to retry. Under parallel CI load the
+/// transport's outgoing queue can briefly fill; a bounded retry with small
+/// backoff absorbs that without masking real transport failures.
+async fn send_with_retry(sink: &GrpcSink, topic: &str, payload: Bytes) -> Result<()> {
+    for attempt in 0..10u32 {
+        match sink.send(topic, payload.clone()).await {
+            Ok(()) => return Ok(()),
+            Err(e) if e.to_string().contains("backpressured") => {
+                tokio::time::sleep(Duration::from_millis(10 * u64::from(attempt + 1))).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(Error::Transport(
+        "backpressure persisted after 10 retries".into(),
+    ))
 }
 
 /// Spin up an in-process gRPC server, returning (endpoint, transport, port).
@@ -77,10 +99,14 @@ async fn test_grpc_sink_multiple_messages_preserved_order() {
 
     let sink = GrpcSink::new(&endpoint).await.expect("sink init");
 
-    // Send 10 ordered messages
+    // Send 10 ordered messages. Use retry helper: under parallel CI load,
+    // the transport's outgoing queue can briefly fill between sequential
+    // sends, surfacing as transient backpressure per the sink's contract.
     for i in 0..10 {
         let payload = Bytes::from(format!(r#"{{"seq":{i}}}"#));
-        sink.send("ordered_topic", payload).await.expect("send");
+        send_with_retry(&sink, "ordered_topic", payload)
+            .await
+            .expect("send");
     }
 
     // Collect all messages
@@ -209,13 +235,13 @@ async fn test_grpc_sink_concurrent_sends() {
 
     let sink = Arc::new(GrpcSink::new(&endpoint).await.expect("sink init"));
 
-    // Fire 50 concurrent sends
+    // Fire 50 concurrent sends. Retry on transient backpressure — the
+    // transport queue can briefly fill under 50-way fan-out on CI runners.
     let mut handles = Vec::new();
     for i in 0..50 {
         let s = sink.clone();
         handles.push(tokio::spawn(async move {
-            s.send("concurrent", Bytes::from(format!(r#"{{"id":{i}}}"#)))
-                .await
+            send_with_retry(&s, "concurrent", Bytes::from(format!(r#"{{"id":{i}}}"#))).await
         }));
     }
     for h in handles {
