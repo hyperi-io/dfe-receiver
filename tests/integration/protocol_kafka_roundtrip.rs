@@ -40,6 +40,20 @@ fn random_port() -> u16 {
     30000 + (uuid::Uuid::new_v4().as_u128() % 20000) as u16
 }
 
+/// Poll the loopback port until it accepts a TCP connection or the budget
+/// is exhausted. Replaces blind `sleep` waits that race the spawned
+/// handler's bind and produce ConnectionRefused on busy ARC runners.
+async fn wait_for_port(port: u16) {
+    let addr = format!("127.0.0.1:{port}");
+    for _ in 0..100 {
+        if tokio::net::TcpStream::connect(&addr).await.is_ok() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("port {port} never accepted connections within 5s");
+}
+
 /// Build a config wired to route via Kafka (rather than the in-memory loader).
 fn kafka_config(kf: &crate::common::KafkaTestConfig, topic: &str) -> Config {
     let mut config = Config::default();
@@ -97,7 +111,7 @@ async fn test_prometheus_rw_to_kafka_roundtrip() {
     tokio::spawn(async move {
         let _ = handler.start(handler_shutdown).await;
     });
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    wait_for_port(rw_port).await;
 
     // Build a valid Prometheus RW WriteRequest
     let request = proto::WriteRequest {
@@ -192,7 +206,7 @@ async fn test_splunk_hec_to_kafka_roundtrip() {
     tokio::spawn(async move {
         let _ = handler.start(handler_shutdown).await;
     });
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    wait_for_port(hec_port).await;
 
     // Send an HEC event
     let event = serde_json::json!({
