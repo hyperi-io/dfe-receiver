@@ -10,6 +10,8 @@
 //!
 //! Uses rustlib's `DfeApp` trait for the standard lifecycle:
 //! parse → log → config → dispatch.
+//!
+//! (canary touch: exercise runner image bake v1.12.1)
 
 #![forbid(unsafe_code)]
 #![allow(clippy::large_futures)]
