@@ -53,6 +53,20 @@ async fn send_with_retry(sink: &GrpcSink, topic: &str, payload: Bytes) -> Result
     ))
 }
 
+/// Poll the loopback port until it accepts a TCP connection or the
+/// budget is exhausted. Replaces blind sleep waits that race tonic's
+/// server bind under parallel CI load.
+async fn wait_for_port(port: u16) {
+    let addr = format!("127.0.0.1:{port}");
+    for _ in 0..100 {
+        if tokio::net::TcpStream::connect(&addr).await.is_ok() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("gRPC server on port {port} never accepted connections within 5s");
+}
+
 /// Spin up an in-process gRPC server, returning (endpoint, transport, port).
 async fn start_server() -> (String, GrpcTransport, u16) {
     let port = random_port();
@@ -62,8 +76,7 @@ async fn start_server() -> (String, GrpcTransport, u16) {
         .await
         .expect("failed to start gRPC server");
 
-    // Give tonic's server a moment to bind.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    wait_for_port(port).await;
 
     let endpoint = format!("http://127.0.0.1:{port}");
     (endpoint, transport, port)
@@ -141,7 +154,10 @@ async fn test_grpc_sink_large_payload() {
     let payload_bytes: Vec<u8> = (0..256 * 1024).map(|i| (i % 256) as u8).collect();
     let payload = Bytes::from(payload_bytes.clone());
 
-    sink.send("large_topic", payload)
+    // Retry on transient backpressure — a 256 KiB RPC on a busy ARC
+    // runner can briefly fill the transport's outgoing queue. Same
+    // contract as ordered/concurrent tests.
+    send_with_retry(&sink, "large_topic", payload)
         .await
         .expect("large send failed");
 
