@@ -1,3 +1,13 @@
+## [1.15.8](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.7...v1.15.8) (2026-04-22)
+
+
+### Bug Fixes
+
+* canary release through BOLT + R2 on ARC runner v1.12.1 ([06858ac](https://github.com/hyperi-io/dfe-receiver/commit/06858acf84ea1254e658e49c6829cb986f9931cd))
+* **tests:** grpc_sink large-payload retry + start_server port poll ([030ce51](https://github.com/hyperi-io/dfe-receiver/commit/030ce5146141aae825a23a09b28b986562d0a1f1))
+* **tests:** poll port readiness in protocol→kafka integration tests ([f80d851](https://github.com/hyperi-io/dfe-receiver/commit/f80d8519626b9f88593f1f5c799793fa0929d780))
+* Tier 2 canary — BOLT fix via hyperi-ci v1.10.2 ([3bafba7](https://github.com/hyperi-io/dfe-receiver/commit/3bafba72bdf40a5ed544d9ddd82ec9a0ef43e8a1))
+
 ## [1.15.7](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.6...v1.15.7) (2026-04-19)
 
 
