@@ -22,7 +22,7 @@ doctest = false
 
 [dependencies]
 # HyperI shared library (crates.io)
-hyperi-rustlib = { version = ">=2.5.4", features = [
+hyperi-rustlib = { version = ">=2.6.1", features = [
     "config",
     "config-reload",
     "logger",
@@ -38,10 +38,10 @@ hyperi-rustlib = { version = ">=2.5.4", features = [
     "runtime",
     "secrets",
     "scaling",
-    "cli",
+    "cli-service",
     "deployment",
     "version-check",
-    "worker",
+    "worker-pool",
 ] }
 
 # Prometheus metrics (direct dep for counter!/gauge! macros with labels)
