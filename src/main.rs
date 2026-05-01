@@ -241,6 +241,10 @@ impl DfeApp for App {
         info!("Shutdown complete");
         Ok(())
     }
+
+    fn deployment_contract(&self) -> Option<hyperi_rustlib::deployment::DeploymentContract> {
+        Some(crate::deployment::contract())
+    }
 }
 
 #[tokio::main]
