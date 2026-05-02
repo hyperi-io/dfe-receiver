@@ -1,3 +1,11 @@
+## [1.15.9](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.8...v1.15.9) (2026-05-02)
+
+
+### Bug Fixes
+
+* **deployment:** wire DfeApp::deployment_contract trait hook + bump rustlib to >=2.7.0 ([70aa9c3](https://github.com/hyperi-io/dfe-receiver/commit/70aa9c3435b9b27b7f117fb3bbf5d46c40e915a3))
+* **deps:** track rustlib 2.6.1 (cli→cli-service, worker→worker-pool) ([7160fbc](https://github.com/hyperi-io/dfe-receiver/commit/7160fbc3780b4f4bc6f240cb31bbb950873b1d33))
+
 ## [1.15.8](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.7...v1.15.8) (2026-04-22)
 
 
