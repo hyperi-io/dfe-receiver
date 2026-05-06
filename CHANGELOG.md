@@ -1,3 +1,11 @@
+## [1.15.10](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.9...v1.15.10) (2026-05-06)
+
+
+### Bug Fixes
+
+* **cli:** align with dfe-loader StandardCommand pattern ([0b06511](https://github.com/hyperi-io/dfe-receiver/commit/0b06511c6e89c5b9b80d425eb6bf339e0d304ee5))
+* **release:** force patch bump v1.15.10 ([0979e8a](https://github.com/hyperi-io/dfe-receiver/commit/0979e8aabaf6f3a47e2840f8bc2d3c3e6b343e25))
+
 ## [1.15.9](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.8...v1.15.9) (2026-05-02)
 
 
