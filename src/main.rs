@@ -8,32 +8,32 @@
 
 //! dfe-receiver CLI entry point.
 //!
-//! Uses rustlib's `DfeApp` trait for the standard lifecycle:
-//! parse → log → config → dispatch.
-//!
-//! (canary touch: exercise runner image bake v1.12.1)
+//! Aligned with dfe-loader's pattern: `command: Option<StandardCommand>`
+//! delegates the standard subcommand surface (run, version, config-check,
+//! generate-artefacts, metrics-manifest) to rustlib's `run_app()`. The
+//! `--emit-helm` / `--emit-dockerfile` flags exist for one-off local
+//! diagnostics; the canonical artefact production path is
+//! `dfe-receiver generate-artefacts --output-dir ci/`.
 
 #![forbid(unsafe_code)]
 #![allow(clippy::large_futures)]
 
-// Jemalloc takes priority when enabled (including when both features are enabled via --all-features)
+// =============================================================================
+// Global Allocator — DFE policy: jemalloc only, no mimalloc.
+// =============================================================================
+// hyperi-ci's release-track build adds `--features jemalloc` automatically on
+// every channel. For local builds, opt in with: `cargo build --features jemalloc`.
 #[cfg(feature = "jemalloc")]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
-
-// Mimalloc only when jemalloc is not enabled
-#[cfg(all(feature = "mimalloc", not(feature = "jemalloc")))]
-#[global_allocator]
-static GLOBAL_MIMALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use hyperi_rustlib::cli::{CliError, CommonArgs, DfeApp, StandardCommand, VersionInfo, run_app};
 use hyperi_rustlib::config::reloader::{ConfigReloader, ReloaderConfig};
-use hyperi_rustlib::deployment::{generate_chart, generate_compose_fragment, generate_dockerfile};
 use tracing::{debug, error, info};
 
 use dfe_receiver::config::{Config, reload_config};
@@ -42,7 +42,7 @@ use dfe_receiver::metrics::Metrics;
 use dfe_receiver::pipeline::Orchestrator;
 use dfe_receiver::server::Server;
 
-/// dfe-receiver: High-performance HTTP/gRPC receiver for data ingestion.
+/// dfe-receiver: high-performance HTTP/gRPC receiver for data ingestion.
 #[derive(Parser, Debug)]
 #[command(name = "dfe-receiver")]
 #[command(about = "High-performance HTTP/gRPC receiver for PB/s scale data ingestion")]
@@ -52,41 +52,17 @@ struct App {
     common: CommonArgs,
 
     #[command(subcommand)]
-    command: Option<AppCommand>,
-}
+    command: Option<StandardCommand>,
 
-/// CLI subcommands.
-#[derive(Subcommand, Clone, Debug)]
-enum AppCommand {
-    /// Start the service (default if no subcommand given).
-    Run,
+    /// Generate Helm chart from deployment contract and exit (default output: ./chart).
+    /// Quick local-dev shortcut; the canonical CI path is `generate-artefacts`.
+    #[arg(long, value_name = "DIR", default_missing_value = "chart", num_args = 0..=1)]
+    emit_helm: Option<PathBuf>,
 
-    /// Print version information and exit.
-    Version,
-
-    /// Validate configuration and exit.
-    #[command(name = "config-check")]
-    ConfigCheck,
-
-    /// Emit generated Dockerfile to stdout.
-    #[command(name = "emit-dockerfile")]
-    EmitDockerfile,
-
-    /// Generate Helm chart directory.
-    #[command(name = "emit-chart")]
-    EmitChart {
-        /// Output directory for the Helm chart.
-        #[arg(default_value = "chart")]
-        dir: String,
-    },
-
-    /// Emit Docker Compose fragment to stdout.
-    #[command(name = "emit-compose")]
-    EmitCompose,
-
-    /// Emit deployment contract as JSON to stdout.
-    #[command(name = "emit-contract")]
-    EmitContract,
+    /// Generate Dockerfile from deployment contract and exit (default output: ./Dockerfile).
+    /// Quick local-dev shortcut; the canonical CI path is `generate-artefacts`.
+    #[arg(long, value_name = "FILE", default_missing_value = "Dockerfile", num_args = 0..=1)]
+    emit_dockerfile: Option<PathBuf>,
 }
 
 impl DfeApp for App {
@@ -109,18 +85,7 @@ impl DfeApp for App {
     }
 
     fn command(&self) -> Option<&StandardCommand> {
-        match &self.command {
-            Some(AppCommand::Version) => {
-                // Use a const to return a stable reference
-                const VERSION: StandardCommand = StandardCommand::Version;
-                Some(&VERSION)
-            }
-            Some(AppCommand::ConfigCheck) => {
-                const CONFIG_CHECK: StandardCommand = StandardCommand::ConfigCheck;
-                Some(&CONFIG_CHECK)
-            }
-            _ => None,
-        }
+        self.command.as_ref()
     }
 
     fn load_config(&self, path: Option<&str>) -> Result<Self::Config, CliError> {
@@ -251,34 +216,27 @@ impl DfeApp for App {
 async fn main() {
     let app = App::parse();
 
-    // Handle deployment commands before the DfeApp lifecycle
-    if let Some(ref cmd) = app.command {
-        match cmd {
-            AppCommand::EmitDockerfile => {
-                println!("{}", generate_dockerfile(&deployment::contract()));
-                return;
-            }
-            AppCommand::EmitChart { dir } => {
-                if let Err(e) = generate_chart(&deployment::contract(), dir) {
-                    eprintln!("error: {e}");
-                    std::process::exit(1);
-                }
-                eprintln!("Helm chart written to {dir}/");
-                return;
-            }
-            AppCommand::EmitCompose => {
-                println!("{}", generate_compose_fragment(&deployment::contract()));
-                return;
-            }
-            AppCommand::EmitContract => {
-                println!("{}", deployment::contract().to_json());
-                return;
-            }
-            _ => {}
+    if let Some(output) = &app.emit_helm {
+        let contract = deployment::contract();
+        if let Err(e) = hyperi_rustlib::deployment::generate_chart(&contract, output) {
+            eprintln!("fatal: {e}");
+            std::process::exit(1);
         }
+        eprintln!("Helm chart written to {}/", output.display());
+        return;
     }
 
-    // Delegate to standard DfeApp lifecycle
+    if let Some(output) = &app.emit_dockerfile {
+        let contract = deployment::contract();
+        let content = hyperi_rustlib::deployment::generate_dockerfile(&contract);
+        if let Err(e) = std::fs::write(output, &content) {
+            eprintln!("fatal: could not write Dockerfile: {e}");
+            std::process::exit(1);
+        }
+        eprintln!("Dockerfile written to {}", output.display());
+        return;
+    }
+
     if let Err(e) = run_app(app).await {
         eprintln!("fatal: {e}");
         std::process::exit(1);
