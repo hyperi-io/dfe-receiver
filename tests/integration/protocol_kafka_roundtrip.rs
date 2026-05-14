@@ -102,9 +102,12 @@ async fn test_prometheus_rw_to_kafka_roundtrip() {
     let metrics = Arc::new(Metrics::default());
     let shutdown = CancellationToken::new();
     let pipeline = Arc::new(
-        PipelineState::new(SharedConfig::new(config.clone()), tokio_util::sync::CancellationToken::new())
-            .await
-            .expect("pipeline init"),
+        PipelineState::new(
+            SharedConfig::new(config.clone()),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("pipeline init"),
     );
     let handler = PrometheusRwHandler::new(config.prometheus_rw.clone(), pipeline, metrics.clone());
     let handler_shutdown = shutdown.clone();
@@ -197,9 +200,12 @@ async fn test_splunk_hec_to_kafka_roundtrip() {
     let metrics = Arc::new(Metrics::default());
     let shutdown = CancellationToken::new();
     let pipeline = Arc::new(
-        PipelineState::new(SharedConfig::new(config.clone()), tokio_util::sync::CancellationToken::new())
-            .await
-            .expect("pipeline init"),
+        PipelineState::new(
+            SharedConfig::new(config.clone()),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("pipeline init"),
     );
     let handler = SplunkHecHandler::new(config.splunk_hec.clone(), pipeline, metrics.clone());
     let handler_shutdown = shutdown.clone();
@@ -261,9 +267,12 @@ async fn test_http_to_kafka_roundtrip() {
     // since we have no HTTP handler to spin up here easily — the goal is
     // validating Kafka delivery, not HTTP parsing).
     let pipeline = Arc::new(
-        PipelineState::new(SharedConfig::new(config), tokio_util::sync::CancellationToken::new())
-            .await
-            .expect("pipeline init"),
+        PipelineState::new(
+            SharedConfig::new(config),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("pipeline init"),
     );
 
     let payload = Bytes::from(r#"{"event":"http-to-kafka-test","id":42,"source":"integration"}"#);

@@ -68,9 +68,12 @@ async fn start_syslog_handler(config: Config) -> (CancellationToken, Arc<Metrics
     let metrics = Arc::new(Metrics::default());
     let shutdown = CancellationToken::new();
     let pipeline = Arc::new(
-        PipelineState::new(SharedConfig::new(config.clone()), tokio_util::sync::CancellationToken::new())
-            .await
-            .expect("Failed to create pipeline"),
+        PipelineState::new(
+            SharedConfig::new(config.clone()),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("Failed to create pipeline"),
     );
 
     let handler = SyslogHandler::new(config.syslog.clone(), pipeline, metrics.clone());
