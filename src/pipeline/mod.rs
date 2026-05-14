@@ -57,7 +57,7 @@ pub struct PipelineState {
 
 impl PipelineState {
     /// Create new pipeline state.
-    pub async fn new(shared_config: SharedConfig) -> Result<Self> {
+    pub async fn new(shared_config: SharedConfig, shutdown: CancellationToken) -> Result<Self> {
         let config = shared_config.get();
         let validator = Validator::new(config.validation.clone());
         let router = Router::new(
@@ -128,7 +128,12 @@ impl PipelineState {
         let dlq = if config.routing.dlq.enabled {
             let dlq_config = config.routing.dlq.to_rustlib_config();
             let kafka_config = config.kafka.to_rustlib_kafka_config();
-            match Dlq::with_kafka(&dlq_config, "receiver", &kafka_config) {
+            match Dlq::spawn(
+                &dlq_config,
+                "receiver",
+                Some(&kafka_config),
+                shutdown.clone(),
+            ) {
                 Ok(d) => {
                     info!(mode = ?dlq_config.mode, "DLQ enabled");
                     Some(Arc::new(d))
@@ -646,7 +651,7 @@ impl Orchestrator {
         shutdown: CancellationToken,
     ) -> Result<Self> {
         let shared_config = SharedConfig::new(config);
-        let state = PipelineState::new(shared_config.clone()).await?;
+        let state = PipelineState::new(shared_config.clone(), shutdown.clone()).await?;
 
         Ok(Self {
             state: Arc::new(state),
@@ -746,11 +751,15 @@ mod tests {
 
     async fn test_state() -> PipelineState {
         let config = test_config();
-        PipelineState::new(SharedConfig::new(config)).await.unwrap()
+        PipelineState::new(SharedConfig::new(config), CancellationToken::new())
+            .await
+            .unwrap()
     }
 
     async fn test_state_with(config: Config) -> PipelineState {
-        PipelineState::new(SharedConfig::new(config)).await.unwrap()
+        PipelineState::new(SharedConfig::new(config), CancellationToken::new())
+            .await
+            .unwrap()
     }
 
     #[tokio::test]

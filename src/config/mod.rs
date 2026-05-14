@@ -1070,6 +1070,7 @@ impl DlqConfig {
                 common_topic: self.topic.clone(),
                 ..KafkaDlqConfig::default()
             },
+            ..hyperi_rustlib::dlq::DlqConfig::default()
         }
     }
 }
