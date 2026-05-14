@@ -62,7 +62,7 @@ async fn start_test_server(config: Config) -> (String, CancellationToken) {
     let metrics = Arc::new(Metrics::default());
     let shutdown = CancellationToken::new();
     let pipeline = Arc::new(
-        PipelineState::new(SharedConfig::new(config.clone()))
+        PipelineState::new(SharedConfig::new(config.clone()), tokio_util::sync::CancellationToken::new())
             .await
             .expect("Failed to create pipeline"),
     );
@@ -1033,7 +1033,7 @@ async fn test_503_when_pipeline_not_ready() {
     let metrics = Arc::new(Metrics::default());
     let shutdown = CancellationToken::new();
     let pipeline = Arc::new(
-        PipelineState::new(SharedConfig::new(config.clone()))
+        PipelineState::new(SharedConfig::new(config.clone()), tokio_util::sync::CancellationToken::new())
             .await
             .expect("Failed to create pipeline"),
     );

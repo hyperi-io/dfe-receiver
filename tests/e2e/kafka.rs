@@ -300,7 +300,7 @@ async fn test_full_pipeline_to_kafka() {
     config.kafka.producer.linger_ms = 0;
 
     // Create pipeline
-    let pipeline = PipelineState::new(SharedConfig::new(config))
+    let pipeline = PipelineState::new(SharedConfig::new(config), tokio_util::sync::CancellationToken::new())
         .await
         .expect("Failed to create pipeline");
 
@@ -479,7 +479,7 @@ async fn test_category_routing() {
     }];
 
     // Create pipeline
-    let pipeline = PipelineState::new(SharedConfig::new(config))
+    let pipeline = PipelineState::new(SharedConfig::new(config), tokio_util::sync::CancellationToken::new())
         .await
         .expect("Failed to create pipeline");
 
@@ -547,7 +547,7 @@ async fn test_dlq_routing() {
     config.validation.dlq_on_invalid = true;
 
     // Create pipeline
-    let pipeline = PipelineState::new(SharedConfig::new(config))
+    let pipeline = PipelineState::new(SharedConfig::new(config), tokio_util::sync::CancellationToken::new())
         .await
         .expect("Failed to create pipeline");
 
