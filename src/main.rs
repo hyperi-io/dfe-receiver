@@ -184,8 +184,21 @@ impl DfeApp for App {
             }
         }
 
-        // Create HTTP/gRPC server
-        let server = Server::new(orchestrator.state(), metrics.clone());
+        // Create HTTP/gRPC server. If flow is enabled (unified or split), build
+        // FlowMetrics against the global recorder; otherwise skip.
+        let server = if config.flow.enabled || config.flow.split.is_some() {
+            match dfe_receiver::server::flow::metrics::FlowMetrics::register(&runtime.metrics) {
+                Ok(flow_metrics) => {
+                    Server::with_flow_metrics(orchestrator.state(), metrics.clone(), flow_metrics)
+                }
+                Err(e) => {
+                    error!(error = %e, "FlowMetrics::register failed; flow handler will be disabled");
+                    Server::new(orchestrator.state(), metrics.clone())
+                }
+            }
+        } else {
+            Server::new(orchestrator.state(), metrics.clone())
+        };
 
         // Set readiness check on runtime's metrics manager (already serving)
         let pipeline_for_ready = orchestrator.state();

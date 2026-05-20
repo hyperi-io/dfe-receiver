@@ -32,11 +32,13 @@ pub mod traits;
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::error::Result;
 use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
+use crate::server::flow::FlowHandler;
+use crate::server::flow::metrics::FlowMetrics;
 use crate::server::fluent::FluentHandler;
 use crate::server::gelf::GelfHandler;
 use crate::server::grpc::GrpcVectorHandler;
@@ -53,12 +55,35 @@ use crate::server::traits::ProtocolHandler;
 pub struct Server {
     state: Arc<PipelineState>,
     metrics: Arc<Metrics>,
+    /// Pre-registered FlowMetrics handles. `None` skips the flow handler
+    /// even if `config.flow.enabled` is true; this is the legacy
+    /// `Server::new` path used by tests that don't bring up a global recorder.
+    flow_metrics: Option<FlowMetrics>,
 }
 
 impl Server {
-    /// Create a new server instance.
+    /// Create a new server instance (no flow handler).
     pub fn new(state: Arc<PipelineState>, metrics: Arc<Metrics>) -> Self {
-        Self { state, metrics }
+        Self {
+            state,
+            metrics,
+            flow_metrics: None,
+        }
+    }
+
+    /// Create a new server instance with FlowMetrics registered against the
+    /// global recorder. Required when `config.flow.enabled` or
+    /// `config.flow.split` is set.
+    pub fn with_flow_metrics(
+        state: Arc<PipelineState>,
+        metrics: Arc<Metrics>,
+        flow_metrics: FlowMetrics,
+    ) -> Self {
+        Self {
+            state,
+            metrics,
+            flow_metrics: Some(flow_metrics),
+        }
     }
 
     /// Collect all enabled protocol handlers based on configuration.
@@ -144,6 +169,27 @@ impl Server {
                 self.state.clone(),
                 self.metrics.clone(),
             )));
+        }
+
+        // Flow (NetFlow + sFlow) handler -- enabled in unified or split mode.
+        // Requires FlowMetrics to be pre-registered via Server::with_flow_metrics.
+        if config.flow.enabled || config.flow.split.is_some() {
+            match self.flow_metrics.clone() {
+                Some(flow_metrics) => {
+                    match FlowHandler::new(config.flow.clone(), flow_metrics, self.state.clone()) {
+                        Ok(handler) => handlers.push(Box::new(handler)),
+                        Err(e) => {
+                            error!(error = %e, "Flow handler config invalid; skipping");
+                        }
+                    }
+                }
+                None => {
+                    warn!(
+                        "Flow handler enabled but no FlowMetrics registered; skipping. \
+                         Use Server::with_flow_metrics to enable flow."
+                    );
+                }
+            }
         }
 
         handlers

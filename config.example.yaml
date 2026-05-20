@@ -286,3 +286,35 @@ file_sink:
 metrics:
   enabled: true
   address: "0.0.0.0:9090"
+
+# --- Flow protocols (NetFlow v5/v9/IPFIX + sFlow v5) ---
+# Unified mode (default): one listener on each port accepts all flow protocols.
+# Split mode: `flow.split:` opt-in, two independent listeners per protocol.
+#
+# Status: EXPERIMENTAL when first enabled -- emits a WARN log at startup.
+# Flip `experimental: false` once stability is proven.
+flow:
+  enabled: false              # set true to receive flow data
+  experimental: true          # WARN-log + info-metric at startup; flip to false after stabilisation period
+  bind_address: "0.0.0.0"
+  ports: [2055, 4739, 6343]   # all three common ports, all autosense (v5/v9/IPFIX/sFlow)
+  output:
+    mode: canonical           # canonical | canonical_with_raw | exploded
+    max_records_per_packet: 200
+  channel_capacity: 4096
+  recv_buffer_bytes: 8388608  # 8 MiB SO_RCVBUF
+  # ip_filter: see IpFilterConfig docs above
+  rate_limit:
+    enabled: false            # per-source-IP UDP token bucket
+    packets_per_second: 5000
+    burst: 10000
+    cache_size: 4096
+  netflow:
+    enabled: true
+    template_cache:
+      max_per_exporter: 1000
+      max_exporters: 10000
+    topic: "netflow_land"
+  sflow:
+    enabled: true
+    topic: "sflow_land"

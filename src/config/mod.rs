@@ -72,6 +72,9 @@ pub struct Config {
     /// GELF receiver configuration.
     pub gelf: GelfConfig,
 
+    /// Flow (NetFlow v5/v9 + IPFIX + sFlow v5) receiver configuration.
+    pub flow: crate::server::flow::config::FlowConfig,
+
     /// Validation rules.
     pub validation: ValidationConfig,
 
@@ -121,6 +124,7 @@ impl Default for Config {
             prometheus_rw: PrometheusRwConfig::default(),
             fluent: FluentConfig::default(),
             gelf: GelfConfig::default(),
+            flow: crate::server::flow::config::FlowConfig::default(),
             validation: ValidationConfig::default(),
             routing: RoutingConfig::default(),
             destinations: DestinationsConfig::default(),
@@ -316,6 +320,47 @@ impl ApplyFlatEnv for Config {
         // Config reload
         if let Some(v) = flat_env::flat_env_parsed::<u64>(prefix, "CONFIG_RELOAD_SECS") {
             self.config_reload_secs = v;
+        }
+
+        // Flow (NetFlow + sFlow)
+        if let Some(v) = flat_env::flat_env_bool(prefix, "FLOW_ENABLED") {
+            self.flow.enabled = v;
+        }
+        if let Some(v) = flat_env::flat_env_bool(prefix, "FLOW_EXPERIMENTAL") {
+            self.flow.experimental = v;
+        }
+        if let Some(v) = flat_env::flat_env_list(prefix, "FLOW_PORTS") {
+            self.flow.ports = v.iter().filter_map(|s| s.parse::<u16>().ok()).collect();
+        }
+        if let Some(v) = flat_env::flat_env_string(prefix, "FLOW_OUTPUT_MODE") {
+            self.flow.output.mode = match v.to_ascii_lowercase().as_str() {
+                "exploded" => crate::server::flow::config::OutputMode::Exploded,
+                "canonical_with_raw" => crate::server::flow::config::OutputMode::CanonicalWithRaw,
+                _ => crate::server::flow::config::OutputMode::Canonical,
+            };
+        }
+        if let Some(v) = flat_env::flat_env_parsed::<usize>(prefix, "FLOW_RECV_BUFFER_BYTES") {
+            self.flow.recv_buffer_bytes = v;
+        }
+        if let Some(v) = flat_env::flat_env_parsed::<usize>(prefix, "FLOW_CHANNEL_CAPACITY") {
+            self.flow.channel_capacity = v;
+        }
+        if let Some(v) = flat_env::flat_env_bool(prefix, "FLOW_NETFLOW_ENABLED") {
+            self.flow.netflow.enabled = v;
+        }
+        if let Some(v) = flat_env::flat_env_bool(prefix, "FLOW_SFLOW_ENABLED") {
+            self.flow.sflow.enabled = v;
+        }
+        if let Some(v) = flat_env::flat_env_bool(prefix, "FLOW_RATE_LIMIT_ENABLED") {
+            self.flow.rate_limit.enabled = v;
+        }
+        if let Some(v) =
+            flat_env::flat_env_parsed::<u32>(prefix, "FLOW_RATE_LIMIT_PACKETS_PER_SECOND")
+        {
+            self.flow.rate_limit.packets_per_second = v;
+        }
+        if let Some(v) = flat_env::flat_env_parsed::<u32>(prefix, "FLOW_RATE_LIMIT_BURST") {
+            self.flow.rate_limit.burst = v;
         }
     }
 }

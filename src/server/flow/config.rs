@@ -11,12 +11,12 @@
 //! Unified mode: `flow.enabled: true` with `ports` listening on autosense.
 //! Split mode: `flow.split:` opt-in, with separate NetFlow / sFlow listeners.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 
 use crate::config::IpFilterConfig;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputMode {
     Canonical,
@@ -40,7 +40,7 @@ impl OutputMode {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FlowOutputConfig {
     #[serde(default)]
     pub mode: OutputMode,
@@ -61,7 +61,7 @@ fn default_max_records() -> usize {
     200
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct RateLimitConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -85,7 +85,7 @@ fn default_rl_cache() -> usize {
     4096
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TemplateCacheConfig {
     #[serde(default = "default_per_exporter")]
     pub max_per_exporter: usize,
@@ -110,7 +110,7 @@ fn default_max_exporters() -> usize {
     10000
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct NetflowSubConfig {
     #[serde(default = "yes")]
     pub enabled: bool,
@@ -134,7 +134,7 @@ fn default_netflow_topic() -> String {
     "netflow_land".into()
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SflowSubConfig {
     #[serde(default = "yes")]
     pub enabled: bool,
@@ -161,7 +161,7 @@ fn yes() -> bool {
 
 /// Unified-mode listener config -- one block applies to all decoders on
 /// configured ports.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FlowConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -237,13 +237,13 @@ impl Default for FlowConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FlowSplitConfig {
     pub netflow: FlowListenerConfig,
     pub sflow: FlowListenerConfig,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FlowListenerConfig {
     #[serde(default = "yes")]
     pub enabled: bool,
