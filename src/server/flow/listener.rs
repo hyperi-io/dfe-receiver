@@ -349,9 +349,75 @@ impl UdpFlowListener {
         };
 
         let mode_label = cfg.output.mode.label();
-        // For Canonical / CanonicalWithRaw modes ranges.len() == 1; for
-        // Exploded it equals records.len() (one event per record).
         let is_exploded = matches!(cfg.output.mode, OutputMode::Exploded);
+
+        if is_exploded {
+            // All-or-nothing per packet: pre-clone every rendered envelope
+            // into its own `Bytes` before any send so a mid-batch failure
+            // cannot leave the buffer pointing at half-consumed ranges. The
+            // first send proves the pipeline has capacity; if it fails we
+            // drop the WHOLE packet (no event leaves the listener). If a
+            // later send fails the remaining records are charged to
+            // `drops_total{reason="channel_full"}` and emission stops --
+            // some events from this packet will already have been emitted
+            // in that case, but we never start emission unless the first
+            // event succeeds.
+            let total = ranges.len();
+            if total == 0 {
+                return;
+            }
+            let events: Vec<Bytes> = ranges
+                .into_iter()
+                .map(|r| Bytes::copy_from_slice(&json_buf[r]))
+                .collect();
+
+            // Probe with the first event. If it fails, charge ALL N to drops
+            // and return without partial emission.
+            let mut iter = events.into_iter();
+            let first = iter.next().expect("events is non-empty");
+            match pipeline.process(first).await {
+                Ok(()) => {
+                    metrics
+                        .records_emitted_total
+                        .inc(&[("transport", D::PROTOCOL), ("mode", mode_label)]);
+                }
+                Err(_) => {
+                    for _ in 0..total {
+                        metrics
+                            .drops_total
+                            .inc(&[("transport", D::PROTOCOL), ("reason", "channel_full")]);
+                    }
+                    return;
+                }
+            }
+            // Pipeline accepted the first event; emit the rest. A later
+            // failure stops emission and charges the remaining tail to
+            // drops_total{reason="channel_full"}.
+            let mut emitted = 1usize;
+            for ev in iter {
+                emitted += 1;
+                match pipeline.process(ev).await {
+                    Ok(()) => {
+                        metrics
+                            .records_emitted_total
+                            .inc(&[("transport", D::PROTOCOL), ("mode", mode_label)]);
+                    }
+                    Err(_) => {
+                        let remaining = total - emitted + 1;
+                        for _ in 0..remaining {
+                            metrics
+                                .drops_total
+                                .inc(&[("transport", D::PROTOCOL), ("reason", "channel_full")]);
+                        }
+                        return;
+                    }
+                }
+            }
+            return;
+        }
+
+        // Canonical / CanonicalWithRaw modes: ranges.len() == 1 so the
+        // original simple loop is safe -- no partial-emit hazard.
         for range in ranges {
             let bytes = Bytes::copy_from_slice(&json_buf[range]);
             match pipeline.process(bytes).await {
@@ -361,15 +427,9 @@ impl UdpFlowListener {
                         .inc(&[("transport", D::PROTOCOL), ("mode", mode_label)]);
                 }
                 Err(_) => {
-                    // Pipeline buffer is full / backpressured / DLQ-routed.
                     metrics
                         .drops_total
                         .inc(&[("transport", D::PROTOCOL), ("reason", "channel_full")]);
-                    if is_exploded {
-                        // Stop emitting the rest of this packet's records to
-                        // avoid partial bursts saturating the pipeline.
-                        break;
-                    }
                     return;
                 }
             }
