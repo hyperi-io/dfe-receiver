@@ -192,6 +192,10 @@ strip = false
 name = "throughput"
 harness = false
 
+[[bench]]
+name = "flow_decode"
+harness = false
+
 [[bin]]
 name = "pgo-driver"
 path = "src/bin/pgo-driver.rs"
