@@ -24,6 +24,8 @@
 //! - `PGO_DRIVER_OTLP_HTTP_URL` (default `http://127.0.0.1:4318/v1/logs`)
 //! - `PGO_DRIVER_SYSLOG_UDP` (default `127.0.0.1:514`)
 //! - `PGO_DRIVER_SYSLOG_TCP` (default `127.0.0.1:514`)
+//! - `PGO_DRIVER_NETFLOW_ADDR` (default `127.0.0.1:2055`)
+//! - `PGO_DRIVER_SFLOW_ADDR` (default `127.0.0.1:6343`)
 //! - `PGO_DRIVER_HTTP_RPS` (default 500)
 //! - `PGO_DRIVER_OTHER_RPS` (default 100) — each non-HTTP protocol
 //!
@@ -34,6 +36,8 @@
 //! - OTLP HTTP logs:         100 rps (~12%)
 //! - Syslog UDP (RFC 5424):   50 rps (~6%)
 //! - Syslog TCP (framed):     50 rps (~6%)
+//! - NetFlow v5 UDP:          ~100 rps (sub-ms send loop)
+//! - sFlow v5 UDP:            ~100 rps (sub-ms send loop)
 //!
 //! Exit codes:
 //! - 0: workload completed for full duration
@@ -77,6 +81,8 @@ async fn main() {
     tasks.spawn(drive_otlp_http(cfg.clone(), stats.clone(), deadline));
     tasks.spawn(drive_syslog_udp(cfg.clone(), stats.clone(), deadline));
     tasks.spawn(drive_syslog_tcp(cfg.clone(), stats.clone(), deadline));
+    tasks.spawn(drive_netflow_v5(cfg.clone(), stats.clone(), deadline));
+    tasks.spawn(drive_sflow_v5(cfg.clone(), stats.clone(), deadline));
 
     // Progress reporter
     let reporter_stats = stats.clone();
@@ -128,6 +134,8 @@ struct Config {
     otlp_http_url: String,
     syslog_udp_addr: String,
     syslog_tcp_addr: String,
+    netflow_addr: String,
+    sflow_addr: String,
     http_rps: u32,
     other_rps: u32,
 }
@@ -148,6 +156,8 @@ impl Config {
             otlp_http_url: env_str("PGO_DRIVER_OTLP_HTTP_URL", "http://127.0.0.1:4318/v1/logs"),
             syslog_udp_addr: env_str("PGO_DRIVER_SYSLOG_UDP", "127.0.0.1:514"),
             syslog_tcp_addr: env_str("PGO_DRIVER_SYSLOG_TCP", "127.0.0.1:514"),
+            netflow_addr: env_str("PGO_DRIVER_NETFLOW_ADDR", "127.0.0.1:2055"),
+            sflow_addr: env_str("PGO_DRIVER_SFLOW_ADDR", "127.0.0.1:6343"),
             http_rps: env_u32("PGO_DRIVER_HTTP_RPS", 500),
             other_rps: env_u32("PGO_DRIVER_OTHER_RPS", 100),
         }
@@ -181,6 +191,8 @@ struct Stats {
     otlp_http: AtomicU64,
     syslog_udp: AtomicU64,
     syslog_tcp: AtomicU64,
+    netflow: AtomicU64,
+    sflow: AtomicU64,
     errors: AtomicU64,
     start: Instant,
 }
@@ -194,6 +206,8 @@ impl Stats {
             otlp_http: AtomicU64::new(0),
             syslog_udp: AtomicU64::new(0),
             syslog_tcp: AtomicU64::new(0),
+            netflow: AtomicU64::new(0),
+            sflow: AtomicU64::new(0),
             errors: AtomicU64::new(0),
             start: Instant::now(),
         }
@@ -207,12 +221,15 @@ impl Stats {
         let otlp = self.otlp_http.load(Ordering::Relaxed);
         let s_udp = self.syslog_udp.load(Ordering::Relaxed);
         let s_tcp = self.syslog_tcp.load(Ordering::Relaxed);
+        let nf = self.netflow.load(Ordering::Relaxed);
+        let sf = self.sflow.load(Ordering::Relaxed);
         let errs = self.errors.load(Ordering::Relaxed);
-        let total = http + prom + hec + otlp + s_udp + s_tcp;
+        let total = http + prom + hec + otlp + s_udp + s_tcp + nf + sf;
         println!(
             "pgo-driver [{elapsed:>6.1}s] total={total:>8} \
              http={http} prom={prom} hec={hec} otlp={otlp} \
-             syslog_udp={s_udp} syslog_tcp={s_tcp} errors={errs} \
+             syslog_udp={s_udp} syslog_tcp={s_tcp} \
+             netflow={nf} sflow={sf} errors={errs} \
              rate={:.0}/s",
             (total as f64) / elapsed.max(1.0)
         );
@@ -479,6 +496,98 @@ async fn drive_syslog_tcp(cfg: Config, stats: Arc<Stats>, deadline: Instant) {
         }
         let _ = stream.shutdown().await;
     }
+}
+
+async fn drive_netflow_v5(cfg: Config, stats: Arc<Stats>, deadline: Instant) {
+    let sock = match UdpSocket::bind("0.0.0.0:0").await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("netflow_v5 bind: {e}");
+            stats.errors.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+    };
+    let pkt = build_netflow_v5_packet();
+    // Tight loop -- UDP send is sub-ms; sleep ~200us between sends to land
+    // around 5000 pps theoretical but rate-limited by the OS scheduler.
+    while Instant::now() < deadline {
+        match sock.send_to(&pkt, &cfg.netflow_addr).await {
+            Ok(_) => {
+                stats.netflow.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(_) => {
+                stats.errors.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        tokio::time::sleep(Duration::from_micros(200)).await;
+    }
+}
+
+async fn drive_sflow_v5(cfg: Config, stats: Arc<Stats>, deadline: Instant) {
+    let sock = match UdpSocket::bind("0.0.0.0:0").await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("sflow_v5 bind: {e}");
+            stats.errors.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+    };
+    let pkt = build_sflow_v5_packet();
+    while Instant::now() < deadline {
+        match sock.send_to(&pkt, &cfg.sflow_addr).await {
+            Ok(_) => {
+                stats.sflow.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(_) => {
+                stats.errors.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        tokio::time::sleep(Duration::from_micros(200)).await;
+    }
+}
+
+/// Build a valid NetFlow v5 datagram (header + one record). Same layout as
+/// the unit-test fixture in `src/server/netflow/tests/decode_v5.rs`.
+fn build_netflow_v5_packet() -> Vec<u8> {
+    let mut pkt = vec![0u8; 72];
+    pkt[0..2].copy_from_slice(&5u16.to_be_bytes());
+    pkt[2..4].copy_from_slice(&1u16.to_be_bytes());
+    pkt[4..8].copy_from_slice(&1000u32.to_be_bytes());
+    pkt[8..12].copy_from_slice(&1_700_000_000u32.to_be_bytes());
+    pkt[12..16].copy_from_slice(&0u32.to_be_bytes());
+    pkt[16..20].copy_from_slice(&42u32.to_be_bytes());
+    pkt[24..28].copy_from_slice(&[10, 0, 0, 1]);
+    pkt[28..32].copy_from_slice(&[10, 0, 0, 2]);
+    pkt[36..38].copy_from_slice(&7u16.to_be_bytes());
+    pkt[38..40].copy_from_slice(&9u16.to_be_bytes());
+    pkt[40..44].copy_from_slice(&5u32.to_be_bytes());
+    pkt[44..48].copy_from_slice(&1500u32.to_be_bytes());
+    pkt[48..52].copy_from_slice(&500u32.to_be_bytes());
+    pkt[52..56].copy_from_slice(&800u32.to_be_bytes());
+    pkt[56..58].copy_from_slice(&12345u16.to_be_bytes());
+    pkt[58..60].copy_from_slice(&80u16.to_be_bytes());
+    pkt[61] = 0x18;
+    pkt[62] = 6;
+    pkt[64..66].copy_from_slice(&64500u16.to_be_bytes());
+    pkt[66..68].copy_from_slice(&64501u16.to_be_bytes());
+    pkt[68] = 24;
+    pkt[69] = 24;
+    pkt
+}
+
+/// Build a minimal sFlow v5 datagram with zero samples. The PGO target is to
+/// exercise UDP recv + autosense dispatch, not the per-record decode path; a
+/// zero-sample datagram is sufficient and keeps generator cost low.
+fn build_sflow_v5_packet() -> Vec<u8> {
+    let mut pkt = Vec::with_capacity(28);
+    pkt.extend_from_slice(&5u32.to_be_bytes()); // version
+    pkt.extend_from_slice(&1u32.to_be_bytes()); // agent_address_type = IPv4
+    pkt.extend_from_slice(&[10, 0, 0, 1]); // agent ip
+    pkt.extend_from_slice(&0u32.to_be_bytes()); // sub_agent_id
+    pkt.extend_from_slice(&100u32.to_be_bytes()); // sequence
+    pkt.extend_from_slice(&3600u32.to_be_bytes()); // uptime
+    pkt.extend_from_slice(&0u32.to_be_bytes()); // num_samples = 0
+    pkt
 }
 
 // ===========================================================================

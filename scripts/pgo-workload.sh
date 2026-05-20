@@ -238,6 +238,18 @@ fluent:
 gelf:
   enabled: false
 
+# NetFlow / sFlow autosense flow listener.
+# Unprivileged ports -- 2055/4739/6343 don't require root.
+flow:
+  enabled: true
+  experimental: false
+  ports:
+    - "127.0.0.1:2055"
+    - "127.0.0.1:6343"
+  output:
+    mode: "canonical"
+    max_records_per_packet: 1000
+
 kafka:
   brokers:
     - "localhost:19092"
@@ -318,6 +330,8 @@ PGO_DRIVER_HEC_URL="http://127.0.0.1:8088/services/collector/event" \
 PGO_DRIVER_OTLP_HTTP_URL="http://127.0.0.1:4318/v1/logs" \
 PGO_DRIVER_SYSLOG_UDP="127.0.0.1:5514" \
 PGO_DRIVER_SYSLOG_TCP="127.0.0.1:5515" \
+PGO_DRIVER_NETFLOW_ADDR="127.0.0.1:2055" \
+PGO_DRIVER_SFLOW_ADDR="127.0.0.1:6343" \
     "$PGO_DRIVER_PATH"
 
 echo "pgo-workload: driver complete"
