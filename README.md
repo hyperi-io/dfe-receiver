@@ -25,7 +25,7 @@ Syslog, Fluent Forward, GELF, Prometheus Remote Write, Flow [NetFlow + sFlow
 | Fluent Forward | 24224 | Fluentd, Fluent Bit |
 | GELF TCP | 12201 | Graylog GELF output, Fluent Bit |
 | Prometheus Remote Write | 9091 | Prometheus, VictoriaMetrics |
-| Flow (NetFlow + sFlow) -- **EXPERIMENTAL** | 2055 / 4739 / 6343 UDP | NetFlow v5/v9, IPFIX, sFlow v5 exporters |
+| Flow (NetFlow + sFlow) -- **EXPERIMENTAL** | 2055 / 4739 / 6343 UDP | NetFlow v5/v9, IPFIX, sFlow v5 exporters (v7 not supported) |
 
 **Core behaviour:**
 

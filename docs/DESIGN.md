@@ -661,12 +661,21 @@ See `config.example.yaml` for the full `flow:` block.
 
 ### Known limitations (v1)
 
-- NetFlow v7 not supported (rare; netgauze 0.12 limitation)
+- **NetFlow v7 is not supported.** v7 is a Cisco-proprietary variant for
+  early-2000s Catalyst switches with hybrid L2+L3 flow tracking. Never widely
+  adopted; current Cisco gear emits v9 or IPFIX. A v7 packet hitting our
+  listener returns a parse error visible in
+  `dfe_transport_decode_err_total{transport="netflow", reason="parse_err"}`.
+  If a customer ever reports v7 exporters, support can be added reactively
+  (~1 day of hand-rolled wire decode like our v5 implementation).
 - Template-miss errors currently conflated with parse errors in metrics
   (`dfe_transport_decode_err_total{reason="template_miss"}` will be 0)
 - Template cache `max_per_exporter` not yet enforced (netgauze limitation)
 - `t_flow_start`/`t_flow_end` carry relative `sysup:<ms>` strings rather than
   absolute RFC 3339 timestamps (sysUpTime anchor resolution deferred)
+- `recvmmsg(2)` batch syscall deferred. Linux listener uses `AsyncFd::readable`
+  + per-packet `recv_from` drain loop (capped at 256 packets per readiness
+  event). Functionally equivalent below ~100K pps.
 
 ## Completed Milestones
 
