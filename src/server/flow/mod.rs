@@ -2,6 +2,7 @@
 //!
 //! More modules will be added in subsequent tasks.
 
+pub mod config;
 pub mod decoder;
 pub mod dispatch;
 pub mod schema;
