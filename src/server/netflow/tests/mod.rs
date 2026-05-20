@@ -11,3 +11,4 @@ mod decode_nat44;
 mod decode_nsel;
 mod decode_v5;
 mod decode_v9;
+mod template_miss;

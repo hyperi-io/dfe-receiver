@@ -312,6 +312,20 @@ impl FlowDecoder for NetflowDecoder {
         record.fields.record_kind
     }
 
+    /// TODO: template_miss differentiation deferred.
+    ///
+    /// netgauze-flow-pkt 0.12 does not expose a "template not yet received"
+    /// error variant distinct from generic parse errors. Currently this method
+    /// returns true ONLY for our explicit `NetflowError::TemplateMiss` variant,
+    /// which we never produce from the netgauze decode path -- all netgauze
+    /// errors map to `Parse`. The `dfe_transport_decode_err_total{reason=
+    /// "template_miss"}` label will therefore be zero until either:
+    ///   1. netgauze upstream exposes the discriminator, OR
+    ///   2. we add a custom error classifier that inspects netgauze error
+    ///      strings (brittle, defer until needed).
+    ///
+    /// See: docs/superpowers/specs/2026-05-20-netflow-sflow-design.md
+    /// "Known limitations (v1)" section.
     fn is_template_miss(err: &Self::DecodeError) -> bool {
         matches!(err, NetflowError::TemplateMiss { .. })
     }
