@@ -109,7 +109,12 @@ impl FlowHandler {
 
     /// Spawn the unified-mode listeners: one `UdpFlowListener` per port, each
     /// carrying both decoders (gated by `netflow.enabled` / `sflow.enabled`).
-    fn build_unified_listeners(&self, shutdown: CancellationToken) -> Vec<JoinHandle<()>> {
+    /// Returns `(JoinHandles, RateLimiters)` -- the rate limiters are exposed so
+    /// the caller can spawn periodic LRU eviction tasks against them.
+    fn build_unified_listeners(
+        &self,
+        shutdown: CancellationToken,
+    ) -> (Vec<JoinHandle<()>>, Vec<Arc<PerSourceRateLimiter>>) {
         let ip_filter = Arc::new(match &self.cfg.ip_filter {
             Some(f) => IpFilter::from_config(f),
             None => IpFilter::disabled(),
@@ -130,6 +135,7 @@ impl FlowHandler {
                 Some(NetflowDecoder::new(
                     self.cfg.netflow.template_cache.max_per_exporter,
                     self.cfg.netflow.template_cache.max_exporters,
+                    self.metrics.clone(),
                 ))
             } else {
                 None
@@ -157,19 +163,26 @@ impl FlowHandler {
                 }
             }));
         }
-        handles
+        let rls = rate_limiter.into_iter().collect();
+        (handles, rls)
     }
 
     /// Spawn split-mode listeners. NetFlow-only listeners on `split.netflow.ports`
     /// and sFlow-only listeners on `split.sflow.ports`. Each sub-config has its
-    /// own ip_filter + rate_limit instance.
-    fn build_split_listeners(&self, shutdown: CancellationToken) -> Vec<JoinHandle<()>> {
+    /// own ip_filter + rate_limit instance. Returns `(JoinHandles, RateLimiters)`
+    /// -- the rate limiters are exposed so the caller can spawn periodic LRU
+    /// eviction tasks against them.
+    fn build_split_listeners(
+        &self,
+        shutdown: CancellationToken,
+    ) -> (Vec<JoinHandle<()>>, Vec<Arc<PerSourceRateLimiter>>) {
         let split = match self.cfg.split.as_ref() {
             Some(s) => s,
-            None => return Vec::new(),
+            None => return (Vec::new(), Vec::new()),
         };
 
         let mut handles = Vec::new();
+        let mut rate_limiters: Vec<Arc<PerSourceRateLimiter>> = Vec::new();
 
         // NetFlow side
         if split.netflow.enabled {
@@ -184,6 +197,9 @@ impl FlowHandler {
             } else {
                 None
             };
+            if let Some(rl) = &rate_limiter {
+                rate_limiters.push(rl.clone());
+            }
             for port in &split.netflow.ports {
                 let bind_addr = SocketAddr::new(split.netflow.bind_address, *port);
                 let listener = UdpFlowListener::new(
@@ -191,6 +207,7 @@ impl FlowHandler {
                     Some(NetflowDecoder::new(
                         split.netflow.template_cache.max_per_exporter,
                         split.netflow.template_cache.max_exporters,
+                        self.metrics.clone(),
                     )),
                     None,
                     split.netflow.clone(),
@@ -221,6 +238,9 @@ impl FlowHandler {
             } else {
                 None
             };
+            if let Some(rl) = &rate_limiter {
+                rate_limiters.push(rl.clone());
+            }
             for port in &split.sflow.ports {
                 let bind_addr = SocketAddr::new(split.sflow.bind_address, *port);
                 let listener = UdpFlowListener::new(
@@ -242,7 +262,7 @@ impl FlowHandler {
             }
         }
 
-        handles
+        (handles, rate_limiters)
     }
 }
 
@@ -296,7 +316,7 @@ impl ProtocolHandler for FlowHandler {
                 .set(&[("handler", "flow")], 1.0);
         }
 
-        let handles = if self.cfg.split.is_some() {
+        let (handles, rate_limiters) = if self.cfg.split.is_some() {
             self.build_split_listeners(shutdown.clone())
         } else {
             self.build_unified_listeners(shutdown.clone())
@@ -310,10 +330,32 @@ impl ProtocolHandler for FlowHandler {
             kernel_drops::poll_kernel_drops(ports, kd_metrics, kd_shutdown).await;
         });
 
+        // Spawn periodic LRU eviction for each constructed rate limiter so the
+        // per-source DashMap can't grow unbounded under spoofed-source-IP
+        // attacks. One task per limiter (unified mode has at most one; split
+        // mode has up to two -- netflow and sflow).
+        let mut evict_handles: Vec<JoinHandle<()>> = Vec::with_capacity(rate_limiters.len());
+        for rl in rate_limiters {
+            let token = shutdown.clone();
+            evict_handles.push(tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = token.cancelled() => return,
+                        _ = tick.tick() => rl.evict_lru(),
+                    }
+                }
+            }));
+        }
+
         // Await shutdown -- the listeners exit themselves on the same token.
         shutdown.cancelled().await;
 
         for h in handles {
+            let _ = h.await;
+        }
+        for h in evict_handles {
             let _ = h.await;
         }
         let _ = kd_handle.await;
