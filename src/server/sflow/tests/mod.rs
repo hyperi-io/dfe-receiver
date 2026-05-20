@@ -8,4 +8,5 @@
 
 mod decode_counter;
 mod decode_flow;
+mod proptest;
 mod sampled_ip_walker;

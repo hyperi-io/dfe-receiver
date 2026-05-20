@@ -13,4 +13,7 @@ pub mod metrics;
 pub mod rate_limit;
 pub mod schema;
 
+#[cfg(test)]
+pub mod proptest_inputs;
+
 pub use handler::FlowHandler;
