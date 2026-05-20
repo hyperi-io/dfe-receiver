@@ -2373,6 +2373,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cd184acca92fd9d167a27118dde3403ab2569cdbba9d18f695563106c9cf2981"
 dependencies = [
  "byteorder",
+ "bytes",
  "chrono",
  "either",
  "netgauze-iana",
@@ -2385,6 +2386,8 @@ dependencies = [
  "serde",
  "strum",
  "strum_macros",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]

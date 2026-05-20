@@ -19,6 +19,7 @@ pub mod grpc;
 pub mod http;
 pub mod ip_filter;
 pub mod lumberjack;
+pub mod netflow;
 #[cfg(feature = "otlp")]
 pub mod otlp;
 pub mod prometheus_rw;

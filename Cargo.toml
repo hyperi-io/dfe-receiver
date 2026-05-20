@@ -125,7 +125,7 @@ uuid = { version = "1", features = ["v4"] }
 async-trait = "0.1"
 
 # Flow handlers (NetFlow, sFlow, IPFIX parsing)
-netgauze-flow-pkt = { version = ">=0.12, <0.13", features = ["serde"] }
+netgauze-flow-pkt = { version = ">=0.12, <0.13", features = ["serde", "codec"] }
 nom = ">=8.0, <9"
 socket2 = ">=0.6.3, <0.7"
 dashmap = ">=6.1, <7"
