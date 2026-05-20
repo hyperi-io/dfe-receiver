@@ -6,8 +6,11 @@ pub mod config;
 pub mod decoder;
 pub mod dispatch;
 pub mod envelope;
+pub mod handler;
 pub mod kernel_drops;
 pub mod listener;
 pub mod metrics;
 pub mod rate_limit;
 pub mod schema;
+
+pub use handler::FlowHandler;
