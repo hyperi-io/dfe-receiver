@@ -6,4 +6,5 @@ pub mod config;
 pub mod decoder;
 pub mod dispatch;
 pub mod metrics;
+pub mod rate_limit;
 pub mod schema;
