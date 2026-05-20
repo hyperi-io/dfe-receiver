@@ -23,6 +23,7 @@
 
 use crate::server::flow::decoder::{DecodedPacket, FlowDecoder};
 use crate::server::flow::dispatch::ProtocolKind;
+use crate::server::flow::metrics::FlowMetrics;
 use crate::server::flow::schema::CanonicalRecord;
 use bytes::BytesMut;
 use netgauze_flow_pkt::codec::{FlowInfoCodec, FlowInfoCodecDecoderError};
@@ -200,18 +201,29 @@ impl ExporterState {
 
 pub struct NetflowDecoder {
     state: HashMap<IpAddr, ExporterState>,
-    /// Maximum templates per exporter (enforced indirectly: netgauze's template
-    /// map grows unbounded, so this is recorded here for a follow-up cap pass).
+    // TODO: template_cache.max_per_exporter not yet enforced.
+    //
+    // netgauze-flow-pkt 0.12's `TemplatesMap` is internal and doesn't expose a
+    // per-exporter prune API. Enforcing this cap requires either upstream
+    // netgauze support or a custom wrapper that intercepts template additions
+    // and tracks counts per exporter scope.
+    //
+    // Currently the bound on `max_exporters` (whole exporters evicted via LRU)
+    // is the only template-related backstop. Spec:
+    // docs/superpowers/specs/2026-05-20-netflow-sflow-design.md
+    // "Known limitations (v1)".
     _max_per_exporter: usize,
     max_exporters: usize,
+    metrics: FlowMetrics,
 }
 
 impl NetflowDecoder {
-    pub fn new(max_per_exporter: usize, max_exporters: usize) -> Self {
+    pub fn new(max_per_exporter: usize, max_exporters: usize, metrics: FlowMetrics) -> Self {
         Self {
             state: HashMap::new(),
             _max_per_exporter: max_per_exporter,
             max_exporters,
+            metrics,
         }
     }
 
@@ -223,8 +235,19 @@ impl NetflowDecoder {
             && let Some(evict) = self.state.keys().next().copied()
         {
             self.state.remove(&evict);
+            self.metrics.template_evicted_total.inc();
         }
-        self.state.entry(source).or_insert_with(ExporterState::new)
+        // Update the size gauge after any insert/evict. Capture the length
+        // through a single mutable borrow window so the gauge call doesn't
+        // conflict with the `entry().or_insert_with()` borrow we return.
+        let _ = self.state.entry(source).or_insert_with(ExporterState::new);
+        let len = self.state.len();
+        self.metrics
+            .template_cache_size
+            .set(&[("transport", "netflow")], len as f64);
+        self.state
+            .get_mut(&source)
+            .expect("slot just inserted above")
     }
 }
 
@@ -300,8 +323,10 @@ impl FlowDecoder for NetflowDecoder {
             Some(IpAddr::V6(_)) => Some(6),
             None => None,
         });
-        let json = serde_json::to_vec(&c).map_err(io::Error::other)?;
-        buf.write_all(&json)
+        // Hot path: render directly into the reusable buffer via sonic-rs's
+        // SIMD writer. Avoids the per-record allocation that
+        // `serde_json::to_vec(&c)` introduces.
+        sonic_rs::to_writer(&mut *buf, &c).map_err(io::Error::other)
     }
 
     fn render_raw(record: &Self::Record, buf: &mut Vec<u8>) -> io::Result<()> {

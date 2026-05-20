@@ -264,7 +264,12 @@ async fn netflow_v5_end_to_end_to_kafka() {
         text.contains("\"version\":\"netflow_v5\""),
         "envelope missing version=netflow_v5: {text}"
     );
-    // Canonical mode embeds records under "records" array with src_ip / dst_ip.
+    // Canonical mode embeds records under a "flows" array. We assert on
+    // record fields populated by the v5 decoder (src_ip / dst_ip).
+    assert!(
+        text.contains("\"flows\":["),
+        "envelope missing flows array: {text}"
+    );
     assert!(
         text.contains("\"src_ip\":\"10.0.0.1\""),
         "expected src_ip 10.0.0.1 in envelope: {text}"
@@ -277,6 +282,262 @@ async fn netflow_v5_end_to_end_to_kafka() {
     // ------------------------------------------------------------------
     // 6. Shutdown.
     // ------------------------------------------------------------------
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), handler_task).await;
+}
+
+// ---------------------------------------------------------------------------
+// NetFlow v9 + NSEL hand-crafted packet builders. Mirror the unit-test
+// builders in `src/server/netflow/tests/` so the e2e test exercises the same
+// codec path. v9 requires two datagrams (template first, data second) with
+// the SAME exporter IP so the decoder's per-exporter codec sees both.
+// ---------------------------------------------------------------------------
+
+use bytes::BytesMut;
+use chrono::{TimeZone, Utc};
+use netgauze_flow_pkt::codec::FlowInfoCodec;
+use netgauze_flow_pkt::netflow::{DataRecord, NetFlowV9Packet, Set as NfSet, TemplateRecord};
+use netgauze_flow_pkt::{DataSetId, FieldSpecifier, FlowInfo, ie};
+use std::net::Ipv4Addr;
+use tokio_util::codec::{Decoder, Encoder};
+
+const V9_TEMPLATE_ID: u16 = 308;
+const NSEL_TEMPLATE_ID: u16 = 501;
+
+/// Build (template, data) v9 datagrams for a simple 5-field flow. Mirrors
+/// `src/server/netflow/tests/decode_v9.rs::build_v9_template_and_data`.
+fn build_v9_template_and_data() -> (Vec<u8>, Vec<u8>) {
+    let template = NetFlowV9Packet::new(
+        45_646,
+        Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+        3812,
+        0,
+        Box::new([NfSet::Template(Box::new([TemplateRecord::new(
+            V9_TEMPLATE_ID,
+            Box::new([
+                FieldSpecifier::new(ie::IE::sourceIPv4Address, 4).unwrap(),
+                FieldSpecifier::new(ie::IE::destinationIPv4Address, 4).unwrap(),
+                FieldSpecifier::new(ie::IE::protocolIdentifier, 1).unwrap(),
+                FieldSpecifier::new(ie::IE::octetDeltaCount, 4).unwrap(),
+                FieldSpecifier::new(ie::IE::packetDeltaCount, 4).unwrap(),
+            ]),
+        )]))]),
+    );
+    let data = NetFlowV9Packet::new(
+        45_647,
+        Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 1).unwrap(),
+        3812,
+        0,
+        Box::new([NfSet::Data {
+            id: DataSetId::new(V9_TEMPLATE_ID).unwrap(),
+            records: Box::new([DataRecord::new(
+                Box::new([]),
+                Box::new([
+                    ie::Field::sourceIPv4Address(Ipv4Addr::new(172, 16, 0, 1)),
+                    ie::Field::destinationIPv4Address(Ipv4Addr::new(172, 16, 0, 2)),
+                    ie::Field::protocolIdentifier(ie::protocolIdentifier::TCP),
+                    ie::Field::octetDeltaCount(4096),
+                    ie::Field::packetDeltaCount(8),
+                ]),
+            )]),
+        }]),
+    );
+    encode_pair(template, data)
+}
+
+/// Build (template, data) v9 datagrams that exercise the NSEL discriminator:
+/// the template includes `firewallEvent` (IE 233); the data carries
+/// event_type=3 (Flow Denied).
+fn build_nsel_template_and_data() -> (Vec<u8>, Vec<u8>) {
+    let template = NetFlowV9Packet::new(
+        12_345,
+        Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+        100,
+        7,
+        Box::new([NfSet::Template(Box::new([TemplateRecord::new(
+            NSEL_TEMPLATE_ID,
+            Box::new([
+                FieldSpecifier::new(ie::IE::sourceIPv4Address, 4).unwrap(),
+                FieldSpecifier::new(ie::IE::destinationIPv4Address, 4).unwrap(),
+                FieldSpecifier::new(ie::IE::protocolIdentifier, 1).unwrap(),
+                FieldSpecifier::new(ie::IE::firewallEvent, 1).unwrap(),
+            ]),
+        )]))]),
+    );
+    let data = NetFlowV9Packet::new(
+        12_346,
+        Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 1).unwrap(),
+        101,
+        7,
+        Box::new([NfSet::Data {
+            id: DataSetId::new(NSEL_TEMPLATE_ID).unwrap(),
+            records: Box::new([DataRecord::new(
+                Box::new([]),
+                Box::new([
+                    ie::Field::sourceIPv4Address(Ipv4Addr::new(10, 1, 1, 1)),
+                    ie::Field::destinationIPv4Address(Ipv4Addr::new(8, 8, 8, 8)),
+                    ie::Field::protocolIdentifier(ie::protocolIdentifier::UDP),
+                    ie::Field::firewallEvent(ie::firewallEvent::FlowDenied),
+                ]),
+            )]),
+        }]),
+    );
+    encode_pair(template, data)
+}
+
+/// Helper: encode (template, data) using a shared `FlowInfoCodec` so the
+/// encoder's internal templates_map sees the template definition before the
+/// data packet is encoded against it.
+fn encode_pair(template: NetFlowV9Packet, data: NetFlowV9Packet) -> (Vec<u8>, Vec<u8>) {
+    let mut codec = FlowInfoCodec::new();
+    let mut tpl_buf = BytesMut::new();
+    codec
+        .encode(FlowInfo::NetFlowV9(template), &mut tpl_buf)
+        .expect("encode template");
+    // Decode the template through the same codec so the encoder side knows the
+    // per-field lengths when it later encodes the data packet.
+    let mut decode_buf = BytesMut::from(&tpl_buf[..]);
+    let _ = codec
+        .decode(&mut decode_buf)
+        .expect("template decode populates codec map");
+    let mut data_buf = BytesMut::new();
+    codec
+        .encode(FlowInfo::NetFlowV9(data), &mut data_buf)
+        .expect("encode data");
+    (tpl_buf.to_vec(), data_buf.to_vec())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn netflow_v9_end_to_end_to_kafka() {
+    let Some((_kafka_handle, kf)) = kafka_backend().await else {
+        eprintln!("Skipping: no Kafka backend available");
+        return;
+    };
+    let topic_suffix = "_land";
+    let topic = format!("netflow{topic_suffix}");
+    let consumer = kafka_consumer(&kf, &topic).expect("kafka consumer setup");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let flow_port = random_udp_port();
+    let config = flow_kafka_config(&kf, flow_port, topic_suffix);
+
+    let shutdown = CancellationToken::new();
+    let pipeline = Arc::new(
+        PipelineState::new(SharedConfig::new(config.clone()), CancellationToken::new())
+            .await
+            .expect("pipeline init"),
+    );
+    let handler = FlowHandler::new(config.flow.clone(), noop_flow_metrics(), pipeline)
+        .expect("flow handler new");
+    let handler_shutdown = shutdown.clone();
+    let handler_task = tokio::spawn(async move {
+        let _ = handler.start(handler_shutdown).await;
+    });
+    wait_after_bind(flow_port).await;
+
+    // Send template first, then data record. Both from the same client socket
+    // so the source IP (127.0.0.1) is identical -- the decoder's per-exporter
+    // template cache keys on source IP.
+    let sock = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind client UDP");
+    let target = SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)), flow_port);
+    let (tpl, data) = build_v9_template_and_data();
+    sock.send_to(&tpl, target).await.expect("udp send template");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Burst the data packet in case of rare loopback loss.
+    for _ in 0..3 {
+        sock.send_to(&data, target).await.expect("udp send data");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let received = kafka_consume_next(&consumer, Duration::from_secs(30))
+        .await
+        .expect("no netflow v9 envelope arrived");
+    let text = String::from_utf8_lossy(&received);
+    assert!(
+        text.contains("\"_source\":\"netflow\""),
+        "envelope missing _source=netflow: {text}"
+    );
+    assert!(
+        text.contains("\"version\":\"netflow_v9\""),
+        "envelope missing version=netflow_v9: {text}"
+    );
+    assert!(
+        text.contains("\"flows\":["),
+        "envelope missing flows array: {text}"
+    );
+    assert!(
+        text.contains("\"src_ip\":\"172.16.0.1\""),
+        "expected src_ip 172.16.0.1: {text}"
+    );
+    assert!(
+        text.contains("\"dst_ip\":\"172.16.0.2\""),
+        "expected dst_ip 172.16.0.2: {text}"
+    );
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_secs(5), handler_task).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn netflow_nsel_end_to_end_to_kafka() {
+    let Some((_kafka_handle, kf)) = kafka_backend().await else {
+        eprintln!("Skipping: no Kafka backend available");
+        return;
+    };
+    let topic_suffix = "_land";
+    let topic = format!("netflow{topic_suffix}");
+    let consumer = kafka_consumer(&kf, &topic).expect("kafka consumer setup");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let flow_port = random_udp_port();
+    let config = flow_kafka_config(&kf, flow_port, topic_suffix);
+
+    let shutdown = CancellationToken::new();
+    let pipeline = Arc::new(
+        PipelineState::new(SharedConfig::new(config.clone()), CancellationToken::new())
+            .await
+            .expect("pipeline init"),
+    );
+    let handler = FlowHandler::new(config.flow.clone(), noop_flow_metrics(), pipeline)
+        .expect("flow handler new");
+    let handler_shutdown = shutdown.clone();
+    let handler_task = tokio::spawn(async move {
+        let _ = handler.start(handler_shutdown).await;
+    });
+    wait_after_bind(flow_port).await;
+
+    let sock = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind client UDP");
+    let target = SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)), flow_port);
+    let (tpl, data) = build_nsel_template_and_data();
+    sock.send_to(&tpl, target).await.expect("udp send template");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..3 {
+        sock.send_to(&data, target).await.expect("udp send data");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    let received = kafka_consume_next(&consumer, Duration::from_secs(30))
+        .await
+        .expect("no NSEL envelope arrived");
+    let text = String::from_utf8_lossy(&received);
+    assert!(
+        text.contains("\"_source\":\"netflow\""),
+        "envelope missing _source=netflow: {text}"
+    );
+    assert!(
+        text.contains("\"record_kind\":\"security_event\""),
+        "expected record_kind=security_event: {text}"
+    );
+    // firewallEvent::FlowDenied = 3.
+    assert!(
+        text.contains("\"event_type\":3"),
+        "expected event_type=3 (FlowDenied): {text}"
+    );
+
     shutdown.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(5), handler_task).await;
 }

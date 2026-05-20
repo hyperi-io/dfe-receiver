@@ -89,7 +89,7 @@ fn build_ipfix_template_and_data() -> (Vec<u8>, Vec<u8>) {
 #[test]
 fn decodes_ipfix_handcrafted_template_then_data() {
     let (tpl, data) = build_ipfix_template_and_data();
-    let mut dec = NetflowDecoder::new(1000, 10_000);
+    let mut dec = NetflowDecoder::new(1000, 10_000, crate::server::flow::metrics::mock::flow_metrics_for_test());
     let exporter: IpAddr = "198.51.100.5".parse().unwrap();
 
     let tpl_decoded = dec
@@ -109,7 +109,7 @@ fn decodes_ipfix_handcrafted_template_then_data() {
 #[test]
 fn ipfix_canonical_render_carries_full_5tuple_and_counters() {
     let (tpl, data) = build_ipfix_template_and_data();
-    let mut dec = NetflowDecoder::new(1000, 10_000);
+    let mut dec = NetflowDecoder::new(1000, 10_000, crate::server::flow::metrics::mock::flow_metrics_for_test());
     let exporter: IpAddr = "198.51.100.5".parse().unwrap();
     dec.decode(&tpl, exporter, ProtocolKind::Ipfix)
         .expect("template");

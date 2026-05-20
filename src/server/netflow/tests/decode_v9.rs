@@ -91,7 +91,7 @@ fn build_v9_template_and_data() -> (Vec<u8>, Vec<u8>) {
 #[test]
 fn decodes_v9_handcrafted_template_then_data() {
     let (tpl, data) = build_v9_template_and_data();
-    let mut dec = NetflowDecoder::new(1000, 10_000);
+    let mut dec = NetflowDecoder::new(1000, 10_000, crate::server::flow::metrics::mock::flow_metrics_for_test());
     let exporter: IpAddr = "192.0.2.10".parse().unwrap();
 
     // First packet primes the template cache; it contains no flow records.
@@ -112,7 +112,7 @@ fn decodes_v9_handcrafted_template_then_data() {
 #[test]
 fn v9_canonical_render_carries_core_flow_fields() {
     let (tpl, data) = build_v9_template_and_data();
-    let mut dec = NetflowDecoder::new(1000, 10_000);
+    let mut dec = NetflowDecoder::new(1000, 10_000, crate::server::flow::metrics::mock::flow_metrics_for_test());
     let exporter: IpAddr = "192.0.2.10".parse().unwrap();
     dec.decode(&tpl, exporter, ProtocolKind::NetflowV9)
         .expect("template decode");
@@ -137,7 +137,7 @@ fn v9_canonical_render_carries_core_flow_fields() {
 #[test]
 fn v9_record_kind_defaults_to_flow() {
     let (tpl, data) = build_v9_template_and_data();
-    let mut dec = NetflowDecoder::new(1000, 10_000);
+    let mut dec = NetflowDecoder::new(1000, 10_000, crate::server::flow::metrics::mock::flow_metrics_for_test());
     let exporter: IpAddr = "192.0.2.10".parse().unwrap();
     dec.decode(&tpl, exporter, ProtocolKind::NetflowV9)
         .expect("template decode");

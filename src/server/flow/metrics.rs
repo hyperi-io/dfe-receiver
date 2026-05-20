@@ -206,7 +206,9 @@ fn describe_flow_metrics() {
     );
 }
 
-#[cfg(test)]
+// Mock metrics adapters. Available to unit tests (`cfg(test)`) and to benches
+// + integration tests that pull in the crate normally -- they need a working
+// `FlowMetrics` value without spinning up a real `MetricsManager`.
 pub mod mock {
     //! Mock implementations of the metric traits. Used by listener / envelope
     //! tests so they don't need a real MetricsManager wired up.

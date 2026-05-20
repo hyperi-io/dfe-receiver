@@ -24,21 +24,21 @@ proptest! {
 
     #[test]
     fn netflow_decoder_v5_never_panics(input in random_netflow_versioned()) {
-        let mut d = NetflowDecoder::new(100, 100);
+        let mut d = NetflowDecoder::new(100, 100, crate::server::flow::metrics::mock::flow_metrics_for_test());
         let exporter: IpAddr = "127.0.0.1".parse().expect("ipv4 literal");
         let _ = d.decode(&input, exporter, ProtocolKind::NetflowV5);
     }
 
     #[test]
     fn netflow_decoder_v9_never_panics(input in random_netflow_versioned()) {
-        let mut d = NetflowDecoder::new(100, 100);
+        let mut d = NetflowDecoder::new(100, 100, crate::server::flow::metrics::mock::flow_metrics_for_test());
         let exporter: IpAddr = "127.0.0.1".parse().expect("ipv4 literal");
         let _ = d.decode(&input, exporter, ProtocolKind::NetflowV9);
     }
 
     #[test]
     fn netflow_decoder_ipfix_never_panics(input in random_netflow_versioned()) {
-        let mut d = NetflowDecoder::new(100, 100);
+        let mut d = NetflowDecoder::new(100, 100, crate::server::flow::metrics::mock::flow_metrics_for_test());
         let exporter: IpAddr = "127.0.0.1".parse().expect("ipv4 literal");
         let _ = d.decode(&input, exporter, ProtocolKind::Ipfix);
     }

@@ -215,8 +215,8 @@ impl FlowDecoder for SflowDecoder {
                     c.ip_version = h.ip_version;
                     c.tcp_flags = h.tcp_flags;
                 }
-                let json = serde_json::to_vec(&c).map_err(io::Error::other)?;
-                buf.write_all(&json)
+                // Hot path: SIMD writer straight into the reusable buffer.
+                sonic_rs::to_writer(&mut *buf, &c).map_err(io::Error::other)
             }
             SflowRecord::Counter { generic, .. } => {
                 let mut c = CanonicalCounterRecord::empty();
@@ -232,8 +232,8 @@ impl FlowDecoder for SflowDecoder {
                     c.if_out_errors = Some(g.if_out_errors);
                     c.if_out_discards = Some(g.if_out_discards);
                 }
-                let json = serde_json::to_vec(&c).map_err(io::Error::other)?;
-                buf.write_all(&json)
+                // Hot path: SIMD writer straight into the reusable buffer.
+                sonic_rs::to_writer(&mut *buf, &c).map_err(io::Error::other)
             }
         }
     }

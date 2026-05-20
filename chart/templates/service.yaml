@@ -43,5 +43,19 @@ spec:
       name: flow-{{ . }}
     {{- end }}
     {{- end }}
+    {{- if .Values.config.flow.split }}
+    {{- range .Values.config.flow.split.netflow.ports }}
+    - port: {{ . }}
+      targetPort: {{ . }}
+      protocol: UDP
+      name: flow-netflow-{{ . }}
+    {{- end }}
+    {{- range .Values.config.flow.split.sflow.ports }}
+    - port: {{ . }}
+      targetPort: {{ . }}
+      protocol: UDP
+      name: flow-sflow-{{ . }}
+    {{- end }}
+    {{- end }}
   selector:
     {{- include "dfe-receiver.selectorLabels" . | nindent 4 }}

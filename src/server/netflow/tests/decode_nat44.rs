@@ -91,7 +91,7 @@ fn build_nat44_template_and_data() -> (Vec<u8>, Vec<u8>) {
 #[test]
 fn nat_event_ie_flips_record_kind_to_nat_translation() {
     let (tpl, data) = build_nat44_template_and_data();
-    let mut dec = NetflowDecoder::new(1000, 10_000);
+    let mut dec = NetflowDecoder::new(1000, 10_000, crate::server::flow::metrics::mock::flow_metrics_for_test());
     let exporter: IpAddr = "198.51.100.99".parse().unwrap();
     dec.decode(&tpl, exporter, ProtocolKind::Ipfix)
         .expect("template decode");

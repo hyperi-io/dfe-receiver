@@ -65,6 +65,18 @@ spec:
               protocol: UDP
           {{- end }}
           {{- end }}
+          {{- if .Values.config.flow.split }}
+          {{- range .Values.config.flow.split.netflow.ports }}
+            - name: flow-nf-{{ . }}
+              containerPort: {{ . }}
+              protocol: UDP
+          {{- end }}
+          {{- range .Values.config.flow.split.sflow.ports }}
+            - name: flow-sf-{{ . }}
+              containerPort: {{ . }}
+              protocol: UDP
+          {{- end }}
+          {{- end }}
           env:
             # kafka credentials via Secret (figment env cascade overrides file config)
             - name: DFE_RECEIVER__KAFKA__SASL__USERNAME
