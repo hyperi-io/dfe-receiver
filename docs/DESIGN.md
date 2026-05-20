@@ -620,6 +620,54 @@ groups:
           summary: "Request timeout spike - possible slow loris attempt"
 ```
 
+## Flow (NetFlow + sFlow) -- EXPERIMENTAL
+
+Native UDP ingestion for NetFlow v5/v9, IPFIX, and sFlow v5 with autosense
+dispatch and configurable output modes.
+
+**Status:** EXPERIMENTAL when first enabled. Handler emits a startup `WARN`
+log and sets `dfe_handler_experimental{handler="flow"} 1`. Set
+`flow.experimental: false` once stability is proven.
+
+### Ports
+
+| Port | Convention | Accepts |
+|---|---|---|
+| 2055/udp | NetFlow historic | v5/v9/IPFIX/sFlow (autosense) |
+| 4739/udp | IPFIX IANA | v5/v9/IPFIX/sFlow (autosense) |
+| 6343/udp | sFlow IANA | v5/v9/IPFIX/sFlow (autosense) |
+
+### Output modes
+
+- `canonical` (default) -- one JSON envelope per UDP datagram with `flows: [...]` array
+- `canonical_with_raw` -- canonical + verbatim parser output in `raw: [...]`
+- `exploded` -- one JSON envelope per flow record (amplifies events; use for per-flow analytics)
+
+### Record kinds
+
+- `flow` -- standard NetFlow / sFlow record
+- `counter` -- sFlow counter sample (interface statistics)
+- `security_event` -- NSEL firewall event (Cisco ASA firewallEvent / NF_F_FW_EVENT)
+- `nat_translation` -- CGNAT NAT44 translation event (natEvent IE)
+
+### Modes
+
+- **Unified** (default): one listener per port accepts all flow protocols
+- **Split**: opt-in via `flow.split:` -- separate NetFlow-only and sFlow-only listeners
+
+### Configuration
+
+See `config.example.yaml` for the full `flow:` block.
+
+### Known limitations (v1)
+
+- NetFlow v7 not supported (rare; netgauze 0.12 limitation)
+- Template-miss errors currently conflated with parse errors in metrics
+  (`dfe_transport_decode_err_total{reason="template_miss"}` will be 0)
+- Template cache `max_per_exporter` not yet enforced (netgauze limitation)
+- `t_flow_start`/`t_flow_end` carry relative `sysup:<ms>` strings rather than
+  absolute RFC 3339 timestamps (sysUpTime anchor resolution deferred)
+
 ## Completed Milestones
 
 - [x] gRPC Vector sink protocol
@@ -628,6 +676,7 @@ groups:
 - [x] Source-rule-based routing (key_present, key_value_set, key_value_use)
 - [x] `_timestamp_receiver` enrichment
 - [x] 9-protocol multi-protocol ingestion (HTTP, gRPC, OTLP, Lumberjack, Splunk HEC, Syslog, Fluent, GELF, Prometheus RW)
+- [x] Flow handler (NetFlow v5/v9/IPFIX + sFlow v5 + NSEL + NAT44, autosense UDP, EXPERIMENTAL)
 
 ## References
 

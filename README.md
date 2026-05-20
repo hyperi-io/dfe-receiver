@@ -7,6 +7,10 @@ High-performance HTTP/gRPC receiver for PB/s scale data ingestion.
 dfe-receiver is a native Rust data ingestion service that accepts data from multiple
 agent protocols, normalises it to JSON, and routes it to Kafka topics or dfe-loader.
 
+**10 protocol handlers** (HTTP, gRPC, OTLP, Lumberjack/Beats, Splunk HEC,
+Syslog, Fluent Forward, GELF, Prometheus Remote Write, Flow [NetFlow + sFlow
+-- **EXPERIMENTAL**]).
+
 **Supported protocols:**
 
 | Protocol | Port | Source |
@@ -21,6 +25,7 @@ agent protocols, normalises it to JSON, and routes it to Kafka topics or dfe-loa
 | Fluent Forward | 24224 | Fluentd, Fluent Bit |
 | GELF TCP | 12201 | Graylog GELF output, Fluent Bit |
 | Prometheus Remote Write | 9091 | Prometheus, VictoriaMetrics |
+| Flow (NetFlow + sFlow) -- **EXPERIMENTAL** | 2055 / 4739 / 6343 UDP | NetFlow v5/v9, IPFIX, sFlow v5 exporters |
 
 **Core behaviour:**
 
@@ -215,6 +220,8 @@ All protocols share the same core pipeline after normalisation:
 │  Fluent Forward   →  msgpack → JSON                 │
 │  GELF TCP         →  GELF JSON → normalised JSON    │
 │  Prometheus RW    →  protobuf timeseries → JSON     │
+│  Flow (NetFlow,   →  UDP autosense → JSON envelopes │
+│   sFlow, IPFIX)      (EXPERIMENTAL)                 │
 └───────────────────────┬─────────────────────────────┘
                         │ bytes::Bytes (normalised JSON)
                         ▼
