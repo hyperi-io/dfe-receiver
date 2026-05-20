@@ -23,6 +23,7 @@ pub mod netflow;
 #[cfg(feature = "otlp")]
 pub mod otlp;
 pub mod prometheus_rw;
+pub mod sflow;
 pub mod splunk_hec;
 pub mod syslog;
 pub mod tls;
