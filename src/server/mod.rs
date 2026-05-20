@@ -12,6 +12,7 @@
 //! All enabled handlers are spawned in parallel and monitored for health.
 
 pub mod auth;
+pub mod flow;
 pub mod fluent;
 pub mod gelf;
 pub mod grpc;
