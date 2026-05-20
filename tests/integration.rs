@@ -15,6 +15,10 @@
 #[allow(dead_code)]
 mod common;
 
+#[path = "integration/flow_netflow_e2e.rs"]
+mod flow_netflow_e2e;
+#[path = "integration/flow_sflow_e2e.rs"]
+mod flow_sflow_e2e;
 #[path = "integration/fluent.rs"]
 mod fluent;
 #[path = "integration/gelf.rs"]
