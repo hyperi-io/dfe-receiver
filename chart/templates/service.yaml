@@ -35,5 +35,13 @@ spec:
       targetPort: 8088
       protocol: TCP
       name: hec
+    {{- if .Values.config.flow.enabled }}
+    {{- range .Values.config.flow.ports }}
+    - port: {{ . }}
+      targetPort: {{ . }}
+      protocol: UDP
+      name: flow-{{ . }}
+    {{- end }}
+    {{- end }}
   selector:
     {{- include "dfe-receiver.selectorLabels" . | nindent 4 }}

@@ -58,24 +58,31 @@ spec:
             - name: hec
               containerPort: 8088
               protocol: TCP
+          {{- if .Values.config.flow.enabled }}
+          {{- range .Values.config.flow.ports }}
+            - name: flow-{{ . }}
+              containerPort: {{ . }}
+              protocol: UDP
+          {{- end }}
+          {{- end }}
           env:
             # kafka credentials via Secret (figment env cascade overrides file config)
             - name: DFE_RECEIVER__KAFKA__SASL__USERNAME
               valueFrom:
                 secretKeyRef:
                   name: {{ include "dfe-receiver.kafkaSecretName" . }}
-                  key: {{ .Values.kafka.secretKeys.username }}
+                  key: {{ .Values.kafka.secretKeys | index "username" }}
             - name: DFE_RECEIVER__KAFKA__SASL__PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ include "dfe-receiver.kafkaSecretName" . }}
-                  key: {{ .Values.kafka.secretKeys.password }}
+                  key: {{ .Values.kafka.secretKeys | index "password" }}
             # auth credentials via Secret (figment env cascade overrides file config)
             - name: DFE_RECEIVER__SERVER__AUTH__BEARER__TOKENS
               valueFrom:
                 secretKeyRef:
                   name: {{ include "dfe-receiver.authSecretName" . }}
-                  key: {{ .Values.auth.secretKeys.bearer-tokens }}
+                  key: {{ .Values.auth.secretKeys | index "bearer-tokens" }}
           livenessProbe:
             httpGet:
               path: /health/live

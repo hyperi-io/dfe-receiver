@@ -116,6 +116,21 @@ pub fn contract() -> DeploymentContract {
                 port: 12201,
                 protocol: "TCP".into(),
             },
+            PortContract {
+                name: "netflow".into(),
+                port: 2055,
+                protocol: "UDP".into(),
+            },
+            PortContract {
+                name: "netflow-ipfix".into(),
+                port: 4739,
+                protocol: "UDP".into(),
+            },
+            PortContract {
+                name: "sflow".into(),
+                port: 6343,
+                protocol: "UDP".into(),
+            },
         ],
         entrypoint_args: vec!["--config".into(), "/etc/dfe-receiver/config.yaml".into()],
         secrets: vec![
@@ -186,6 +201,36 @@ pub fn contract() -> DeploymentContract {
                 "enabled": false,
                 "bind_address": "0.0.0.0:12201"
             },
+            "flow": {
+                "enabled": false,
+                "experimental": true,
+                "bind_address": "0.0.0.0",
+                "ports": [2055, 4739, 6343],
+                "output": {
+                    "mode": "canonical",
+                    "max_records_per_packet": 200
+                },
+                "channel_capacity": 4096,
+                "recv_buffer_bytes": 8388608,
+                "rate_limit": {
+                    "enabled": false,
+                    "packets_per_second": 5000,
+                    "burst": 10000,
+                    "cache_size": 4096
+                },
+                "netflow": {
+                    "enabled": true,
+                    "template_cache": {
+                        "max_per_exporter": 1000,
+                        "max_exporters": 10000
+                    },
+                    "topic": "netflow_land"
+                },
+                "sflow": {
+                    "enabled": true,
+                    "topic": "sflow_land"
+                }
+            },
             "kafka": {
                 "brokers": ["kafka:9092"],
                 "client_id": "dfe-receiver",
@@ -243,7 +288,7 @@ mod tests {
     #[test]
     fn test_contract_ports() {
         let c = contract();
-        assert_eq!(c.extra_ports.len(), 11);
+        assert_eq!(c.extra_ports.len(), 14);
         let port_names: Vec<&str> = c.extra_ports.iter().map(|p| p.name.as_str()).collect();
         assert!(port_names.contains(&"http"));
         assert!(port_names.contains(&"grpc"));
@@ -256,6 +301,9 @@ mod tests {
         assert!(port_names.contains(&"syslog-tls"));
         assert!(port_names.contains(&"fluent"));
         assert!(port_names.contains(&"gelf"));
+        assert!(port_names.contains(&"netflow"));
+        assert!(port_names.contains(&"netflow-ipfix"));
+        assert!(port_names.contains(&"sflow"));
     }
 
     #[test]

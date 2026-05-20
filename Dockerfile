@@ -28,7 +28,7 @@ RUN chmod +x /usr/local/bin/dfe-receiver
 RUN userdel -r ubuntu && useradd --create-home --uid 1000 appuser
 USER appuser
 
-EXPOSE 9090 8080 6000 4317 4318 5044 8088 9091 514 6514 24224 12201
+EXPOSE 9090 8080 6000 4317 4318 5044 8088 9091 514 6514 24224 12201 2055/udp 4739/udp 6343/udp
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD curl -sf http://localhost:9090/health/live > /dev/null || exit 1
