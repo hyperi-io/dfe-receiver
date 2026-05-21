@@ -155,6 +155,7 @@ temp-env = { version = "0.3", features = ["async_closure"] }
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["kafka", "hashicorp_vault", "minio"] }
 pcap-file = ">=2.0, <3"
+sha2 = ">=0.10, <0.11"
 
 # Contract artefact e2e (tests/e2e/contract_artefacts.rs) — pulls in
 # probe/skip/cluster helpers from rustlib's test_support module.
