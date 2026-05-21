@@ -47,7 +47,11 @@ fn build_v9_data_record_without_template() -> Vec<u8> {
 #[test]
 fn data_record_without_template_returns_error() {
     let pkt = build_v9_data_record_without_template();
-    let mut decoder = NetflowDecoder::new(1000, 10000, crate::server::flow::metrics::mock::flow_metrics_for_test());
+    let mut decoder = NetflowDecoder::new(
+        1000,
+        10000,
+        crate::server::flow::metrics::mock::flow_metrics_for_test(),
+    );
     let exporter: IpAddr = "127.0.0.1".parse().unwrap();
     let result = decoder.decode(&pkt, exporter, ProtocolKind::NetflowV9);
     assert!(
@@ -71,7 +75,11 @@ fn is_template_miss_returns_false_for_current_errors() {
     // When netgauze gains the discriminator, flip the expected value for the
     // genuine missing-template case.
     let pkt = build_v9_data_record_without_template();
-    let mut decoder = NetflowDecoder::new(1000, 10000, crate::server::flow::metrics::mock::flow_metrics_for_test());
+    let mut decoder = NetflowDecoder::new(
+        1000,
+        10000,
+        crate::server::flow::metrics::mock::flow_metrics_for_test(),
+    );
     let exporter: IpAddr = "127.0.0.1".parse().unwrap();
     let err = decoder
         .decode(&pkt, exporter, ProtocolKind::NetflowV9)

@@ -83,7 +83,11 @@ fn build_nsel_template_and_data() -> (Vec<u8>, Vec<u8>) {
 #[test]
 fn firewall_event_ie_flips_record_kind_to_security_event() {
     let (tpl, data) = build_nsel_template_and_data();
-    let mut dec = NetflowDecoder::new(1000, 10_000, crate::server::flow::metrics::mock::flow_metrics_for_test());
+    let mut dec = NetflowDecoder::new(
+        1000,
+        10_000,
+        crate::server::flow::metrics::mock::flow_metrics_for_test(),
+    );
     let exporter: IpAddr = "203.0.113.1".parse().unwrap();
     dec.decode(&tpl, exporter, ProtocolKind::NetflowV9)
         .expect("template decode");

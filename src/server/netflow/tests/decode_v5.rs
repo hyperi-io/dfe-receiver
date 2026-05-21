@@ -64,7 +64,11 @@ fn build_v5_packet_with_one_flow() -> Vec<u8> {
 #[test]
 fn decodes_v5_handcrafted_packet() {
     let pkt = build_v5_packet_with_one_flow();
-    let mut dec = NetflowDecoder::new(1000, 10_000, crate::server::flow::metrics::mock::flow_metrics_for_test());
+    let mut dec = NetflowDecoder::new(
+        1000,
+        10_000,
+        crate::server::flow::metrics::mock::flow_metrics_for_test(),
+    );
     let exporter: IpAddr = "127.0.0.1".parse().unwrap();
     let decoded = dec
         .decode(&pkt, exporter, ProtocolKind::NetflowV5)
@@ -78,7 +82,11 @@ fn decodes_v5_handcrafted_packet() {
 #[test]
 fn v5_canonical_render_contains_known_fields() {
     let pkt = build_v5_packet_with_one_flow();
-    let mut dec = NetflowDecoder::new(1000, 10_000, crate::server::flow::metrics::mock::flow_metrics_for_test());
+    let mut dec = NetflowDecoder::new(
+        1000,
+        10_000,
+        crate::server::flow::metrics::mock::flow_metrics_for_test(),
+    );
     let exporter: IpAddr = "127.0.0.1".parse().unwrap();
     let decoded = dec
         .decode(&pkt, exporter, ProtocolKind::NetflowV5)
@@ -109,7 +117,11 @@ fn v5_canonical_render_contains_known_fields() {
 #[test]
 fn v5_raw_render_round_trips_to_json() {
     let pkt = build_v5_packet_with_one_flow();
-    let mut dec = NetflowDecoder::new(1000, 10_000, crate::server::flow::metrics::mock::flow_metrics_for_test());
+    let mut dec = NetflowDecoder::new(
+        1000,
+        10_000,
+        crate::server::flow::metrics::mock::flow_metrics_for_test(),
+    );
     let exporter: IpAddr = "127.0.0.1".parse().unwrap();
     let decoded = dec
         .decode(&pkt, exporter, ProtocolKind::NetflowV5)
@@ -128,7 +140,11 @@ fn v5_raw_render_round_trips_to_json() {
 #[test]
 fn rejects_v5_packet_shorter_than_header() {
     let pkt = vec![0x00, 0x05, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00];
-    let mut dec = NetflowDecoder::new(1000, 10_000, crate::server::flow::metrics::mock::flow_metrics_for_test());
+    let mut dec = NetflowDecoder::new(
+        1000,
+        10_000,
+        crate::server::flow::metrics::mock::flow_metrics_for_test(),
+    );
     let exporter: IpAddr = "127.0.0.1".parse().unwrap();
     let err = dec
         .decode(&pkt, exporter, ProtocolKind::NetflowV5)
@@ -141,7 +157,11 @@ fn rejects_v5_packet_with_length_mismatch() {
     let mut pkt = build_v5_packet_with_one_flow();
     // Claim 3 flows but datagram only contains room for 1.
     pkt[2..4].copy_from_slice(&3u16.to_be_bytes());
-    let mut dec = NetflowDecoder::new(1000, 10_000, crate::server::flow::metrics::mock::flow_metrics_for_test());
+    let mut dec = NetflowDecoder::new(
+        1000,
+        10_000,
+        crate::server::flow::metrics::mock::flow_metrics_for_test(),
+    );
     let exporter: IpAddr = "127.0.0.1".parse().unwrap();
     let err = dec
         .decode(&pkt, exporter, ProtocolKind::NetflowV5)
@@ -152,7 +172,11 @@ fn rejects_v5_packet_with_length_mismatch() {
 #[test]
 fn rejects_wrong_protocol_kind() {
     let pkt = build_v5_packet_with_one_flow();
-    let mut dec = NetflowDecoder::new(1000, 10_000, crate::server::flow::metrics::mock::flow_metrics_for_test());
+    let mut dec = NetflowDecoder::new(
+        1000,
+        10_000,
+        crate::server::flow::metrics::mock::flow_metrics_for_test(),
+    );
     let exporter: IpAddr = "127.0.0.1".parse().unwrap();
     let err = dec
         .decode(&pkt, exporter, ProtocolKind::SflowV5)

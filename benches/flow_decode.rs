@@ -77,7 +77,11 @@ fn bench_decode(c: &mut Criterion) {
 
     let mut g = c.benchmark_group("decode");
     g.bench_function("netflow_v5", |b| {
-        let mut d = NetflowDecoder::new(1000, 10_000, dfe_receiver::server::flow::metrics::mock::flow_metrics_for_test());
+        let mut d = NetflowDecoder::new(
+            1000,
+            10_000,
+            dfe_receiver::server::flow::metrics::mock::flow_metrics_for_test(),
+        );
         b.iter(|| {
             black_box(
                 d.decode(black_box(&v5_pkt), exporter, ProtocolKind::NetflowV5)
@@ -99,7 +103,11 @@ fn bench_decode(c: &mut Criterion) {
 
 fn bench_envelope_canonical(c: &mut Criterion) {
     let v5_pkt = build_v5_packet();
-    let mut d = NetflowDecoder::new(1000, 10_000, dfe_receiver::server::flow::metrics::mock::flow_metrics_for_test());
+    let mut d = NetflowDecoder::new(
+        1000,
+        10_000,
+        dfe_receiver::server::flow::metrics::mock::flow_metrics_for_test(),
+    );
     let exporter: IpAddr = "127.0.0.1".parse().expect("ipv4 literal");
     let decoded = d
         .decode(&v5_pkt, exporter, ProtocolKind::NetflowV5)

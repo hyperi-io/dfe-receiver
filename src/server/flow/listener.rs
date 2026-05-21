@@ -374,7 +374,9 @@ impl UdpFlowListener {
             // Probe with the first event. If it fails, charge ALL N to drops
             // and return without partial emission.
             let mut iter = events.into_iter();
-            let first = iter.next().expect("events is non-empty");
+            let first = iter.next().unwrap_or_else(|| {
+                unreachable!("events is non-empty (proven by len check at line 366)")
+            });
             match pipeline.process(first).await {
                 Ok(()) => {
                     metrics

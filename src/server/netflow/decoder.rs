@@ -247,7 +247,7 @@ impl NetflowDecoder {
             .set(&[("transport", "netflow")], len as f64);
         self.state
             .get_mut(&source)
-            .expect("slot just inserted above")
+            .unwrap_or_else(|| unreachable!("slot was just inserted via entry().or_insert_with()"))
     }
 }
 
