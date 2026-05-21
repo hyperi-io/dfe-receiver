@@ -39,7 +39,16 @@ coverage.lcov
 .cargo/
 !.cargo/config.toml
 .tmp/
-docs/superpowers/
 .worktrees/
 ci
 # Phase 2 batch integration
+
+# Local working files (not committed)
+docs/superpowers/
+.claude/
+hyperi-ai/
+.mcp.json
+CLAUDE.md
+STATE.md
+TODO.md
+.ai-version
