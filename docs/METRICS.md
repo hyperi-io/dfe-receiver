@@ -5,8 +5,7 @@ services. Designed for Prometheus scraping, Grafana dashboards, KEDA autoscaling
 and PagerDuty/OpsGenie alerting.
 
 > **Scope:** This standard applies to dfe-receiver, dfe-loader, dfe-fetcher,
-> dfe-archiver, and dfe-transform-vector. It is intended to be generalised
-> and merged into `hyperi-ai/standards/` once validated.
+> dfe-archiver, and dfe-transform-vector.
 
 ---
 

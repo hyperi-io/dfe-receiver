@@ -1,7 +1,7 @@
 # DFE Platform Log Spamming Protection
 
 Patterns and techniques for preventing log flooding in high-throughput DFE Rust
-services. Designed to be generalised and merged into `hyperi-ai/standards/`.
+services.
 
 > **Problem:** Under failure conditions (Kafka down, ClickHouse unavailable,
 > disk full, memory pressure), error/warn log sites can produce thousands to

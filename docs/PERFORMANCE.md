@@ -10,11 +10,8 @@ memory allocators, runtime tuning, and profiling workflows.
 > and one-off investigations.
 >
 > See:
-> - `hyperi-ai/standards/languages/rust.md` — *Release-Track Build
->   Optimisation (hyperi-ci)*
 > - hyperi-ci docs (`RUST-RELEASE-TRACK-OPTIMISATION.md`,
->   `PGO-WORKLOAD-GUIDE.md`) — once hyperi-ci v1.8+ is shipped
-> - `TODO.md` → *Rust Release-Track Optimisation* — per-project opt-in steps
+>   `PGO-WORKLOAD-GUIDE.md`) -- once hyperi-ci v1.8+ is shipped
 
 ## Quick status
 
