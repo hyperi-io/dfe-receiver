@@ -15,3 +15,6 @@ mod common;
 
 #[path = "e2e/kafka.rs"]
 mod kafka;
+
+#[path = "e2e/contract_artefacts.rs"]
+mod contract_artefacts;

@@ -218,7 +218,12 @@ async fn main() {
 
     if let Some(output) = &app.emit_helm {
         let contract = deployment::contract();
-        if let Err(e) = hyperi_rustlib::deployment::generate_chart(&contract, output) {
+        // rustlib v2.7.3 added a third `Option<&ContractIdentity>` parameter.
+        // Passing None preserves the pre-v2.7.3 chart (no contract identity
+        // annotations). The canonical generate-artefacts path stamps identity
+        // via the CI-orchestrated invocation in scripts/, not via this
+        // one-off --emit-helm flag.
+        if let Err(e) = hyperi_rustlib::deployment::generate_chart(&contract, output, None) {
             eprintln!("fatal: {e}");
             std::process::exit(1);
         }
@@ -228,7 +233,8 @@ async fn main() {
 
     if let Some(output) = &app.emit_dockerfile {
         let contract = deployment::contract();
-        let content = hyperi_rustlib::deployment::generate_dockerfile(&contract);
+        // rustlib v2.7.3 — see note above. None = no contract identity labels.
+        let content = hyperi_rustlib::deployment::generate_dockerfile(&contract, None);
         if let Err(e) = std::fs::write(output, &content) {
             eprintln!("fatal: could not write Dockerfile: {e}");
             std::process::exit(1);

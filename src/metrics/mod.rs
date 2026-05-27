@@ -26,6 +26,10 @@ use std::time::Duration;
 
 use hyperi_rustlib::metrics::DfeMetrics;
 use hyperi_rustlib::metrics::MetricsManager;
+use hyperi_rustlib::metrics::{
+    AuthFailureReason as RlAuthReason, TransportKind,
+    ValidationFailureReason as RlValidationReason,
+};
 use hyperi_rustlib::metrics::dfe_groups::{
     AppMetrics, BackpressureMetrics, BufferMetrics, CircuitBreakerMetrics, SinkMetrics,
 };
@@ -296,7 +300,7 @@ impl Metrics {
     pub fn add_messages_sent_kafka(&self, count: u64) {
         self.messages_sent_kafka.fetch_add(count, Ordering::Relaxed);
         if let Some(ref dfe) = self.dfe {
-            dfe.transport_sent("kafka", count);
+            dfe.transport_sent(TransportKind::Kafka, count);
         }
     }
 
@@ -306,7 +310,8 @@ impl Metrics {
         self.messages_sent_loader
             .fetch_add(count, Ordering::Relaxed);
         if let Some(ref dfe) = self.dfe {
-            dfe.transport_sent("loader", count);
+            // Loader sink rides the gRPC transport.
+            dfe.transport_sent(TransportKind::Grpc, count);
         }
     }
 
@@ -424,21 +429,25 @@ impl Metrics {
     #[inline]
     pub fn inc_auth_failure(&self, reason: AuthFailureReason) {
         self.auth_failures_total.fetch_add(1, Ordering::Relaxed);
-        let reason_str = match reason {
+        // Local label string for the bespoke dfe_receiver_* metric, plus the
+        // standardised rustlib enum for DfeMetrics. rustlib v2.8.0 typed the
+        // auth_failure label (RFC 6749 codes); our fine-grained local reasons
+        // map to the closest rustlib variant.
+        let (reason_str, dfe_reason) = match reason {
             AuthFailureReason::MissingHeader => {
                 self.auth_failures_missing_header
                     .fetch_add(1, Ordering::Relaxed);
-                "missing_header"
+                ("missing_header", RlAuthReason::Unauthorized)
             }
             AuthFailureReason::InvalidToken => {
                 self.auth_failures_invalid_token
                     .fetch_add(1, Ordering::Relaxed);
-                "invalid_token"
+                ("invalid_token", RlAuthReason::MalformedToken)
             }
             AuthFailureReason::InvalidHeader => {
                 self.auth_failures_invalid_header
                     .fetch_add(1, Ordering::Relaxed);
-                "invalid_header"
+                ("invalid_header", RlAuthReason::MalformedToken)
             }
         };
         metrics::counter!(
@@ -447,7 +456,7 @@ impl Metrics {
         )
         .increment(1);
         if let Some(ref dfe) = self.dfe {
-            dfe.auth_failure(reason_str);
+            dfe.auth_failure(dfe_reason);
         }
     }
 
@@ -456,16 +465,20 @@ impl Metrics {
     pub fn inc_validation_failure(&self, reason: ValidationFailureReason) {
         self.validation_failures_total
             .fetch_add(1, Ordering::Relaxed);
-        let reason_str = match reason {
+        // Local label string + standardised rustlib enum (v2.8.0 typed the
+        // validation_failure label). InvalidJson maps to EncodingError (the
+        // input bytes can't be decoded into a JSON value); MissingField maps
+        // exactly to FieldMissing.
+        let (reason_str, dfe_reason) = match reason {
             ValidationFailureReason::InvalidJson => {
                 self.validation_failures_invalid_json
                     .fetch_add(1, Ordering::Relaxed);
-                "invalid_json"
+                ("invalid_json", RlValidationReason::EncodingError)
             }
             ValidationFailureReason::MissingField => {
                 self.validation_failures_missing_field
                     .fetch_add(1, Ordering::Relaxed);
-                "missing_field"
+                ("missing_field", RlValidationReason::FieldMissing)
             }
         };
         metrics::counter!(
@@ -474,7 +487,7 @@ impl Metrics {
         )
         .increment(1);
         if let Some(ref dfe) = self.dfe {
-            dfe.validation_failure(reason_str);
+            dfe.validation_failure(dfe_reason);
         }
     }
 
