@@ -12,8 +12,8 @@
 #
 # Environment variables (all optional):
 #   PGO_WORKLOAD_DURATION_SECS  Duration of load (default 300)
-#   PGO_WORKLOAD_KAFKA_IMAGE    Override Kafka image (default apache/kafka:3.8.0)
-#   PGO_WORKLOAD_KEEP           Set to 1 to keep Kafka + receiver on exit (debug)
+#   PGO_WORKLOAD_KAFKA_IMAGE    Override broker image (default Redpanda; speaks Kafka wire protocol)
+#   PGO_WORKLOAD_KEEP           Set to 1 to keep broker + receiver on exit (debug)
 #
 # Preconditions:
 #   - Docker daemon running + user has access
@@ -23,7 +23,7 @@
 #     $PGO_DRIVER_PATH
 #
 # Behaviour:
-#   - Starts a single-node Kafka (KRaft mode) via docker run
+#   - Starts a single-node Redpanda broker (Kafka wire protocol) via docker run
 #   - Writes an ephemeral config enabling all listeners on fixed ports
 #   - Starts the passed-in receiver binary in background
 #   - Waits for /health/ready
@@ -48,7 +48,7 @@ if [[ ! -x "$RECEIVER_BIN" ]]; then
 fi
 
 DURATION="${PGO_WORKLOAD_DURATION_SECS:-300}"
-KAFKA_IMAGE="${PGO_WORKLOAD_KAFKA_IMAGE:-apache/kafka:3.8.0}"
+KAFKA_IMAGE="${PGO_WORKLOAD_KAFKA_IMAGE:-docker.redpanda.com/redpandadata/redpanda:v26.1.9}"
 KEEP="${PGO_WORKLOAD_KEEP:-0}"
 
 # Floor of 60s — shorter workloads produce bad PGO profiles
@@ -131,38 +131,33 @@ trap cleanup EXIT INT TERM
 # Start Kafka (KRaft mode, single-node, auto-create topics)
 # ----------------------------------------------------------------------------
 
-echo "pgo-workload: starting Kafka ($KAFKA_IMAGE)"
+echo "pgo-workload: starting Redpanda ($KAFKA_IMAGE)"
+# Redpanda speaks the Kafka wire protocol (app config unchanged) but is a
+# single C++/Seastar binary that boots in ~1s and fits a hard 512 MiB cap --
+# unlike the Kafka JVM (1.5-2 GB heap+metaspace) which OOMs the 4 GB arm64
+# runners alongside the PGO-instrumented binary + load driver. See gh #34.
 KAFKA_CID=$(docker run -d --rm \
     -p 19092:9092 \
-    -e KAFKA_NODE_ID=1 \
-    -e KAFKA_PROCESS_ROLES=broker,controller \
-    -e KAFKA_LISTENERS='PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093' \
-    -e KAFKA_ADVERTISED_LISTENERS='PLAINTEXT://localhost:19092' \
-    -e KAFKA_LISTENER_SECURITY_PROTOCOL_MAP='CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT' \
-    -e KAFKA_CONTROLLER_QUORUM_VOTERS='1@localhost:9093' \
-    -e KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER \
-    -e KAFKA_INTER_BROKER_LISTENER_NAME=PLAINTEXT \
-    -e KAFKA_AUTO_CREATE_TOPICS_ENABLE=true \
-    -e KAFKA_NUM_PARTITIONS=3 \
-    -e KAFKA_DEFAULT_REPLICATION_FACTOR=1 \
-    -e CLUSTER_ID="$(printf '%s' "pgo$(date +%s)$$" | base64 | head -c 22)" \
-    "$KAFKA_IMAGE")
+    "$KAFKA_IMAGE" \
+    redpanda start \
+        --mode dev-container \
+        --smp 1 \
+        --memory 512M \
+        --kafka-addr PLAINTEXT://0.0.0.0:9092 \
+        --advertise-kafka-addr PLAINTEXT://localhost:19092)
 
-echo "pgo-workload: Kafka container: $KAFKA_CID"
+echo "pgo-workload: Redpanda container: $KAFKA_CID"
 
-# Wait for Kafka to accept connections on the host-mapped port.
-# We can't `docker exec kafka-topics.sh` here because the broker's
-# advertised listener is `localhost:19092` (the host-side mapping) and
-# that port doesn't exist inside the container.
-for attempt in $(seq 1 30); do
-    if (echo > /dev/tcp/127.0.0.1/19092) 2>/dev/null; then
-        # TCP accept — give the broker a beat to finish RAFT bootstrap
-        sleep 2
-        echo "pgo-workload: Kafka ready (attempt $attempt)"
+# Real protocol readiness via the admin API (rpk), not a bare TCP-open probe.
+# `--mode dev-container` bundles --overprovisioned --reserve-memory 0M
+# --check=false --unsafe-bypass-fsync and auto-creates topics.
+for attempt in $(seq 1 60); do
+    if docker exec "$KAFKA_CID" rpk cluster health 2>/dev/null | grep -q "Healthy:.*true"; then
+        echo "pgo-workload: Redpanda ready (attempt $attempt)"
         break
     fi
-    if [[ $attempt -eq 30 ]]; then
-        echo "error: Kafka did not become ready in 60s" >&2
+    if [[ $attempt -eq 60 ]]; then
+        echo "error: Redpanda did not become ready in 120s" >&2
         docker logs --tail 50 "$KAFKA_CID" >&2
         exit 1
     fi
