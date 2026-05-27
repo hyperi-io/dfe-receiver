@@ -446,7 +446,9 @@ mod tests {
                         assert_eq!(*protocol, 1);
                         assert_eq!(header.len(), 54);
                     }
-                    other => panic!("expected SampledHeader, got {other:?}"),
+                    other @ FlowRecord::Opaque { .. } => {
+                        panic!("expected SampledHeader, got {other:?}")
+                    }
                 }
             }
             other => panic!("expected flow sample, got {other:?}"),
@@ -524,7 +526,9 @@ mod tests {
                         assert_eq!(*if_out_octets, 777_666);
                         assert_eq!(*if_in_ucast_pkts, 100);
                     }
-                    other => panic!("expected Generic, got {other:?}"),
+                    other @ CounterRecord::Opaque { .. } => {
+                        panic!("expected Generic, got {other:?}")
+                    }
                 }
             }
             other => panic!("expected counter sample, got {other:?}"),

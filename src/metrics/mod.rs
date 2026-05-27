@@ -26,12 +26,11 @@ use std::time::Duration;
 
 use hyperi_rustlib::metrics::DfeMetrics;
 use hyperi_rustlib::metrics::MetricsManager;
-use hyperi_rustlib::metrics::{
-    AuthFailureReason as RlAuthReason, TransportKind,
-    ValidationFailureReason as RlValidationReason,
-};
 use hyperi_rustlib::metrics::dfe_groups::{
     AppMetrics, BackpressureMetrics, BufferMetrics, CircuitBreakerMetrics, SinkMetrics,
+};
+use hyperi_rustlib::metrics::{
+    AuthFailureReason as RlAuthReason, TransportKind, ValidationFailureReason as RlValidationReason,
 };
 use hyperi_rustlib::scaling::{RateWindow, ScalingPressure};
 

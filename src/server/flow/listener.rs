@@ -304,14 +304,14 @@ impl UdpFlowListener {
         decoder: &mut D,
         data: &[u8],
         src: SocketAddr,
-        _kind: ProtocolKind,
+        kind: ProtocolKind,
         now_rfc3339: &str,
         json_buf: &mut Vec<u8>,
         cfg: &FlowListenerConfig,
         metrics: &FlowMetrics,
         pipeline: &Arc<PipelineState>,
     ) {
-        let decoded = match decoder.decode(data, src.ip(), _kind) {
+        let packet = match decoder.decode(data, src.ip(), kind) {
             Ok(d) => d,
             Err(e) if D::is_template_miss(&e) => {
                 metrics
@@ -327,7 +327,7 @@ impl UdpFlowListener {
             }
         };
 
-        if decoded.records.len() > cfg.output.max_records_per_packet {
+        if packet.records.len() > cfg.output.max_records_per_packet {
             metrics
                 .invalid_packet_total
                 .inc(&[("transport", D::PROTOCOL), ("reason", "oversized")]);
@@ -336,9 +336,9 @@ impl UdpFlowListener {
 
         metrics
             .records_per_packet
-            .observe(decoded.records.len() as f64);
+            .observe(packet.records.len() as f64);
 
-        let ranges = match render_packet::<D>(&decoded, cfg.output.mode, now_rfc3339, json_buf) {
+        let ranges = match render_packet::<D>(&packet, cfg.output.mode, now_rfc3339, json_buf) {
             Ok(r) => r,
             Err(_) => {
                 metrics

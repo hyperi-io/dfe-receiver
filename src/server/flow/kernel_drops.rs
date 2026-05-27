@@ -31,15 +31,13 @@ pub async fn poll_kernel_drops(
         tokio::select! {
             _ = shutdown.cancelled() => return,
             _ = tick.tick() => {
-                if let Ok(current) = read_drop_counts(&bind_ports) {
-                    for (port, drops) in current {
-                        let last = *last_drops.get(&port).unwrap_or(&0);
-                        let delta = drops.saturating_sub(last);
-                        if delta > 0 {
-                            metrics.kernel_drops_total.add(delta);
-                        }
-                        last_drops.insert(port, drops);
+                for (port, drops) in read_drop_counts(&bind_ports) {
+                    let last = *last_drops.get(&port).unwrap_or(&0);
+                    let delta = drops.saturating_sub(last);
+                    if delta > 0 {
+                        metrics.kernel_drops_total.add(delta);
                     }
+                    last_drops.insert(port, drops);
                 }
             }
         }
@@ -49,7 +47,7 @@ pub async fn poll_kernel_drops(
 /// Parse `/proc/net/udp` and `/proc/net/udp6` and return (port, drops) pairs
 /// for every entry whose local port is in `bind_ports`.
 #[cfg(target_os = "linux")]
-fn read_drop_counts(bind_ports: &[u16]) -> std::io::Result<Vec<(u16, u64)>> {
+fn read_drop_counts(bind_ports: &[u16]) -> Vec<(u16, u64)> {
     use std::collections::HashSet;
 
     let wanted: HashSet<u16> = bind_ports.iter().copied().collect();
@@ -89,7 +87,7 @@ fn read_drop_counts(bind_ports: &[u16]) -> std::io::Result<Vec<(u16, u64)>> {
             }
         }
     }
-    Ok(results)
+    results
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -109,14 +107,13 @@ mod tests {
     fn reads_proc_net_udp_without_error() {
         // /proc/net/udp always exists on Linux; just check the parser
         // doesn't blow up. The result may be empty (port unlikely to be
-        // bound in tests) but the call must succeed.
-        let result = read_drop_counts(&[12345, 54321]);
-        assert!(result.is_ok());
+        // bound in tests) but the call must not panic.
+        let _ = read_drop_counts(&[12345, 54321]);
     }
 
     #[test]
     fn empty_port_list_returns_empty() {
-        let result = read_drop_counts(&[]).unwrap();
+        let result = read_drop_counts(&[]);
         assert!(result.is_empty());
     }
 }

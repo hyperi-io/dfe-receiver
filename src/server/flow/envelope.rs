@@ -121,7 +121,7 @@ fn render_exploded_record<D: FlowDecoder>(
 ) -> io::Result<()> {
     write_envelope_head::<D>(decoded, now_rfc3339, buf)?;
     buf.extend_from_slice(br#","record_count":1,"record_index":"#);
-    write!(buf, "{}", record_index)?;
+    write!(buf, "{record_index}")?;
     buf.extend_from_slice(br#","record_total":"#);
     write!(buf, "{}", decoded.records.len())?;
     buf.extend_from_slice(br#","flow":"#);

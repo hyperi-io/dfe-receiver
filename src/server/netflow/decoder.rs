@@ -318,7 +318,7 @@ impl FlowDecoder for NetflowDecoder {
         c.nat_pool_name = f.nat_pool_name.clone();
         // Derive ip_version from src_ip when the wire data didn't carry an
         // explicit IE for it.
-        c.ip_version = f.ip_version.or_else(|| match c.src_ip {
+        c.ip_version = f.ip_version.or(match c.src_ip {
             Some(IpAddr::V4(_)) => Some(4),
             Some(IpAddr::V6(_)) => Some(6),
             None => None,
@@ -625,15 +625,11 @@ fn map_single_field(field: &Field, out: &mut NetflowFields) {
         Field::bgpDestinationAsNumber(v) => {
             out.dst_as = Some(*v);
         }
-        Field::ipNextHopIPv4Address(ip) => {
-            if !ip.is_unspecified() {
-                out.next_hop = Some(IpAddr::V4(*ip));
-            }
+        Field::ipNextHopIPv4Address(ip) if !ip.is_unspecified() => {
+            out.next_hop = Some(IpAddr::V4(*ip));
         }
-        Field::ipNextHopIPv6Address(ip) => {
-            if !ip.is_unspecified() {
-                out.next_hop = Some(IpAddr::V6(*ip));
-            }
+        Field::ipNextHopIPv6Address(ip) if !ip.is_unspecified() => {
+            out.next_hop = Some(IpAddr::V6(*ip));
         }
         Field::samplingInterval(v) | Field::samplingPacketInterval(v) => {
             out.sampling_rate = Some(*v);
@@ -716,10 +712,8 @@ fn map_cisco_unknown(id: u16, value: &[u8], out: &mut NetflowFields) {
             }
         }
         // NF_F_FW_EXT_EVENT (u16, big-endian).
-        CISCO_IE_FW_EXT_EVENT => {
-            if value.len() >= 2 {
-                out.event_subtype = Some(u16::from_be_bytes([value[0], value[1]]));
-            }
+        CISCO_IE_FW_EXT_EVENT if value.len() >= 2 => {
+            out.event_subtype = Some(u16::from_be_bytes([value[0], value[1]]));
         }
         // NF_F_USERNAME -- UTF-8 string, null-terminated tolerated.
         CISCO_IE_USERNAME => {

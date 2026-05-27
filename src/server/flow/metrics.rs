@@ -212,7 +212,9 @@ fn describe_flow_metrics() {
 pub mod mock {
     //! Mock implementations of the metric traits. Used by listener / envelope
     //! tests so they don't need a real MetricsManager wired up.
-    use super::*;
+    use super::{
+        Arc, FlowCounter, FlowHistogram, FlowLabelledCounter, FlowLabelledGauge, FlowMetrics,
+    };
     use std::sync::atomic::{AtomicU64, Ordering};
 
     pub struct MockCounter(pub AtomicU64);

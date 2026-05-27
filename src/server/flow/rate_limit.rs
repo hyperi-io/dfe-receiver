@@ -32,7 +32,7 @@ impl AtomicBucket {
 
 #[inline]
 fn pack(tokens: u32, micros: u32) -> u64 {
-    ((tokens as u64) << 32) | (micros as u64)
+    (u64::from(tokens) << 32) | u64::from(micros)
 }
 
 #[inline]
@@ -71,7 +71,7 @@ impl PerSourceRateLimiter {
             let elapsed_us = now_us.wrapping_sub(last_us);
             // Refill: pps tokens per 1_000_000 us.
             let refill =
-                ((elapsed_us as u64) * (self.cfg.packets_per_second as u64) / 1_000_000) as u32;
+                (u64::from(elapsed_us) * u64::from(self.cfg.packets_per_second) / 1_000_000) as u32;
             tokens = tokens.saturating_add(refill).min(self.cfg.burst);
             if tokens == 0 {
                 return false;

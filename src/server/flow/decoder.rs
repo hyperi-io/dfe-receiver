@@ -64,7 +64,7 @@ mod tests {
     #[test]
     fn decoded_packet_constructs() {
         let p: DecodedPacket<u32> = DecodedPacket {
-            exporter_ip: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            exporter_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
             observation_domain: 0,
             packet_seq: 0,
             kind: ProtocolKind::NetflowV5,

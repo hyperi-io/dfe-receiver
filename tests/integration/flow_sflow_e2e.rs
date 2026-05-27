@@ -199,7 +199,7 @@ fn flow_kafka_config(
     // Flow handler -- sFlow-only on a single port.
     config.flow.enabled = true;
     config.flow.experimental = false;
-    config.flow.bind_address = IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1));
+    config.flow.bind_address = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
     config.flow.ports = vec![flow_port];
     config.flow.recv_buffer_bytes = 256 * 1024;
     config.flow.netflow.enabled = false;
@@ -244,7 +244,7 @@ async fn sflow_v5_end_to_end_to_kafka() {
     let sock = tokio::net::UdpSocket::bind("127.0.0.1:0")
         .await
         .expect("bind client UDP");
-    let target = SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)), flow_port);
+    let target = SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), flow_port);
 
     let pkt = build_sflow_v5_packet();
     for _ in 0..3 {

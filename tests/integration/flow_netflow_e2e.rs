@@ -179,7 +179,7 @@ fn flow_kafka_config(
     // Flow handler config -- unified mode, single port, NetFlow only.
     config.flow.enabled = true;
     config.flow.experimental = false; // suppress WARN log noise
-    config.flow.bind_address = IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1));
+    config.flow.bind_address = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
     config.flow.ports = vec![flow_port];
     // Smaller SO_RCVBUF -- system default may cap below 8MiB on some runners.
     config.flow.recv_buffer_bytes = 256 * 1024;
@@ -238,7 +238,7 @@ async fn netflow_v5_end_to_end_to_kafka() {
     let sock = tokio::net::UdpSocket::bind("127.0.0.1:0")
         .await
         .expect("bind client UDP");
-    let target = SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)), flow_port);
+    let target = SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), flow_port);
 
     // Send a few packets -- one is plenty but a small burst makes the test
     // more robust against rare UDP loss on loopback.
@@ -441,7 +441,7 @@ async fn netflow_v9_end_to_end_to_kafka() {
     let sock = tokio::net::UdpSocket::bind("127.0.0.1:0")
         .await
         .expect("bind client UDP");
-    let target = SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)), flow_port);
+    let target = SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), flow_port);
     let (tpl, data) = build_v9_template_and_data();
     sock.send_to(&tpl, target).await.expect("udp send template");
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -511,7 +511,7 @@ async fn netflow_nsel_end_to_end_to_kafka() {
     let sock = tokio::net::UdpSocket::bind("127.0.0.1:0")
         .await
         .expect("bind client UDP");
-    let target = SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)), flow_port);
+    let target = SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), flow_port);
     let (tpl, data) = build_nsel_template_and_data();
     sock.send_to(&tpl, target).await.expect("udp send template");
     tokio::time::sleep(Duration::from_millis(50)).await;

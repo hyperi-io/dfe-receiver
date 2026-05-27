@@ -113,7 +113,7 @@ impl FlowHandler {
     /// the caller can spawn periodic LRU eviction tasks against them.
     fn build_unified_listeners(
         &self,
-        shutdown: CancellationToken,
+        shutdown: &CancellationToken,
     ) -> (Vec<JoinHandle<()>>, Vec<Arc<PerSourceRateLimiter>>) {
         let ip_filter = Arc::new(match &self.cfg.ip_filter {
             Some(f) => IpFilter::from_config(f),
@@ -174,7 +174,7 @@ impl FlowHandler {
     /// eviction tasks against them.
     fn build_split_listeners(
         &self,
-        shutdown: CancellationToken,
+        shutdown: &CancellationToken,
     ) -> (Vec<JoinHandle<()>>, Vec<Arc<PerSourceRateLimiter>>) {
         let split = match self.cfg.split.as_ref() {
             Some(s) => s,
@@ -317,9 +317,9 @@ impl ProtocolHandler for FlowHandler {
         }
 
         let (handles, rate_limiters) = if self.cfg.split.is_some() {
-            self.build_split_listeners(shutdown.clone())
+            self.build_split_listeners(&shutdown)
         } else {
-            self.build_unified_listeners(shutdown.clone())
+            self.build_unified_listeners(&shutdown)
         };
 
         // Spawn the /proc/net/udp poller on Linux for the union of bind ports.
@@ -338,7 +338,7 @@ impl ProtocolHandler for FlowHandler {
         for rl in rate_limiters {
             let token = shutdown.clone();
             evict_handles.push(tokio::spawn(async move {
-                let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+                let mut tick = tokio::time::interval(std::time::Duration::from_mins(1));
                 loop {
                     tokio::select! {
                         biased;
@@ -387,7 +387,7 @@ mod tests {
     #[tokio::test]
     async fn new_rejects_invalid_config() {
         // enabled + split set => validate fails.
-        let yaml = r#"
+        let yaml = r"
 enabled: true
 split:
   netflow:
@@ -396,7 +396,7 @@ split:
   sflow:
     ports: [6343]
     topic: y
-"#;
+";
         let cfg: FlowConfig = serde_yaml_ng::from_str(yaml).unwrap();
         let result = FlowHandler::new(cfg, flow_metrics_for_test(), test_pipeline().await);
         assert!(result.is_err());
@@ -418,7 +418,7 @@ split:
 
     #[tokio::test]
     async fn bind_address_split_renders_both_sides() {
-        let yaml = r#"
+        let yaml = r"
 enabled: false
 split:
   netflow:
@@ -427,7 +427,7 @@ split:
   sflow:
     ports: [6343]
     topic: sflow_land
-"#;
+";
         let cfg: FlowConfig = serde_yaml_ng::from_str(yaml).unwrap();
         let handler =
             FlowHandler::new(cfg, flow_metrics_for_test(), test_pipeline().await).unwrap();
@@ -491,7 +491,7 @@ split:
 
     #[tokio::test]
     async fn union_ports_split() {
-        let yaml = r#"
+        let yaml = r"
 enabled: false
 split:
   netflow:
@@ -500,7 +500,7 @@ split:
   sflow:
     ports: [6343, 7343]
     topic: s
-"#;
+";
         let cfg: FlowConfig = serde_yaml_ng::from_str(yaml).unwrap();
         let handler =
             FlowHandler::new(cfg, flow_metrics_for_test(), test_pipeline().await).unwrap();

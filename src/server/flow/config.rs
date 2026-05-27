@@ -269,15 +269,14 @@ impl FlowConfig {
         if self.enabled && self.split.is_some() {
             return Err("flow.enabled and flow.split are mutually exclusive".into());
         }
-        if let Some(split) = &self.split {
-            if split
+        if let Some(split) = &self.split
+            && split
                 .netflow
                 .ports
                 .iter()
                 .any(|p| split.sflow.ports.contains(p))
-            {
-                return Err("split.netflow.ports and split.sflow.ports must not overlap".into());
-            }
+        {
+            return Err("split.netflow.ports and split.sflow.ports must not overlap".into());
         }
         Ok(())
     }
@@ -289,9 +288,9 @@ mod tests {
 
     #[test]
     fn parses_unified_defaults() {
-        let yaml = r#"
+        let yaml = r"
 enabled: true
-"#;
+";
         let cfg: FlowConfig = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(cfg.enabled);
         assert_eq!(cfg.ports, vec![2055, 4739, 6343]);
@@ -305,12 +304,12 @@ enabled: true
 
     #[test]
     fn parses_explicit_exploded_mode() {
-        let yaml = r#"
+        let yaml = r"
 enabled: true
 output:
   mode: exploded
   max_records_per_packet: 500
-"#;
+";
         let cfg: FlowConfig = serde_yaml_ng::from_str(yaml).unwrap();
         assert_eq!(cfg.output.mode, OutputMode::Exploded);
         assert_eq!(cfg.output.max_records_per_packet, 500);
@@ -318,7 +317,7 @@ output:
 
     #[test]
     fn parses_split_mode() {
-        let yaml = r#"
+        let yaml = r"
 enabled: false
 split:
   netflow:
@@ -327,7 +326,7 @@ split:
   sflow:
     ports: [6343]
     topic: sflow_land
-"#;
+";
         let cfg: FlowConfig = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(!cfg.enabled);
         assert!(cfg.split.is_some());
@@ -338,7 +337,7 @@ split:
 
     #[test]
     fn validate_rejects_both_enabled_and_split() {
-        let yaml = r#"
+        let yaml = r"
 enabled: true
 split:
   netflow:
@@ -347,14 +346,14 @@ split:
   sflow:
     ports: [6343]
     topic: y
-"#;
+";
         let cfg: FlowConfig = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn validate_rejects_overlapping_split_ports() {
-        let yaml = r#"
+        let yaml = r"
 enabled: false
 split:
   netflow:
@@ -363,17 +362,17 @@ split:
   sflow:
     ports: [6343]
     topic: s
-"#;
+";
         let cfg: FlowConfig = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn experimental_can_be_disabled() {
-        let yaml = r#"
+        let yaml = r"
 enabled: true
 experimental: false
-"#;
+";
         let cfg: FlowConfig = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(!cfg.experimental);
     }

@@ -211,7 +211,7 @@ pub fn contract() -> DeploymentContract {
                     "max_records_per_packet": 200
                 },
                 "channel_capacity": 4096,
-                "recv_buffer_bytes": 8388608,
+                "recv_buffer_bytes": 8_388_608,
                 "rate_limit": {
                     "enabled": false,
                     "packets_per_second": 5000,

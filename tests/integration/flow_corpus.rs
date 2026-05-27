@@ -191,9 +191,10 @@ fn corpus_sha256_matches_manifest() {
         let rest = parts.next().unwrap_or("").trim();
         // sha256sum -b uses '*' prefix; strip it
         let filename = rest.trim_start_matches('*').to_string();
-        if hash.len() != 64 || filename.is_empty() {
-            panic!("malformed sha256sums.txt line: {line:?}");
-        }
+        assert!(
+            !(hash.len() != 64 || filename.is_empty()),
+            "malformed sha256sums.txt line: {line:?}"
+        );
         expected.insert(filename, hash);
     }
     assert!(
@@ -310,14 +311,13 @@ fn corpus_decodes_real_world_datagrams() {
     // dispatcher rejects it, that's a regression we want to catch.
     for (file, r) in &summary {
         let lower = file.to_ascii_lowercase();
-        let expected_family = if lower.contains("netflow-v5") {
+        // ipfix uses the netflow decoder family, so it groups with netflow.
+        let expected_family = if lower.contains("netflow-v5")
+            || lower.contains("netflow-v9")
+            || lower.contains("nfv9")
+            || lower.contains("ipfix")
+        {
             Some("netflow")
-        } else if lower.contains("netflow-v9") {
-            Some("netflow")
-        } else if lower.contains("nfv9") {
-            Some("netflow")
-        } else if lower.contains("ipfix") {
-            Some("netflow") // ipfix uses the netflow decoder family
         } else if lower.contains("sflow") {
             Some("sflow")
         } else {
