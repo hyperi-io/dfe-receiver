@@ -338,6 +338,18 @@ impl UdpFlowListener {
             .records_per_packet
             .observe(packet.records.len() as f64);
 
+        // Template-only / options-template packets (NetFlow v9/IPFIX) and
+        // empty sFlow datagrams decode successfully but carry zero data
+        // records. Emitting an empty `flows:[]` envelope would be pure
+        // downstream noise -- a v9 exporter refreshes templates periodically,
+        // so this would fire on every refresh. Skip emission; the zero is
+        // still recorded in `records_per_packet` above for observability.
+        // (Exploded mode already skips via its empty-ranges guard; this makes
+        // canonical and canonical_with_raw consistent.)
+        if packet.records.is_empty() {
+            return;
+        }
+
         let ranges = match render_packet::<D>(&packet, cfg.output.mode, now_rfc3339, json_buf) {
             Ok(r) => r,
             Err(_) => {
