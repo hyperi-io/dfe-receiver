@@ -3,7 +3,7 @@
 // Purpose:   End-to-end NetFlow v5 -> FlowHandler -> Kafka netflow_land
 // Language:  Rust
 //
-// License:   FSL-1.1-ALv2
+// License:   BUSL-1.1
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
 //! End-to-end test for the flow handler with NetFlow v5 packets.

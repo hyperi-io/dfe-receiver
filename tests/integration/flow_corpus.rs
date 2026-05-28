@@ -3,7 +3,7 @@
 // Purpose:   Real-world PCAP / UDP-payload corpus integration tests
 // Language:  Rust
 //
-// License:   FSL-1.1-ALv2
+// License:   BUSL-1.1
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
 //! Real-world flow corpus integration tests.
@@ -28,7 +28,7 @@
 //! Provenance + license for every fixture is documented in
 //! `tests/fixtures/flow/external/README.md`. Sources: influxdata/telegraf
 //! (MIT) and NetGauze (Apache-2.0) -- both license-compatible with
-//! FSL-1.1-ALv2.
+//! BUSL-1.1.
 
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]

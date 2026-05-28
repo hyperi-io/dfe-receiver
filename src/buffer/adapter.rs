@@ -3,7 +3,7 @@
 // Purpose:   Adapter between receiver's Sink trait and rustlib's tiered_sink::Sink
 // Language:  Rust
 //
-// License:   FSL-1.1-ALv2
+// License:   BUSL-1.1
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
 //! Adapter between receiver's Sink trait and rustlib's tiered_sink::Sink.

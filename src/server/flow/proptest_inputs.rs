@@ -3,7 +3,7 @@
 //  Purpose:      Shared proptest strategies for fuzzing flow decoders
 //  Language:     Rust
 //
-//  License:      FSL-1.1-ALv2
+//  License:      BUSL-1.1
 //  Copyright:    (c) 2026 HYPERI PTY LIMITED
 
 //! Fuzz strategies for flow decoders. Asserts decoders never panic on

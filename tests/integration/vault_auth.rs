@@ -3,7 +3,7 @@
 // Purpose:   Integration tests for secret-manager-backed bearer tokens
 // Language:  Rust
 //
-// License:   FSL-1.1-ALv2
+// License:   BUSL-1.1
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
 //! Integration tests for bearer-token loading from external secret sources.

@@ -3,7 +3,7 @@
 // Purpose:   Poll /proc/net/udp(6) for kernel-side UDP drop counters
 // Language:  Rust
 //
-// License:   FSL-1.1-ALv2
+// License:   BUSL-1.1
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
 //! Linux `/proc/net/udp` poller. Reads the `drops` column for our bind ports

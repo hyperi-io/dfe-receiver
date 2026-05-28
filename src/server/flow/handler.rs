@@ -3,7 +3,7 @@
 // Purpose:   FlowHandler -- ProtocolHandler impl for NetFlow + sFlow over UDP
 // Language:  Rust
 //
-// License:   FSL-1.1-ALv2
+// License:   BUSL-1.1
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
 //! `FlowHandler` -- the orchestrator that brings up `UdpFlowListener`

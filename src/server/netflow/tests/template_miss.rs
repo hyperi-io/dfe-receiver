@@ -3,7 +3,7 @@
 //  Purpose:      Test template_miss error handling in NetflowDecoder
 //  Language:     Rust
 //
-//  License:      FSL-1.1-ALv2
+//  License:      BUSL-1.1
 //  Copyright:    (c) 2026 HYPERI PTY LIMITED
 
 //! template_miss test for NetflowDecoder.

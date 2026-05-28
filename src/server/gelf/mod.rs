@@ -3,7 +3,7 @@
 // Purpose:   GELF protocol handler (TCP, null-byte delimited)
 // Language:  Rust
 //
-// License:   FSL-1.1-ALv2
+// License:   BUSL-1.1
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
 //! GELF (Graylog Extended Log Format) protocol handler.

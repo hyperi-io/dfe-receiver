@@ -3,7 +3,7 @@
 //  Purpose:      NetFlow v5 decode tests using a hand-crafted fixture
 //  Language:     Rust
 //
-//  License:      FSL-1.1-ALv2
+//  License:      BUSL-1.1
 //  Copyright:    (c) 2026 HYPERI PTY LIMITED
 
 //! Tests for `NetflowDecoder` on NetFlow v5 datagrams.
