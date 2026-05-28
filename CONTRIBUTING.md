@@ -125,7 +125,7 @@ git config --global user.email "your.email@example.com"
 ## License for Contributions
 
 All contributions to this project are licensed under the Functional Source
-License, Version 1.1, ALv2 Future License (FSL-1.1-ALv2), the same license
+License, Version 1.1, ALv2 Future License (BUSL-1.1), the same license
 that covers the project.
 
 Each version of the software (including your contributions) will automatically
@@ -146,49 +146,6 @@ anniversary of its release.
 - [ ] All commits are signed off (DCO)
 - [ ] Tests pass (if applicable)
 - [ ] Documentation is updated (if applicable)
-
-## Working with Kafka
-
-[kcat](https://github.com/edenhill/kcat) (formerly kafkacat) is essential for
-verifying that messages flow through dfe-receiver correctly.
-
-```bash
-# Start local Kafka (KRaft mode, no Zookeeper)
-docker compose -f docker-compose.test.yaml up -d
-
-# List topics and broker metadata
-kcat -b localhost:9092 -L
-
-# Watch a topic in real time as dfe-receiver routes to it
-kcat -b localhost:9092 -t events -C -o end
-
-# Send a test event and verify receipt
-curl -s -X POST http://localhost:8080/ingest \
-  -H 'Content-Type: application/json' \
-  -d '{"level":"info","message":"test"}'
-
-kcat -b localhost:9092 -t events -C -c 1
-
-# Consume with partition and offset metadata
-kcat -b localhost:9092 -t events -C -f 'P:%p O:%o T:%T\n%s\n'
-
-# Produce directly to Kafka (useful for testing consumers in isolation)
-echo '{"source":"manual","msg":"direct inject"}' | \
-  kcat -b localhost:9092 -t events -P
-
-# Drain and count all messages in a topic
-kcat -b localhost:9092 -t events -C -e -q | wc -l
-```
-
-> **Install:** `apt install kcat` / `brew install kcat`
-> Older packages may be named `kafkacat`.
-
-For a full browser UI, start with the `ui` profile:
-
-```bash
-docker compose -f docker-compose.test.yaml --profile ui up -d
-# Open http://localhost:8080 (Kafbat UI)
-```
 
 ## CI/CD Workflow
 

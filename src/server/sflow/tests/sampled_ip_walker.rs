@@ -3,7 +3,7 @@
 //  Purpose:      Tests for parse_sampled_ip Ethernet/IP/TCP/UDP walker
 //  Language:     Rust
 //
-//  License:      FSL-1.1-ALv2
+//  License:      BUSL-1.1
 //  Copyright:    (c) 2026 HYPERI PTY LIMITED
 
 //! The walker translates raw L2/L3/L4 bytes from an sFlow sampled_header into

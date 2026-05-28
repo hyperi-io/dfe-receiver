@@ -3,7 +3,7 @@
 // Purpose:   Memory buffer and disk spillover
 // Language:  Rust
 //
-// License:   FSL-1.1-ALv2
+// License:   BUSL-1.1
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
 //! Buffer management with memory pressure detection.

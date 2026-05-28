@@ -3,7 +3,7 @@
 // Purpose:   RFC 6587 syslog TCP framing codec
 // Language:  Rust
 //
-// License:   FSL-1.1-ALv2
+// License:   BUSL-1.1
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
 //! Syslog TCP framing codec (RFC 6587).

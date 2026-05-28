@@ -38,7 +38,7 @@ L2/L3/L4 stripping heuristic to maintain.
 - influxdata/telegraf -- <https://github.com/influxdata/telegraf> -- MIT
 - NetGauze/NetGauze -- <https://github.com/NetGauze/NetGauze> -- Apache-2.0
 
-Both licenses are compatible with this project's FSL-1.1-ALv2 -- they
+Both licenses are compatible with this project's BUSL-1.1 -- they
 permit redistribution of the fixture bytes without any restriction beyond
 attribution (handled by this README).
 
@@ -82,7 +82,7 @@ on every test run -- silent fixture rot will fail loudly.
 ## Adding a new fixture
 
 1. Verify the source is CC0 / BSD / Apache-2.0 / MIT / public domain
-   (compatible with FSL-1.1-ALv2). Reject GPL, AGPL, SSPL, BSL, LGPL,
+   (compatible with BUSL-1.1). Reject GPL, AGPL, SSPL, BSL, LGPL,
    unlicensed.
 2. Download with `curl -L -o <name>.<ext> <URL>` (use `.bin` for raw UDP
    payloads, `.pcap` for libpcap captures)

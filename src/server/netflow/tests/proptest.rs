@@ -3,7 +3,7 @@
 //  Purpose:      Proptest fuzz harness for NetflowDecoder (never panic)
 //  Language:     Rust
 //
-//  License:      FSL-1.1-ALv2
+//  License:      BUSL-1.1
 //  Copyright:    (c) 2026 HYPERI PTY LIMITED
 
 //! Property tests asserting `NetflowDecoder::decode` never panics on

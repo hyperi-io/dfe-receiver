@@ -3,7 +3,7 @@
 // Purpose:   Fluent Forward protocol handler (msgpack over TCP)
 // Language:  Rust
 //
-// License:   FSL-1.1-ALv2
+// License:   BUSL-1.1
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
 //! Fluent Forward protocol handler.
