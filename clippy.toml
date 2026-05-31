@@ -1,7 +1,7 @@
 # Project:   dfe-receiver
 # File:      clippy.toml
 # Purpose:   Clippy configuration
-# License:   FSL-1.1-ALv2
+# License:   BUSL-1.1
 # Copyright: (c) 2026 HYPERI PTY LIMITED
 
 # Allow long functions in certain contexts

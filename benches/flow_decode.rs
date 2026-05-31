@@ -3,7 +3,7 @@
 // Purpose:   Flow decode + envelope throughput benches (NetFlow v5, sFlow v5)
 // Language:  Rust
 //
-// License:   FSL-1.1-ALv2
+// License:   BUSL-1.1
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
 //! Flow decode + envelope throughput benches.

@@ -3,7 +3,7 @@
 // Purpose:   End-to-end Kafka sink tests via testcontainers
 // Language:  Rust
 //
-// License:   FSL-1.1-ALv2
+// License:   BUSL-1.1
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
 //! Kafka sink integration tests.
