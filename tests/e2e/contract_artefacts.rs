@@ -145,20 +145,24 @@ fn stage_binary(build_ctx: &Path, binary_name: &str) -> std::io::Result<()> {
         std::fs::copy(src, &dest)?;
     } else {
         // Fallback: mock binary. The tier-A test only needs `--help` to
-        // exit 0 — the contract artefacts test in hyperi-rustlib uses the
-        // same pattern.
+        // exit 0 and the output to mention the binary name (the test
+        // asserts `stdout.contains(binary_name)` further down). Mirror
+        // the pattern hyperi-rustlib uses for its own contract artefact
+        // tests, plus the binary name in the help line.
         let mut f = std::fs::File::create(&dest)?;
-        f.write_all(
-            b"#!/bin/sh\n\
-              # Mock binary for the dfe-receiver contract-artefact e2e test.\n\
-              # Used when target/release/dfe-receiver is not built (CI Test stage).\n\
-              if [ \"$1\" = \"--help\" ] || [ \"$1\" = \"-h\" ]; then\n\
-              \x20 echo \"hyperi-contract-test: ok\"\n\
-              \x20 exit 0\n\
-              fi\n\
-              echo \"hyperi-contract-test: started (mock)\"\n\
-              exit 0\n",
-        )?;
+        let script = format!(
+            "#!/bin/sh\n\
+             # Mock binary for the {bin} contract-artefact e2e test.\n\
+             # Used when target/release/{bin} is not built (CI Test stage).\n\
+             if [ \"$1\" = \"--help\" ] || [ \"$1\" = \"-h\" ]; then\n\
+             \x20 echo \"{bin}: contract-test ok\"\n\
+             \x20 exit 0\n\
+             fi\n\
+             echo \"{bin}: started (mock)\"\n\
+             exit 0\n",
+            bin = binary_name,
+        );
+        f.write_all(script.as_bytes())?;
         drop(f);
     }
     #[cfg(unix)]
