@@ -8,7 +8,7 @@
 
 [package]
 name = "dfe-receiver"
-version = "1.15.10"
+version = "1.0.0"
 edition = "2024"
 description = "High-performance HTTP/gRPC receiver for PB/s scale data ingestion"
 license-file = "LICENSE"
