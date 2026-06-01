@@ -238,9 +238,10 @@ gelf:
 flow:
   enabled: true
   experimental: false
+  bind_address: "127.0.0.1"
   ports:
-    - "127.0.0.1:2055"
-    - "127.0.0.1:6343"
+    - 2055
+    - 6343
   output:
     mode: "canonical"
     max_records_per_packet: 1000
