@@ -58,13 +58,15 @@ async fn send_with_retry(sink: &GrpcSink, topic: &str, payload: Bytes) -> Result
 /// server bind under parallel CI load.
 async fn wait_for_port(port: u16) {
     let addr = format!("127.0.0.1:{port}");
-    for _ in 0..100 {
+    // 300 x 50ms = 15s budget. ARC runners under parallel CI load can take
+    // well over 5s to bind tonic's server, which flaked the grpc_sink tests.
+    for _ in 0..300 {
         if tokio::net::TcpStream::connect(&addr).await.is_ok() {
             return;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    panic!("gRPC server on port {port} never accepted connections within 5s");
+    panic!("gRPC server on port {port} never accepted connections within 15s");
 }
 
 /// Spin up an in-process gRPC server, returning (endpoint, transport, port).
