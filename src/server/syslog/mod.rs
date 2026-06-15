@@ -88,6 +88,7 @@ async fn run_udp(
                     Ok(s) => s,
                     Err(e) => {
                         debug!(peer = %peer_addr, error = %e, "Syslog UDP: invalid UTF-8");
+                        metrics.inc_parse_failure("syslog");
                         metrics.inc_requests_error("syslog");
                         continue;
                     }
@@ -104,6 +105,7 @@ async fn run_udp(
                     }
                     Err(e) => {
                         debug!(peer = %peer_addr, error = %e, "Syslog UDP parse error");
+                        metrics.inc_parse_failure("syslog");
                         metrics.inc_requests_error("syslog");
                     }
                 }
@@ -154,6 +156,7 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
                             }
                             Err(e) => {
                                 debug!(peer = %peer_addr, error = %e, "Syslog TCP parse error");
+                                metrics.inc_parse_failure("syslog");
                                 metrics.inc_requests_error("syslog");
                             }
                         }

@@ -287,6 +287,42 @@ metrics:
   enabled: true
   address: "0.0.0.0:9090"
 
+# --- Horizontal scaling pressure (KEDA autoscaling) ---
+# One `scaling:` section feeds THREE consumers (serde ignores each other's
+# extra fields):
+#   1. dfe-receiver's own legacy weighted ScalingPressure (`weight_*` /
+#      `saturation_*` / `memory_gate_threshold` -- emits `dfe_scaling_pressure`).
+#   2. rustlib's ScalingPressureConfig (worker-pool feedback -- reads `enabled`
+#      / `memory_gate_threshold`).
+#   3. rustlib's horizontal scaling-pressure ENGINE (`transport` / `params` /
+#      `pressures` -- emits `dfe_receiver_scaling_pressure{name="default"}` and
+#      `dfe_receiver_transport_inbound_pressure_ratio`). Requires the
+#      `expression` cargo feature (enabled in Cargo.toml).
+#
+# The receiver is a PUSH ORIGINATOR: inbound is HTTP/gRPC/syslog, outbound is
+# Kafka. The engine's smart default is `max(cpu/cpu_target, inbound)` gated by
+# the outbound circuit being open. For an HTTP inbound the compound inbound is
+# `max(inflight/http_concurrency_target, shed_rate/shed_target)`.
+scaling:
+  enabled: true
+  # Engine evaluation period (periodic, off the data hot-path).
+  interval_secs: 15
+  transport:
+    inbound: http     # receiver leads with HTTP (server.bind_address :8080);
+                      # set to `grpc` if gRPC is the primary ingress.
+    outbound: kafka
+  params:
+    cpu_target: 0.70             # CPU utilisation that counts as full pressure
+    http_concurrency_target: 100 # per-pod in-flight that counts as full inbound
+    shed_target: 10              # 503/UNAVAILABLE shed rate (events/sec) = full
+    # NO lag_target: a push originator has no inbound Kafka lag, so the lag term
+    # contributes 0 (never mis-scales). Outbound Kafka produce-queue depth is
+    # pushed but is downstream-bound and NOT in the smart-default max.
+  # pressures: []  # empty => rustlib's context-aware smart default
+
+  # Legacy weighted ScalingPressure (dfe_scaling_pressure gauge) -- retained.
+  memory_gate_threshold: 0.8
+
 # --- Flow protocols (NetFlow v5/v9/IPFIX + sFlow v5) ---
 # Unified mode (default): one listener on each port accepts all flow protocols.
 # Split mode: `flow.split:` opt-in, two independent listeners per protocol.

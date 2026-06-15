@@ -270,6 +270,26 @@ impl Metrics {
         }
     }
 
+    /// Record a per-protocol parse/decode failure.
+    ///
+    /// Distinct from `inc_requests_error`, which conflates protocol decode
+    /// failures with downstream process failures. This counter isolates the
+    /// ingress-decode failure rate per protocol (syslog/gelf/otlp/...), the
+    /// signal an operator needs to tell "the wire is malformed" apart from
+    /// "the sink is unhappy". Also feeds the standard `DfeMetrics`
+    /// validation-failure counter (encoding category).
+    #[inline]
+    pub fn inc_parse_failure(&self, transport: &str) {
+        metrics::counter!(
+            "dfe_receiver_parse_failures_total",
+            "transport" => transport.to_string()
+        )
+        .increment(1);
+        if let Some(ref dfe) = self.dfe {
+            dfe.validation_failure(RlValidationReason::EncodingError);
+        }
+    }
+
     /// Add bytes received.
     #[inline]
     pub fn add_bytes_received(&self, transport: &str, bytes: u64) {
@@ -700,6 +720,10 @@ fn describe_receiver_metrics() {
     metrics::describe_counter!(
         "dfe_receiver_requests_error_total",
         "Total failed requests by transport"
+    );
+    metrics::describe_counter!(
+        "dfe_receiver_parse_failures_total",
+        "Per-protocol ingress parse/decode failures by transport"
     );
     metrics::describe_counter!(
         "dfe_receiver_bytes_received_total",

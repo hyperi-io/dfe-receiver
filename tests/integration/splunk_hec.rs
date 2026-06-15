@@ -18,6 +18,9 @@
 // Allow unwrap/expect in tests - they're the idiomatic way to fail fast
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
+// Test helpers build a PipelineState inline; the config structs put the future
+// just over clippy's 16 KiB threshold. Mirrors the lib crate's allow (main.rs).
+#![allow(clippy::large_futures)]
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,9 +32,20 @@ use dfe_receiver::server::splunk_hec::SplunkHecHandler;
 use dfe_receiver::server::traits::ProtocolHandler;
 use tokio_util::sync::CancellationToken;
 
-/// Get a random port for testing.
+/// Get a free port for testing.
+///
+/// Binds an OS-assigned ephemeral port and immediately drops the listener,
+/// returning the port the kernel picked. This is collision-free across the
+/// 500+ tests nextest runs in parallel -- the previous `10000 + uuid % 10000`
+/// scheme could (and did) hand two tests the same port, leaving the loser's
+/// handler unable to bind while its client hung forever on a port with no
+/// listener (reqwest has no default timeout).
 fn random_port() -> u16 {
-    10000 + (uuid::Uuid::new_v4().as_u128() % 10000) as u16
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind ephemeral port")
+        .local_addr()
+        .expect("read local addr")
+        .port()
 }
 
 /// Create a minimal config for testing with Splunk HEC enabled.

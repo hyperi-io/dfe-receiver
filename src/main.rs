@@ -125,11 +125,32 @@ impl DfeApp for App {
         // Use runtime's shutdown token (signal handler + K8s pre-stop delay)
         let shutdown_token = runtime.shutdown.clone();
 
-        // Create and run the pipeline orchestrator
-        let orchestrator =
-            Orchestrator::new(config.clone(), metrics.clone(), shutdown_token.clone())
-                .await
-                .map_err(|e| CliError::Service(e.to_string()))?;
+        // Create and run the pipeline orchestrator.
+        //
+        // Originator self-regulation: thread the runtime's self-regulation
+        // governor (built default-ON before transports) into the pipeline so
+        // the HTTP/gRPC ingest handlers shed (503 / UNAVAILABLE) under the
+        // governor's UnifiedPressure latch -- the inbound brake for a push
+        // source. Ingest byte tracking lands on the guard that latch watches.
+        // When self_regulation.enabled = false the governor is None and the
+        // brake falls back to the bespoke memory-guard threshold check.
+        // Horizontal scaling-pressure engine: hand the runtime's signal cell to
+        // the pipeline so the once-per-second metrics loop pushes this pod's
+        // LOCAL per-pod signals (in-flight, outbound producer queue, outbound
+        // circuit state). The receiver is a push originator (inbound
+        // HTTP/gRPC/syslog), so the engine composes its compound inbound from
+        // in-flight; KEDA can also scale on the gratis `dfe_receiver_*` ingress
+        // metrics directly.
+        let orchestrator = Orchestrator::with_governor(
+            config.clone(),
+            metrics.clone(),
+            shutdown_token.clone(),
+            runtime.governor.as_ref(),
+            Some(runtime.memory_guard.clone()),
+            Some(runtime.scaling_signals.clone()),
+        )
+        .await
+        .map_err(|e| CliError::Service(e.to_string()))?;
 
         // Start config hot-reload (SIGHUP + periodic + file polling via rustlib ConfigReloader)
         {

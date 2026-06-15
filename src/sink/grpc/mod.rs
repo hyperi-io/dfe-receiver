@@ -56,9 +56,13 @@ impl Sink for GrpcSink {
     /// The topic is passed as the `key` to the DFE Push RPC, where dfe-loader
     /// uses it for routing.
     async fn send(&self, topic: &str, payload: Bytes) -> Result<()> {
-        match self.transport.send(topic, &payload).await {
+        // rustlib v2.8.5: TransportSender::send takes owned `Bytes`
+        // (reqwest/tonic bodies are zero-copy from Bytes). The clone is a
+        // refcount bump, not a payload copy.
+        let bytes = payload.len();
+        match self.transport.send(topic, payload).await {
             SendResult::Ok | SendResult::FilteredDlq => {
-                debug!(topic = %topic, bytes = payload.len(), "Sent to loader via gRPC");
+                debug!(topic = %topic, bytes, "Sent to loader via gRPC");
                 self.healthy.store(true, Ordering::Relaxed);
                 Ok(())
             }

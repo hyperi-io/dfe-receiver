@@ -142,6 +142,7 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
                             }
                             Err(e) => {
                                 debug!(peer = %peer_addr, error = %e, "GELF parse error");
+                                metrics.inc_parse_failure("gelf");
                                 metrics.inc_requests_error("gelf");
                             }
                         }

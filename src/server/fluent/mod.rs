@@ -120,6 +120,7 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
                         }
                         Err(e) => {
                             debug!(peer = %peer_addr, error = %e, "Fluent Forward parse error");
+                            metrics.inc_parse_failure("fluent");
                             metrics.inc_requests_error("fluent");
                         }
                     }

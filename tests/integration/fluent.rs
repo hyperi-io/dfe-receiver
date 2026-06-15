@@ -23,6 +23,9 @@
 
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
+// Test helpers build a PipelineState inline; the config structs put the future
+// just over clippy's 16 KiB threshold. Mirrors the lib crate's allow (main.rs).
+#![allow(clippy::large_futures)]
 
 use std::io::Write;
 use std::path::{Path, PathBuf};

@@ -143,11 +143,22 @@ keda:
     # -- CPU utilisation percentage threshold
     threshold: "80"
   prometheus:
-    # -- Enable Prometheus-based scaling (dfe_scaling_pressure metric)
+    # -- Enable Prometheus-based scaling on the app's scaling-pressure signal.
+    # OPT-IN: Kafka + CPU triggers above are the defaults. Turn this on to scale
+    # on the rustlib horizontal scaling-pressure ENGINE's correlated composite.
     enabled: false
-    # -- Prometheus server address
+    # -- Prometheus server address. CLUSTER-SPECIFIC: point at your in-cluster
+    # Prometheus / Thanos query endpoint (the default below is a placeholder).
     serverAddress: "http://prometheus:9090"
-    # -- PromQL query for scaling decision
+    # -- PromQL query for the scale decision. The receiver is a PUSH ORIGINATOR
+    # (inbound HTTP/gRPC/syslog), so its engine smart-default composite is
+    # max(CPU/cpu_target, in-flight/concurrency_target) gated by the outbound
+    # Kafka circuit. Use the engine gauge (preferred):
+    #   avg(dfe_receiver_scaling_pressure{name="default"})
+    # The legacy weighted gauge `avg(dfe_scaling_pressure)` (0-100) is retained
+    # and used as the default here for backward compatibility. To scale on raw
+    # per-pod in-flight directly (Tier-1, no engine), use:
+    #   avg(dfe_receiver_active_connections)   # with metricType Value
     query: "avg(dfe_scaling_pressure)"
     # -- Threshold value (0-100) to trigger scale-up
     threshold: "70"

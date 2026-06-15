@@ -12,8 +12,8 @@
 //! to produce Dockerfile, Helm chart, and Docker Compose fragments.
 
 use hyperi_rustlib::deployment::{
-    DeploymentContract, HealthContract, ImageProfile, KedaContract, NativeDepsContract, OciLabels,
-    PortContract, SecretEnvContract, SecretGroupContract,
+    DeploymentContract, HealthContract, ImageProfile, KedaConfig, KedaContract, NativeDepsContract,
+    OciLabels, PortContract, SecretEnvContract, SecretGroupContract,
 };
 
 /// Build the deployment contract for dfe-receiver.
@@ -255,7 +255,14 @@ pub fn contract() -> DeploymentContract {
             description: "High-performance HTTP/gRPC receiver for PB/s scale data ingestion".into(),
             ..OciLabels::default()
         },
-        keda: Some(KedaContract {
+        // KedaContract is #[non_exhaustive] (rustlib 2.8.13): construct via
+        // KedaConfig + From rather than a struct literal so future contract
+        // fields stay non-breaking. The scaling_pressure_* trigger comes from
+        // KedaConfig defaults (enabled=false, threshold=70) -- OFF: the
+        // serverAddress is cluster-specific and must be set in values.yaml
+        // before enabling, no runtime change here. The receiver pushes the
+        // engine signals; an operator opts in per cluster.
+        keda: Some(KedaContract::from_config(&KedaConfig {
             min_replicas: 1,
             max_replicas: 10,
             polling_interval: 15,
@@ -264,7 +271,8 @@ pub fn contract() -> DeploymentContract {
             activation_lag_threshold: 0,
             cpu_enabled: true,
             cpu_threshold: 80,
-        }),
+            ..Default::default()
+        })),
     }
 }
 

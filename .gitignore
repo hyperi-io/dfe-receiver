@@ -41,14 +41,25 @@ coverage.lcov
 .tmp/
 .worktrees/
 ci
-# Phase 2 batch integration
+tarpaulin-report.json
+cobertura.xml
 
-# Local working files (not committed)
+# Local working files (not committed) -- mirrored in .git/info/exclude.
 docs/superpowers/
 .claude/
+.codex/
+.cursor/
+.gemini/
+.cursorrules
 hyperi-ai/
 .mcp.json
 CLAUDE.md
 STATE.md
 TODO.md
+AGENTS.md
+GEMINI.md
 .ai-version
+
+# Local environment files (never commit -- contain secrets)
+!.env.example
+!.env.example.*

@@ -44,6 +44,13 @@ use convert::OtlpMode;
 
 #[doc(hidden)]
 pub mod pb {
+    // Generated prost/tonic types carry the upstream OpenTelemetry proto doc
+    // comments verbatim (e.g. `schema: .../<version>`, `rejected_<signal>`),
+    // which rustdoc parses as unclosed HTML tags. The code is generated into
+    // `OUT_DIR` and regenerated every build, so the comments cannot be edited
+    // at the source; allow the lint at the module boundary instead.
+    #![allow(rustdoc::invalid_html_tags)]
+
     pub mod common {
         pub mod v1 {
             tonic::include_proto!("opentelemetry.proto.common.v1");

@@ -9,6 +9,10 @@
 //! E2E tests that require real infrastructure.
 //! Run with: `cargo nextest run --test e2e` or `cargo nextest run -- --ignored`
 
+// E2E helpers build a PipelineState/Orchestrator inline; the config structs put
+// the future just over clippy's 16 KiB threshold. Mirrors the lib's main.rs.
+#![allow(clippy::large_futures)]
+
 #[path = "common/mod.rs"]
 #[allow(dead_code)]
 mod common;

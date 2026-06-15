@@ -1,4 +1,4 @@
-//! Render a DecodedPacket<R> into JSON envelopes per the configured OutputMode.
+//! Render a `DecodedPacket<R>` into JSON envelopes per the configured `OutputMode`.
 //!
 //! The three modes share top-level envelope fields (_source, protocol,
 //! version, exporter_ip, observation_domain, packet_seq, t_collected). Modes

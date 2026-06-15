@@ -318,6 +318,7 @@ async fn event_handler(
     }
 
     let events = parse_hec_events(&body).map_err(|e| {
+        state.metrics.inc_parse_failure("splunk_hec");
         state.metrics.inc_requests_error("splunk_hec");
         let msg = e.to_string();
         debug!(transport = "splunk_hec", error = %msg, "HEC event parse failed");

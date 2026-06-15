@@ -1968,4 +1968,96 @@ kafka:
         assert!(!debug_output.contains("leakable-password-xyz"));
         assert!(debug_output.contains("REDACTED"));
     }
+
+    // ---------------------------------------------------------------------
+    // Cascade-applied: the receiver's `scaling:` YAML reaches rustlib's
+    // horizontal scaling-pressure ENGINE config (rustlib 2.8.11 cascade fix).
+    //
+    // This exercises the SAME path `ScalingEngineConfig::from_cascade()` uses
+    // (`Config::unmarshal_key::<_>("scaling")`) on a real cascade built from a
+    // `--config` file -- the deployed k8s path. No mocks: real rustlib config
+    // machinery, isolated from the global singleton via `Config::new`.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn test_scaling_section_reaches_rustlib_engine_config() {
+        use hyperi_rustlib::config::{Config as RlConfig, ConfigOptions as RlOpts};
+        use hyperi_rustlib::scaling::{ScalingEngineConfig, ScalingTransport};
+
+        let dir = std::env::temp_dir().join(format!(
+            "dfe-receiver-scaling-cascade-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("config.yaml");
+        // The receiver's scaling block (mirrors config.example.yaml). Note the
+        // receiver's OWN legacy fields (weight_*/saturation_*) sit alongside the
+        // engine's transport/params -- serde tolerates each other's fields.
+        std::fs::write(
+            &file,
+            r"
+scaling:
+  enabled: true
+  interval_secs: 15
+  weight_request_rate: 0.30
+  saturation_request_rate: 100000.0
+  memory_gate_threshold: 0.8
+  transport:
+    inbound: http
+    outbound: kafka
+  params:
+    cpu_target: 0.70
+    http_concurrency_target: 100
+    shed_target: 10
+",
+        )
+        .unwrap();
+
+        let cfg = RlConfig::new(RlOpts {
+            env_prefix: "DFE_RECEIVER".to_string(),
+            config_file: Some(file.clone()),
+            load_dotenv: false,
+            ..Default::default()
+        })
+        .expect("build cascade from --config file");
+
+        let engine: ScalingEngineConfig = cfg
+            .unmarshal_key("scaling")
+            .expect("scaling section deserialises into rustlib ScalingEngineConfig");
+
+        // The receiver is a push originator: inbound HTTP, outbound Kafka.
+        assert_eq!(engine.transport.inbound.as_deref(), Some("http"));
+        assert_eq!(engine.transport.outbound.as_deref(), Some("kafka"));
+        assert_eq!(
+            ScalingTransport::from_label(engine.transport.inbound.as_deref().unwrap()),
+            ScalingTransport::Http
+        );
+        assert!((engine.cpu_target() - 0.70).abs() < f64::EPSILON);
+        // No lag_target for a push originator -> kafka inbound term contributes 0.
+        assert!(!engine.params.contains_key("lag_target"));
+        assert!(engine.enabled);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_receiver_scaling_config_tolerates_engine_keys() {
+        // The receiver's OWN ScalingConfig must still deserialise when the YAML
+        // also carries the engine's transport/params keys (no deny_unknown).
+        let yaml = r"
+scaling:
+  enabled: true
+  memory_gate_threshold: 0.8
+  transport:
+    inbound: http
+    outbound: kafka
+  params:
+    cpu_target: 0.70
+";
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert!(config.scaling.enabled);
+        assert!((config.scaling.memory_gate_threshold - 0.8).abs() < f64::EPSILON);
+        // Legacy weighted defaults preserved (the engine keys were ignored).
+        assert!((config.scaling.weight_request_rate - 0.30).abs() < f64::EPSILON);
+    }
 }

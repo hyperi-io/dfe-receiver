@@ -16,10 +16,10 @@ use std::io::{BufReader, Cursor};
 use std::path::Path;
 use std::sync::Arc;
 
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig};
-use rustls_pemfile::{certs, private_key};
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info};
 
@@ -34,7 +34,7 @@ fn load_certs_from_file(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
         .map_err(|e| Error::Tls(format!("failed to open cert file {}: {e}", path.display())))?;
     let mut reader = BufReader::new(file);
 
-    certs(&mut reader)
+    CertificateDer::pem_reader_iter(&mut reader)
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|e| {
             Error::Tls(format!(
@@ -48,7 +48,7 @@ fn load_certs_from_file(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
 fn load_certs_from_bytes(pem_data: &[u8], source: &str) -> Result<Vec<CertificateDer<'static>>> {
     let mut reader = Cursor::new(pem_data);
 
-    certs(&mut reader)
+    CertificateDer::pem_reader_iter(&mut reader)
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|e| Error::Tls(format!("failed to parse certs from {source}: {e}")))
 }
@@ -59,18 +59,20 @@ fn load_private_key_from_file(path: &Path) -> Result<PrivateKeyDer<'static>> {
         .map_err(|e| Error::Tls(format!("failed to open key file {}: {e}", path.display())))?;
     let mut reader = BufReader::new(file);
 
-    private_key(&mut reader)
-        .map_err(|e| Error::Tls(format!("failed to parse key from {}: {e}", path.display())))?
-        .ok_or_else(|| Error::Tls(format!("no private key found in {}", path.display())))
+    PrivateKeyDer::from_pem_reader(&mut reader).map_err(|e| {
+        Error::Tls(format!(
+            "failed to load private key from {}: {e}",
+            path.display()
+        ))
+    })
 }
 
 /// Load a private key from PEM bytes.
 fn load_private_key_from_bytes(pem_data: &[u8], source: &str) -> Result<PrivateKeyDer<'static>> {
     let mut reader = Cursor::new(pem_data);
 
-    private_key(&mut reader)
-        .map_err(|e| Error::Tls(format!("failed to parse key from {source}: {e}")))?
-        .ok_or_else(|| Error::Tls(format!("no private key found in {source}")))
+    PrivateKeyDer::from_pem_reader(&mut reader)
+        .map_err(|e| Error::Tls(format!("failed to load private key from {source}: {e}")))
 }
 
 /// Load CA certificates into a root store from a file.

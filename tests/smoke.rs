@@ -7,6 +7,9 @@
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+// Test builds a PipelineState/Orchestrator inline; the config structs put the
+// future just over clippy's 16 KiB threshold. Mirrors the lib's main.rs allow.
+#![allow(clippy::large_futures)]
 
 //! Smoke test that exercises the full startup path:
 //! config → metrics init → pipeline build → server bind → shutdown.

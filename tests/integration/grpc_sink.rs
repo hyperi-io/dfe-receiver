@@ -100,10 +100,11 @@ async fn test_grpc_sink_delivers_message() {
         .await
         .expect("send failed");
 
-    // Server should receive it
+    // Server should receive it (recv now yields a WorkBatch -- records on
+    // `.records`, source acks on `.commit_tokens`)
     let received = server.recv(10).await.expect("recv failed");
     assert_eq!(received.len(), 1, "expected exactly 1 message");
-    assert_eq!(&received[0].payload[..], &payload[..]);
+    assert_eq!(&received.records[0].payload[..], &payload[..]);
 
     assert!(sink.is_healthy(), "sink should remain healthy after send");
 }
@@ -129,7 +130,7 @@ async fn test_grpc_sink_multiple_messages_preserved_order() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while all_received.len() < 10 && tokio::time::Instant::now() < deadline {
         if let Ok(batch) = server.recv(10).await {
-            all_received.extend(batch);
+            all_received.extend(batch.records);
         }
     }
 
@@ -165,8 +166,8 @@ async fn test_grpc_sink_large_payload() {
 
     let received = server.recv(10).await.expect("recv failed");
     assert_eq!(received.len(), 1);
-    assert_eq!(received[0].payload.len(), payload_bytes.len());
-    assert_eq!(&received[0].payload[..], &payload_bytes[..]);
+    assert_eq!(received.records[0].payload.len(), payload_bytes.len());
+    assert_eq!(&received.records[0].payload[..], &payload_bytes[..]);
 }
 
 #[tokio::test]
@@ -194,7 +195,7 @@ async fn test_grpc_sink_recovers_after_server_restart() {
     sink.send("topic", Bytes::from(r#"{"phase":"before"}"#))
         .await
         .expect("pre-restart send");
-    assert_eq!(server1.recv(1).await.expect("recv").len(), 1);
+    assert_eq!(server1.recv(1).await.expect("recv").records.len(), 1);
 
     // Simulate server going down and coming back on the same port
     drop(server1);
@@ -236,6 +237,7 @@ async fn test_grpc_sink_recovers_after_server_restart() {
         while tokio::time::Instant::now() < deadline {
             if let Ok(batch) = server2.recv(10).await
                 && batch
+                    .records
                     .iter()
                     .any(|m| String::from_utf8_lossy(&m.payload).contains("after"))
             {
@@ -274,5 +276,6 @@ async fn test_grpc_sink_concurrent_sends() {
             total += batch.len();
         }
     }
+    // NB: WorkBatch::len() == records.len(); the running total is correct.
     assert_eq!(total, 50, "expected 50 messages, got {total}");
 }

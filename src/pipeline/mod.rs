@@ -23,8 +23,10 @@ use tracing::{debug, error, info, warn};
 /// State-change flag for memory pressure log deduplication.
 static PRESSURE_LOGGED: AtomicBool = AtomicBool::new(false);
 
+use hyperi_rustlib::UnifiedPressure;
 use hyperi_rustlib::dlq::{Dlq, DlqEntry};
 use hyperi_rustlib::logger::security;
+use hyperi_rustlib::scaling::ScalingSignalsCell;
 
 use crate::buffer::{InMemoryBuffer, MemoryGuard, MemoryGuardConfig, MemoryPressure, SinkBackend};
 use crate::config::{Config, SharedConfig};
@@ -51,13 +53,56 @@ pub struct PipelineState {
     grpc_loader_sink: Option<Arc<SinkBackend<GrpcSink>>>,
     file_sink: Option<Arc<FileSink>>,
     memory_guard: Arc<MemoryGuard>,
+    /// Self-regulation pressure latch from the runtime governor.
+    ///
+    /// `Some` when self-regulation is enabled (the default): the originator
+    /// ingest brake (HTTP 503 / gRPC `UNAVAILABLE`) consults this unified,
+    /// hysteretic pressure signal -- the HARD memory source is the never-OOM
+    /// authority. `None` when `self_regulation.enabled = false`, in which case
+    /// the brake falls back to the bespoke memory-guard `under_pressure()`
+    /// check (byte-identical to pre-governor behaviour).
+    pressure: Option<Arc<UnifiedPressure>>,
+    /// Horizontal scaling-pressure signal cell from the runtime engine.
+    ///
+    /// `Some` when the runtime built the scaling engine (the default): the
+    /// once-per-second metrics loop pushes this pod's LOCAL, per-pod signals
+    /// here (in-flight, shed rate, outbound circuit state) so the engine's
+    /// compound inbound pressure -- HTTP/gRPC use in-flight + shed -- and the
+    /// smart-default `dfe_receiver_scaling_pressure` gauge reflect real load.
+    /// `None` only in tests / standalone contexts with no `ServiceRuntime`.
+    scaling_signals: Option<Arc<ScalingSignalsCell>>,
     dlq: Option<Arc<Dlq>>,
     ready: AtomicBool,
 }
 
 impl PipelineState {
-    /// Create new pipeline state.
+    /// Create new pipeline state with self-regulation disabled.
+    ///
+    /// The ingest brake falls back to the bespoke YAML-configured memory-guard
+    /// threshold check (byte-identical to pre-governor behaviour). Used by
+    /// tests and the `self_regulation.enabled = false` path. Production wires
+    /// the governor via [`with_governor`](Self::with_governor).
     pub async fn new(shared_config: SharedConfig, shutdown: CancellationToken) -> Result<Self> {
+        Self::with_governor(shared_config, shutdown, None, None, None).await
+    }
+
+    /// Create new pipeline state, optionally wired to the runtime governor.
+    ///
+    /// `governor` is the runtime self-regulation governor (the originator brake
+    /// source of truth). When `Some`, the pipeline tracks ingest bytes on the
+    /// governor's OWN memory guard so the governor's HARD memory source -- and
+    /// thus the `UnifiedPressure` latch the ingest brake consults -- actually
+    /// reacts to in-flight load. When `None` (self-regulation disabled, or
+    /// tests) the pipeline builds the bespoke YAML-configured guard and the
+    /// brake falls back to its threshold check (byte-identical to pre-governor
+    /// behaviour).
+    pub async fn with_governor(
+        shared_config: SharedConfig,
+        shutdown: CancellationToken,
+        governor: Option<&hyperi_rustlib::SelfRegulationGovernor>,
+        runtime_memory_guard: Option<Arc<MemoryGuard>>,
+        scaling_signals: Option<Arc<ScalingSignalsCell>>,
+    ) -> Result<Self> {
         let config = shared_config.get();
         let validator = Validator::new(config.validation.clone());
         let router = Router::new(
@@ -65,15 +110,25 @@ impl PipelineState {
             &config.destinations,
             config.server.auth.include_common_header,
         );
-        // Memory guard: env vars take precedence, then YAML config, then auto-detect
-        let mut mg_config = MemoryGuardConfig::from_env("DFE_RECEIVER");
-        if config.buffer.memory_limit > 0 && mg_config.limit_bytes == 0 {
-            mg_config.limit_bytes = config.buffer.memory_limit as u64;
-        }
-        if (config.buffer.pressure_threshold - 0.8).abs() > f64::EPSILON {
-            mg_config.pressure_threshold = config.buffer.pressure_threshold;
-        }
-        let memory_guard = Arc::new(MemoryGuard::new(mg_config));
+        // Memory guard + pressure source of truth.
+        //
+        // With self-regulation ON, reuse the runtime's guard (the one the
+        // governor's HARD memory source watches) so ingest byte reservations
+        // feed the UnifiedPressure latch. Otherwise build the bespoke
+        // YAML-configured guard (env > YAML > cgroup auto-detect).
+        let (memory_guard, pressure) = match (governor, runtime_memory_guard) {
+            (Some(gov), Some(guard)) => (guard, Some(gov.pressure())),
+            _ => {
+                let mut mg_config = MemoryGuardConfig::from_env("DFE_RECEIVER");
+                if config.buffer.memory_limit > 0 && mg_config.limit_bytes == 0 {
+                    mg_config.limit_bytes = config.buffer.memory_limit as u64;
+                }
+                if (config.buffer.pressure_threshold - 0.8).abs() > f64::EPSILON {
+                    mg_config.pressure_threshold = config.buffer.pressure_threshold;
+                }
+                (Arc::new(MemoryGuard::new(mg_config)), None)
+            }
+        };
 
         // Initialise Kafka sink with buffer wrapper if brokers configured
         let kafka_sink = if !config.kafka.brokers.is_empty() {
@@ -157,6 +212,8 @@ impl PipelineState {
             grpc_loader_sink,
             file_sink,
             memory_guard,
+            pressure,
+            scaling_signals,
             dlq,
             ready: AtomicBool::new(true),
         })
@@ -178,8 +235,8 @@ impl PipelineState {
             return false;
         }
 
-        // Not ready under high memory pressure
-        if self.memory_guard.under_pressure() {
+        // Not ready under high pressure (originator brake source of truth).
+        if self.under_pressure() {
             return false;
         }
 
@@ -210,9 +267,28 @@ impl PipelineState {
         self.memory_guard.pressure()
     }
 
+    /// Originator pressure signal -- the source of truth for the ingest brake.
+    ///
+    /// When self-regulation is enabled, this is the runtime governor's unified,
+    /// hysteretic pressure latch (HARD memory source = never-OOM authority).
+    /// When disabled, it falls back to the bespoke memory-guard threshold
+    /// check, byte-identical to pre-governor behaviour.
+    ///
+    /// This is an INBOUND brake only. Under pressure the HTTP/gRPC ingest
+    /// handlers shed (503 / `UNAVAILABLE`) BEFORE accepting -- relying on
+    /// upstream retry. The OUTBOUND drain (Kafka / loader / tiered sink) is
+    /// NEVER gated here; gating the drain would deadlock the pipeline.
+    #[inline]
+    fn under_pressure(&self) -> bool {
+        match self.pressure {
+            Some(ref p) => p.should_hold(),
+            None => self.memory_guard.under_pressure(),
+        }
+    }
+
     /// Check if backpressure should be applied.
     pub fn should_apply_backpressure(&self) -> bool {
-        self.memory_guard.under_pressure()
+        self.under_pressure()
     }
 
     /// Process a message through the pipeline.
@@ -554,8 +630,23 @@ impl PipelineState {
         // EPS gauge — events per second from the rate window
         metrics::gauge!("dfe_receiver_events_per_second").set(metrics.request_rate());
 
-        // Sync all metrics into the scaling pressure engine
+        // Sync all metrics into the (legacy) weighted scaling pressure engine.
         metrics.update_scaling();
+
+        // Feed the rustlib horizontal scaling-pressure ENGINE its per-pod,
+        // LOCALLY-knowable signals. The receiver is a PUSH ORIGINATOR (inbound
+        // HTTP/gRPC/syslog), so the engine's compound inbound pressure uses
+        // in-flight (active connections is the per-pod concurrency proxy) max'd
+        // with shed rate; outbound is Kafka, whose circuit-open is the engine's
+        // ONLY default gate and whose producer queue depth is the outbound term.
+        // Tier-1 KEDA can also scale on the gratis `dfe_receiver_*` metrics
+        // directly. NB: there is no inbound Kafka lag for a push originator, so
+        // `lag_target` is intentionally absent (the lag term contributes 0).
+        if let Some(ref signals) = self.scaling_signals {
+            signals.set_inflight(metrics.get_active_connections() as f64);
+            signals.set_produce_queue_depth(total_queue as f64);
+            signals.set_circuit_open(metrics.is_circuit_open());
+        }
     }
 
     /// Reload configuration, rebuilding router and validator.
@@ -644,14 +735,40 @@ pub struct Orchestrator {
 }
 
 impl Orchestrator {
-    /// Create a new orchestrator.
+    /// Create a new orchestrator with self-regulation disabled (tests).
     pub async fn new(
         config: Config,
         metrics: Arc<Metrics>,
         shutdown: CancellationToken,
     ) -> Result<Self> {
+        Self::with_governor(config, metrics, shutdown, None, None, None).await
+    }
+
+    /// Create a new orchestrator, optionally wired to the runtime governor.
+    ///
+    /// `governor` + `runtime_memory_guard` come from the `ServiceRuntime`: when
+    /// self-regulation is enabled, the ingest brake (HTTP 503 / gRPC
+    /// `UNAVAILABLE`) is driven by the governor's `UnifiedPressure` latch and
+    /// byte tracking lands on the guard that latch watches. `scaling_signals`
+    /// is the runtime's scaling-engine signal cell -- the metrics loop pushes
+    /// this pod's in-flight / shed / outbound-circuit signals into it.
+    pub async fn with_governor(
+        config: Config,
+        metrics: Arc<Metrics>,
+        shutdown: CancellationToken,
+        governor: Option<&hyperi_rustlib::SelfRegulationGovernor>,
+        runtime_memory_guard: Option<Arc<MemoryGuard>>,
+        scaling_signals: Option<Arc<ScalingSignalsCell>>,
+    ) -> Result<Self> {
         let shared_config = SharedConfig::new(config);
-        let state = PipelineState::new(shared_config.clone(), shutdown.clone()).await?;
+        let state = PipelineState::with_governor(
+            shared_config.clone(),
+            shutdown.clone(),
+            governor,
+            runtime_memory_guard,
+            scaling_signals,
+        )
+        .await?;
 
         Ok(Self {
             state: Arc::new(state),

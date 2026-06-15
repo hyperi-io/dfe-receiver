@@ -223,6 +223,7 @@ async fn write_handler(
     const MAX_DECOMPRESSED_SIZE: usize = 64 * 1024 * 1024; // 64 MiB
 
     let expected_len = snap::raw::decompress_len(&body).map_err(|e| {
+        state.metrics.inc_parse_failure("prometheus_rw");
         state.metrics.inc_requests_error("prometheus_rw");
         RwError::bad_request(&format!("snappy decompression failed: {e}"))
     })?;
@@ -237,12 +238,14 @@ async fn write_handler(
     let decompressed = snap::raw::Decoder::new()
         .decompress_vec(&body)
         .map_err(|e| {
+            state.metrics.inc_parse_failure("prometheus_rw");
             state.metrics.inc_requests_error("prometheus_rw");
             RwError::bad_request(&format!("snappy decompression failed: {e}"))
         })?;
 
     // Protobuf decode
     let request = proto::WriteRequest::decode(decompressed.as_slice()).map_err(|e| {
+        state.metrics.inc_parse_failure("prometheus_rw");
         state.metrics.inc_requests_error("prometheus_rw");
         RwError::bad_request(&format!("protobuf decode failed: {e}"))
     })?;
