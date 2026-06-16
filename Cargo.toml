@@ -22,7 +22,7 @@ doctest = false
 
 [dependencies]
 # HyperI shared library (crates.io)
-hyperi-rustlib = { version = ">=2.8.13, <3", features = [
+hyperi-rustlib = { version = ">=2.8.14, <3", features = [
     "config",
     "config-reload",
     "logger",
@@ -173,7 +173,7 @@ sha2 = ">=0.10, <0.11"
 
 # Contract artefact e2e (tests/e2e/contract_artefacts.rs) — pulls in
 # probe/skip/cluster helpers from rustlib's test_support module.
-hyperi-rustlib = { version = ">=2.8.13, <3", features = ["deployment-test-support"] }
+hyperi-rustlib = { version = ">=2.8.14, <3", features = ["deployment-test-support"] }
 
 [features]
 default = ["otlp"]

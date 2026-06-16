@@ -1126,9 +1126,13 @@ impl KafkaConfig {
         &self,
         suffix: &str,
     ) -> hyperi_rustlib::transport::KafkaConfig {
+        // Receiver's Kafka transports are produce-only (syslog -> Kafka); the
+        // Producer role + empty group mean rustlib builds no idle consumer (#44).
         let mut config = hyperi_rustlib::transport::KafkaConfig {
+            role: hyperi_rustlib::transport::KafkaRole::Producer,
             brokers: self.brokers.clone(),
             client_id: format!("{}{}", self.client_id, suffix),
+            group: String::new(),
             ..Default::default()
         };
 
