@@ -71,17 +71,27 @@ async fn wait_for_port(port: u16) {
 
 /// Spin up an in-process gRPC server, returning (endpoint, transport, port).
 async fn start_server() -> (String, GrpcTransport, u16) {
-    let port = random_port();
-    let listen = format!("127.0.0.1:{port}");
-    let config = GrpcConfig::server(&listen);
-    let transport = GrpcTransport::new(&config)
-        .await
-        .expect("failed to start gRPC server");
-
-    wait_for_port(port).await;
-
-    let endpoint = format!("http://127.0.0.1:{port}");
-    (endpoint, transport, port)
+    // `random_port()` can collide under parallel CI load -- the port is free
+    // when picked but grabbed by another test before GrpcTransport binds, so
+    // `new()` fails fast. Retry on a fresh port rather than flake the test.
+    let mut last_err = String::new();
+    for _ in 0..20 {
+        let port = random_port();
+        let listen = format!("127.0.0.1:{port}");
+        let config = GrpcConfig::server(&listen);
+        match GrpcTransport::new(&config).await {
+            Ok(transport) => {
+                wait_for_port(port).await;
+                let endpoint = format!("http://127.0.0.1:{port}");
+                return (endpoint, transport, port);
+            }
+            Err(e) => {
+                last_err = e.to_string();
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    }
+    panic!("failed to start gRPC server after 20 attempts: {last_err}");
 }
 
 #[tokio::test]
