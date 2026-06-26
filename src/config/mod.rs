@@ -6,7 +6,7 @@
 // License:   BUSL-1.1
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
-//! Configuration management using hyperi-rustlib's 7-layer cascade.
+//! Configuration management using scalo's 7-layer cascade.
 //!
 //! Priority (highest to lowest):
 //! 1. CLI arguments
@@ -23,11 +23,11 @@ pub use shared::SharedConfig;
 
 use std::collections::HashMap;
 
-use hyperi_rustlib::config::flat_env::{self, ApplyFlatEnv, Normalize};
-use hyperi_rustlib::config::{self, ConfigOptions};
+use scalo::config::flat_env::{self, ApplyFlatEnv, Normalize};
+use scalo::config::{self, ConfigOptions};
 use serde::{Deserialize, Serialize};
 
-use hyperi_rustlib::scaling::{ScalingComponent, ScalingPressure, ScalingPressureConfig};
+use scalo::scaling::{ScalingComponent, ScalingPressure, ScalingPressureConfig};
 
 use crate::error::{Error, Result};
 
@@ -146,7 +146,7 @@ impl Config {
     /// Priority (highest to lowest):
     /// 1. CLI arguments (handled by caller, merged after)
     /// 2. Environment variables (DFE_RECEIVER_ prefix)
-    /// 3. .env file (loaded by dotenvy via hyperi-rustlib)
+    /// 3. .env file (loaded by dotenvy via scalo)
     /// 4. Config file (YAML)
     /// 5. Hard-coded defaults
     pub fn load(config_path: Option<&str>) -> Result<Self> {
@@ -155,7 +155,7 @@ impl Config {
             return Self::load_from_file(path);
         }
 
-        // Otherwise, use hyperi-rustlib's 7-layer cascade
+        // Otherwise, use scalo's 7-layer cascade
         config::setup(ConfigOptions {
             env_prefix: ENV_PREFIX.to_string(),
             config_paths: Vec::new(),
@@ -1090,9 +1090,9 @@ impl Default for DlqConfig {
 }
 
 impl DlqConfig {
-    /// Convert to rustlib DlqConfig for the unified DLQ module.
-    pub fn to_rustlib_config(&self) -> hyperi_rustlib::dlq::DlqConfig {
-        use hyperi_rustlib::dlq::{DlqMode, FileDlqConfig, KafkaDlqConfig};
+    /// Convert to scalo DlqConfig for the unified DLQ module.
+    pub fn to_rustlib_config(&self) -> scalo::dlq::DlqConfig {
+        use scalo::dlq::{DlqMode, FileDlqConfig, KafkaDlqConfig};
 
         let mode = match self.mode.as_str() {
             "fan_out" => DlqMode::FanOut,
@@ -1101,7 +1101,7 @@ impl DlqConfig {
             _ => DlqMode::Cascade,
         };
 
-        hyperi_rustlib::dlq::DlqConfig {
+        scalo::dlq::DlqConfig {
             enabled: self.enabled,
             mode,
             file: FileDlqConfig {
@@ -1115,21 +1115,18 @@ impl DlqConfig {
                 common_topic: self.topic.clone(),
                 ..KafkaDlqConfig::default()
             },
-            ..hyperi_rustlib::dlq::DlqConfig::default()
+            ..scalo::dlq::DlqConfig::default()
         }
     }
 }
 
 impl KafkaConfig {
-    /// Convert to rustlib transport KafkaConfig with a given client ID suffix.
-    fn to_rustlib_config_with_suffix(
-        &self,
-        suffix: &str,
-    ) -> hyperi_rustlib::transport::KafkaConfig {
-        // Receiver's Kafka transports are produce-only (syslog -> Kafka); the
-        // Producer role + empty group mean rustlib builds no idle consumer (#44).
-        let mut config = hyperi_rustlib::transport::KafkaConfig {
-            role: hyperi_rustlib::transport::KafkaRole::Producer,
+    /// Convert to scalo transport KafkaConfig with a given client ID suffix.
+    fn to_rustlib_config_with_suffix(&self, suffix: &str) -> scalo::transport::KafkaConfig {
+        // Receiver's Kafka transports are produce-only (syslog -> Kafka). scalo
+        // 2.9 dropped the explicit role field for a profile-based config: an
+        // empty group (and no topics) means scalo builds no idle consumer (#44).
+        let mut config = scalo::transport::KafkaConfig {
             brokers: self.brokers.clone(),
             client_id: format!("{}{}", self.client_id, suffix),
             group: String::new(),
@@ -1164,13 +1161,13 @@ impl KafkaConfig {
         config
     }
 
-    /// Convert to rustlib transport KafkaConfig for the main producer sink.
-    pub fn to_rustlib_kafka_config_for_producer(&self) -> hyperi_rustlib::transport::KafkaConfig {
+    /// Convert to scalo transport KafkaConfig for the main producer sink.
+    pub fn to_rustlib_kafka_config_for_producer(&self) -> scalo::transport::KafkaConfig {
         self.to_rustlib_config_with_suffix("")
     }
 
-    /// Convert to rustlib transport KafkaConfig for DLQ producer.
-    pub fn to_rustlib_kafka_config(&self) -> hyperi_rustlib::transport::KafkaConfig {
+    /// Convert to scalo transport KafkaConfig for DLQ producer.
+    pub fn to_rustlib_kafka_config(&self) -> scalo::transport::KafkaConfig {
         self.to_rustlib_config_with_suffix("-dlq")
     }
 }
@@ -1423,7 +1420,7 @@ pub struct BufferConfig {
     pub pressure_threshold: f64,
 
     /// Optional disk spillover configuration.
-    /// When enabled, messages are spilled to disk via rustlib's TieredSink
+    /// When enabled, messages are spilled to disk via scalo's TieredSink
     /// when the primary sink is unavailable (instead of in-memory only).
     #[serde(default)]
     pub spillover: SpilloverConfig,
@@ -1441,7 +1438,7 @@ impl Default for BufferConfig {
 
 /// Disk spillover configuration (opt-in, default disabled).
 ///
-/// When enabled, failed sends are spilled to disk via rustlib's TieredSink
+/// When enabled, failed sends are spilled to disk via scalo's TieredSink
 /// instead of being held in an in-memory queue. This provides crash-resilient
 /// buffering at the cost of disk I/O on the failure path.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1564,14 +1561,28 @@ impl Default for ScalingConfig {
 }
 
 impl ScalingConfig {
-    /// Build a `ScalingPressure` engine from this config.
+    /// The scalo `ScalingPressureConfig` (gate thresholds) from this config.
     #[must_use]
-    pub fn build_pressure(&self) -> ScalingPressure {
-        let base = ScalingPressureConfig {
+    pub fn pressure_config(&self) -> ScalingPressureConfig {
+        ScalingPressureConfig {
             enabled: self.enabled,
             memory_gate_threshold: self.memory_gate_threshold,
-        };
-        let components = vec![
+        }
+    }
+
+    /// The weighted components KEDA scores against.
+    ///
+    /// Shared between [`build_pressure`](Self::build_pressure) and the
+    /// `ServiceApp::scaling_components` hook so the runtime's
+    /// `ScalingPressure` (the engine `/scaling/pressure` serves to KEDA) and
+    /// any standalone engine register the SAME set. `queue_depth` is the sum of
+    /// all sink producer queues (the outbound term) and `connections` is the
+    /// per-pod inbound concurrency proxy -- between them they subsume the
+    /// signals the old scalo runtime signal cell fed (in-flight, produce-queue
+    /// depth), so the pipeline no longer pushes a separate per-pod feed.
+    #[must_use]
+    pub fn components(&self) -> Vec<ScalingComponent> {
+        vec![
             ScalingComponent::new(
                 "request_rate",
                 self.weight_request_rate,
@@ -1589,8 +1600,16 @@ impl ScalingConfig {
                 self.saturation_connections,
             ),
             ScalingComponent::new("spill", self.weight_spill, self.saturation_spill),
-        ];
-        ScalingPressure::new(base, components)
+        ]
+    }
+
+    /// Build a standalone `ScalingPressure` engine from this config.
+    ///
+    /// Used by tests / standalone contexts. Production shares the runtime's
+    /// engine (registered via `ServiceApp::scaling_components`).
+    #[must_use]
+    pub fn build_pressure(&self) -> ScalingPressure {
+        ScalingPressure::new(self.pressure_config(), self.components())
     }
 }
 
@@ -1974,72 +1993,52 @@ kafka:
     }
 
     // ---------------------------------------------------------------------
-    // Cascade-applied: the receiver's `scaling:` YAML reaches rustlib's
-    // horizontal scaling-pressure ENGINE config (rustlib 2.8.11 cascade fix).
+    // The receiver's `scaling:` YAML reaches the scalo ScalingPressure model.
     //
-    // This exercises the SAME path `ScalingEngineConfig::from_cascade()` uses
-    // (`Config::unmarshal_key::<_>("scaling")`) on a real cascade built from a
-    // `--config` file -- the deployed k8s path. No mocks: real rustlib config
-    // machinery, isolated from the global singleton via `Config::new`.
+    // scalo 2.9 dropped the old transport/params horizontal-engine config
+    // (`ScalingEngineConfig`) for a weighted-component `ScalingPressure`. The
+    // receiver feeds those components onto the runtime's shared engine (served
+    // at `/scaling/pressure` to KEDA) via `ServiceApp::scaling_components`.
+    // This loads a real `--config` file -- the deployed k8s path -- and asserts
+    // the section yields the expected weighted components. No mocks.
     // ---------------------------------------------------------------------
 
     #[test]
-    fn test_scaling_section_reaches_rustlib_engine_config() {
-        use hyperi_rustlib::config::{Config as RlConfig, ConfigOptions as RlOpts};
-        use hyperi_rustlib::scaling::{ScalingEngineConfig, ScalingTransport};
-
+    fn test_scaling_section_yields_pressure_components() {
         let dir = std::env::temp_dir().join(format!(
             "dfe-receiver-scaling-cascade-{}",
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("config.yaml");
-        // The receiver's scaling block (mirrors config.example.yaml). Note the
-        // receiver's OWN legacy fields (weight_*/saturation_*) sit alongside the
-        // engine's transport/params -- serde tolerates each other's fields.
         std::fs::write(
             &file,
             r"
 scaling:
   enabled: true
-  interval_secs: 15
   weight_request_rate: 0.30
   saturation_request_rate: 100000.0
   memory_gate_threshold: 0.8
-  transport:
-    inbound: http
-    outbound: kafka
-  params:
-    cpu_target: 0.70
-    http_concurrency_target: 100
-    shed_target: 10
 ",
         )
         .unwrap();
 
-        let cfg = RlConfig::new(RlOpts {
-            env_prefix: "DFE_RECEIVER".to_string(),
-            config_file: Some(file.clone()),
-            load_dotenv: false,
-            ..Default::default()
-        })
-        .expect("build cascade from --config file");
+        let config = Config::load_from_file(file.to_str().unwrap())
+            .expect("load receiver config from --config file");
 
-        let engine: ScalingEngineConfig = cfg
-            .unmarshal_key("scaling")
-            .expect("scaling section deserialises into rustlib ScalingEngineConfig");
+        assert!(config.scaling.enabled);
+        assert!((config.scaling.memory_gate_threshold - 0.8).abs() < f64::EPSILON);
 
-        // The receiver is a push originator: inbound HTTP, outbound Kafka.
-        assert_eq!(engine.transport.inbound.as_deref(), Some("http"));
-        assert_eq!(engine.transport.outbound.as_deref(), Some("kafka"));
-        assert_eq!(
-            ScalingTransport::from_label(engine.transport.inbound.as_deref().unwrap()),
-            ScalingTransport::Http
-        );
-        assert!((engine.cpu_target() - 0.70).abs() < f64::EPSILON);
-        // No lag_target for a push originator -> kafka inbound term contributes 0.
-        assert!(!engine.params.contains_key("lag_target"));
-        assert!(engine.enabled);
+        // The components the runtime's ScalingPressure registers for KEDA.
+        let components = config.scaling.components();
+        let names: Vec<&str> = components.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"request_rate"));
+        assert!(names.contains(&"queue_depth"));
+        assert!(names.contains(&"connections"));
+        assert!(names.contains(&"memory"));
+        assert!(names.contains(&"spill"));
+        // The receiver is a push originator: no inbound Kafka lag component.
+        assert!(!names.contains(&"lag"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

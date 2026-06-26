@@ -9,7 +9,7 @@
 //! dfe-loader gRPC transport sink.
 //!
 //! Sends messages directly to dfe-loader using the DFE native gRPC protocol
-//! (hyperi-rustlib `GrpcTransport`, client-only mode). Used when
+//! (scalo `GrpcTransport`, client-only mode). Used when
 //! `loader.transport = "grpc"`, enabling receiver→loader communication
 //! without Kafka (e.g., inside dfe-docker).
 
@@ -17,8 +17,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use hyperi_rustlib::transport::{GrpcConfig, GrpcTransport, SendResult};
-use hyperi_rustlib::transport::{TransportBase, TransportSender};
+use scalo::transport::{GrpcConfig, GrpcTransport, SendResult};
+use scalo::transport::{TransportBase, TransportSender};
 use tracing::{debug, error, info};
 
 use crate::error::{Error, Result};
@@ -56,7 +56,7 @@ impl Sink for GrpcSink {
     /// The topic is passed as the `key` to the DFE Push RPC, where dfe-loader
     /// uses it for routing.
     async fn send(&self, topic: &str, payload: Bytes) -> Result<()> {
-        // rustlib v2.8.5: TransportSender::send takes owned `Bytes`
+        // scalo: TransportSender::send takes owned `Bytes`
         // (reqwest/tonic bodies are zero-copy from Bytes). The clone is a
         // refcount bump, not a payload copy.
         let bytes = payload.len();

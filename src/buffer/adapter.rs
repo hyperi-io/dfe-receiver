@@ -1,12 +1,12 @@
 // Project:   dfe-receiver
 // File:      src/buffer/adapter.rs
-// Purpose:   Adapter between receiver's Sink trait and rustlib's tiered_sink::Sink
+// Purpose:   Adapter between receiver's Sink trait and scalo's tiered_sink::Sink
 // Language:  Rust
 //
 // License:   BUSL-1.1
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
-//! Adapter between receiver's Sink trait and rustlib's tiered_sink::Sink.
+//! Adapter between receiver's Sink trait and scalo's tiered_sink::Sink.
 //!
 //! Encodes topic + payload as: `[topic_len: u32 LE][topic bytes][payload bytes]`
 //! This allows the spool to store topic-routed messages as raw bytes.
@@ -14,11 +14,11 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use hyperi_rustlib::tiered_sink::{Sink as RustlibSink, SinkError};
+use scalo::tiered_sink::{Sink as RustlibSink, SinkError};
 
 use crate::sink::Sink as ReceiverSink;
 
-/// Adapts a receiver Sink to rustlib's tiered_sink::Sink interface.
+/// Adapts a receiver Sink to scalo's tiered_sink::Sink interface.
 pub struct RustlibSinkAdapter<S: ReceiverSink> {
     inner: Arc<S>,
 }

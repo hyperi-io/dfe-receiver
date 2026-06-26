@@ -21,14 +21,14 @@ path = "src/lib.rs"
 doctest = false
 
 [dependencies]
-# HyperI shared library (crates.io)
-hyperi-rustlib = { version = ">=2.8.14, <3", features = [
+# scalo shared library (crates.io)
+scalo = { version = ">=2.9.0, <3", features = [
     "config",
     "config-reload",
     "logger",
     "memory",
     "metrics",
-    "metrics-dfe",
+    "service-metrics",
     "http-server",
     "transport-kafka",
     "transport-grpc",
@@ -38,9 +38,9 @@ hyperi-rustlib = { version = ">=2.8.14, <3", features = [
     "runtime",
     "secrets",
     "scaling",
-    # CEL expression evaluation -- REQUIRED for the rustlib ScalingEngine to
+    # CEL expression evaluation -- REQUIRED for the scalo ScalingEngine to
     # build (`#[cfg(all(scaling, expression))]`). Without it the horizontal
-    # scaling-pressure engine, its smart-default `dfe_receiver_scaling_pressure`
+    # scaling-pressure engine, its smart-default `dfe_scaling_pressure`
     # gauge, and the compound `transport_inbound_pressure_ratio` are NOT emitted
     # and any `scaling.transport`/`params`/`pressures` YAML is silently inert.
     # cli-service does not pull this in, so list it explicitly.
@@ -90,7 +90,7 @@ prost-types = "0.14"
 # TLS
 rustls = "0.23"
 # PEM parsing via rustls-pki-types PemObject (rustls-pemfile is unmaintained,
-# RUSTSEC-2025-0134). Mirrors rustlib src/tls.rs. `std` enables the reader/file iters.
+# RUSTSEC-2025-0134). Mirrors scalo src/tls.rs. `std` enables the reader/file iters.
 rustls-pki-types = { version = ">=1.14, <2", features = ["std"] }
 tokio-rustls = "0.26"
 
@@ -172,8 +172,8 @@ pcap-file = ">=2.0, <3"
 sha2 = ">=0.10, <0.11"
 
 # Contract artefact e2e (tests/e2e/contract_artefacts.rs) — pulls in
-# probe/skip/cluster helpers from rustlib's test_support module.
-hyperi-rustlib = { version = ">=2.8.14, <3", features = ["deployment-test-support"] }
+# probe/skip/cluster helpers from scalo's test_support module.
+scalo = { version = ">=2.9.0, <3", features = ["deployment-test-support"] }
 
 [features]
 default = ["otlp"]

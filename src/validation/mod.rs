@@ -558,25 +558,35 @@ mod tests {
 
     #[test]
     fn test_deeply_nested() {
-        let validator = Validator::new(default_config());
-        // Create moderately nested JSON (30 levels) — sonic-rs 0.5 uses
-        // recursive descent which has finite stack depth.
-        let mut json = String::new();
-        for _ in 0..30 {
-            json.push_str("{\"a\":");
-        }
-        json.push_str("1");
-        for _ in 0..30 {
-            json.push('}');
-        }
-        let payload = Bytes::from(json);
+        // sonic-rs 0.5 parses by recursive descent, so deep nesting consumes
+        // proportional stack. In production the parse runs on Tokio worker /
+        // server threads (>=2 MiB stacks); the default libtest harness thread
+        // is far smaller (and smaller still on macOS), so run the parse on a
+        // thread with a production-representative stack -- the test verifies the
+        // validator HANDLES deep input gracefully, not the harness stack limit.
+        let handle = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let validator = Validator::new(default_config());
+                let mut json = String::new();
+                for _ in 0..30 {
+                    json.push_str("{\"a\":");
+                }
+                json.push_str("1");
+                for _ in 0..30 {
+                    json.push('}');
+                }
+                let payload = Bytes::from(json);
 
-        // Should handle nesting without panic
-        let result = validator.validate(&payload);
-        assert!(matches!(
-            result,
-            ValidationResult::Valid | ValidationResult::Dlq(_)
-        ));
+                // Should handle nesting without panic
+                let result = validator.validate(&payload);
+                assert!(matches!(
+                    result,
+                    ValidationResult::Valid | ValidationResult::Dlq(_)
+                ));
+            })
+            .expect("spawn validation thread");
+        handle.join().expect("validation thread panicked");
     }
 
     #[test]

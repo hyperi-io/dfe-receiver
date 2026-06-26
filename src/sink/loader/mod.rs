@@ -9,13 +9,13 @@
 //! dfe-loader transport sink.
 //!
 //! Sends messages directly to dfe-loader's Kafka input topic using
-//! rustlib KafkaProducer.
+//! scalo KafkaProducer.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use hyperi_rustlib::transport::kafka::{KafkaProducer, ProducerProfile};
+use scalo::transport::kafka::{KafkaProducer, ProducerProfile};
 use tracing::{debug, error, info};
 
 use crate::config::{KafkaConfig, LoaderConfig};
@@ -95,7 +95,7 @@ impl Sink for LoaderSink {
                     Ok(())
                 }
                 Err(e) => {
-                    if hyperi_rustlib::logger::log_sampled(&LOADER_ERRORS, 1000) {
+                    if scalo::logger::log_sampled(&LOADER_ERRORS, 1000) {
                         let total = LOADER_ERRORS.load(Ordering::Relaxed);
                         error!(error = %e, topic = %self.topic, total_errors = total, "Loader send failed (1 in 1000)");
                     }

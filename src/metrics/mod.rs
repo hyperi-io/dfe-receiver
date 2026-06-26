@@ -1,6 +1,6 @@
 // Project:   dfe-receiver
 // File:      src/metrics/mod.rs
-// Purpose:   Prometheus metrics and KEDA scaling (dfe_receiver namespace)
+// Purpose:   Prometheus metrics and KEDA scaling (dfe namespace, receiver_* names)
 // Language:  Rust
 //
 // License:   BUSL-1.1
@@ -8,9 +8,11 @@
 
 //! Prometheus metrics for dfe-receiver.
 //!
-//! Uses `MetricsManager` with namespace `dfe_receiver` and rustlib
-//! `dfe_groups` for standardised metric groups. Receiver-specific
-//! counters use the `metrics` crate directly with transport labels.
+//! Uses `MetricsManager` with namespace `dfe` and scalo
+//! `groups` for standardised metric groups. Receiver-specific
+//! counters emit BARE names (`receiver_*`) via the `metrics` crate with
+//! transport labels -- the namespace prefixes a single `dfe_` so the
+//! runtime-visible series are `dfe_receiver_*`.
 //!
 //! # Security Metrics
 //!
@@ -21,18 +23,19 @@
 //! - `dfe_receiver_body_size_rejected_total` - Oversized body rejections
 //! - `dfe_receiver_tls_handshake_failures_total` - TLS failures
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::Duration;
 
-use hyperi_rustlib::metrics::DfeMetrics;
-use hyperi_rustlib::metrics::MetricsManager;
-use hyperi_rustlib::metrics::dfe_groups::{
+use scalo::metrics::MetricsManager;
+use scalo::metrics::ServiceMetrics;
+use scalo::metrics::groups::{
     AppMetrics, BackpressureMetrics, BufferMetrics, CircuitBreakerMetrics, SinkMetrics,
 };
-use hyperi_rustlib::metrics::{
+use scalo::metrics::{
     AuthFailureReason as RlAuthReason, TransportKind, ValidationFailureReason as RlValidationReason,
 };
-use hyperi_rustlib::scaling::{RateWindow, ScalingPressure};
+use scalo::scaling::{RateWindow, ScalingPressure};
 
 /// Reason for authentication failure (for metrics labels).
 #[derive(Debug, Clone, Copy)]
@@ -56,7 +59,7 @@ pub enum ValidationFailureReason {
 
 /// Metrics collector for dfe-receiver.
 ///
-/// Wraps rustlib metric groups (`AppMetrics`, `BufferMetrics`, etc.) plus
+/// Wraps scalo metric groups (`AppMetrics`, `BufferMetrics`, etc.) plus
 /// receiver-specific counters with transport labels. Atomics are retained
 /// for values the scaling pressure engine reads back.
 pub struct Metrics {
@@ -100,14 +103,16 @@ pub struct Metrics {
     // Rate tracking
     rate_window: RateWindow,
 
-    // Scaling pressure engine (from hyperi-rustlib)
-    scaling: ScalingPressure,
+    // Scaling pressure engine (from scalo). Shared `Arc` with the runtime's
+    // engine -- the one `/scaling/pressure` serves to KEDA -- so the
+    // once-per-second `update_scaling` feed drives the gauge KEDA scales on.
+    scaling: Arc<ScalingPressure>,
 
     // Standard DFE metrics (dual-emit `dfe_*` alongside `dfe_receiver_*`).
     // None in tests (no global recorder); Some in prod after MetricsManager.
-    dfe: Option<DfeMetrics>,
+    dfe: Option<ServiceMetrics>,
 
-    // Rustlib metric groups (None in tests without MetricsManager)
+    // scalo metric groups (None in tests without MetricsManager)
     app_group: Option<AppMetrics>,
     buffer_group: Option<BufferMetrics>,
     sink_group: Option<SinkMetrics>,
@@ -138,7 +143,7 @@ impl Metrics {
     /// Create a new metrics collector with scaling pressure engine.
     ///
     /// No MetricsManager — use for tests or standalone contexts.
-    pub fn with_scaling(scaling: ScalingPressure) -> Self {
+    pub fn with_scaling(scaling: Arc<ScalingPressure>) -> Self {
         Self {
             requests_total: AtomicU64::new(0),
             requests_success: AtomicU64::new(0),
@@ -182,13 +187,13 @@ impl Metrics {
 
     /// Create a metrics collector with standard DFE metrics and metric groups.
     ///
-    /// Creates a `MetricsManager` with namespace `dfe_receiver`, registers
-    /// all metric groups, and calls `DfeMetrics::register()` for platform metrics.
+    /// Creates a `MetricsManager` with namespace `dfe`, registers
+    /// all metric groups, and calls `ServiceMetrics::register()` for platform metrics.
     /// Returns both the `Metrics` and the `MetricsManager` — caller must use the
     /// returned manager for `start_server()`. Creating a second `MetricsManager`
     /// will panic (global Prometheus recorder can only be installed once).
-    pub fn with_dfe_metrics(scaling: ScalingPressure) -> (Self, MetricsManager) {
-        let manager = MetricsManager::new("dfe_receiver");
+    pub fn with_dfe_metrics(scaling: Arc<ScalingPressure>) -> (Self, MetricsManager) {
+        let manager = MetricsManager::new("dfe");
         let metrics = Self::register_on(scaling, &manager);
         (metrics, manager)
     }
@@ -197,13 +202,13 @@ impl Metrics {
     ///
     /// Use this when `ServiceRuntime` has already created the manager and
     /// installed the global Prometheus recorder.
-    pub fn register_on(scaling: ScalingPressure, manager: &MetricsManager) -> Self {
+    pub fn register_on(scaling: Arc<ScalingPressure>, manager: &MetricsManager) -> Self {
         let app = AppMetrics::new(manager, env!("CARGO_PKG_VERSION"), "dev");
         let buffer = BufferMetrics::new(manager);
         let sink = SinkMetrics::new(manager);
         let cb = CircuitBreakerMetrics::new(manager);
         let bp = BackpressureMetrics::new(manager);
-        let dfe = DfeMetrics::register(manager);
+        let dfe = ServiceMetrics::register(manager);
 
         describe_receiver_metrics();
 
@@ -229,7 +234,7 @@ impl Metrics {
         if count.is_multiple_of(100) {
             self.rate_window.record(count);
         }
-        metrics::counter!("dfe_receiver_requests_total", "transport" => transport.to_string())
+        metrics::counter!("receiver_requests_total", "transport" => transport.to_string())
             .increment(1);
         if let Some(ref dfe) = self.dfe {
             dfe.records_received(1);
@@ -244,7 +249,7 @@ impl Metrics {
     pub fn inc_requests_success(&self, transport: &str) {
         self.requests_success.fetch_add(1, Ordering::Relaxed);
         metrics::counter!(
-            "dfe_receiver_requests_success_total",
+            "receiver_requests_success_total",
             "transport" => transport.to_string()
         )
         .increment(1);
@@ -261,7 +266,7 @@ impl Metrics {
     pub fn inc_requests_error(&self, transport: &str) {
         self.requests_error.fetch_add(1, Ordering::Relaxed);
         metrics::counter!(
-            "dfe_receiver_requests_error_total",
+            "receiver_requests_error_total",
             "transport" => transport.to_string()
         )
         .increment(1);
@@ -276,12 +281,12 @@ impl Metrics {
     /// failures with downstream process failures. This counter isolates the
     /// ingress-decode failure rate per protocol (syslog/gelf/otlp/...), the
     /// signal an operator needs to tell "the wire is malformed" apart from
-    /// "the sink is unhappy". Also feeds the standard `DfeMetrics`
+    /// "the sink is unhappy". Also feeds the standard `ServiceMetrics`
     /// validation-failure counter (encoding category).
     #[inline]
     pub fn inc_parse_failure(&self, transport: &str) {
         metrics::counter!(
-            "dfe_receiver_parse_failures_total",
+            "receiver_parse_failures_total",
             "transport" => transport.to_string()
         )
         .increment(1);
@@ -295,7 +300,7 @@ impl Metrics {
     pub fn add_bytes_received(&self, transport: &str, bytes: u64) {
         self.bytes_received.fetch_add(bytes, Ordering::Relaxed);
         metrics::counter!(
-            "dfe_receiver_bytes_received_total",
+            "receiver_bytes_received_total",
             "transport" => transport.to_string()
         )
         .increment(bytes);
@@ -400,7 +405,7 @@ impl Metrics {
     pub fn inc_active_connections(&self, transport: &str) {
         let count = self.active_connections.fetch_add(1, Ordering::Relaxed) + 1;
         metrics::gauge!(
-            "dfe_receiver_active_connections",
+            "receiver_active_connections",
             "transport" => transport.to_string()
         )
         .set(count as f64);
@@ -414,7 +419,7 @@ impl Metrics {
             .fetch_sub(1, Ordering::Relaxed)
             .saturating_sub(1);
         metrics::gauge!(
-            "dfe_receiver_active_connections",
+            "receiver_active_connections",
             "transport" => transport.to_string()
         )
         .set(count as f64);
@@ -424,7 +429,7 @@ impl Metrics {
     #[inline]
     pub fn record_request_duration(&self, transport: &str, duration_secs: f64) {
         metrics::histogram!(
-            "dfe_receiver_request_duration_seconds",
+            "receiver_request_duration_seconds",
             "transport" => transport.to_string()
         )
         .record(duration_secs);
@@ -448,10 +453,10 @@ impl Metrics {
     #[inline]
     pub fn inc_auth_failure(&self, reason: AuthFailureReason) {
         self.auth_failures_total.fetch_add(1, Ordering::Relaxed);
-        // Local label string for the bespoke dfe_receiver_* metric, plus the
-        // standardised rustlib enum for DfeMetrics. rustlib v2.8.0 typed the
+        // Local label string for the bespoke receiver_* metric, plus the
+        // standardised scalo enum for ServiceMetrics. scalo typed the
         // auth_failure label (RFC 6749 codes); our fine-grained local reasons
-        // map to the closest rustlib variant.
+        // map to the closest scalo variant.
         let (reason_str, dfe_reason) = match reason {
             AuthFailureReason::MissingHeader => {
                 self.auth_failures_missing_header
@@ -470,7 +475,7 @@ impl Metrics {
             }
         };
         metrics::counter!(
-            "dfe_receiver_auth_failures_total",
+            "receiver_auth_failures_total",
             "reason" => reason_str.to_string()
         )
         .increment(1);
@@ -484,7 +489,7 @@ impl Metrics {
     pub fn inc_validation_failure(&self, reason: ValidationFailureReason) {
         self.validation_failures_total
             .fetch_add(1, Ordering::Relaxed);
-        // Local label string + standardised rustlib enum (v2.8.0 typed the
+        // Local label string + standardised scalo enum (scalo typed the
         // validation_failure label). InvalidJson maps to EncodingError (the
         // input bytes can't be decoded into a JSON value); MissingField maps
         // exactly to FieldMissing.
@@ -501,7 +506,7 @@ impl Metrics {
             }
         };
         metrics::counter!(
-            "dfe_receiver_validation_failures_total",
+            "receiver_validation_failures_total",
             "reason" => reason_str.to_string()
         )
         .increment(1);
@@ -514,7 +519,7 @@ impl Metrics {
     #[inline]
     pub fn inc_request_timeout(&self) {
         self.request_timeouts_total.fetch_add(1, Ordering::Relaxed);
-        metrics::counter!("dfe_receiver_request_timeouts_total").increment(1);
+        metrics::counter!("receiver_request_timeouts_total").increment(1);
     }
 
     /// Record a body size rejection (413).
@@ -522,7 +527,7 @@ impl Metrics {
     pub fn inc_body_size_rejected(&self) {
         self.body_size_rejected_total
             .fetch_add(1, Ordering::Relaxed);
-        metrics::counter!("dfe_receiver_body_size_rejected_total").increment(1);
+        metrics::counter!("receiver_body_size_rejected_total").increment(1);
     }
 
     /// Record a TLS handshake failure.
@@ -530,7 +535,7 @@ impl Metrics {
     pub fn inc_tls_handshake_failure(&self) {
         self.tls_handshake_failures_total
             .fetch_add(1, Ordering::Relaxed);
-        metrics::counter!("dfe_receiver_tls_handshake_failures_total").increment(1);
+        metrics::counter!("receiver_tls_handshake_failures_total").increment(1);
     }
 
     // ======================================================================
@@ -654,14 +659,14 @@ impl Metrics {
     }
 
     // ======================================================================
-    // Scaling pressure (delegated to hyperi-rustlib ScalingPressure engine)
+    // Scaling pressure (delegated to scalo ScalingPressure engine)
     // ======================================================================
 
     /// Sync current metric values into the scaling pressure engine.
     ///
     /// Called from the metrics update cycle (every 1 second) to feed
-    /// current component values into the rustlib `ScalingPressure` engine.
-    /// Also emits standard `dfe_scaling_*` gauges when `DfeMetrics` is active.
+    /// current component values into the scalo `ScalingPressure` engine.
+    /// Also emits standard `dfe_scaling_*` gauges when `ServiceMetrics` is active.
     pub fn update_scaling(&self) {
         self.scaling
             .set_component("request_rate", self.request_rate());
@@ -685,7 +690,7 @@ impl Metrics {
         let circuit_open = self.is_circuit_open();
         self.scaling.set_circuit_open(circuit_open);
 
-        // Dual-emit scaling gauges via DfeMetrics
+        // Dual-emit scaling gauges via ServiceMetrics
         if let Some(ref dfe) = self.dfe {
             let pressure = self.scaling.calculate();
             dfe.scaling_pressure(pressure);
@@ -701,7 +706,7 @@ impl Metrics {
 
     /// Calculate scaling pressure (0.0-100.0).
     ///
-    /// Delegates to the `ScalingPressure` engine from hyperi-rustlib.
+    /// Delegates to the `ScalingPressure` engine from scalo.
     pub fn scaling_pressure(&self) -> f64 {
         self.scaling.calculate()
     }
@@ -710,86 +715,88 @@ impl Metrics {
 /// Describe receiver-specific metrics that take labels.
 fn describe_receiver_metrics() {
     metrics::describe_counter!(
-        "dfe_receiver_requests_total",
+        "receiver_requests_total",
         "Total requests received by transport"
     );
     metrics::describe_counter!(
-        "dfe_receiver_requests_success_total",
+        "receiver_requests_success_total",
         "Total successful requests by transport"
     );
     metrics::describe_counter!(
-        "dfe_receiver_requests_error_total",
+        "receiver_requests_error_total",
         "Total failed requests by transport"
     );
     metrics::describe_counter!(
-        "dfe_receiver_parse_failures_total",
+        "receiver_parse_failures_total",
         "Per-protocol ingress parse/decode failures by transport"
     );
     metrics::describe_counter!(
-        "dfe_receiver_bytes_received_total",
+        "receiver_bytes_received_total",
         "Total bytes received by transport"
     );
     metrics::describe_counter!(
-        "dfe_receiver_auth_failures_total",
+        "receiver_auth_failures_total",
         "Authentication failures by reason"
     );
     metrics::describe_counter!(
-        "dfe_receiver_validation_failures_total",
+        "receiver_validation_failures_total",
         "Validation failures by reason"
     );
     metrics::describe_counter!(
-        "dfe_receiver_request_timeouts_total",
+        "receiver_request_timeouts_total",
         "Request timeouts (slow loris indicator)"
     );
     metrics::describe_counter!(
-        "dfe_receiver_body_size_rejected_total",
+        "receiver_body_size_rejected_total",
         "Oversized body rejections"
     );
     metrics::describe_counter!(
-        "dfe_receiver_tls_handshake_failures_total",
+        "receiver_tls_handshake_failures_total",
         "TLS handshake failures"
     );
     metrics::describe_counter!(
-        "dfe_receiver_messages_spilled_total",
+        "receiver_messages_spilled_total",
         "Messages spilled to disk"
     );
     metrics::describe_counter!(
-        "dfe_receiver_messages_drained_total",
+        "receiver_messages_drained_total",
         "Messages drained from spool"
     );
 
     // Request latency
     metrics::describe_histogram!(
-        "dfe_receiver_request_duration_seconds",
+        "receiver_request_duration_seconds",
         "End-to-end request processing latency"
     );
     metrics::describe_gauge!(
-        "dfe_receiver_active_connections",
+        "receiver_active_connections",
         "Currently active inbound connections"
     );
 
     // Kafka outbound
     metrics::describe_histogram!(
-        "dfe_receiver_kafka_send_duration_seconds",
+        "receiver_kafka_send_duration_seconds",
         "Kafka producer send latency"
     );
-    metrics::describe_counter!("dfe_receiver_kafka_sends_total", "Total Kafka sends");
+    metrics::describe_counter!("receiver_kafka_sends_total", "Total Kafka sends");
     metrics::describe_counter!(
-        "dfe_receiver_kafka_bytes_sent_total",
+        "receiver_kafka_bytes_sent_total",
         "Total bytes sent to Kafka"
     );
-    metrics::describe_counter!("dfe_receiver_kafka_send_errors_total", "Kafka send errors");
+    metrics::describe_counter!("receiver_kafka_send_errors_total", "Kafka send errors");
 
     // EPS
     metrics::describe_gauge!(
-        "dfe_receiver_events_per_second",
+        "receiver_events_per_second",
         "Current events per second (1s sample)"
     );
 }
 
 impl Default for Metrics {
     fn default() -> Self {
-        Self::with_scaling(crate::config::ScalingConfig::default().build_pressure())
+        Self::with_scaling(Arc::new(
+            crate::config::ScalingConfig::default().build_pressure(),
+        ))
     }
 }
 

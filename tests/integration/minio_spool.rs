@@ -12,7 +12,7 @@
 //! and verify S3-compatible HTTP endpoints work end-to-end. The MinIO
 //! emulator is a drop-in replacement for S3 for local testing.
 //!
-//! Note: dfe-receiver itself uses disk spillover via rustlib's `TieredSink`
+//! Note: dfe-receiver itself uses disk spillover via scalo's `TieredSink`
 //! (not S3). These tests document the MinIO test-container pattern for
 //! downstream archival/spillover features that may be added in future.
 //! The MinIO container is stopped automatically when the test completes.

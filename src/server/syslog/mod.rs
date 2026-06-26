@@ -74,7 +74,7 @@ async fn run_udp(
                 let (len, peer_addr) = match result {
                     Ok(r) => r,
                     Err(e) => {
-                        if hyperi_rustlib::logger::log_debounced(&SYSLOG_UDP_WARN, 5000) {
+                        if scalo::logger::log_debounced(&SYSLOG_UDP_WARN, 5000) {
                             warn!(error = %e, "Syslog UDP recv error (throttled to 1/5s)");
                         }
                         continue;

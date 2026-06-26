@@ -8,12 +8,12 @@
 
 //! Deployment contract for dfe-receiver.
 //!
-//! Defines the single source of truth used by rustlib's deployment generators
+//! Defines the single source of truth used by scalo's deployment generators
 //! to produce Dockerfile, Helm chart, and Docker Compose fragments.
 
-use hyperi_rustlib::deployment::{
+use scalo::deployment::{
     DeploymentContract, HealthContract, ImageProfile, KedaConfig, KedaContract, NativeDepsContract,
-    OciLabels, PortContract, SecretEnvContract, SecretGroupContract,
+    OciLabels, PortContract, SecretEnvContract, SecretGroupContract, base_image_from_cascade,
 };
 
 /// Build the deployment contract for dfe-receiver.
@@ -24,10 +24,14 @@ use hyperi_rustlib::deployment::{
 /// use this contract as their single source of truth.
 #[allow(clippy::too_many_lines)]
 pub fn contract() -> DeploymentContract {
+    // Resolve the base image via the scalo cascade helper so the org-wide
+    // `deployment.base_image` override (config or env) wins before falling
+    // back to scalo's DEFAULT_BASE_IMAGE (debian:trixie-slim). NEVER hardcode
+    // a distro -- the old "ubuntu:24.04" pin predated the trixie cutover.
+    let base_image = base_image_from_cascade();
     DeploymentContract {
         app_name: "dfe-receiver".into(),
         binary_name: "dfe-receiver".into(),
-        base_image: "ubuntu:24.04".into(),
         native_deps: NativeDepsContract::for_rustlib_features(
             &[
                 "config",
@@ -46,8 +50,9 @@ pub fn contract() -> DeploymentContract {
                 "cli",
                 "deployment",
             ],
-            "ubuntu:24.04",
+            &base_image,
         ),
+        base_image,
         image_profile: ImageProfile::Production,
         description: "High-performance HTTP/gRPC receiver for PB/s scale data ingestion".into(),
         metrics_port: 9090,
@@ -253,9 +258,13 @@ pub fn contract() -> DeploymentContract {
         oci_labels: OciLabels {
             title: "dfe-receiver".into(),
             description: "High-performance HTTP/gRPC receiver for PB/s scale data ingestion".into(),
+            // BUSL-1.1 drives the OCI `org.opencontainers.image.licenses`
+            // label and the Dockerfile `# License` header. Copyright stays
+            // the scalo default (the right HYPERI line).
+            licenses: "BUSL-1.1".into(),
             ..OciLabels::default()
         },
-        // KedaContract is #[non_exhaustive] (rustlib 2.8.13): construct via
+        // KedaContract is #[non_exhaustive] (scalo): construct via
         // KedaConfig + From rather than a struct literal so future contract
         // fields stay non-breaking. The scaling_pressure_* trigger comes from
         // KedaConfig defaults (enabled=false, threshold=70) -- OFF: the
@@ -276,6 +285,20 @@ pub fn contract() -> DeploymentContract {
     }
 }
 
+/// Generate the Dockerfile from the deployment contract.
+///
+/// Thin wrapper over `scalo::deployment::generate_dockerfile`: the receiver
+/// is a single-binary image with no consumer-side splice (unlike
+/// dfe-transform-vector, which injects the upstream `vector` binary). Both
+/// the `--emit-dockerfile` CLI path and the `checked_in_dockerfile_matches_emit_dockerfile`
+/// drift guard call THIS function so there is one source of truth for the
+/// checked-in `Dockerfile`. `None` = no contract-identity labels (those are
+/// stamped by the CI-orchestrated invocation, not this one-off).
+#[must_use]
+pub fn emit_dockerfile() -> String {
+    scalo::deployment::generate_dockerfile(&contract(), None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,6 +314,22 @@ mod tests {
         assert_eq!(c.config_mount_path, "/etc/dfe-receiver/config.yaml");
         assert_eq!(c.config_filename(), "config.yaml");
         assert_eq!(c.config_dir(), "/etc/dfe-receiver");
+    }
+
+    #[test]
+    fn test_contract_base_image() {
+        // The cascade helper resolves the org-wide `deployment.base_image`
+        // override (config or env) when set, else falls back to scalo's
+        // DEFAULT_BASE_IMAGE (debian:trixie-slim). In CI / local-dev with no
+        // overrides the default applies. Assert it is non-empty and carries an
+        // explicit tag -- never pin a distro here.
+        let c = contract();
+        assert!(!c.base_image.is_empty());
+        assert!(
+            c.base_image.contains(':'),
+            "base_image must include an explicit tag: {}",
+            c.base_image
+        );
     }
 
     #[test]
@@ -329,5 +368,43 @@ mod tests {
         assert!(json.contains("dfe-receiver"));
         let yaml = c.to_yaml();
         assert!(yaml.contains("dfe-receiver"));
+    }
+
+    #[test]
+    fn emit_dockerfile_produces_valid_output() {
+        let dockerfile = emit_dockerfile();
+        // Base image is cascade-resolved (debian:trixie-slim by default), so
+        // assert the FROM line matches the contract's resolved base_image
+        // rather than pinning a distro.
+        assert!(
+            dockerfile.contains(&format!("FROM {}", contract().base_image)),
+            "missing/incorrect base image FROM line in Dockerfile",
+        );
+        // BUSL-1.1 from the contract's oci_labels.licenses drives the header.
+        assert!(
+            dockerfile.contains("# License:   BUSL-1.1"),
+            "Dockerfile missing BUSL-1.1 license header",
+        );
+        assert!(
+            dockerfile.contains("COPY dfe-receiver /usr/local/bin/dfe-receiver"),
+            "missing binary COPY in Dockerfile",
+        );
+    }
+
+    #[test]
+    fn checked_in_dockerfile_matches_emit_dockerfile() {
+        // The checked-in Dockerfile is autogenerated from emit_dockerfile()
+        // (the same function the `--emit-dockerfile` CLI path uses). If they
+        // drift, CI publishes from a stale Dockerfile -- e.g. a base-image or
+        // licence change in the contract that never got regenerated.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Dockerfile");
+        let on_disk = std::fs::read_to_string(&path).expect("read Dockerfile");
+        let emitted = emit_dockerfile();
+        assert_eq!(
+            on_disk.trim(),
+            emitted.trim(),
+            "Dockerfile on disk does not match emit_dockerfile() output -- \
+             regenerate with: `dfe-receiver --emit-dockerfile Dockerfile`",
+        );
     }
 }

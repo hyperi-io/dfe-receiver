@@ -8,7 +8,7 @@
 
 //! gRPC loader sink integration tests.
 //!
-//! These tests spin up an in-process gRPC server (via rustlib's
+//! These tests spin up an in-process gRPC server (via scalo's
 //! `GrpcTransport` in server mode) that acts as a mock dfe-loader, then
 //! connect a `GrpcSink` to it and verify messages are delivered correctly.
 //!
@@ -24,8 +24,8 @@ use bytes::Bytes;
 use dfe_receiver::sink::Sink;
 use dfe_receiver::sink::grpc::GrpcSink;
 use dfe_receiver::{Error, Result};
-use hyperi_rustlib::transport::TransportReceiver;
-use hyperi_rustlib::transport::grpc::{GrpcConfig, GrpcTransport};
+use scalo::transport::TransportReceiver;
+use scalo::transport::grpc::{GrpcConfig, GrpcTransport};
 
 /// Allocate a random port for test isolation.
 fn random_port() -> u16 {

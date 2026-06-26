@@ -242,7 +242,7 @@ impl UdpFlowListener {
 
         // Gate 4: memory pressure (state-transition log).
         let under_pressure = self.pipeline.memory_guard().under_pressure();
-        if hyperi_rustlib::logger::log_state_change(&self.pressure_state, under_pressure) {
+        if scalo::logger::log_state_change(&self.pressure_state, under_pressure) {
             if under_pressure {
                 tracing::warn!(addr = %self.bind_addr, "flow listener under memory pressure");
             } else {

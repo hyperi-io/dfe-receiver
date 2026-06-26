@@ -8,12 +8,12 @@
 
 //! In-memory buffer with circuit breaker for sink unavailability.
 //!
-//! Uses hyperi-rustlib's CircuitBreaker for health tracking with half-open state support.
+//! Uses scalo's CircuitBreaker for health tracking with half-open state support.
 //! Messages are buffered in memory during outages and drained when the downstream
 //! sink recovers.
 //!
 //! This is the default buffer backend (no disk I/O). For opt-in disk spillover,
-//! see `SinkBackend::Tiered` which uses rustlib's `TieredSink` with a disk spool.
+//! see `SinkBackend::Tiered` which uses scalo's `TieredSink` with a disk spool.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,8 +21,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use hyperi_rustlib::tiered_sink::{CircuitBreaker, CircuitState};
 use parking_lot::Mutex;
+use scalo::tiered_sink::{CircuitBreaker, CircuitState};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -39,7 +39,7 @@ struct SpillMessage {
 
 /// InMemoryBuffer wraps a primary sink with circuit breaker and in-memory buffering.
 ///
-/// Uses hyperi-rustlib's CircuitBreaker for health tracking with half-open state support.
+/// Uses scalo's CircuitBreaker for health tracking with half-open state support.
 /// When the primary sink fails, messages are buffered in memory and automatically
 /// drained when the sink recovers.
 pub struct InMemoryBuffer<S: Sink> {
@@ -49,7 +49,7 @@ pub struct InMemoryBuffer<S: Sink> {
     spill_queue: Mutex<Vec<SpillMessage>>,
     /// Maximum queue size before rejecting.
     max_queue_size: usize,
-    /// Circuit breaker from hyperi-rustlib with half-open state support.
+    /// Circuit breaker from scalo with half-open state support.
     circuit: CircuitBreaker,
     /// Messages queued during outage.
     queued_count: AtomicU64,
@@ -65,7 +65,7 @@ impl<S: Sink + Send + Sync + 'static> InMemoryBuffer<S> {
             primary: Arc::new(primary),
             spill_queue: Mutex::new(Vec::with_capacity(1000)),
             max_queue_size: 1000,
-            // Use hyperi-rustlib CircuitBreaker with proper half-open state
+            // Use scalo CircuitBreaker with proper half-open state
             circuit: CircuitBreaker::new(5, Duration::from_secs(30)),
             queued_count: AtomicU64::new(0),
             drained_count: AtomicU64::new(0),

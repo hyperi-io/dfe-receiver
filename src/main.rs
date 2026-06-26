@@ -10,7 +10,7 @@
 //!
 //! Aligned with dfe-loader's pattern: `command: Option<StandardCommand>`
 //! delegates the standard subcommand surface (run, version, config-check,
-//! generate-artefacts, metrics-manifest) to rustlib's `run_app()`. The
+//! generate-artefacts, metrics-manifest) to scalo's `run_app()`. The
 //! `--emit-helm` / `--emit-dockerfile` flags exist for one-off local
 //! diagnostics; the canonical artefact production path is
 //! `dfe-receiver generate-artefacts --output-dir ci/`.
@@ -32,8 +32,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
-use hyperi_rustlib::cli::{CliError, CommonArgs, DfeApp, StandardCommand, VersionInfo, run_app};
-use hyperi_rustlib::config::reloader::{ConfigReloader, ReloaderConfig};
+use scalo::cli::{CliError, CommonArgs, ServiceApp, StandardCommand, VersionInfo, run_app};
+use scalo::config::reloader::{ConfigReloader, ReloaderConfig};
 use tracing::{debug, error, info};
 
 use dfe_receiver::config::{Config, reload_config};
@@ -65,7 +65,7 @@ struct App {
     emit_dockerfile: Option<PathBuf>,
 }
 
-impl DfeApp for App {
+impl ServiceApp for App {
     type Config = Config;
 
     fn name(&self) -> &str {
@@ -99,7 +99,7 @@ impl DfeApp for App {
     async fn run_service(
         &self,
         config: Self::Config,
-        mut runtime: hyperi_rustlib::cli::ServiceRuntime,
+        mut runtime: scalo::cli::ServiceRuntime,
     ) -> Result<(), CliError> {
         info!(version = env!("CARGO_PKG_VERSION"), "Starting dfe-receiver");
 
@@ -116,11 +116,19 @@ impl DfeApp for App {
         );
 
         // Register receiver-specific metric groups on the runtime's existing manager.
-        // ServiceRuntime already installed the global recorder and DfeMetrics.
-        let metrics = Arc::new(Metrics::register_on(
-            config.scaling.build_pressure(),
-            &runtime.metrics,
-        ));
+        // ServiceRuntime already installed the global recorder and ServiceMetrics.
+        //
+        // Share the runtime's ScalingPressure engine (registered via
+        // `scaling_components` above and served at `/scaling/pressure` to KEDA)
+        // so the once-per-second `update_scaling` feed drives the gauge KEDA
+        // scales on. If the `scaling` feature/section is off the runtime hands
+        // back None; fall back to a standalone engine (byte-identical to the
+        // pre-share path).
+        let scaling = runtime
+            .scaling
+            .clone()
+            .unwrap_or_else(|| Arc::new(config.scaling.build_pressure()));
+        let metrics = Arc::new(Metrics::register_on(scaling, &runtime.metrics));
 
         // Use runtime's shutdown token (signal handler + K8s pre-stop delay)
         let shutdown_token = runtime.shutdown.clone();
@@ -134,25 +142,22 @@ impl DfeApp for App {
         // source. Ingest byte tracking lands on the guard that latch watches.
         // When self_regulation.enabled = false the governor is None and the
         // brake falls back to the bespoke memory-guard threshold check.
-        // Horizontal scaling-pressure engine: hand the runtime's signal cell to
-        // the pipeline so the once-per-second metrics loop pushes this pod's
-        // LOCAL per-pod signals (in-flight, outbound producer queue, outbound
-        // circuit state). The receiver is a push originator (inbound
-        // HTTP/gRPC/syslog), so the engine composes its compound inbound from
-        // in-flight; KEDA can also scale on the gratis `dfe_receiver_*` ingress
-        // metrics directly.
+        // Horizontal scaling pressure is driven by the once-per-second
+        // `update_scaling` feed on the shared engine above (connections,
+        // queue_depth, request_rate, memory, spill, circuit) -- KEDA scales on
+        // the resulting `/scaling/pressure` gauge -- so the pipeline no longer
+        // pushes a separate per-pod signal feed.
         let orchestrator = Orchestrator::with_governor(
             config.clone(),
             metrics.clone(),
             shutdown_token.clone(),
             runtime.governor.as_ref(),
             Some(runtime.memory_guard.clone()),
-            Some(runtime.scaling_signals.clone()),
         )
         .await
         .map_err(|e| CliError::Service(e.to_string()))?;
 
-        // Start config hot-reload (SIGHUP + periodic + file polling via rustlib ConfigReloader)
+        // Start config hot-reload (SIGHUP + periodic + file polling via scalo ConfigReloader)
         {
             let config_path_str = config.config_path.clone();
             let shared_config = orchestrator.shared_config();
@@ -241,7 +246,14 @@ impl DfeApp for App {
         Ok(())
     }
 
-    fn deployment_contract(&self) -> Option<hyperi_rustlib::deployment::DeploymentContract> {
+    fn scaling_components(&self, config: &Self::Config) -> Vec<scalo::scaling::ScalingComponent> {
+        // Register the receiver's weighted KEDA components on the runtime's
+        // ScalingPressure -- the engine `/scaling/pressure` serves -- so the
+        // once-per-second `update_scaling` feed drives the gauge KEDA scales on.
+        config.scaling.components()
+    }
+
+    fn deployment_contract(&self) -> Option<scalo::deployment::DeploymentContract> {
         Some(crate::deployment::contract())
     }
 }
@@ -252,12 +264,12 @@ async fn main() {
 
     if let Some(output) = &app.emit_helm {
         let contract = deployment::contract();
-        // rustlib v2.7.3 added a third `Option<&ContractIdentity>` parameter.
-        // Passing None preserves the pre-v2.7.3 chart (no contract identity
-        // annotations). The canonical generate-artefacts path stamps identity
-        // via the CI-orchestrated invocation in scripts/, not via this
+        // scalo's generate_chart takes a third `Option<&ContractIdentity>`
+        // parameter. Passing None preserves the plain chart (no contract
+        // identity annotations). The canonical generate-artefacts path stamps
+        // identity via the CI-orchestrated invocation in scripts/, not via this
         // one-off --emit-helm flag.
-        if let Err(e) = hyperi_rustlib::deployment::generate_chart(&contract, output, None) {
+        if let Err(e) = scalo::deployment::generate_chart(&contract, output, None) {
             eprintln!("fatal: {e}");
             std::process::exit(1);
         }
@@ -266,9 +278,10 @@ async fn main() {
     }
 
     if let Some(output) = &app.emit_dockerfile {
-        let contract = deployment::contract();
-        // rustlib v2.7.3 — see note above. None = no contract identity labels.
-        let content = hyperi_rustlib::deployment::generate_dockerfile(&contract, None);
+        // Single source of truth: deployment::emit_dockerfile() is what the
+        // checked_in_dockerfile_matches_emit_dockerfile drift guard asserts
+        // against, so the CLI emit and the test can never disagree.
+        let content = deployment::emit_dockerfile();
         if let Err(e) = std::fs::write(output, &content) {
             eprintln!("fatal: could not write Dockerfile: {e}");
             std::process::exit(1);

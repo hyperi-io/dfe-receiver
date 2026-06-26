@@ -15,7 +15,7 @@
 //!
 //! Bearer tokens can be loaded from:
 //! - Static configuration (for dev)
-//! - OpenBao/Vault via hyperi-rustlib secrets
+//! - OpenBao/Vault via scalo secrets
 //! - AWS Secrets Manager
 //! - File (K8s secrets mounted as files)
 
@@ -29,9 +29,9 @@ use axum::extract::State;
 use axum::http::{Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use hyperi_rustlib::logger::security;
 use parking_lot::RwLock;
 use ring::digest;
+use scalo::logger::security;
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
@@ -192,8 +192,8 @@ impl BearerTokenProvider {
         let path = parts[1];
         let key = parts.get(2).copied();
 
-        // Use hyperi-rustlib secrets manager
-        use hyperi_rustlib::secrets::{SecretSource, SecretsConfig, SecretsManager};
+        // Use scalo secrets manager
+        use scalo::secrets::{SecretSource, SecretsConfig, SecretsManager};
 
         // Build the secret source based on provider
         let secret_source = match provider_name {
@@ -217,12 +217,12 @@ impl BearerTokenProvider {
 
         // Configure secrets manager with this source.
         // Disable cache so each refresh reads the file fresh — the disk-backed cache
-        // in hyperi-rustlib would otherwise return stale data across SecretsManager instances.
+        // in scalo would otherwise return stale data across SecretsManager instances.
         let config = SecretsConfig {
             sources: [("bearer_tokens".into(), secret_source)]
                 .into_iter()
                 .collect(),
-            cache: hyperi_rustlib::secrets::CacheConfig {
+            cache: scalo::secrets::CacheConfig {
                 enabled: false,
                 ..Default::default()
             },

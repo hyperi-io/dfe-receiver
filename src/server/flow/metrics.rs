@@ -1,17 +1,17 @@
-//! Flow-specific Prometheus metrics. Wraps the existing DfeMetrics framework.
+//! Flow-specific Prometheus metrics. Wraps the existing ServiceMetrics framework.
 //!
 //! The trait surface (`FlowCounter`, `FlowLabelledCounter`, `FlowHistogram`,
 //! `FlowLabelledGauge`) lets listener / envelope tests use mocks. The
 //! `register()` constructor wires the production adapters against the global
-//! `metrics` crate recorder that hyperi-rustlib's `MetricsManager` installs.
+//! `metrics` crate recorder that scalo's `MetricsManager` installs.
 //! `register()` accepts a `&MetricsManager` reference for API symmetry with
-//! `DfeMetrics::register`; the actual metric routing goes through the global
+//! `ServiceMetrics::register`; the actual metric routing goes through the global
 //! recorder, so the parameter is only used to ensure the recorder has been
 //! installed before any metric handles are constructed.
 
 use std::sync::Arc;
 
-use hyperi_rustlib::metrics::MetricsManager;
+use scalo::metrics::MetricsManager;
 
 /// Initialized once per FlowHandler. Provides label-scoped counter handles.
 #[derive(Clone)]
@@ -55,8 +55,9 @@ pub trait FlowLabelledGauge: Send + Sync {
 // macros so the same `MetricsManager`-installed global recorder receives the
 // values. Metric names are looked up (and lazily registered) by the recorder
 // on the first emission -- there is no separate `register()` step against the
-// recorder. Names that overlap with `DfeMetrics` (e.g. `dfe_transport_*`) are
-// shared by design: both call sites end up incrementing the same series.
+// recorder. Names that overlap with `ServiceMetrics` (e.g. `transport_*`, which
+// the namespace prefixes to `dfe_transport_*`) are shared by design: both call
+// sites end up incrementing the same series.
 // ---------------------------------------------------------------------------
 
 /// Unlabelled counter routed through `metrics::counter!`.
@@ -112,96 +113,97 @@ impl FlowLabelledGauge for PromLabelledGauge {
 
 impl FlowMetrics {
     /// Build a `FlowMetrics` backed by the global `metrics` crate recorder
-    /// installed by hyperi-rustlib's `MetricsManager`. Idempotent on metric
+    /// installed by scalo's `MetricsManager`. Idempotent on metric
     /// names -- the `metrics` crate dedupes by `(name, labels)` so registering
-    /// the same series from multiple call sites (e.g. `DfeMetrics` +
+    /// the same series from multiple call sites (e.g. `ServiceMetrics` +
     /// `FlowMetrics`) is intentional.
     pub fn register(_mm: &MetricsManager) -> anyhow::Result<Self> {
         describe_flow_metrics();
         Ok(Self {
             recv_total: Arc::new(PromCounter {
-                name: "dfe_transport_recv_total",
+                name: "transport_recv_total",
             }),
             recv_bytes_total: Arc::new(PromCounter {
-                name: "dfe_transport_recv_bytes_total",
+                name: "transport_recv_bytes_total",
             }),
             decode_err_total: Arc::new(PromLabelledCounter {
-                name: "dfe_transport_decode_err_total",
+                name: "transport_decode_err_total",
             }),
             drops_total: Arc::new(PromLabelledCounter {
-                name: "dfe_transport_drops_total",
+                name: "transport_drops_total",
             }),
             invalid_packet_total: Arc::new(PromLabelledCounter {
-                name: "dfe_flow_invalid_packet_total",
+                name: "flow_invalid_packet_total",
             }),
             rate_limited_total: Arc::new(PromLabelledCounter {
-                name: "dfe_flow_rate_limited_total",
+                name: "flow_rate_limited_total",
             }),
             records_emitted_total: Arc::new(PromLabelledCounter {
-                name: "dfe_flow_records_emitted_total",
+                name: "flow_records_emitted_total",
             }),
             records_per_packet: Arc::new(PromHistogram {
-                name: "dfe_flow_records_per_packet",
+                name: "flow_records_per_packet",
             }),
             template_cache_size: Arc::new(PromLabelledGauge {
-                name: "dfe_flow_template_cache_size",
+                name: "flow_template_cache_size",
             }),
             template_evicted_total: Arc::new(PromCounter {
-                name: "dfe_flow_template_evicted_total",
+                name: "flow_template_evicted_total",
             }),
             kernel_drops_total: Arc::new(PromCounter {
-                name: "dfe_flow_kernel_drops_total",
+                name: "flow_kernel_drops_total",
             }),
             send_duration_seconds: Arc::new(PromHistogram {
-                name: "dfe_transport_send_duration_seconds",
+                name: "transport_send_duration_seconds",
             }),
             unknown_version_total: Arc::new(PromCounter {
-                name: "dfe_flow_unknown_version_total",
+                name: "flow_unknown_version_total",
             }),
             handler_experimental: Arc::new(PromLabelledGauge {
-                name: "dfe_handler_experimental",
+                name: "handler_experimental",
             }),
         })
     }
 }
 
 /// Describe flow-specific metrics that don't already have descriptions from
-/// `DfeMetrics`. Shared `dfe_transport_*` series are described by rustlib.
+/// `ServiceMetrics`. Shared `transport_*` series (namespace -> `dfe_transport_*`)
+/// are described by scalo.
 fn describe_flow_metrics() {
     metrics::describe_counter!(
-        "dfe_flow_invalid_packet_total",
+        "flow_invalid_packet_total",
         "Flow packets rejected before decode (truncated, wrong magic, etc.)"
     );
     metrics::describe_counter!(
-        "dfe_flow_rate_limited_total",
+        "flow_rate_limited_total",
         "Flow packets dropped by the per-source UDP rate limiter"
     );
     metrics::describe_counter!(
-        "dfe_flow_records_emitted_total",
+        "flow_records_emitted_total",
         "Flow records emitted downstream after decode and envelope rendering"
     );
     metrics::describe_histogram!(
-        "dfe_flow_records_per_packet",
+        "flow_records_per_packet",
         "Distribution of flow records produced per UDP datagram"
     );
     metrics::describe_gauge!(
-        "dfe_flow_template_cache_size",
+        "flow_template_cache_size",
         "Current entries in the per-exporter NetFlow/IPFIX template cache"
     );
     metrics::describe_counter!(
-        "dfe_flow_template_evicted_total",
+        "flow_template_evicted_total",
         "Template cache evictions (LRU + per-exporter cap)"
     );
     metrics::describe_counter!(
-        "dfe_flow_kernel_drops_total",
+        "flow_kernel_drops_total",
         "UDP datagrams dropped by the kernel before our recv loop (from /proc/net/udp)"
     );
     metrics::describe_counter!(
-        "dfe_flow_unknown_version_total",
+        "flow_unknown_version_total",
         "Flow packets whose first 16 bits matched no known protocol version"
     );
     metrics::describe_gauge!(
-        "dfe_handler_experimental",
+        "handler_experimental",
         "Set to 1 while a protocol handler is marked experimental"
     );
 }

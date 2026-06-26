@@ -7,10 +7,10 @@
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
 //! ============================================================================
-//! Canonical adaptation of rustlib's `tests/e2e/contract_artefacts.rs`
-//! TEMPLATE (rustlib v2.7.3+, feature `deployment-test-support`).
+//! Canonical adaptation of scalo's `tests/e2e/contract_artefacts.rs`
+//! TEMPLATE (feature `deployment-test-support`).
 //!
-//! Diff from the upstream TEMPLATE (kept deliberately small so rustlib
+//! Diff from the upstream TEMPLATE (kept deliberately small so scalo
 //! bug fixes merge cleanly here):
 //!   1. `test_contract()` returns `dfe_receiver::deployment::contract()`
 //!      instead of the throwaway hyperi-contract-test fixture.
@@ -48,7 +48,7 @@
 //! # Skip policy
 //!
 //! Every test that needs an external tool / daemon / cluster probes first
-//! via `hyperi_rustlib::deployment::test_support` and skips cleanly when
+//! via `scalo::deployment::test_support` and skips cleanly when
 //! the dependency is absent. Skip emissions use the canonical prefix
 //! `HYPERCI-SKIP[contract-e2e][tier-a|tier-b]:` so downstream test
 //! runners can grep, count, and emit a summary line at the end of a CI
@@ -76,11 +76,11 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use hyperi_rustlib::deployment::test_support::{
+use scalo::deployment::test_support::{
     docker_available, docker_empty_creds_json, ensure_kind_cluster, helm_available,
     kubeconform_available, skip, tier_b_enabled, wait_until,
 };
-use hyperi_rustlib::deployment::{
+use scalo::deployment::{
     ArgocdConfig, ContractIdentity, DeploymentContract, generate_argocd_application,
     generate_chart, generate_dockerfile,
 };
@@ -114,7 +114,7 @@ fn test_identity() -> ContractIdentity {
 ///
 /// CI Test stage doesn't build release before nextest (Build runs after
 /// Test), so when the real binary is absent we fall back to writing a
-/// shell-script mock that mirrors `hyperi_rustlib`'s contract-artefact
+/// shell-script mock that mirrors `scalo`'s contract-artefact
 /// tests. The mock satisfies Dockerfile `COPY` and the image's `--help`
 /// entrypoint smoke check, which is what the tier-A test actually
 /// exercises: that the generated Dockerfile builds and the image runs.
@@ -147,7 +147,7 @@ fn stage_binary(build_ctx: &Path, binary_name: &str) -> std::io::Result<()> {
         // Fallback: mock binary. The tier-A test only needs `--help` to
         // exit 0 and the output to mention the binary name (the test
         // asserts `stdout.contains(binary_name)` further down). Mirror
-        // the pattern hyperi-rustlib uses for its own contract artefact
+        // the pattern scalo uses for its own contract artefact
         // tests, plus the binary name in the help line.
         let mut f = std::fs::File::create(&dest)?;
         let script = format!(

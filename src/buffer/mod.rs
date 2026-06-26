@@ -14,8 +14,8 @@ pub mod adapter;
 pub mod tiered;
 
 pub use tiered::{InMemoryBuffer, InMemoryBufferStats};
-// Re-export CircuitState from hyperi-rustlib for convenience
-pub use hyperi_rustlib::tiered_sink::CircuitState;
+// Re-export CircuitState from scalo for convenience
+pub use scalo::tiered_sink::CircuitState;
 
 use std::sync::Arc;
 
@@ -30,8 +30,8 @@ use crate::sink::Sink as ReceiverSink;
 pub enum SinkBackend<S: ReceiverSink + 'static> {
     /// In-memory buffer with circuit breaker (default, no disk).
     InMemory(InMemoryBuffer<S>),
-    /// Rustlib TieredSink with disk spool (opt-in via spillover config).
-    Tiered(hyperi_rustlib::tiered_sink::TieredSink<adapter::RustlibSinkAdapter<S>>),
+    /// scalo TieredSink with disk spool (opt-in via spillover config).
+    Tiered(scalo::tiered_sink::TieredSink<adapter::RustlibSinkAdapter<S>>),
 }
 
 #[async_trait]
@@ -52,7 +52,7 @@ impl<S: ReceiverSink + 'static> ReceiverSink for SinkBackend<S> {
     async fn flush(&self) -> crate::error::Result<()> {
         match self {
             SinkBackend::InMemory(buf) => buf.flush().await,
-            SinkBackend::Tiered(_) => Ok(()), // rustlib handles drain internally
+            SinkBackend::Tiered(_) => Ok(()), // scalo handles drain internally
         }
     }
 
@@ -73,11 +73,11 @@ impl<S: ReceiverSink + 'static> SinkBackend<S> {
         match self {
             SinkBackend::InMemory(buf) => buf.stats().await,
             SinkBackend::Tiered(tiered) => {
-                // Map rustlib stats into InMemoryBufferStats for compatibility
+                // Map scalo stats into InMemoryBufferStats for compatibility
                 let circuit_state = tiered.circuit_state().await;
                 InMemoryBufferStats {
                     circuit_state,
-                    consecutive_failures: 0, // rustlib doesn't expose this directly
+                    consecutive_failures: 0, // scalo doesn't expose this directly
                     queue_size: tiered.spool_len().await,
                     queued_total: tiered.cold_path_count(),
                     drained_total: tiered.hot_path_count(),
@@ -89,7 +89,7 @@ impl<S: ReceiverSink + 'static> SinkBackend<S> {
     /// Start background drain task.
     ///
     /// For InMemory: spawns the existing drain loop from `InMemoryBuffer`.
-    /// For Tiered: rustlib manages its own drain task internally — this is a no-op.
+    /// For Tiered: scalo manages its own drain task internally - this is a no-op.
     pub fn start_drain_task(self: Arc<Self>, shutdown: CancellationToken) {
         match self.as_ref() {
             SinkBackend::InMemory(_) => {
@@ -117,15 +117,15 @@ impl<S: ReceiverSink + 'static> SinkBackend<S> {
                 });
             }
             SinkBackend::Tiered(_) => {
-                // Rustlib TieredSink starts its own drain task in TieredSink::new()
+                // scalo TieredSink starts its own drain task in TieredSink::new()
             }
         }
     }
 }
 
-// Re-export MemoryGuard from hyperi-rustlib as the memory tracker.
+// Re-export MemoryGuard from scalo as the memory tracker.
 // Replaces the bespoke BufferManager — same API, cgroup-aware auto-detection.
-pub use hyperi_rustlib::memory::{MemoryGuard, MemoryGuardConfig, MemoryPressure};
+pub use scalo::memory::{MemoryGuard, MemoryGuardConfig, MemoryPressure};
 
 #[cfg(test)]
 mod tests {

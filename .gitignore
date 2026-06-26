@@ -41,25 +41,72 @@ coverage.lcov
 .tmp/
 .worktrees/
 ci
-tarpaulin-report.json
-cobertura.xml
 
-# Local working files (not committed) -- mirrored in .git/info/exclude.
+# Phase 2 batch integration
+
+# Local working files (not committed)
 docs/superpowers/
 .claude/
-.codex/
-.cursor/
-.gemini/
-.cursorrules
 hyperi-ai/
 .mcp.json
 CLAUDE.md
 STATE.md
 TODO.md
-AGENTS.md
-GEMINI.md
 .ai-version
 
+# OS junk (never useful in repo)
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Editor / IDE local state
+.idea/
+.vscode/
+
 # Local environment files (never commit -- contain secrets)
+.env
+.env.*
 !.env.example
 !.env.example.*
+
+# them alone if already present.
+docs/superpowers/
+.mcp.json
+.ai-version
+
+# committed -- mirrored in .git/info/exclude.
+CLAUDE.md
+TODO.md
+AGENTS.md
+GEMINI.md
+.claude/
+.codex/
+.cursor/
+.gemini/
+.cursorrules
+
+# Git worktrees (local dev convenience)
+.worktrees/
+
+# Rust build artefacts
+target/
+**/*.rs.bk
+*.pdb
+*.profraw
+*.profdata
+coverage-html/
+coverage.lcov
+tarpaulin-report.json
+cobertura.xml
+
+# cargo
+.cargo/
+!.cargo/config.toml
+
+# Local scratch / tmp (CORE.md: scratch goes here, gitignored, NOT
+# /tmp). Bare patterns (no leading slash) match a tmp dir at ANY
+# depth, so these cover top-level .tmp/ and tmp/ as well as nested
+# ones like tests/tmp/. Mirrored in attach.py _DEFAULT_EXCLUDES.
+tmp/

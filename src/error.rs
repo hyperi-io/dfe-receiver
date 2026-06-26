@@ -64,7 +64,7 @@ pub enum Error {
 
     /// Secrets management error.
     #[error("secrets error: {0}")]
-    Secrets(#[from] hyperi_rustlib::SecretsError),
+    Secrets(#[from] scalo::SecretsError),
 }
 
 /// Result type alias for dfe-receiver operations.

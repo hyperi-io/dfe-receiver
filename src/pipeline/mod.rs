@@ -23,10 +23,9 @@ use tracing::{debug, error, info, warn};
 /// State-change flag for memory pressure log deduplication.
 static PRESSURE_LOGGED: AtomicBool = AtomicBool::new(false);
 
-use hyperi_rustlib::UnifiedPressure;
-use hyperi_rustlib::dlq::{Dlq, DlqEntry};
-use hyperi_rustlib::logger::security;
-use hyperi_rustlib::scaling::ScalingSignalsCell;
+use scalo::UnifiedPressure;
+use scalo::dlq::{Dlq, DlqEntry};
+use scalo::logger::security;
 
 use crate::buffer::{InMemoryBuffer, MemoryGuard, MemoryGuardConfig, MemoryPressure, SinkBackend};
 use crate::config::{Config, SharedConfig};
@@ -62,15 +61,6 @@ pub struct PipelineState {
     /// the brake falls back to the bespoke memory-guard `under_pressure()`
     /// check (byte-identical to pre-governor behaviour).
     pressure: Option<Arc<UnifiedPressure>>,
-    /// Horizontal scaling-pressure signal cell from the runtime engine.
-    ///
-    /// `Some` when the runtime built the scaling engine (the default): the
-    /// once-per-second metrics loop pushes this pod's LOCAL, per-pod signals
-    /// here (in-flight, shed rate, outbound circuit state) so the engine's
-    /// compound inbound pressure -- HTTP/gRPC use in-flight + shed -- and the
-    /// smart-default `dfe_receiver_scaling_pressure` gauge reflect real load.
-    /// `None` only in tests / standalone contexts with no `ServiceRuntime`.
-    scaling_signals: Option<Arc<ScalingSignalsCell>>,
     dlq: Option<Arc<Dlq>>,
     ready: AtomicBool,
 }
@@ -83,7 +73,7 @@ impl PipelineState {
     /// tests and the `self_regulation.enabled = false` path. Production wires
     /// the governor via [`with_governor`](Self::with_governor).
     pub async fn new(shared_config: SharedConfig, shutdown: CancellationToken) -> Result<Self> {
-        Self::with_governor(shared_config, shutdown, None, None, None).await
+        Self::with_governor(shared_config, shutdown, None, None).await
     }
 
     /// Create new pipeline state, optionally wired to the runtime governor.
@@ -99,9 +89,8 @@ impl PipelineState {
     pub async fn with_governor(
         shared_config: SharedConfig,
         shutdown: CancellationToken,
-        governor: Option<&hyperi_rustlib::SelfRegulationGovernor>,
+        governor: Option<&scalo::SelfRegulationGovernor>,
         runtime_memory_guard: Option<Arc<MemoryGuard>>,
-        scaling_signals: Option<Arc<ScalingSignalsCell>>,
     ) -> Result<Self> {
         let config = shared_config.get();
         let validator = Validator::new(config.validation.clone());
@@ -179,7 +168,7 @@ impl PipelineState {
             None
         };
 
-        // DLQ (unified rustlib module — cascade: Kafka primary, file fallback)
+        // DLQ (unified scalo module - cascade: Kafka primary, file fallback)
         let dlq = if config.routing.dlq.enabled {
             let dlq_config = config.routing.dlq.to_rustlib_config();
             let kafka_config = config.kafka.to_rustlib_kafka_config();
@@ -213,7 +202,6 @@ impl PipelineState {
             file_sink,
             memory_guard,
             pressure,
-            scaling_signals,
             dlq,
             ready: AtomicBool::new(true),
         })
@@ -298,13 +286,13 @@ impl PipelineState {
     pub async fn process(&self, payload: Bytes) -> Result<()> {
         // Check for backpressure
         if self.should_apply_backpressure() {
-            if hyperi_rustlib::logger::log_state_change(&PRESSURE_LOGGED, true) {
+            if scalo::logger::log_state_change(&PRESSURE_LOGGED, true) {
                 warn!("Memory pressure HIGH — backpressure active");
             }
             return Err(Error::Buffer("server under memory pressure".into()));
         }
         // Log recovery when pressure drops
-        if hyperi_rustlib::logger::log_state_change(&PRESSURE_LOGGED, false) {
+        if scalo::logger::log_state_change(&PRESSURE_LOGGED, false) {
             info!("Memory pressure recovered");
         }
 
@@ -335,7 +323,7 @@ impl PipelineState {
 
         // Single backpressure check for the entire batch
         if self.should_apply_backpressure() {
-            if hyperi_rustlib::logger::log_state_change(&PRESSURE_LOGGED, true) {
+            if scalo::logger::log_state_change(&PRESSURE_LOGGED, true) {
                 warn!("Memory pressure HIGH — backpressure active (batch)");
             }
             return (
@@ -343,7 +331,7 @@ impl PipelineState {
                 Some(Error::Buffer("server under memory pressure".into())),
             );
         }
-        if hyperi_rustlib::logger::log_state_change(&PRESSURE_LOGGED, false) {
+        if scalo::logger::log_state_change(&PRESSURE_LOGGED, false) {
             info!("Memory pressure recovered");
         }
 
@@ -506,13 +494,13 @@ impl PipelineState {
     pub async fn process_to_topic(&self, payload: Bytes, topic: &str) -> Result<()> {
         // Check for backpressure
         if self.should_apply_backpressure() {
-            if hyperi_rustlib::logger::log_state_change(&PRESSURE_LOGGED, true) {
+            if scalo::logger::log_state_change(&PRESSURE_LOGGED, true) {
                 warn!("Memory pressure HIGH — backpressure active");
             }
             return Err(Error::Buffer("server under memory pressure".into()));
         }
         // Log recovery when pressure drops
-        if hyperi_rustlib::logger::log_state_change(&PRESSURE_LOGGED, false) {
+        if scalo::logger::log_state_change(&PRESSURE_LOGGED, false) {
             info!("Memory pressure recovered");
         }
 
@@ -568,7 +556,7 @@ impl PipelineState {
         sink.send("", payload).await
     }
 
-    /// Send message to DLQ via unified rustlib module (cascade: Kafka → file).
+    /// Send message to DLQ via unified scalo module (cascade: Kafka -> file).
     #[inline]
     async fn send_to_dlq(&self, payload: &Bytes, reason: &str) -> Result<()> {
         if let Some(ref dlq) = self.dlq {
@@ -628,25 +616,18 @@ impl PipelineState {
         metrics.set_batch_queue_size(total_queue);
 
         // EPS gauge — events per second from the rate window
-        metrics::gauge!("dfe_receiver_events_per_second").set(metrics.request_rate());
+        metrics::gauge!("receiver_events_per_second").set(metrics.request_rate());
 
-        // Sync all metrics into the (legacy) weighted scaling pressure engine.
+        // Sync all metrics into the scaling pressure engine. This is the SHARED
+        // scalo `ScalingPressure` the runtime serves at `/scaling/pressure` to
+        // KEDA: `update_scaling` feeds the per-pod, locally-knowable signals --
+        // connections (the inbound concurrency proxy), queue_depth (the summed
+        // sink producer queues = the outbound term, set above via
+        // `set_batch_queue_size`), request_rate, memory, spill, and the
+        // outbound circuit gate. The receiver is a push originator (inbound
+        // HTTP/gRPC/syslog) so there is no inbound Kafka lag term. KEDA can also
+        // scale on the gratis bare ingress metrics directly.
         metrics.update_scaling();
-
-        // Feed the rustlib horizontal scaling-pressure ENGINE its per-pod,
-        // LOCALLY-knowable signals. The receiver is a PUSH ORIGINATOR (inbound
-        // HTTP/gRPC/syslog), so the engine's compound inbound pressure uses
-        // in-flight (active connections is the per-pod concurrency proxy) max'd
-        // with shed rate; outbound is Kafka, whose circuit-open is the engine's
-        // ONLY default gate and whose producer queue depth is the outbound term.
-        // Tier-1 KEDA can also scale on the gratis `dfe_receiver_*` metrics
-        // directly. NB: there is no inbound Kafka lag for a push originator, so
-        // `lag_target` is intentionally absent (the lag term contributes 0).
-        if let Some(ref signals) = self.scaling_signals {
-            signals.set_inflight(metrics.get_active_connections() as f64);
-            signals.set_produce_queue_depth(total_queue as f64);
-            signals.set_circuit_open(metrics.is_circuit_open());
-        }
     }
 
     /// Reload configuration, rebuilding router and validator.
@@ -689,7 +670,7 @@ impl PipelineState {
 
 /// Build the appropriate `SinkBackend` based on spillover configuration.
 ///
-/// When `spillover.enabled` is true, wraps the primary sink in rustlib's `TieredSink`
+/// When `spillover.enabled` is true, wraps the primary sink in scalo's `TieredSink`
 /// with disk spillover. Otherwise, uses the default in-memory buffer.
 async fn build_sink_backend<S: crate::sink::Sink + 'static>(
     primary: S,
@@ -699,15 +680,15 @@ async fn build_sink_backend<S: crate::sink::Sink + 'static>(
         let adapter = crate::buffer::adapter::RustlibSinkAdapter::new(Arc::new(primary));
         let spillover = &buffer_config.spillover;
 
-        let mut tiered_config = hyperi_rustlib::tiered_sink::TieredSinkConfig::new(&spillover.path);
+        let mut tiered_config = scalo::tiered_sink::TieredSinkConfig::new(&spillover.path);
 
         // Configure disk-aware capacity management
-        tiered_config.disk_aware = Some(hyperi_rustlib::tiered_sink::DiskAwareConfig {
+        tiered_config.disk_aware = Some(scalo::tiered_sink::DiskAwareConfig {
             max_usage_percent: spillover.max_usage_percent,
             poll_interval_secs: spillover.poll_interval_secs,
         });
 
-        let tiered = hyperi_rustlib::tiered_sink::TieredSink::new(adapter, tiered_config)
+        let tiered = scalo::tiered_sink::TieredSink::new(adapter, tiered_config)
             .await
             .map_err(|e| Error::Config(format!("failed to create tiered sink: {e}")))?;
 
@@ -741,7 +722,7 @@ impl Orchestrator {
         metrics: Arc<Metrics>,
         shutdown: CancellationToken,
     ) -> Result<Self> {
-        Self::with_governor(config, metrics, shutdown, None, None, None).await
+        Self::with_governor(config, metrics, shutdown, None, None).await
     }
 
     /// Create a new orchestrator, optionally wired to the runtime governor.
@@ -749,16 +730,15 @@ impl Orchestrator {
     /// `governor` + `runtime_memory_guard` come from the `ServiceRuntime`: when
     /// self-regulation is enabled, the ingest brake (HTTP 503 / gRPC
     /// `UNAVAILABLE`) is driven by the governor's `UnifiedPressure` latch and
-    /// byte tracking lands on the guard that latch watches. `scaling_signals`
-    /// is the runtime's scaling-engine signal cell -- the metrics loop pushes
-    /// this pod's in-flight / shed / outbound-circuit signals into it.
+    /// byte tracking lands on the guard that latch watches. The horizontal
+    /// scaling pressure KEDA reads is driven separately, via the shared
+    /// `ScalingPressure` engine the metrics loop feeds in `update_metrics`.
     pub async fn with_governor(
         config: Config,
         metrics: Arc<Metrics>,
         shutdown: CancellationToken,
-        governor: Option<&hyperi_rustlib::SelfRegulationGovernor>,
+        governor: Option<&scalo::SelfRegulationGovernor>,
         runtime_memory_guard: Option<Arc<MemoryGuard>>,
-        scaling_signals: Option<Arc<ScalingSignalsCell>>,
     ) -> Result<Self> {
         let shared_config = SharedConfig::new(config);
         let state = PipelineState::with_governor(
@@ -766,7 +746,6 @@ impl Orchestrator {
             shutdown.clone(),
             governor,
             runtime_memory_guard,
-            scaling_signals,
         )
         .await?;
 

@@ -15,6 +15,12 @@
 //! Fixtures mirror the unit-test packet builders so the bench surfaces the
 //! same code path used in tests.
 
+// Benches legitimately panic on bad fixture data -- a malformed test packet
+// is a bug in the bench, not a condition to handle. Allow expect/unwrap so
+// `cargo clippy --all-targets` (which lints benches) stays clean.
+#![allow(clippy::expect_used)]
+#![allow(clippy::unwrap_used)]
+
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use dfe_receiver::server::flow::config::OutputMode;
 use dfe_receiver::server::flow::decoder::FlowDecoder;

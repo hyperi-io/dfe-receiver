@@ -42,7 +42,7 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 use tracing::{debug, error, info, warn};
 
-use hyperi_rustlib::logger::security::{self, SecurityOutcome};
+use scalo::logger::security::{self, SecurityOutcome};
 
 use crate::config::{AuthConfig, SharedConfig};
 use crate::error::{Error, Result};

@@ -11,7 +11,7 @@
 //! These tests exercise the `BearerTokenProvider::load_from_secret` path
 //! end-to-end via the `file:` provider (the only provider always compiled
 //! in; `vault:` and `aws:` require the `secrets-vault` / `secrets-aws`
-//! features in hyperi-rustlib).
+//! features in scalo).
 //!
 //! The tests also include a skipped-by-default live Vault test gated on
 //! `VAULT_ADDR` that runs when a Vault/OpenBao instance is reachable.
@@ -174,7 +174,7 @@ async fn test_bearer_tokens_unknown_provider_rejected() {
 /// The container is stopped automatically when the test completes.
 ///
 /// Skips if Docker is unavailable or if the `secrets-vault` feature isn't
-/// compiled into hyperi-rustlib (graceful fallback is still exercised).
+/// compiled into scalo (graceful fallback is still exercised).
 #[tokio::test]
 async fn test_bearer_tokens_loaded_from_vault_container() {
     skip_if_no_docker!();
@@ -247,7 +247,7 @@ async fn test_bearer_tokens_loaded_from_vault_container() {
         assert!(!provider.is_valid("not-in-vault"));
     } else {
         eprintln!(
-            "Note: rustlib compiled without secrets-vault feature; \
+            "Note: scalo compiled without secrets-vault feature; \
              test exercised graceful fallback path only"
         );
     }

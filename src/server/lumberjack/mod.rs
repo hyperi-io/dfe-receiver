@@ -95,7 +95,7 @@ async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin>(
                 metrics.add_bytes_received("lumberjack", payload.len() as u64);
 
                 if let Err(e) = pipeline.process(payload).await {
-                    if hyperi_rustlib::logger::log_sampled(&LUMBERJACK_ERRORS, 100) {
+                    if scalo::logger::log_sampled(&LUMBERJACK_ERRORS, 100) {
                         let total = LUMBERJACK_ERRORS.load(Ordering::Relaxed);
                         warn!(peer = %peer_addr, seq = sequence, error = %e, total_errors = total, "Lumberjack event error (1 in 100)");
                     }
@@ -139,7 +139,7 @@ async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin>(
                             metrics.add_bytes_received("lumberjack", payload.len() as u64);
 
                             if let Err(e) = pipeline.process(payload).await {
-                                if hyperi_rustlib::logger::log_sampled(&LUMBERJACK_ERRORS, 100) {
+                                if scalo::logger::log_sampled(&LUMBERJACK_ERRORS, 100) {
                                     let total = LUMBERJACK_ERRORS.load(Ordering::Relaxed);
                                     warn!(peer = %peer_addr, seq = sequence, error = %e, total_errors = total, "Lumberjack event error (1 in 100)");
                                 }

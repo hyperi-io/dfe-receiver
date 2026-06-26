@@ -42,7 +42,7 @@ async fn test_full_startup_lifecycle() {
     // Step 2: Create metrics with DFE groups — this installs the global recorder.
     // If this panics with SetRecorderError, the bug is back.
     let (metrics_instance, metrics_manager) =
-        Metrics::with_dfe_metrics(config.scaling.build_pressure());
+        Metrics::with_dfe_metrics(Arc::new(config.scaling.build_pressure()));
     let metrics = Arc::new(metrics_instance);
 
     // Step 3: Verify the MetricsManager is usable (can set readiness check)

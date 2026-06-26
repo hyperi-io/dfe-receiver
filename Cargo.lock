@@ -939,7 +939,6 @@ dependencies = [
  "http",
  "hyper",
  "hyper-util",
- "hyperi-rustlib",
  "ipnet",
  "ipnet-trie",
  "metrics",
@@ -959,6 +958,7 @@ dependencies = [
  "rustc-hash",
  "rustls",
  "rustls-pki-types",
+ "scalo",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -1714,65 +1714,6 @@ dependencies = [
  "tower-service",
  "tracing",
  "windows-registry",
-]
-
-[[package]]
-name = "hyperi-rustlib"
-version = "2.8.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57550bb87ae6a3845db5767b0d69010077357c879ea0ea9a15c106fc26b3ce0a"
-dependencies = [
- "aes-gcm",
- "async-trait",
- "axum",
- "base64",
- "bytes",
- "cel",
- "chrono",
- "clap",
- "dirs",
- "dotenvy",
- "figment",
- "file-rotate",
- "hkdf",
- "libc",
- "lz4_flex",
- "memchr",
- "metrics",
- "metrics-exporter-prometheus",
- "owo-colors",
- "parking_lot",
- "prost",
- "prost-build",
- "prost-types",
- "rand_core 0.6.4",
- "rayon",
- "rdkafka",
- "regex",
- "reqwest",
- "rmpv",
- "serde",
- "serde_json",
- "serde_yaml_ng",
- "sha2",
- "snap",
- "sonic-rs",
- "sysinfo 0.39.3",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tonic",
- "tonic-prost",
- "tonic-prost-build",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "tracing-throttle",
- "uuid",
- "yaque",
- "zstd",
 ]
 
 [[package]]
@@ -3105,7 +3046,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03da047801ff44bb6a4d407d4860c05fd70bb81714e6b2f3812603d5b145b042"
 dependencies = [
  "heck",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "log",
  "multimap",
  "petgraph",
@@ -3126,7 +3067,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -3224,9 +3165,9 @@ dependencies = [
 
 [[package]]
 name = "quinn-proto"
-version = "0.11.14"
+version = "0.11.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "434b42fec591c96ef50e21e886936e66d3cc3f737104fdb9b737c40ffb94c098"
+checksum = "4fcb935c5bec503c2f0e306bdd3e58bb9029dcb14fa8d9ac76e3a5256ac0763e"
 dependencies = [
  "aws-lc-rs",
  "bytes",
@@ -3790,6 +3731,63 @@ dependencies = [
  "duct",
  "libc",
  "pkg-config",
+]
+
+[[package]]
+name = "scalo"
+version = "2.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4647f908f40fbf2a37c33ea046b0eac8242adbf15da4b0cb630fd0b97fb71b1b"
+dependencies = [
+ "aes-gcm",
+ "axum",
+ "base64",
+ "bytes",
+ "cel",
+ "chrono",
+ "clap",
+ "dirs",
+ "dotenvy",
+ "figment",
+ "file-rotate",
+ "hkdf",
+ "libc",
+ "lz4_flex",
+ "memchr",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "owo-colors",
+ "parking_lot",
+ "prost",
+ "prost-build",
+ "prost-types",
+ "rand_core 0.6.4",
+ "rayon",
+ "rdkafka",
+ "regex",
+ "reqwest",
+ "rmpv",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "sha2",
+ "snap",
+ "sonic-rs",
+ "sysinfo 0.39.3",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "tracing-throttle",
+ "yaque",
+ "zstd",
 ]
 
 [[package]]

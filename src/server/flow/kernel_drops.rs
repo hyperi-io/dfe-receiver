@@ -90,7 +90,10 @@ fn read_drop_counts(bind_ports: &[u16]) -> Vec<(u16, u64)> {
     results
 }
 
+// Async signature must mirror the Linux version for call-site uniformity; the
+// stub has nothing to await, so silence the lint here only.
 #[cfg(not(target_os = "linux"))]
+#[allow(clippy::unused_async)]
 pub async fn poll_kernel_drops(
     _bind_ports: Vec<u16>,
     _metrics: Arc<FlowMetrics>,
