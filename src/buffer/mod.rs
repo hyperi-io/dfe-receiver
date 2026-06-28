@@ -40,9 +40,20 @@ impl<S: ReceiverSink + 'static> ReceiverSink for SinkBackend<S> {
         match self {
             SinkBackend::InMemory(buf) => buf.send(topic, payload).await,
             SinkBackend::Tiered(tiered) => {
-                let encoded = adapter::encode_message(topic, &payload);
+                // Record-native spill: carry the topic as the routing key so the
+                // TieredSink spills the whole Record (key + payload) and replays
+                // it to the right topic on drain -- no bespoke byte framing.
+                let record = scalo::transport::Record {
+                    payload,
+                    key: Some(Arc::from(topic)),
+                    headers: Vec::new(),
+                    metadata: scalo::transport::RecordMeta {
+                        timestamp_ms: None,
+                        format: scalo::transport::PayloadFormat::Auto,
+                    },
+                };
                 tiered
-                    .send(&encoded)
+                    .send(&record)
                     .await
                     .map_err(|e| crate::error::Error::Transport(e.to_string()))
             }
