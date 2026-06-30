@@ -1,5 +1,11 @@
 # DFE Platform Log Spamming Protection
 
+> **STATUS - HISTORICAL (out of date).** Platform-era planning doc that predates
+> the scalo rename. The flood-control it proposes now ships in the library: the
+> scalo `logger` feature pulls `tracing-throttle`, so the "Phase 1/3" plans
+> below are largely implemented in-library. Kept for context; not current
+> guidance.
+
 Patterns and techniques for preventing log flooding in high-throughput DFE Rust
 services.
 
@@ -60,7 +66,7 @@ let subscriber = Registry::default()
 ```
 
 **When to use:** As a global safety net. Does not require per-site code changes.
-Add as a layer in rustlib's `logger::setup()`.
+Add as a layer in scalo's `logger::setup()`.
 
 **Trade-off:** Adds ~50ns per event (lock-free sharded storage). Negligible for
 logging but measurable if applied to `trace!`-level events at millions/sec.
@@ -185,9 +191,9 @@ those.
 
 ## Recommended Implementation Strategy
 
-### Phase 1: Global Safety Net (rustlib)
+### Phase 1: Global Safety Net (scalo)
 
-Add `tracing-throttle` as a layer in `hyperi_rustlib::logger::setup()`.
+Add `tracing-throttle` as a layer in `scalo::logger::setup()`.
 This provides baseline protection for all DFE services with zero per-site
 code changes.
 
@@ -241,12 +247,12 @@ Fix the worst offenders identified in the audit:
 | `crates/archiver/src/archiver.rs` | 191 | `warn!` per buffer push under pressure | State-transition logging |
 | `crates/core/src/buffer/tiered.rs` | 225,242 | `warn!` per spool full push | State-transition logging |
 
-### Phase 3: Helpers in rustlib
+### Phase 3: Helpers in scalo
 
-Add convenience macros/utilities to rustlib for the common patterns:
+Add convenience macros/utilities to scalo for the common patterns:
 
 ```rust
-// In hyperi_rustlib::logger
+// In scalo::logger
 
 /// Log on state transition only. Returns true if state changed.
 pub fn log_state_change(flag: &AtomicBool, new_state: bool) -> bool {

@@ -6,6 +6,8 @@ High-performance HTTP/gRPC receiver for PB/s scale data ingestion.
 
 dfe-receiver is a native Rust data ingestion service that accepts data from multiple
 agent protocols, normalises it to JSON, and routes it to Kafka topics or dfe-loader.
+It is built on the [scalo](https://github.com/hyperi-io/scalo-rs) data-plane runtime
+(config cascade, logging, metrics, transport, TieredSink, health probes).
 
 **10 protocol handlers** (HTTP, gRPC, OTLP, Lumberjack/Beats, Splunk HEC,
 Syslog, Fluent Forward, GELF, Prometheus Remote Write, Flow [NetFlow + sFlow
@@ -204,46 +206,20 @@ Key metrics:
 
 ## Architecture
 
-All protocols share the same core pipeline after normalisation:
+Every protocol handler normalises to JSON, then all share one core pipeline.
+The handlers run in parallel (each opt-in); the table above lists the full set.
 
-```text
-┌─────────────────────────────────────────────────────┐
-│                  Protocol Handlers                  │
-│  (each independently enabled, spawned in parallel)  │
-│                                                     │
-│  HTTP(S)          →  JSON passthrough               │
-│  gRPC/Vector      →  protobuf → JSON                │
-│  OTLP gRPC/HTTP   →  OTel proto → JSON              │
-│  Lumberjack/Beats →  msgpack frames → JSON          │
-│  Splunk HEC       →  HEC JSON → normalised JSON     │
-│  Syslog UDP/TCP   →  RFC5424/3164 → JSON            │
-│  Fluent Forward   →  msgpack → JSON                 │
-│  GELF TCP         →  GELF JSON → normalised JSON    │
-│  Prometheus RW    →  protobuf timeseries → JSON     │
-│  Flow (NetFlow,   →  UDP autosense → JSON envelopes │
-│   sFlow, IPFIX)      (EXPERIMENTAL)                 │
-└───────────────────────┬─────────────────────────────┘
-                        │ bytes::Bytes (normalised JSON)
-                        ▼
-               Auth middleware
-               (header / bearer token / mTLS)
-                        │
-                        ▼
-               JSON validation
-               (sonic_rs SIMD — optional field checks)
-                        │
-                        ▼
-               Router
-               (zero-copy field extraction → topic name)
-                        │
-                        ▼
-               TieredSink
-               (in-memory buffer + CircuitBreaker)
-                 │                    │
-                 ▼                    ▼
-           Kafka topics          dfe-loader
-           (librdkafka,          (direct Kafka
-            batched/LZ4)          input topic)
+```mermaid
+flowchart TB
+    SRC["Agents / collectors<br/>Vector, Beats, OTel, Splunk, syslog, ..."]
+    SRC --> H["10 protocol handlers<br/>each opt-in, spawned in parallel<br/>normalise to JSON"]
+    H -->|"bytes::Bytes (normalised JSON)"| AUTH["Auth middleware<br/>header / bearer / mTLS"]
+    AUTH --> VAL["JSON validation<br/>sonic-rs SIMD, optional field checks"]
+    VAL --> RT["Router<br/>zero-copy field extract -> topic name"]
+    RT --> TS["TieredSink (scalo)<br/>in-memory buffer + CircuitBreaker<br/>no disk spillover by design"]
+    TS --> KAFKA[("Kafka topics<br/>librdkafka, batched / LZ4")]
+    TS --> LOADER["dfe-loader<br/>direct Kafka input topic"]
+    RT -. unmatched .-> DEF["default_land topic"]
 ```
 
 ## Development
@@ -279,7 +255,7 @@ kcat -b localhost:9092 -t events -C
 # Consume with metadata (partition, offset, timestamp)
 kcat -b localhost:9092 -t events -C -f 'P:%p O:%o T:%T\n%s\n'
 
-# Tail a topic — watch live as dfe-receiver routes messages
+# Tail a topic - watch live as dfe-receiver routes messages
 kcat -b localhost:9092 -t events -C -o end
 
 # Send a test event through dfe-receiver and verify it arrives

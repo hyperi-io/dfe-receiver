@@ -85,7 +85,7 @@ dfe-receiver is a high-performance HTTP/gRPC receiver for PB/s scale data ingest
                          │                  │                  │
                ┌─────────▼─────────┐ ┌──────▼──────┐ ┌─────────▼─────────┐
                │   Kafka Sink      │ │ DLQ Sink    │ │  Loader Sink      │
-               │   (rdkafka)       │ │             │ │  (hyperi-rustlib)     │
+               │   (rdkafka)       │ │             │ │  (scalo)          │
                └─────────┬─────────┘ └─────────────┘ └───────────────────┘
                          │
                ┌─────────▼─────────┐
@@ -190,7 +190,7 @@ Uses rdkafka `FutureProducer` with zstd compression.
 
 Wraps primary sink with resilience:
 
-1. **Circuit Breaker** (hyperi-rustlib) - Tracks consecutive failures, opens after threshold
+1. **Circuit Breaker** (scalo) - Tracks consecutive failures, opens after threshold
 2. **In-Memory Queue** - Buffers during circuit-open state
 3. **Background Drain** - Retries queued messages when circuit closes
 
@@ -220,7 +220,7 @@ Secret source format: `provider:path:key`
 
 ## Configuration
 
-7-layer cascade (hyperi-rustlib pattern):
+7-layer cascade (scalo pattern):
 
 1. Compiled defaults
 2. `/etc/dfe-receiver/config.yaml`
@@ -690,6 +690,6 @@ See `config.example.yaml` for the full `flow:` block.
 ## References
 
 - [dfe-loader](https://github.com/hyperi-io/dfe-loader) - Reference implementation patterns
-- [hyperi-rustlib](https://github.com/hyperi-io/hyperi-rustlib) - Shared library
+- [scalo](https://github.com/hyperi-io/scalo-rs) - Shared data-plane runtime (crate: `scalo`)
 - [Vector HTTP sink](https://vector.dev/docs/reference/configuration/sinks/http/)
 - [Vector sink (gRPC)](https://vector.dev/docs/reference/configuration/sinks/vector/)

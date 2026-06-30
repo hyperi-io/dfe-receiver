@@ -230,7 +230,7 @@ deployments. See `docs/HARDENING.md`.
 
 ### Kafka producer batching
 
-`hyperi-rustlib`'s `KafkaProducer::HighThroughput` profile sets librdkafka
+`scalo`'s `KafkaProducer::HighThroughput` profile sets librdkafka
 batching to **256 KiB batches, 100 ms linger, LZ4 compression**. These are
 the hot-path throughput defaults. Override per-env via
 `kafka.librdkafka_overrides` in config YAML if a specific cluster needs

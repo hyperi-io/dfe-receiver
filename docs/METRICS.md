@@ -1,5 +1,11 @@
 # DFE Platform Metrics Standard
 
+> **STATUS - HISTORICAL (out of date).** Platform-era planning doc that predates
+> the scalo rename. The consolidation it proposes happened: the DFE apps now
+> emit through scalo's `MetricsManager` (bare metric names, optional namespace
+> prefix), so the "Current State (Problems)" table and migration plan below are
+> largely resolved. Kept for context; not current guidance.
+
 Common metrics naming, structure, and implementation patterns for all DFE Rust
 services. Designed for Prometheus scraping, Grafana dashboards, KEDA autoscaling,
 and PagerDuty/OpsGenie alerting.
@@ -15,7 +21,7 @@ and PagerDuty/OpsGenie alerting.
 |-------|--------|
 | 3 different metric implementations across 5 projects | No shared dashboards, inconsistent naming |
 | Prefix collision: `dfe_pipeline_ready` emitted by both dfe-fetcher and dfe-transform-vector | Prometheus conflation when scraped from same cluster |
-| dfe-receiver and dfe-fetcher hand-roll Prometheus text; dfe-loader uses `prometheus` crate; dfe-archiver uses rustlib `MetricsManager` | Maintenance burden, no code reuse |
+| dfe-receiver and dfe-fetcher hand-roll Prometheus text; dfe-loader uses `prometheus` crate; dfe-archiver uses scalo `MetricsManager` | Maintenance burden, no code reuse |
 | No histograms in dfe-receiver or dfe-fetcher | SLO tracking impossible without external APM |
 | dfe-loader appends `scaling_pressure` as raw text after `Registry::gather()` | Invisible to registry-based tooling |
 | No transport labels — separate metrics for Kafka vs gRPC vs loader | Can't build unified transport dashboards |
@@ -101,7 +107,7 @@ Metrics for KEDA autoscaling. All services that run in K8s SHOULD emit these.
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `dfe_scaling_pressure` | gauge | Composite pressure score 0-100 (from rustlib `ScalingPressure`) |
+| `dfe_scaling_pressure` | gauge | Composite pressure score 0-100 (from scalo `ScalingPressure`) |
 | `dfe_scaling_circuit_open` | gauge | 1 if circuit breaker is open, 0 otherwise |
 | `dfe_scaling_memory_pressure` | gauge | Memory usage as fraction of limit (0.0-1.0) |
 
@@ -115,7 +121,7 @@ For services with disk spillover.
 | `dfe_spool_messages` | gauge | Current messages in disk spool |
 | `dfe_spool_disk_available` | gauge | 1 if disk has capacity, 0 if full |
 
-### Process Metrics (automatic via rustlib)
+### Process Metrics (automatic via scalo)
 
 These are auto-registered by `MetricsManager` when `enable_process_metrics: true`:
 
@@ -149,13 +155,13 @@ These PromQL expressions should be standardised across all DFE Grafana dashboard
 
 ## Implementation Standard
 
-### Use rustlib `MetricsManager`
+### Use scalo `MetricsManager`
 
-All projects MUST use `hyperi_rustlib::metrics::MetricsManager`. No hand-rolled
+All projects MUST use `scalo::metrics::MetricsManager`. No hand-rolled
 Prometheus text output. No direct `prometheus` crate usage.
 
 ```rust
-use hyperi_rustlib::metrics::MetricsManager;
+use scalo::metrics::MetricsManager;
 
 let metrics = MetricsManager::new("dfe");
 
@@ -183,7 +189,7 @@ counter!("dfe_transport_sent_total", "transport" => "grpc").increment(1);
 
 ### Histogram Buckets
 
-Use rustlib's standard bucket helpers:
+Use scalo's standard bucket helpers:
 
 | Domain | Buckets | Helper |
 |--------|---------|--------|
@@ -216,7 +222,7 @@ Coordinate across teams — one release cycle warning.
 
 ### Phase 3: Consolidate implementation
 
-Migrate all projects to rustlib `MetricsManager`. Remove hand-rolled
+Migrate all projects to scalo `MetricsManager`. Remove hand-rolled
 `render()` functions and direct `prometheus` crate usage.
 
 ---
