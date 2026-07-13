@@ -1049,7 +1049,7 @@ mod tests {
             value: Some(Value::BoolValue(true)),
         };
         let s = any_value_to_string_value(&bv);
-        assert!(s.as_str().unwrap() == "true");
+        assert_eq!(s.as_str().unwrap(), "true");
 
         // Bytes
         let bsv = AnyValue {
