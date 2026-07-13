@@ -22,9 +22,10 @@ doctest = false
 
 [dependencies]
 # scalo shared library (crates.io)
-scalo = { version = ">=2.10.0, <3", features = [
+scalo = { version = ">=2.10.4, <3", features = [
     "config",
     "config-reload",
+    "config-schema",
     "logger",
     "memory",
     "metrics",
@@ -55,6 +56,10 @@ scalo = { version = ">=2.10.0, <3", features = [
     # in by cli-service, listed explicitly so the dependency is unambiguous.
     "governor",
 ] }
+
+# JSON Schema derivation for the reflectable config-schema capability
+# (scalo-rs#6). Same version range as scalo so cargo unifies to one schemars.
+schemars = { version = ">=1.2.1, <2", default-features = false, features = ["std", "derive", "preserve_order"] }
 
 # Prometheus metrics (direct dep for counter!/gauge! macros with labels)
 metrics = "0.24"
@@ -173,7 +178,7 @@ sha2 = ">=0.10, <0.11"
 
 # Contract artefact e2e (tests/e2e/contract_artefacts.rs) — pulls in
 # probe/skip/cluster helpers from scalo's test_support module.
-scalo = { version = ">=2.10.0, <3", features = ["deployment-test-support"] }
+scalo = { version = ">=2.10.4, <3", features = ["deployment-test-support"] }
 
 [features]
 default = ["otlp"]

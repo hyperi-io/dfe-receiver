@@ -41,7 +41,7 @@ pub const COMMON_HEADER_NAME: &str = "x-hyperi-agent";
 pub const COMMON_HEADER_VALUE: &str = "1.0";
 
 /// Main configuration struct.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct Config {
     /// HTTP server configuration.
@@ -377,7 +377,7 @@ impl Normalize for Config {
 }
 
 /// HTTP server configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ServerConfig {
     /// Bind address (e.g., "0.0.0.0:443").
@@ -422,7 +422,7 @@ impl Default for ServerConfig {
 }
 
 /// Per-IP rate limiting configuration using GCRA (token bucket variant).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct RateLimitConfig {
     /// Enable per-IP rate limiting.
@@ -446,7 +446,7 @@ impl Default for RateLimitConfig {
 }
 
 /// IP filter (allowlist / denylist) configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct IpFilterConfig {
     /// Filter mode: "disabled", "allowlist", "denylist".
@@ -466,7 +466,7 @@ impl Default for IpFilterConfig {
 }
 
 /// TLS configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct TlsConfig {
     /// Enable TLS.
@@ -518,7 +518,7 @@ impl Default for TlsConfig {
 }
 
 /// Authentication configuration.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct AuthConfig {
     /// Auth mode (none, header, bearer, mtls, both).
@@ -553,7 +553,7 @@ fn default_true() -> bool {
 }
 
 /// Bearer token authentication configuration.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct BearerConfig {
     /// Static tokens (for dev/simple deployments).
@@ -581,7 +581,7 @@ impl Default for BearerConfig {
 }
 
 /// Defines an accepted authentication header.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AcceptedHeader {
     /// Header name (e.g., "x-hyperi-agent", "Authorization").
     pub name: String,
@@ -638,7 +638,7 @@ impl AuthConfig {
 }
 
 /// gRPC server configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct GrpcConfig {
     /// Enable gRPC server.
@@ -670,7 +670,7 @@ impl Default for GrpcConfig {
 
 /// OTLP (OpenTelemetry Protocol) receiver configuration.
 #[cfg(feature = "otlp")]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct OtlpConfig {
     /// Enable OTLP receiver.
@@ -717,7 +717,7 @@ impl Default for OtlpConfig {
 ///
 /// Accepts data from Elastic Beats agents (Filebeat, Winlogbeat, etc.)
 /// over the Lumberjack v2 wire protocol on TCP/TLS.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct LumberjackConfig {
     /// Enable Lumberjack/Beats receiver.
@@ -751,7 +751,7 @@ impl Default for LumberjackConfig {
 ///
 /// Accepts data from Splunk forwarders and HTTP clients over the HEC protocol.
 /// Supports both `Authorization: Splunk <token>` and `Authorization: Bearer <token>`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct SplunkHecConfig {
     /// Enable Splunk HEC receiver.
@@ -793,7 +793,7 @@ impl Default for SplunkHecConfig {
 ///
 /// Accepts syslog messages over UDP, TCP, and TLS/TCP.
 /// Auto-detects message format (RFC 5424 vs RFC 3164) per message.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct SyslogConfig {
     /// Enable syslog receiver.
@@ -836,7 +836,7 @@ impl Default for SyslogConfig {
 }
 
 /// Prometheus Remote Write receiver configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct PrometheusRwConfig {
     /// Enable Prometheus Remote Write receiver.
@@ -885,7 +885,7 @@ impl Default for PrometheusRwConfig {
 ///
 /// Accepts data from Fluentd and Fluent Bit agents over the Forward
 /// protocol (msgpack over TCP) on the standard port 24224.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct FluentConfig {
     /// Enable Fluent Forward receiver.
@@ -916,7 +916,7 @@ impl Default for FluentConfig {
 ///
 /// Accepts GELF messages over TCP (null-byte delimited JSON)
 /// on the standard port 12201.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct GelfConfig {
     /// Enable GELF receiver.
@@ -944,7 +944,7 @@ impl Default for GelfConfig {
 }
 
 /// Validation configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ValidationConfig {
     /// Require JSON format.
@@ -968,7 +968,7 @@ impl Default for ValidationConfig {
 }
 
 /// Rule for determining `_source` value from JSON payload.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SourceRule {
     /// JSON field path (dot notation for nested, e.g., "tags.event.category").
     pub field: String,
@@ -991,7 +991,7 @@ pub struct SourceRule {
 }
 
 /// Routing configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct RoutingConfig {
     /// Rules for determining `_source` value (first match wins).
@@ -1052,7 +1052,7 @@ impl RoutingConfig {
 }
 
 /// DLQ (Dead Letter Queue) configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct DlqConfig {
     /// Enable DLQ.
@@ -1173,7 +1173,7 @@ impl KafkaConfig {
 }
 
 /// Destinations configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct DestinationsConfig {
     /// Default destination (kafka or loader).
@@ -1193,7 +1193,7 @@ impl Default for DestinationsConfig {
 }
 
 /// Destination routing rule.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DestinationRule {
     /// Field to match.
     pub match_field: String,
@@ -1206,7 +1206,7 @@ pub struct DestinationRule {
 }
 
 /// Kafka producer configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct KafkaConfig {
     /// Broker addresses.
@@ -1248,7 +1248,7 @@ impl Default for KafkaConfig {
 }
 
 /// SASL authentication configuration.
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SaslConfig {
     /// Enable SASL.
     pub enabled: bool,
@@ -1275,7 +1275,7 @@ impl std::fmt::Debug for SaslConfig {
 }
 
 /// Kafka TLS configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct KafkaTlsConfig {
     /// Enable TLS for Kafka.
@@ -1303,7 +1303,7 @@ impl Default for KafkaTlsConfig {
 }
 
 /// Kafka producer settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ProducerConfig {
     /// Maximum batch size in bytes.
@@ -1339,7 +1339,7 @@ impl Default for ProducerConfig {
 }
 
 /// dfe-loader connection configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct LoaderConfig {
     /// Loader address (used for Kafka mode reference; override with grpc_endpoint for gRPC mode).
@@ -1381,7 +1381,7 @@ impl LoaderConfig {
 }
 
 /// Debug file sink configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct FileSinkConfig {
     /// Enable writing all processed messages to a file.
@@ -1409,7 +1409,7 @@ impl Default for FileSinkConfig {
 /// 2. Vector clients have their own disk buffers for retries
 /// 3. Circuit breaker + 503 responses propagate backpressure upstream
 /// 4. Disk I/O would bottleneck the hot path at PB/s scale
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct BufferConfig {
     /// Maximum memory for buffers in bytes (0 = auto-detect 67% of available).
@@ -1441,7 +1441,7 @@ impl Default for BufferConfig {
 /// When enabled, failed sends are spilled to disk via scalo's TieredSink
 /// instead of being held in an in-memory queue. This provides crash-resilient
 /// buffering at the cost of disk I/O on the failure path.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 #[serde(default)]
 pub struct SpilloverConfig {
     /// Enable disk spillover (default: false).
@@ -1481,7 +1481,7 @@ impl Default for SpilloverConfig {
 }
 
 /// Metrics configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct MetricsConfig {
     /// Enable metrics.
@@ -1505,7 +1505,7 @@ impl Default for MetricsConfig {
 /// Configures the weighted composite metric that KEDA uses to scale the receiver.
 /// Each component has a weight (relative importance) and saturation point (value
 /// at which it contributes its full weight to the composite).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ScalingConfig {
     /// Enable scaling pressure calculation.

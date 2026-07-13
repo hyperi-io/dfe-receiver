@@ -254,7 +254,7 @@ pub fn contract() -> DeploymentContract {
             }
         })),
         depends_on: vec!["kafka".into()],
-        schema_version: 2,
+        schema_version: 3,
         oci_labels: OciLabels {
             title: "dfe-receiver".into(),
             description: "High-performance HTTP/gRPC receiver for PB/s scale data ingestion".into(),
@@ -282,7 +282,51 @@ pub fn contract() -> DeploymentContract {
             cpu_threshold: 80,
             ..Default::default()
         })),
+        // Reflectable config (scalo-rs#6): the derived JSON Schema of the full
+        // Config (all ingest protocols + destinations, secret fields marked
+        // x-dfe-secret) plus a capability catalog of the ingest protocols the
+        // receiver accepts and the destinations it writes to.
+        config_schema: Some(scalo::deployment::config_schema_json::<crate::config::Config>()),
+        capabilities: capabilities(),
     }
+}
+
+/// Capability catalog for dfe-receiver: the ingest protocols it accepts and the
+/// output destinations it writes to. Grounded in `config::Config` -- the typed
+/// per-protocol knobs live in the derived schema; this lists the protocols +
+/// their maturity for the control plane's endpoint picker.
+fn capabilities() -> Vec<scalo::deployment::Capability> {
+    use scalo::deployment::Capability;
+    let ingest = |name: &str, desc: &str| {
+        Capability::new("ingest", name)
+            .description(desc.to_string())
+            .maturity("stable")
+    };
+    vec![
+        Capability::source("receiver")
+            .description("Multi-protocol ingest receiver: accepts data over many wire protocols and routes to Kafka / the loader.")
+            .maturity("stable")
+            .children(vec![
+                ingest("http", "HTTP/JSON + NDJSON ingest (the ServerConfig endpoint)."),
+                ingest("grpc", "gRPC ingest (scalo Vector-compatible push service)."),
+                ingest("otlp", "OpenTelemetry OTLP logs/metrics/traces (feature-gated)."),
+                ingest("lumberjack", "Elastic Beats / Lumberjack v2 frames."),
+                ingest("splunk_hec", "Splunk HTTP Event Collector."),
+                ingest("syslog", "Syslog RFC3164/RFC5424 over TCP/UDP/TLS."),
+                ingest("prometheus_rw", "Prometheus Remote Write."),
+                ingest("fluent", "Fluent Forward protocol."),
+                ingest("gelf", "Graylog Extended Log Format."),
+                ingest("flow", "NetFlow v5/v9 + IPFIX + sFlow v5."),
+            ]),
+        Capability::sink("destinations")
+            .description("Output destinations the receiver routes accepted events to.")
+            .maturity("stable")
+            .children(vec![
+                Capability::service("kafka").description("Kafka producer (the primary destination)."),
+                Capability::service("loader").description("Direct gRPC connection to dfe-loader (broker-less low-latency path)."),
+                Capability::service("file_sink").description("Debug file sink (writes processed messages to a file)."),
+            ]),
+    ]
 }
 
 /// Generate the Dockerfile from the deployment contract.
@@ -314,6 +358,28 @@ mod tests {
         assert_eq!(c.config_mount_path, "/etc/dfe-receiver/config.yaml");
         assert_eq!(c.config_filename(), "config.yaml");
         assert_eq!(c.config_dir(), "/etc/dfe-receiver");
+    }
+
+    #[test]
+    fn test_contract_carries_reflectable_config() {
+        let c = contract();
+        assert_eq!(c.schema_version, 3);
+        assert!(c.config_schema.is_some());
+        let recv = c
+            .capabilities
+            .iter()
+            .find(|cap| cap.name == "receiver")
+            .expect("receiver ingest capability");
+        let protos: Vec<&str> = recv.children.iter().map(|s| s.name.as_str()).collect();
+        assert!(protos.contains(&"syslog") && protos.contains(&"grpc") && protos.contains(&"flow"));
+    }
+
+    /// Committed reflectable artefacts under docs/ must not drift. Regenerate
+    /// with `dfe-receiver config-schema --dir docs`.
+    #[test]
+    fn test_config_artifacts_do_not_drift() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs");
+        scalo::deployment::assert_no_config_artifact_drift(&contract(), dir);
     }
 
     #[test]

@@ -1,0 +1,2007 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Config",
+  "description": "Main configuration struct.",
+  "type": "object",
+  "properties": {
+    "server": {
+      "description": "HTTP server configuration.",
+      "$ref": "#/$defs/ServerConfig",
+      "default": {
+        "bind_address": "0.0.0.0:8080",
+        "max_body_size": 10485760,
+        "request_timeout_ms": 30000,
+        "max_concurrent_requests": 10000,
+        "rate_limit": {
+          "enabled": false,
+          "requests_per_second": 100,
+          "burst": 500
+        },
+        "ip_filter": {
+          "mode": "disabled",
+          "cidrs": []
+        },
+        "tls": {
+          "enabled": false,
+          "cert_file": null,
+          "key_file": null,
+          "ca_file": null,
+          "client_auth": "none",
+          "cert_secret": null,
+          "key_secret": null,
+          "ca_secret": null,
+          "refresh_interval_secs": 3600
+        },
+        "auth": {
+          "mode": "none",
+          "accepted_headers": [],
+          "bearer": {
+            "tokens": [],
+            "secret_source": null,
+            "refresh_interval_secs": 300
+          },
+          "include_common_header": true,
+          "header_name": "",
+          "header_values": []
+        }
+      }
+    },
+    "grpc": {
+      "description": "gRPC server configuration.",
+      "$ref": "#/$defs/GrpcConfig",
+      "default": {
+        "enabled": false,
+        "bind_address": "0.0.0.0:6000",
+        "tls": {
+          "enabled": false,
+          "cert_file": null,
+          "key_file": null,
+          "ca_file": null,
+          "client_auth": "none",
+          "cert_secret": null,
+          "key_secret": null,
+          "ca_secret": null,
+          "refresh_interval_secs": 3600
+        },
+        "auth": {
+          "mode": "none",
+          "accepted_headers": [],
+          "bearer": {
+            "tokens": [],
+            "secret_source": null,
+            "refresh_interval_secs": 300
+          },
+          "include_common_header": true,
+          "header_name": "",
+          "header_values": []
+        }
+      }
+    },
+    "otlp": {
+      "description": "OTLP receiver configuration.",
+      "$ref": "#/$defs/OtlpConfig",
+      "default": {
+        "enabled": false,
+        "grpc_bind_address": "0.0.0.0:4317",
+        "http_bind_address": "0.0.0.0:4318",
+        "mode": "hyperdx",
+        "tls": {
+          "enabled": false,
+          "cert_file": null,
+          "key_file": null,
+          "ca_file": null,
+          "client_auth": "none",
+          "cert_secret": null,
+          "key_secret": null,
+          "ca_secret": null,
+          "refresh_interval_secs": 3600
+        },
+        "auth": {
+          "mode": "none",
+          "accepted_headers": [],
+          "bearer": {
+            "tokens": [],
+            "secret_source": null,
+            "refresh_interval_secs": 300
+          },
+          "include_common_header": true,
+          "header_name": "",
+          "header_values": []
+        }
+      }
+    },
+    "lumberjack": {
+      "description": "Lumberjack v2 (Beats) receiver configuration.",
+      "$ref": "#/$defs/LumberjackConfig",
+      "default": {
+        "enabled": false,
+        "bind_address": "0.0.0.0:5044",
+        "tls": {
+          "enabled": false,
+          "cert_file": null,
+          "key_file": null,
+          "ca_file": null,
+          "client_auth": "none",
+          "cert_secret": null,
+          "key_secret": null,
+          "ca_secret": null,
+          "refresh_interval_secs": 3600
+        },
+        "auth": {
+          "mode": "none",
+          "accepted_headers": [],
+          "bearer": {
+            "tokens": [],
+            "secret_source": null,
+            "refresh_interval_secs": 300
+          },
+          "include_common_header": true,
+          "header_name": "",
+          "header_values": []
+        }
+      }
+    },
+    "splunk_hec": {
+      "description": "Splunk HEC receiver configuration.",
+      "$ref": "#/$defs/SplunkHecConfig",
+      "default": {
+        "enabled": false,
+        "bind_address": "0.0.0.0:8088",
+        "max_body_size": 10485760,
+        "request_timeout_ms": 30000,
+        "tls": {
+          "enabled": false,
+          "cert_file": null,
+          "key_file": null,
+          "ca_file": null,
+          "client_auth": "none",
+          "cert_secret": null,
+          "key_secret": null,
+          "ca_secret": null,
+          "refresh_interval_secs": 3600
+        },
+        "auth": {
+          "mode": "none",
+          "accepted_headers": [],
+          "bearer": {
+            "tokens": [],
+            "secret_source": null,
+            "refresh_interval_secs": 300
+          },
+          "include_common_header": true,
+          "header_name": "",
+          "header_values": []
+        }
+      }
+    },
+    "syslog": {
+      "description": "Syslog receiver configuration.",
+      "$ref": "#/$defs/SyslogConfig",
+      "default": {
+        "enabled": false,
+        "udp_bind_address": "0.0.0.0:514",
+        "tcp_bind_address": "0.0.0.0:514",
+        "tls_bind_address": "0.0.0.0:6514",
+        "max_message_size": 65536,
+        "tls": {
+          "enabled": false,
+          "cert_file": null,
+          "key_file": null,
+          "ca_file": null,
+          "client_auth": "none",
+          "cert_secret": null,
+          "key_secret": null,
+          "ca_secret": null,
+          "refresh_interval_secs": 3600
+        },
+        "auth": {
+          "mode": "none",
+          "accepted_headers": [],
+          "bearer": {
+            "tokens": [],
+            "secret_source": null,
+            "refresh_interval_secs": 300
+          },
+          "include_common_header": true,
+          "header_name": "",
+          "header_values": []
+        }
+      }
+    },
+    "prometheus_rw": {
+      "description": "Prometheus Remote Write receiver configuration.",
+      "$ref": "#/$defs/PrometheusRwConfig",
+      "default": {
+        "enabled": false,
+        "bind_address": "0.0.0.0:9091",
+        "mode": "native",
+        "max_body_size": 10485760,
+        "request_timeout_ms": 30000,
+        "tls": {
+          "enabled": false,
+          "cert_file": null,
+          "key_file": null,
+          "ca_file": null,
+          "client_auth": "none",
+          "cert_secret": null,
+          "key_secret": null,
+          "ca_secret": null,
+          "refresh_interval_secs": 3600
+        },
+        "auth": {
+          "mode": "none",
+          "accepted_headers": [],
+          "bearer": {
+            "tokens": [],
+            "secret_source": null,
+            "refresh_interval_secs": 300
+          },
+          "include_common_header": true,
+          "header_name": "",
+          "header_values": []
+        }
+      }
+    },
+    "fluent": {
+      "description": "Fluent Forward protocol receiver configuration.",
+      "$ref": "#/$defs/FluentConfig",
+      "default": {
+        "enabled": false,
+        "bind_address": "0.0.0.0:24224",
+        "max_message_size": 33554432,
+        "tls": {
+          "enabled": false,
+          "cert_file": null,
+          "key_file": null,
+          "ca_file": null,
+          "client_auth": "none",
+          "cert_secret": null,
+          "key_secret": null,
+          "ca_secret": null,
+          "refresh_interval_secs": 3600
+        }
+      }
+    },
+    "gelf": {
+      "description": "GELF receiver configuration.",
+      "$ref": "#/$defs/GelfConfig",
+      "default": {
+        "enabled": false,
+        "bind_address": "0.0.0.0:12201",
+        "max_message_size": 1048576,
+        "tls": {
+          "enabled": false,
+          "cert_file": null,
+          "key_file": null,
+          "ca_file": null,
+          "client_auth": "none",
+          "cert_secret": null,
+          "key_secret": null,
+          "ca_secret": null,
+          "refresh_interval_secs": 3600
+        }
+      }
+    },
+    "flow": {
+      "description": "Flow (NetFlow v5/v9 + IPFIX + sFlow v5) receiver configuration.",
+      "$ref": "#/$defs/FlowConfig",
+      "default": {
+        "enabled": false,
+        "bind_address": "0.0.0.0",
+        "ports": [
+          2055,
+          4739,
+          6343
+        ],
+        "output": {
+          "mode": "canonical",
+          "max_records_per_packet": 200
+        },
+        "channel_capacity": 4096,
+        "recv_buffer_bytes": 8388608,
+        "ip_filter": null,
+        "rate_limit": {
+          "enabled": false,
+          "packets_per_second": 0,
+          "burst": 0,
+          "cache_size": 0
+        },
+        "netflow": {
+          "enabled": true,
+          "template_cache": {
+            "max_per_exporter": 1000,
+            "max_exporters": 10000
+          },
+          "topic": "netflow_land"
+        },
+        "sflow": {
+          "enabled": true,
+          "topic": "sflow_land"
+        },
+        "split": null,
+        "experimental": true
+      }
+    },
+    "validation": {
+      "description": "Validation rules.",
+      "$ref": "#/$defs/ValidationConfig",
+      "default": {
+        "require_json": true,
+        "required_fields": [],
+        "dlq_on_invalid": true
+      }
+    },
+    "routing": {
+      "description": "Routing configuration.",
+      "$ref": "#/$defs/RoutingConfig",
+      "default": {
+        "source_rules": [],
+        "default_source": "default",
+        "topic_suffix": "_land",
+        "source_to_topic": {},
+        "legacy_compat": false,
+        "dlq": {
+          "enabled": true,
+          "mode": "cascade",
+          "topic": "dlq_land",
+          "topic_suffix": ".dlq",
+          "file_enabled": true,
+          "file_path": "/var/spool/dfe/dlq",
+          "kafka_enabled": true
+        }
+      }
+    },
+    "destinations": {
+      "description": "Destination configuration.",
+      "$ref": "#/$defs/DestinationsConfig",
+      "default": {
+        "default": "kafka",
+        "rules": []
+      }
+    },
+    "kafka": {
+      "description": "Kafka producer configuration.",
+      "$ref": "#/$defs/KafkaConfig",
+      "default": {
+        "brokers": [],
+        "client_id": "dfe-receiver",
+        "sasl": null,
+        "tls": {
+          "enabled": false,
+          "ca_file": null,
+          "cert_file": null,
+          "key_file": null
+        },
+        "producer": {
+          "batch_size": 8388608,
+          "batch_messages": 10000,
+          "linger_ms": 20,
+          "compression": "lz4",
+          "acks": "all",
+          "retries": 5
+        },
+        "librdkafka_overrides": {
+          "statistics.interval.ms": "5000"
+        }
+      }
+    },
+    "loader": {
+      "description": "dfe-loader connection configuration.",
+      "$ref": "#/$defs/LoaderConfig",
+      "default": {
+        "address": "dfe-loader:9000",
+        "transport": "kafka",
+        "timeout_ms": 5000,
+        "grpc_endpoint": null
+      }
+    },
+    "buffer": {
+      "description": "Buffer and memory configuration.",
+      "$ref": "#/$defs/BufferConfig",
+      "default": {
+        "memory_limit": 0,
+        "pressure_threshold": 0.8,
+        "spillover": {
+          "enabled": false,
+          "path": "/var/spool/dfe-receiver",
+          "max_usage_percent": 0.8,
+          "poll_interval_secs": 5
+        }
+      }
+    },
+    "metrics": {
+      "description": "Metrics configuration.",
+      "$ref": "#/$defs/MetricsConfig",
+      "default": {
+        "enabled": true,
+        "address": "0.0.0.0:9090"
+      }
+    },
+    "scaling": {
+      "description": "Scaling pressure configuration for KEDA autoscaling.",
+      "$ref": "#/$defs/ScalingConfig",
+      "default": {
+        "enabled": true,
+        "memory_gate_threshold": 0.8,
+        "weight_request_rate": 0.3,
+        "weight_queue_depth": 0.25,
+        "weight_memory": 0.25,
+        "weight_connections": 0.1,
+        "weight_spill": 0.1,
+        "saturation_request_rate": 100000.0,
+        "saturation_queue_depth": 10000.0,
+        "saturation_connections": 1000.0,
+        "saturation_spill": 1000.0
+      }
+    },
+    "config_reload_secs": {
+      "description": "Periodic config reload interval in seconds (0 = disabled, SIGHUP only).",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0,
+      "default": 0
+    },
+    "file_sink": {
+      "description": "Debug file sink — writes all processed messages to a file.",
+      "$ref": "#/$defs/FileSinkConfig",
+      "default": {
+        "enabled": false,
+        "path": "/tmp/dfe-receiver-debug.ndjson"
+      }
+    }
+  },
+  "$defs": {
+    "ServerConfig": {
+      "description": "HTTP server configuration.",
+      "type": "object",
+      "properties": {
+        "bind_address": {
+          "description": "Bind address (e.g., \"0.0.0.0:443\").",
+          "type": "string",
+          "default": "0.0.0.0:8080"
+        },
+        "max_body_size": {
+          "description": "Maximum request body size in bytes.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "default": 10485760
+        },
+        "request_timeout_ms": {
+          "description": "Request timeout in milliseconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 30000
+        },
+        "max_concurrent_requests": {
+          "description": "Maximum concurrent in-flight requests (0 = unlimited).\nProtects against connection exhaustion and memory pressure.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "default": 10000
+        },
+        "rate_limit": {
+          "description": "Per-IP rate limiting configuration.",
+          "$ref": "#/$defs/RateLimitConfig",
+          "default": {
+            "enabled": false,
+            "requests_per_second": 100,
+            "burst": 500
+          }
+        },
+        "ip_filter": {
+          "description": "IP filter (allowlist/denylist) configuration.",
+          "$ref": "#/$defs/IpFilterConfig",
+          "default": {
+            "mode": "disabled",
+            "cidrs": []
+          }
+        },
+        "tls": {
+          "description": "TLS configuration.",
+          "$ref": "#/$defs/TlsConfig",
+          "default": {
+            "enabled": false,
+            "cert_file": null,
+            "key_file": null,
+            "ca_file": null,
+            "client_auth": "none",
+            "cert_secret": null,
+            "key_secret": null,
+            "ca_secret": null,
+            "refresh_interval_secs": 3600
+          }
+        },
+        "auth": {
+          "description": "Authentication configuration.",
+          "$ref": "#/$defs/AuthConfig",
+          "default": {
+            "mode": "none",
+            "accepted_headers": [],
+            "bearer": {
+              "tokens": [],
+              "secret_source": null,
+              "refresh_interval_secs": 300
+            },
+            "include_common_header": true,
+            "header_name": "",
+            "header_values": []
+          }
+        }
+      }
+    },
+    "RateLimitConfig": {
+      "description": "Per-IP rate limiting configuration using GCRA (token bucket variant).",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Enable per-IP rate limiting.",
+          "type": "boolean",
+          "default": false
+        },
+        "requests_per_second": {
+          "description": "Maximum sustained requests per second per source IP.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 100
+        },
+        "burst": {
+          "description": "Burst capacity above the sustained rate.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "default": 500
+        }
+      }
+    },
+    "IpFilterConfig": {
+      "description": "IP filter (allowlist / denylist) configuration.",
+      "type": "object",
+      "properties": {
+        "mode": {
+          "description": "Filter mode: \"disabled\", \"allowlist\", \"denylist\".",
+          "type": "string",
+          "default": "disabled"
+        },
+        "cidrs": {
+          "description": "CIDR ranges (e.g., `[\"10.0.0.0/8\", \"192.168.0.0/16\"]`).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      }
+    },
+    "TlsConfig": {
+      "description": "TLS configuration.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Enable TLS.",
+          "type": "boolean",
+          "default": false
+        },
+        "cert_file": {
+          "description": "Path to certificate file (local file path).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "key_file": {
+          "description": "Path to private key file (local file path).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "ca_file": {
+          "description": "Path to CA certificate for client verification (mTLS).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "client_auth": {
+          "description": "Client certificate requirement (none, optional, required).",
+          "type": "string",
+          "default": "none"
+        },
+        "cert_secret": {
+          "description": "Secret source for certificate (overrides cert_file).\nFormat: \"provider:path:key\" (e.g., \"vault:secret/tls:cert\")",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "key_secret": {
+          "description": "Secret source for private key (overrides key_file).\nFormat: \"provider:path:key\" (e.g., \"vault:secret/tls:key\")",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "ca_secret": {
+          "description": "Secret source for CA certificate (overrides ca_file).\nFormat: \"provider:path:key\" (e.g., \"vault:secret/tls:ca\")",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "refresh_interval_secs": {
+          "description": "Refresh interval for secrets in seconds.\nDefault: 3600 (1 hour)",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 3600
+        }
+      }
+    },
+    "AuthConfig": {
+      "description": "Authentication configuration.",
+      "type": "object",
+      "properties": {
+        "mode": {
+          "description": "Auth mode (none, header, bearer, mtls, both).",
+          "type": "string",
+          "default": "none"
+        },
+        "accepted_headers": {
+          "description": "List of accepted headers (any one must match).\nEach entry defines a header name and its allowed values.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AcceptedHeader"
+          },
+          "default": []
+        },
+        "bearer": {
+          "description": "Bearer token configuration.",
+          "$ref": "#/$defs/BearerConfig",
+          "default": {
+            "tokens": [],
+            "secret_source": null,
+            "refresh_interval_secs": 300
+          }
+        },
+        "include_common_header": {
+          "description": "Include the common `x-hyperi-agent` header in accepted headers.\nAlso gates source rule evaluation and timestamp enrichment.\nDefault: true",
+          "type": "boolean",
+          "default": true
+        },
+        "header_name": {
+          "description": "Legacy: Single header name for header-based auth.\nDeprecated: Use `accepted_headers` instead.",
+          "type": "string",
+          "default": ""
+        },
+        "header_values": {
+          "description": "Legacy: Allowed header values for single header.\nDeprecated: Use `accepted_headers` instead.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      }
+    },
+    "AcceptedHeader": {
+      "description": "Defines an accepted authentication header.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Header name (e.g., \"x-hyperi-agent\", \"Authorization\").",
+          "type": "string"
+        },
+        "values": {
+          "description": "Allowed values for this header.\nIf empty, any non-empty value is accepted.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      },
+      "required": [
+        "name"
+      ]
+    },
+    "BearerConfig": {
+      "description": "Bearer token authentication configuration.",
+      "type": "object",
+      "properties": {
+        "tokens": {
+          "description": "Static tokens (for dev/simple deployments).\nIn production, use `secret_source` instead.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "secret_source": {
+          "description": "Secret source for dynamic token loading.\nFormat: \"provider:path:key\" (e.g., \"vault:secret/auth:bearer_tokens\")",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "refresh_interval_secs": {
+          "description": "Token refresh interval in seconds (for secret-sourced tokens).\nDefault: 300 (5 minutes)",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 300
+        }
+      }
+    },
+    "GrpcConfig": {
+      "description": "gRPC server configuration.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Enable gRPC server.",
+          "type": "boolean",
+          "default": false
+        },
+        "bind_address": {
+          "description": "Bind address for gRPC.",
+          "type": "string",
+          "default": "0.0.0.0:6000"
+        },
+        "tls": {
+          "description": "TLS configuration for gRPC server.",
+          "$ref": "#/$defs/TlsConfig",
+          "default": {
+            "enabled": false,
+            "cert_file": null,
+            "key_file": null,
+            "ca_file": null,
+            "client_auth": "none",
+            "cert_secret": null,
+            "key_secret": null,
+            "ca_secret": null,
+            "refresh_interval_secs": 3600
+          }
+        },
+        "auth": {
+          "description": "Authentication configuration for gRPC server.",
+          "$ref": "#/$defs/AuthConfig",
+          "default": {
+            "mode": "none",
+            "accepted_headers": [],
+            "bearer": {
+              "tokens": [],
+              "secret_source": null,
+              "refresh_interval_secs": 300
+            },
+            "include_common_header": true,
+            "header_name": "",
+            "header_values": []
+          }
+        }
+      }
+    },
+    "OtlpConfig": {
+      "description": "OTLP (OpenTelemetry Protocol) receiver configuration.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Enable OTLP receiver.",
+          "type": "boolean",
+          "default": false
+        },
+        "grpc_bind_address": {
+          "description": "Bind address for OTLP gRPC (standard port 4317).",
+          "type": "string",
+          "default": "0.0.0.0:4317"
+        },
+        "http_bind_address": {
+          "description": "Bind address for OTLP HTTP (standard port 4318).",
+          "type": "string",
+          "default": "0.0.0.0:4318"
+        },
+        "mode": {
+          "description": "Conversion mode: \"hyperdx\" (default) or \"generic\".\n\n- `hyperdx`: JSON matching the OTel ClickHouse exporter schema\n  for direct HyperDX compatibility.\n- `generic`: Normalised JSON envelope with routing fields.",
+          "type": "string",
+          "default": "hyperdx"
+        },
+        "tls": {
+          "description": "TLS configuration for OTLP endpoints.",
+          "$ref": "#/$defs/TlsConfig",
+          "default": {
+            "enabled": false,
+            "cert_file": null,
+            "key_file": null,
+            "ca_file": null,
+            "client_auth": "none",
+            "cert_secret": null,
+            "key_secret": null,
+            "ca_secret": null,
+            "refresh_interval_secs": 3600
+          }
+        },
+        "auth": {
+          "description": "Authentication configuration for OTLP endpoints.",
+          "$ref": "#/$defs/AuthConfig",
+          "default": {
+            "mode": "none",
+            "accepted_headers": [],
+            "bearer": {
+              "tokens": [],
+              "secret_source": null,
+              "refresh_interval_secs": 300
+            },
+            "include_common_header": true,
+            "header_name": "",
+            "header_values": []
+          }
+        }
+      }
+    },
+    "LumberjackConfig": {
+      "description": "Lumberjack v2 (Beats) protocol configuration.\n\nAccepts data from Elastic Beats agents (Filebeat, Winlogbeat, etc.)\nover the Lumberjack v2 wire protocol on TCP/TLS.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Enable Lumberjack/Beats receiver.",
+          "type": "boolean",
+          "default": false
+        },
+        "bind_address": {
+          "description": "Bind address for Lumberjack TCP listener (standard port 5044).",
+          "type": "string",
+          "default": "0.0.0.0:5044"
+        },
+        "tls": {
+          "description": "TLS configuration (Beats clients typically require TLS).",
+          "$ref": "#/$defs/TlsConfig",
+          "default": {
+            "enabled": false,
+            "cert_file": null,
+            "key_file": null,
+            "ca_file": null,
+            "client_auth": "none",
+            "cert_secret": null,
+            "key_secret": null,
+            "ca_secret": null,
+            "refresh_interval_secs": 3600
+          }
+        },
+        "auth": {
+          "description": "Authentication configuration.",
+          "$ref": "#/$defs/AuthConfig",
+          "default": {
+            "mode": "none",
+            "accepted_headers": [],
+            "bearer": {
+              "tokens": [],
+              "secret_source": null,
+              "refresh_interval_secs": 300
+            },
+            "include_common_header": true,
+            "header_name": "",
+            "header_values": []
+          }
+        }
+      }
+    },
+    "SplunkHecConfig": {
+      "description": "Splunk HEC (HTTP Event Collector) receiver configuration.\n\nAccepts data from Splunk forwarders and HTTP clients over the HEC protocol.\nSupports both `Authorization: Splunk <token>` and `Authorization: Bearer <token>`.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Enable Splunk HEC receiver.",
+          "type": "boolean",
+          "default": false
+        },
+        "bind_address": {
+          "description": "Bind address for Splunk HEC HTTP listener (standard port 8088).",
+          "type": "string",
+          "default": "0.0.0.0:8088"
+        },
+        "max_body_size": {
+          "description": "Maximum request body size in bytes.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "default": 10485760
+        },
+        "request_timeout_ms": {
+          "description": "Request timeout in milliseconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 30000
+        },
+        "tls": {
+          "description": "TLS configuration.",
+          "$ref": "#/$defs/TlsConfig",
+          "default": {
+            "enabled": false,
+            "cert_file": null,
+            "key_file": null,
+            "ca_file": null,
+            "client_auth": "none",
+            "cert_secret": null,
+            "key_secret": null,
+            "ca_secret": null,
+            "refresh_interval_secs": 3600
+          }
+        },
+        "auth": {
+          "description": "Authentication configuration.",
+          "$ref": "#/$defs/AuthConfig",
+          "default": {
+            "mode": "none",
+            "accepted_headers": [],
+            "bearer": {
+              "tokens": [],
+              "secret_source": null,
+              "refresh_interval_secs": 300
+            },
+            "include_common_header": true,
+            "header_name": "",
+            "header_values": []
+          }
+        }
+      }
+    },
+    "SyslogConfig": {
+      "description": "Syslog receiver configuration (RFC 5424 + RFC 3164).\n\nAccepts syslog messages over UDP, TCP, and TLS/TCP.\nAuto-detects message format (RFC 5424 vs RFC 3164) per message.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Enable syslog receiver.",
+          "type": "boolean",
+          "default": false
+        },
+        "udp_bind_address": {
+          "description": "Bind address for UDP listener (standard port 514).",
+          "type": "string",
+          "default": "0.0.0.0:514"
+        },
+        "tcp_bind_address": {
+          "description": "Bind address for TCP listener (standard port 514).",
+          "type": "string",
+          "default": "0.0.0.0:514"
+        },
+        "tls_bind_address": {
+          "description": "Bind address for TLS/TCP listener (standard port 6514, RFC 5425).",
+          "type": "string",
+          "default": "0.0.0.0:6514"
+        },
+        "max_message_size": {
+          "description": "Maximum syslog message size in bytes.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "default": 65536
+        },
+        "tls": {
+          "description": "TLS configuration (for secure syslog on port 6514).",
+          "$ref": "#/$defs/TlsConfig",
+          "default": {
+            "enabled": false,
+            "cert_file": null,
+            "key_file": null,
+            "ca_file": null,
+            "client_auth": "none",
+            "cert_secret": null,
+            "key_secret": null,
+            "ca_secret": null,
+            "refresh_interval_secs": 3600
+          }
+        },
+        "auth": {
+          "description": "Authentication configuration.",
+          "$ref": "#/$defs/AuthConfig",
+          "default": {
+            "mode": "none",
+            "accepted_headers": [],
+            "bearer": {
+              "tokens": [],
+              "secret_source": null,
+              "refresh_interval_secs": 300
+            },
+            "include_common_header": true,
+            "header_name": "",
+            "header_values": []
+          }
+        }
+      }
+    },
+    "PrometheusRwConfig": {
+      "description": "Prometheus Remote Write receiver configuration.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Enable Prometheus Remote Write receiver.",
+          "type": "boolean",
+          "default": false
+        },
+        "bind_address": {
+          "description": "Bind address for HTTP listener.",
+          "type": "string",
+          "default": "0.0.0.0:9091"
+        },
+        "mode": {
+          "description": "Output mode: \"native\" (default), \"otel\", or \"hyperdx\".\n- `native`: Flat JSON with labels as top-level fields.\n- `otel`: Generic OTel JSON envelope (snake_case, RFC 3339).\n- `hyperdx`: HyperDX ClickHouse-compatible JSON (PascalCase, DateTime64).",
+          "type": "string",
+          "default": "native"
+        },
+        "max_body_size": {
+          "description": "Maximum request body size in bytes.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "default": 10485760
+        },
+        "request_timeout_ms": {
+          "description": "Request timeout in milliseconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 30000
+        },
+        "tls": {
+          "description": "TLS configuration.",
+          "$ref": "#/$defs/TlsConfig",
+          "default": {
+            "enabled": false,
+            "cert_file": null,
+            "key_file": null,
+            "ca_file": null,
+            "client_auth": "none",
+            "cert_secret": null,
+            "key_secret": null,
+            "ca_secret": null,
+            "refresh_interval_secs": 3600
+          }
+        },
+        "auth": {
+          "description": "Authentication configuration.",
+          "$ref": "#/$defs/AuthConfig",
+          "default": {
+            "mode": "none",
+            "accepted_headers": [],
+            "bearer": {
+              "tokens": [],
+              "secret_source": null,
+              "refresh_interval_secs": 300
+            },
+            "include_common_header": true,
+            "header_name": "",
+            "header_values": []
+          }
+        }
+      }
+    },
+    "FluentConfig": {
+      "description": "Fluent Forward protocol configuration.\n\nAccepts data from Fluentd and Fluent Bit agents over the Forward\nprotocol (msgpack over TCP) on the standard port 24224.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Enable Fluent Forward receiver.",
+          "type": "boolean",
+          "default": false
+        },
+        "bind_address": {
+          "description": "Bind address for TCP listener (standard port 24224).",
+          "type": "string",
+          "default": "0.0.0.0:24224"
+        },
+        "max_message_size": {
+          "description": "Maximum message size in bytes.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "default": 33554432
+        },
+        "tls": {
+          "description": "TLS configuration.",
+          "$ref": "#/$defs/TlsConfig",
+          "default": {
+            "enabled": false,
+            "cert_file": null,
+            "key_file": null,
+            "ca_file": null,
+            "client_auth": "none",
+            "cert_secret": null,
+            "key_secret": null,
+            "ca_secret": null,
+            "refresh_interval_secs": 3600
+          }
+        }
+      }
+    },
+    "GelfConfig": {
+      "description": "GELF (Graylog Extended Log Format) receiver configuration.\n\nAccepts GELF messages over TCP (null-byte delimited JSON)\non the standard port 12201.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Enable GELF receiver.",
+          "type": "boolean",
+          "default": false
+        },
+        "bind_address": {
+          "description": "Bind address for TCP listener (standard port 12201).",
+          "type": "string",
+          "default": "0.0.0.0:12201"
+        },
+        "max_message_size": {
+          "description": "Maximum message size in bytes.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "default": 1048576
+        },
+        "tls": {
+          "description": "TLS configuration.",
+          "$ref": "#/$defs/TlsConfig",
+          "default": {
+            "enabled": false,
+            "cert_file": null,
+            "key_file": null,
+            "ca_file": null,
+            "client_auth": "none",
+            "cert_secret": null,
+            "key_secret": null,
+            "ca_secret": null,
+            "refresh_interval_secs": 3600
+          }
+        }
+      }
+    },
+    "FlowConfig": {
+      "description": "Unified-mode listener config -- one block applies to all decoders on\nconfigured ports.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "bind_address": {
+          "type": "string",
+          "format": "ip",
+          "default": "0.0.0.0"
+        },
+        "ports": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint16",
+            "minimum": 0,
+            "maximum": 65535
+          },
+          "default": [
+            2055,
+            4739,
+            6343
+          ]
+        },
+        "output": {
+          "$ref": "#/$defs/FlowOutputConfig",
+          "default": {
+            "mode": "canonical",
+            "max_records_per_packet": 200
+          }
+        },
+        "channel_capacity": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "default": 4096
+        },
+        "recv_buffer_bytes": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "default": 8388608
+        },
+        "ip_filter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IpFilterConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rate_limit": {
+          "$ref": "#/$defs/RateLimitConfig2",
+          "default": {
+            "enabled": false,
+            "packets_per_second": 0,
+            "burst": 0,
+            "cache_size": 0
+          }
+        },
+        "netflow": {
+          "$ref": "#/$defs/NetflowSubConfig",
+          "default": {
+            "enabled": true,
+            "template_cache": {
+              "max_per_exporter": 1000,
+              "max_exporters": 10000
+            },
+            "topic": "netflow_land"
+          }
+        },
+        "sflow": {
+          "$ref": "#/$defs/SflowSubConfig",
+          "default": {
+            "enabled": true,
+            "topic": "sflow_land"
+          }
+        },
+        "split": {
+          "description": "If present, switches to split mode and `flow.enabled` MUST be false.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FlowSplitConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "experimental": {
+          "description": "EXPERIMENTAL marker. When true (default), the handler emits a startup\nWARN log and sets `dfe_handler_experimental{handler=\"flow\"} 1`.\nFlipped to false in a follow-up PR after stability period.",
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "FlowOutputConfig": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/OutputMode",
+          "default": "canonical"
+        },
+        "max_records_per_packet": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "default": 200
+        }
+      }
+    },
+    "OutputMode": {
+      "type": "string",
+      "enum": [
+        "canonical",
+        "canonical_with_raw",
+        "exploded"
+      ]
+    },
+    "RateLimitConfig2": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "packets_per_second": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "default": 5000
+        },
+        "burst": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "default": 10000
+        },
+        "cache_size": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "default": 4096
+        }
+      }
+    },
+    "NetflowSubConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "template_cache": {
+          "$ref": "#/$defs/TemplateCacheConfig",
+          "default": {
+            "max_per_exporter": 1000,
+            "max_exporters": 10000
+          }
+        },
+        "topic": {
+          "type": "string",
+          "default": "netflow_land"
+        }
+      }
+    },
+    "TemplateCacheConfig": {
+      "type": "object",
+      "properties": {
+        "max_per_exporter": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "default": 1000
+        },
+        "max_exporters": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "default": 10000
+        }
+      }
+    },
+    "SflowSubConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "topic": {
+          "type": "string",
+          "default": "sflow_land"
+        }
+      }
+    },
+    "FlowSplitConfig": {
+      "type": "object",
+      "properties": {
+        "netflow": {
+          "$ref": "#/$defs/FlowListenerConfig"
+        },
+        "sflow": {
+          "$ref": "#/$defs/FlowListenerConfig"
+        }
+      },
+      "required": [
+        "netflow",
+        "sflow"
+      ]
+    },
+    "FlowListenerConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "bind_address": {
+          "type": "string",
+          "format": "ip",
+          "default": "0.0.0.0"
+        },
+        "ports": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint16",
+            "minimum": 0,
+            "maximum": 65535
+          }
+        },
+        "output": {
+          "$ref": "#/$defs/FlowOutputConfig",
+          "default": {
+            "mode": "canonical",
+            "max_records_per_packet": 200
+          }
+        },
+        "channel_capacity": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "default": 4096
+        },
+        "recv_buffer_bytes": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "default": 8388608
+        },
+        "ip_filter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IpFilterConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rate_limit": {
+          "$ref": "#/$defs/RateLimitConfig2",
+          "default": {
+            "enabled": false,
+            "packets_per_second": 0,
+            "burst": 0,
+            "cache_size": 0
+          }
+        },
+        "template_cache": {
+          "$ref": "#/$defs/TemplateCacheConfig",
+          "default": {
+            "max_per_exporter": 1000,
+            "max_exporters": 10000
+          }
+        },
+        "topic": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ports",
+        "topic"
+      ]
+    },
+    "ValidationConfig": {
+      "description": "Validation configuration.",
+      "type": "object",
+      "properties": {
+        "require_json": {
+          "description": "Require JSON format.",
+          "type": "boolean",
+          "default": true
+        },
+        "required_fields": {
+          "description": "Required fields (reject if missing).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "dlq_on_invalid": {
+          "description": "Send invalid messages to DLQ instead of rejecting.",
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "RoutingConfig": {
+      "description": "Routing configuration.",
+      "type": "object",
+      "properties": {
+        "source_rules": {
+          "description": "Rules for determining `_source` value (first match wins).\nOnly evaluated when `include_common_header` is true.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SourceRule"
+          },
+          "default": []
+        },
+        "default_source": {
+          "description": "Default source when no rule matches.",
+          "type": "string",
+          "default": "default"
+        },
+        "topic_suffix": {
+          "description": "Suffix appended to source to form topic name.",
+          "type": "string",
+          "default": "_land"
+        },
+        "source_to_topic": {
+          "description": "Source-to-topic remapping (optional).",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "legacy_compat": {
+          "description": "Enable pre-2.2 compatibility.\nAppends `key_value_use` rules for `tags.event.category` and `event_category`.",
+          "type": "boolean",
+          "default": false
+        },
+        "dlq": {
+          "description": "DLQ configuration.",
+          "$ref": "#/$defs/DlqConfig",
+          "default": {
+            "enabled": true,
+            "mode": "cascade",
+            "topic": "dlq_land",
+            "topic_suffix": ".dlq",
+            "file_enabled": true,
+            "file_path": "/var/spool/dfe/dlq",
+            "kafka_enabled": true
+          }
+        }
+      }
+    },
+    "SourceRule": {
+      "description": "Rule for determining `_source` value from JSON payload.",
+      "type": "object",
+      "properties": {
+        "field": {
+          "description": "JSON field path (dot notation for nested, e.g., \"tags.event.category\").",
+          "type": "string"
+        },
+        "mode": {
+          "description": "Match mode: \"key_present\", \"key_value_set\", \"key_value_use\".\n\n- `key_present`: if field exists → `_source = source`\n- `key_value_set`: if field value == `match_value` → `_source = source`\n- `key_value_use`: if field exists → `_source = <field value>`",
+          "type": "string"
+        },
+        "match_value": {
+          "description": "Value to match against (for `key_value_set` mode only).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "source": {
+          "description": "Source value to set (for `key_present` and `key_value_set` modes).\nIgnored for `key_value_use` (uses the field value directly).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "field",
+        "mode"
+      ]
+    },
+    "DlqConfig": {
+      "description": "DLQ (Dead Letter Queue) configuration.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Enable DLQ.",
+          "type": "boolean",
+          "default": true
+        },
+        "mode": {
+          "description": "Backend mode: cascade (default), fan_out, file_only, kafka_only.",
+          "type": "string",
+          "default": "cascade"
+        },
+        "topic": {
+          "description": "DLQ topic name (used as common_topic for Kafka backend).",
+          "type": "string",
+          "default": "dlq_land"
+        },
+        "topic_suffix": {
+          "description": "Topic suffix for per-table routing.",
+          "type": "string",
+          "default": ".dlq"
+        },
+        "file_enabled": {
+          "description": "File backend settings.",
+          "type": "boolean",
+          "default": true
+        },
+        "file_path": {
+          "type": "string",
+          "default": "/var/spool/dfe/dlq"
+        },
+        "kafka_enabled": {
+          "description": "Kafka backend settings.",
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "DestinationsConfig": {
+      "description": "Destinations configuration.",
+      "type": "object",
+      "properties": {
+        "default": {
+          "description": "Default destination (kafka or loader).",
+          "type": "string",
+          "default": "kafka"
+        },
+        "rules": {
+          "description": "Routing rules for destination selection.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DestinationRule"
+          },
+          "default": []
+        }
+      }
+    },
+    "DestinationRule": {
+      "description": "Destination routing rule.",
+      "type": "object",
+      "properties": {
+        "match_field": {
+          "description": "Field to match.",
+          "type": "string"
+        },
+        "match_value": {
+          "description": "Value to match.",
+          "type": "string"
+        },
+        "destination": {
+          "description": "Destination for matched messages.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "match_field",
+        "match_value",
+        "destination"
+      ]
+    },
+    "KafkaConfig": {
+      "description": "Kafka producer configuration.",
+      "type": "object",
+      "properties": {
+        "brokers": {
+          "description": "Broker addresses.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "client_id": {
+          "description": "Client ID.",
+          "type": "string",
+          "default": "dfe-receiver"
+        },
+        "sasl": {
+          "description": "SASL configuration.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SaslConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "tls": {
+          "description": "TLS configuration.",
+          "$ref": "#/$defs/KafkaTlsConfig",
+          "default": {
+            "enabled": false,
+            "ca_file": null,
+            "cert_file": null,
+            "key_file": null
+          }
+        },
+        "producer": {
+          "description": "Producer-specific settings.",
+          "$ref": "#/$defs/ProducerConfig",
+          "default": {
+            "batch_size": 8388608,
+            "batch_messages": 10000,
+            "linger_ms": 20,
+            "compression": "lz4",
+            "acks": "all",
+            "retries": 5
+          }
+        },
+        "librdkafka_overrides": {
+          "description": "Raw librdkafka configuration overrides (highest priority).",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {
+            "statistics.interval.ms": "5000"
+          }
+        }
+      }
+    },
+    "SaslConfig": {
+      "description": "SASL authentication configuration.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Enable SASL.",
+          "type": "boolean"
+        },
+        "mechanism": {
+          "description": "SASL mechanism (plain, scram_sha_256, scram_sha_512).",
+          "type": "string"
+        },
+        "username": {
+          "description": "Username.",
+          "type": "string"
+        },
+        "password": {
+          "description": "Password (redacted in Debug/Display output).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "enabled",
+        "mechanism",
+        "username",
+        "password"
+      ]
+    },
+    "KafkaTlsConfig": {
+      "description": "Kafka TLS configuration.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Enable TLS for Kafka.",
+          "type": "boolean",
+          "default": false
+        },
+        "ca_file": {
+          "description": "CA certificate file.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "cert_file": {
+          "description": "Client certificate file.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "key_file": {
+          "description": "Client key file.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      }
+    },
+    "ProducerConfig": {
+      "description": "Kafka producer settings.",
+      "type": "object",
+      "properties": {
+        "batch_size": {
+          "description": "Maximum batch size in bytes.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "default": 8388608
+        },
+        "batch_messages": {
+          "description": "Maximum messages per batch.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "default": 10000
+        },
+        "linger_ms": {
+          "description": "Linger time in milliseconds.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "default": 20
+        },
+        "compression": {
+          "description": "Compression type (none, gzip, snappy, lz4, zstd).",
+          "type": "string",
+          "default": "lz4"
+        },
+        "acks": {
+          "description": "Acknowledgment level (0, 1, all).",
+          "type": "string",
+          "default": "all"
+        },
+        "retries": {
+          "description": "Number of retries.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "default": 5
+        }
+      }
+    },
+    "LoaderConfig": {
+      "description": "dfe-loader connection configuration.",
+      "type": "object",
+      "properties": {
+        "address": {
+          "description": "Loader address (used for Kafka mode reference; override with grpc_endpoint for gRPC mode).",
+          "type": "string",
+          "default": "dfe-loader:9000"
+        },
+        "transport": {
+          "description": "Transport type (kafka, memory, grpc).",
+          "type": "string",
+          "default": "kafka"
+        },
+        "timeout_ms": {
+          "description": "Connection timeout in milliseconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 5000
+        },
+        "grpc_endpoint": {
+          "description": "gRPC endpoint URI for loader (only used when transport = \"grpc\").\nDefaults to http://{address} if not set.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      }
+    },
+    "BufferConfig": {
+      "description": "Buffer and memory configuration.\n\n## Design Decision: No Disk Spillover\n\nMemory-only buffering is used because:\n1. K8s memory limits trigger OOMKill, which triggers KEDA scale-up\n2. Vector clients have their own disk buffers for retries\n3. Circuit breaker + 503 responses propagate backpressure upstream\n4. Disk I/O would bottleneck the hot path at PB/s scale",
+      "type": "object",
+      "properties": {
+        "memory_limit": {
+          "description": "Maximum memory for buffers in bytes (0 = auto-detect 67% of available).",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "default": 0
+        },
+        "pressure_threshold": {
+          "description": "Memory pressure threshold (0.0-1.0).\nWhen usage exceeds this, backpressure is applied (503 responses).",
+          "type": "number",
+          "format": "double",
+          "default": 0.8
+        },
+        "spillover": {
+          "description": "Optional disk spillover configuration.\nWhen enabled, messages are spilled to disk via scalo's TieredSink\nwhen the primary sink is unavailable (instead of in-memory only).",
+          "$ref": "#/$defs/SpilloverConfig",
+          "default": {
+            "enabled": false,
+            "path": "/var/spool/dfe-receiver",
+            "max_usage_percent": 0.8,
+            "poll_interval_secs": 5
+          }
+        }
+      }
+    },
+    "SpilloverConfig": {
+      "description": "Disk spillover configuration (opt-in, default disabled).\n\nWhen enabled, failed sends are spilled to disk via scalo's TieredSink\ninstead of being held in an in-memory queue. This provides crash-resilient\nbuffering at the cost of disk I/O on the failure path.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Enable disk spillover (default: false).",
+          "type": "boolean",
+          "default": false
+        },
+        "path": {
+          "description": "Directory for spool files.",
+          "type": "string",
+          "default": "/var/spool/dfe-receiver"
+        },
+        "max_usage_percent": {
+          "description": "Maximum filesystem usage percentage (0.0-1.0) before pausing spool writes.",
+          "type": "number",
+          "format": "double",
+          "default": 0.8
+        },
+        "poll_interval_secs": {
+          "description": "How often to check disk usage, in seconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 5
+        }
+      }
+    },
+    "MetricsConfig": {
+      "description": "Metrics configuration.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Enable metrics.",
+          "type": "boolean",
+          "default": true
+        },
+        "address": {
+          "description": "Metrics server address.",
+          "type": "string",
+          "default": "0.0.0.0:9090"
+        }
+      }
+    },
+    "ScalingConfig": {
+      "description": "Scaling pressure configuration for KEDA autoscaling.\n\nConfigures the weighted composite metric that KEDA uses to scale the receiver.\nEach component has a weight (relative importance) and saturation point (value\nat which it contributes its full weight to the composite).",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Enable scaling pressure calculation.",
+          "type": "boolean",
+          "default": true
+        },
+        "memory_gate_threshold": {
+          "description": "Memory usage ratio that triggers the memory gate (0.0-1.0).",
+          "type": "number",
+          "format": "double",
+          "default": 0.8
+        },
+        "weight_request_rate": {
+          "description": "Weight for request rate component (default 0.30).",
+          "type": "number",
+          "format": "double",
+          "default": 0.3
+        },
+        "weight_queue_depth": {
+          "description": "Weight for queue depth component (default 0.25).",
+          "type": "number",
+          "format": "double",
+          "default": 0.25
+        },
+        "weight_memory": {
+          "description": "Weight for memory component (default 0.25).",
+          "type": "number",
+          "format": "double",
+          "default": 0.25
+        },
+        "weight_connections": {
+          "description": "Weight for active connections component (default 0.10).",
+          "type": "number",
+          "format": "double",
+          "default": 0.1
+        },
+        "weight_spill": {
+          "description": "Weight for spilled messages component (default 0.10).",
+          "type": "number",
+          "format": "double",
+          "default": 0.1
+        },
+        "saturation_request_rate": {
+          "description": "Saturation point for request rate (req/s).",
+          "type": "number",
+          "format": "double",
+          "default": 100000.0
+        },
+        "saturation_queue_depth": {
+          "description": "Saturation point for queue depth (messages).",
+          "type": "number",
+          "format": "double",
+          "default": 10000.0
+        },
+        "saturation_connections": {
+          "description": "Saturation point for active connections.",
+          "type": "number",
+          "format": "double",
+          "default": 1000.0
+        },
+        "saturation_spill": {
+          "description": "Saturation point for spilled messages.",
+          "type": "number",
+          "format": "double",
+          "default": 1000.0
+        }
+      }
+    },
+    "FileSinkConfig": {
+      "description": "Debug file sink configuration.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Enable writing all processed messages to a file.",
+          "type": "boolean",
+          "default": false
+        },
+        "path": {
+          "description": "Path to the output file (NDJSON format, appended).",
+          "type": "string",
+          "default": "/tmp/dfe-receiver-debug.ndjson"
+        }
+      }
+    }
+  }
+}

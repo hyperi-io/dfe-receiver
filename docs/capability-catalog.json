@@ -1,0 +1,93 @@
+[
+  {
+    "kind": "source",
+    "name": "receiver",
+    "description": "Multi-protocol ingest receiver: accepts data over many wire protocols and routes to Kafka / the loader.",
+    "maturity": "stable",
+    "children": [
+      {
+        "kind": "ingest",
+        "name": "http",
+        "description": "HTTP/JSON + NDJSON ingest (the ServerConfig endpoint).",
+        "maturity": "stable"
+      },
+      {
+        "kind": "ingest",
+        "name": "grpc",
+        "description": "gRPC ingest (scalo Vector-compatible push service).",
+        "maturity": "stable"
+      },
+      {
+        "kind": "ingest",
+        "name": "otlp",
+        "description": "OpenTelemetry OTLP logs/metrics/traces (feature-gated).",
+        "maturity": "stable"
+      },
+      {
+        "kind": "ingest",
+        "name": "lumberjack",
+        "description": "Elastic Beats / Lumberjack v2 frames.",
+        "maturity": "stable"
+      },
+      {
+        "kind": "ingest",
+        "name": "splunk_hec",
+        "description": "Splunk HTTP Event Collector.",
+        "maturity": "stable"
+      },
+      {
+        "kind": "ingest",
+        "name": "syslog",
+        "description": "Syslog RFC3164/RFC5424 over TCP/UDP/TLS.",
+        "maturity": "stable"
+      },
+      {
+        "kind": "ingest",
+        "name": "prometheus_rw",
+        "description": "Prometheus Remote Write.",
+        "maturity": "stable"
+      },
+      {
+        "kind": "ingest",
+        "name": "fluent",
+        "description": "Fluent Forward protocol.",
+        "maturity": "stable"
+      },
+      {
+        "kind": "ingest",
+        "name": "gelf",
+        "description": "Graylog Extended Log Format.",
+        "maturity": "stable"
+      },
+      {
+        "kind": "ingest",
+        "name": "flow",
+        "description": "NetFlow v5/v9 + IPFIX + sFlow v5.",
+        "maturity": "stable"
+      }
+    ]
+  },
+  {
+    "kind": "sink",
+    "name": "destinations",
+    "description": "Output destinations the receiver routes accepted events to.",
+    "maturity": "stable",
+    "children": [
+      {
+        "kind": "service",
+        "name": "kafka",
+        "description": "Kafka producer (the primary destination)."
+      },
+      {
+        "kind": "service",
+        "name": "loader",
+        "description": "Direct gRPC connection to dfe-loader (broker-less low-latency path)."
+      },
+      {
+        "kind": "service",
+        "name": "file_sink",
+        "description": "Debug file sink (writes processed messages to a file)."
+      }
+    ]
+  }
+]
