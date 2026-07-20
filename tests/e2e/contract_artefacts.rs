@@ -77,7 +77,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use scalo::deployment::test_support::{
-    docker_available, docker_empty_creds_json, ensure_kind_cluster, helm_available,
+    docker_available, docker_empty_creds_json, docker_host, ensure_kind_cluster, helm_available,
     kubeconform_available, skip, tier_b_enabled, wait_until,
 };
 use scalo::deployment::{
@@ -179,6 +179,22 @@ fn stage_binary(build_ctx: &Path, binary_name: &str) -> std::io::Result<()> {
 // Tier A -- Dockerfile: docker build + docker run --help
 // ============================================================================
 
+/// A `docker` command pointed at a throwaway credential store.
+///
+/// The throwaway `DOCKER_CONFIG` keeps credential helpers out of the test, but
+/// it also hides the context store that lives in the same directory, so the
+/// daemon endpoint has to be carried across explicitly or docker falls back to
+/// `unix:///var/run/docker.sock` -- correct on Linux CI, wrong on a developer
+/// machine running Colima or Docker Desktop.
+fn docker_cmd(docker_config: &Path) -> Command {
+    let mut cmd = Command::new("docker");
+    cmd.env("DOCKER_CONFIG", docker_config);
+    if let Some(host) = docker_host() {
+        cmd.env("DOCKER_HOST", host);
+    }
+    cmd
+}
+
 #[test]
 fn tier_a_dockerfile_builds_and_image_runs() {
     if !docker_available() {
@@ -209,8 +225,7 @@ fn tier_a_dockerfile_builds_and_image_runs() {
 
     let tag = format!("dfe-receiver:e2e-{}", std::process::id());
 
-    let build = Command::new("docker")
-        .env("DOCKER_CONFIG", docker_config.path())
+    let build = docker_cmd(docker_config.path())
         .args(["build", "--quiet", "-t", &tag, "-f"])
         .arg(&dockerfile_path)
         .arg(ctx)
@@ -224,8 +239,7 @@ fn tier_a_dockerfile_builds_and_image_runs() {
     );
 
     let entrypoint = format!("/usr/local/bin/{}", contract.binary());
-    let run = Command::new("docker")
-        .env("DOCKER_CONFIG", docker_config.path())
+    let run = docker_cmd(docker_config.path())
         .args(["run", "--rm", "--entrypoint", &entrypoint, &tag, "--help"])
         .output()
         .expect("docker run invocation");
@@ -240,8 +254,7 @@ fn tier_a_dockerfile_builds_and_image_runs() {
         "container ran but --help did not mention dfe-receiver: stdout={stdout} stderr={stderr}",
     );
 
-    let inspect = Command::new("docker")
-        .env("DOCKER_CONFIG", docker_config.path())
+    let inspect = docker_cmd(docker_config.path())
         .args(["inspect", "--format", "{{json .Config.Labels}}", &tag])
         .output()
         .expect("docker inspect invocation");
@@ -256,8 +269,7 @@ fn tier_a_dockerfile_builds_and_image_runs() {
         "docker inspect did not show all three io.hyperi.contract.* labels with expected values: {labels}",
     );
 
-    let _ = Command::new("docker")
-        .env("DOCKER_CONFIG", docker_config.path())
+    let _ = docker_cmd(docker_config.path())
         .args(["rmi", "-f", &tag])
         .output();
 }
