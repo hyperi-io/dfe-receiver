@@ -390,6 +390,43 @@ async fn test_health_endpoints() {
     shutdown.cancel();
 }
 
+/// The retired spellings must 404, not answer.
+///
+/// This half of the assertion is the one that matters. An alias quietly kept
+/// alive still answers 200, so a chart left probing the old name keeps passing
+/// and the migration looks finished when it is not -- which is exactly how this
+/// service ran a probe against a path it never served. Asserting the 404 is what
+/// makes a re-added alias fail a test instead of hiding for six days.
+#[tokio::test]
+async fn test_retired_health_paths_are_gone() {
+    let port = random_port();
+    let config = test_config(port, 10_000, 30_000, "none");
+
+    let (url, shutdown) = start_test_server(config).await;
+    let client = reqwest::Client::new();
+
+    for path in [
+        "/healthz",
+        "/health/live",
+        "/health/ready",
+        "/health/startup",
+        "/startupz",
+    ] {
+        let response = client
+            .get(format!("{url}{path}"))
+            .send()
+            .await
+            .expect("Request failed");
+        assert_eq!(
+            response.status().as_u16(),
+            404,
+            "{path} still answers -- retired probe paths must 404"
+        );
+    }
+
+    shutdown.cancel();
+}
+
 // =============================================================================
 // Security Attack Simulation Tests
 // =============================================================================
