@@ -376,7 +376,8 @@ macro_rules! skip_if_no_vault {
 // returned ContainerAsync is dropped at the end of each test, which
 // triggers Docker to stop and remove the container automatically.
 //
-// Tests skip gracefully when Docker is unavailable.
+// Tests skip gracefully when Docker is unavailable LOCALLY, and fail hard in
+// CI -- see `skip_if_no_docker!`.
 
 /// Check if Docker daemon is reachable.
 pub fn docker_available() -> bool {
@@ -389,11 +390,23 @@ pub fn docker_available() -> bool {
         .unwrap_or(false)
 }
 
-/// Skip test if Docker is not available.
+/// Skip this test locally when Docker is down; PANIC when `$CI` is set.
+///
+/// A skip is the right call on a developer machine, but in CI it makes every
+/// container-backed test pass VACUOUSLY -- the suite reports green while
+/// exercising none of the integration surface. That is not a hypothetical: a
+/// bad third-party URL shipped to CI precisely because the test that would
+/// have caught it skipped itself when the local daemon was down, and CI never
+/// re-checked. A gate that disappears along with its environment is not a gate.
 #[macro_export]
 macro_rules! skip_if_no_docker {
     () => {
         if !$crate::common::docker_available() {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "Docker daemon unreachable in CI -- container tests must RUN here, \
+                 not skip. Skipping would report green while testing nothing."
+            );
             eprintln!("Skipping: Docker daemon not available");
             return;
         }
