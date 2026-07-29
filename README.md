@@ -149,21 +149,21 @@ curl -X POST http://localhost:8080/ingest \
 - `401 Unauthorized` - Authentication failed
 - `503 Service Unavailable` - Downstream unavailable or under pressure
 
-### GET /health/live
+### GET /livez
 
 Kubernetes liveness probe.
 
 ```bash
-curl http://localhost:8080/health/live
+curl http://localhost:8080/livez
 # OK
 ```
 
-### GET /health/ready
+### GET /readyz
 
 Kubernetes readiness probe. Returns 503 if downstream sinks are unavailable.
 
 ```bash
-curl http://localhost:8080/health/ready
+curl http://localhost:8080/readyz
 ```
 
 ## Routing

@@ -312,11 +312,11 @@ spec:
 ```yaml
 livenessProbe:
   httpGet:
-    path: /health/live
+    path: /livez
     port: 8080
 readinessProbe:
   httpGet:
-    path: /health/ready
+    path: /readyz
     port: 8080
 ```
 

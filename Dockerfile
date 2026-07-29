@@ -42,7 +42,7 @@ USER appuser
 EXPOSE 9090 8080 6000 4317 4318 5044 8088 9091 514 6514 24224 12201 2055 4739 6343
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD curl -sf http://localhost:9090/health/live > /dev/null || exit 1
+    CMD curl -sf http://localhost:9090/livez > /dev/null || exit 1
 
 ENTRYPOINT ["dfe-receiver"]
 CMD ["--config", "/etc/dfe-receiver/config.yaml"]

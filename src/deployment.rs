@@ -57,8 +57,8 @@ pub fn contract() -> DeploymentContract {
         description: "High-performance HTTP/gRPC receiver for PB/s scale data ingestion".into(),
         metrics_port: 9090,
         health: HealthContract {
-            liveness_path: "/health/live".into(),
-            readiness_path: "/health/ready".into(),
+            liveness_path: "/livez".into(),
+            readiness_path: "/readyz".into(),
             metrics_path: "/metrics".into(),
         },
         env_prefix: "DFE_RECEIVER".into(),

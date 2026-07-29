@@ -388,7 +388,7 @@ initContainers:
       - sh
       - -c
       - |
-        until curl -sf http://localhost:8080/healthz; do
+        until curl -sf http://localhost:8080/livez; do
           echo "waiting for receiver..."
           sleep 2
         done
@@ -414,7 +414,7 @@ services:
   dfe-receiver:
     image: ghcr.io/hyperi-io/dfe-receiver:latest
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8080/healthz"]
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/livez"]
       interval: 5s
       start_period: 10s
 

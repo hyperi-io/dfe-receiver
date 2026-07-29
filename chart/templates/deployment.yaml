@@ -97,21 +97,21 @@ spec:
                   key: {{ .Values.auth.secretKeys | index "bearer-tokens" }}
           livenessProbe:
             httpGet:
-              path: /health/live
+              path: /livez
               port: metrics
             initialDelaySeconds: 10
             periodSeconds: 10
             failureThreshold: 3
           readinessProbe:
             httpGet:
-              path: /health/ready
+              path: /readyz
               port: metrics
             initialDelaySeconds: 5
             periodSeconds: 5
             failureThreshold: 2
           startupProbe:
             httpGet:
-              path: /health/live
+              path: /livez
               port: metrics
             failureThreshold: 30
             periodSeconds: 5
