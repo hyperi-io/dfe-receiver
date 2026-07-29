@@ -170,8 +170,8 @@ impl PipelineState {
 
         // DLQ (unified scalo module - cascade: Kafka primary, file fallback)
         let dlq = if config.routing.dlq.enabled {
-            let dlq_config = config.routing.dlq.to_rustlib_config();
-            let kafka_config = config.kafka.to_rustlib_kafka_config();
+            let dlq_config = config.routing.dlq.to_scalo_config();
+            let kafka_config = config.kafka.to_scalo_kafka_config();
             match Dlq::spawn(
                 &dlq_config,
                 "receiver",
@@ -677,7 +677,7 @@ async fn build_sink_backend<S: crate::sink::Sink + 'static>(
     buffer_config: &crate::config::BufferConfig,
 ) -> Result<SinkBackend<S>> {
     if buffer_config.spillover.enabled {
-        let adapter = crate::buffer::adapter::RustlibSinkAdapter::new(Arc::new(primary));
+        let adapter = crate::buffer::adapter::ScaloSinkAdapter::new(Arc::new(primary));
         let spillover = &buffer_config.spillover;
 
         let mut tiered_config = scalo::tiered_sink::TieredSinkConfig::new(&spillover.path);

@@ -39,10 +39,10 @@ impl LoaderSink {
     /// Create a new loader sink.
     pub fn new(config: &LoaderConfig, kafka_config: &KafkaConfig) -> Result<Self> {
         let producer = if config.transport == "kafka" && !kafka_config.brokers.is_empty() {
-            let mut rustlib_config = kafka_config.to_rustlib_kafka_config_for_producer();
-            rustlib_config.client_id = format!("{}-loader", kafka_config.client_id);
+            let mut scalo_config = kafka_config.to_scalo_kafka_config_for_producer();
+            scalo_config.client_id = format!("{}-loader", kafka_config.client_id);
 
-            let producer = KafkaProducer::new(&rustlib_config, ProducerProfile::HighThroughput)
+            let producer = KafkaProducer::new(&scalo_config, ProducerProfile::HighThroughput)
                 .map_err(|e| Error::Transport(format!("failed to create loader producer: {e}")))?;
 
             Some(producer)

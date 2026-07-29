@@ -37,8 +37,8 @@ pub struct KafkaSink {
 impl KafkaSink {
     /// Create a new Kafka sink.
     pub fn new(config: &KafkaConfig) -> Result<Self> {
-        let rustlib_config = config.to_rustlib_kafka_config_for_producer();
-        let producer = KafkaProducer::new(&rustlib_config, ProducerProfile::HighThroughput)
+        let scalo_config = config.to_scalo_kafka_config_for_producer();
+        let producer = KafkaProducer::new(&scalo_config, ProducerProfile::HighThroughput)
             .map_err(|e| Error::Transport(format!("failed to create Kafka producer: {e}")))?;
 
         info!(
