@@ -41,7 +41,7 @@ async fn test_minio_container_starts_and_responds() {
     };
 
     // MinIO's live-ness endpoint
-    let health_url = format!("{endpoint}/minio/health/live");
+    let health_url = format!("{endpoint}/minio/livez");
     let client = reqwest::Client::new();
 
     // Give MinIO a moment to fully initialise

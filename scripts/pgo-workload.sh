@@ -26,7 +26,7 @@
 #   - Starts a single-node Redpanda broker (Kafka wire protocol) via docker run
 #   - Writes an ephemeral config enabling all listeners on fixed ports
 #   - Starts the passed-in receiver binary in background
-#   - Waits for /health/ready
+#   - Waits for /readyz
 #   - Runs pgo-driver for the configured duration
 #   - Cleans up (traps EXIT): kills receiver, stops + removes Kafka
 
@@ -297,8 +297,8 @@ for attempt in $(seq 1 60); do
         tail -50 "$CONFIG_DIR/receiver.log" >&2
         exit 1
     fi
-    if curl -sf -o /dev/null --max-time 1 "http://127.0.0.1:9090/health/ready" \
-        || curl -sf -o /dev/null --max-time 1 "http://127.0.0.1:8080/health/ready"; then
+    if curl -sf -o /dev/null --max-time 1 "http://127.0.0.1:9090/readyz" \
+        || curl -sf -o /dev/null --max-time 1 "http://127.0.0.1:8080/readyz"; then
         echo "pgo-workload: receiver ready (attempt $attempt)"
         break
     fi

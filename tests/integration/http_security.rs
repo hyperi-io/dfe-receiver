@@ -373,7 +373,7 @@ async fn test_health_endpoints() {
 
     // Test liveness
     let response = client
-        .get(format!("{url}/health/live"))
+        .get(format!("{url}/livez"))
         .send()
         .await
         .expect("Request failed");
@@ -381,7 +381,7 @@ async fn test_health_endpoints() {
 
     // Test readiness
     let response = client
-        .get(format!("{url}/health/ready"))
+        .get(format!("{url}/readyz"))
         .send()
         .await
         .expect("Request failed");

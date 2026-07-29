@@ -286,10 +286,18 @@ pub async fn run_server(
     // 7. Handler - Only reached by filtered, rate-limited, authenticated requests
     //
     // This order ensures minimal resource usage for malicious/bot requests.
+    // /livez + /readyz are the whole probe surface, matching scalo. No aliases:
+    // an alias that keeps answering 200 hides a probe still aimed at a retired
+    // name, which is how this service's chart and image drifted apart for six
+    // days and three thousand restarts. A startupProbe targets /livez.
+    //
+    // These are registered HERE rather than inherited from scalo's HttpServer
+    // because this server is hand-rolled on hyper's low-level API for
+    // connection control -- it will never pick up scalo's routes automatically.
     let mut app = Router::new()
         .route("/ingest", post(ingest_handler))
-        .route("/health/live", get(liveness_handler))
-        .route("/health/ready", get(readiness_handler))
+        .route("/livez", get(liveness_handler))
+        .route("/readyz", get(readiness_handler))
         // Auth middleware
         .layer(middleware::from_fn_with_state(
             auth_state,
