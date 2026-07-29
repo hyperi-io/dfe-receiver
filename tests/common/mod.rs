@@ -400,6 +400,30 @@ macro_rules! skip_if_no_docker {
     };
 }
 
+// =============================================================================
+// Test image pins
+// =============================================================================
+//
+// Pinned HERE rather than left to testcontainers-modules' defaults, which lag
+// badly: Kafka 3.8.0, MinIO from February 2025. A tag baked into a dependency's
+// source is invisible to dependency review -- Renovate reads Cargo.toml,
+// correctly reports the crate current, and never sees the image. Hoisting the
+// tags out is what puts them back under review, hence the annotations.
+
+/// renovate: datasource=docker depName=apache/kafka-native
+const KAFKA_TAG: &str = "4.3.1";
+
+/// renovate: datasource=docker depName=minio/minio
+const MINIO_TAG: &str = "RELEASE.2025-09-07T16-13-09Z";
+
+/// OpenBao, not hashicorp/vault. The estate runs OpenBao and so does the
+/// sibling fetcher's harness; testing the secrets path against the product we
+/// forked away from is a fidelity gap, not a convenience. The KV v2 API this
+/// exercises is identical across both.
+///
+/// renovate: datasource=docker depName=openbao/openbao
+const OPENBAO_TAG: &str = "2.6.1";
+
 /// Start a Kafka container and return (container_handle, bootstrap_address).
 ///
 /// The returned handle holds the container alive; drop it to stop the container.
@@ -414,10 +438,12 @@ pub async fn start_kafka_container() -> Result<
     ),
     String,
 > {
+    use testcontainers::ImageExt;
     use testcontainers::runners::AsyncRunner;
     use testcontainers_modules::kafka::apache;
 
     let node = apache::Kafka::default()
+        .with_tag(KAFKA_TAG)
         .start()
         .await
         .map_err(|e| format!("failed to start Kafka container: {e}"))?;
@@ -431,34 +457,38 @@ pub async fn start_kafka_container() -> Result<
     Ok((node, bootstrap))
 }
 
-/// Start a Vault (hashicorp_vault) container in dev mode.
+/// Start an OpenBao container in dev mode.
 ///
-/// Returns (container_handle, url, root_token). The Vault image defaults to
-/// root token "myroot" in dev mode (not production-safe, for tests only).
-pub async fn start_vault_container() -> Result<
-    (
-        testcontainers::ContainerAsync<testcontainers_modules::hashicorp_vault::HashicorpVault>,
-        String,
-        String,
-    ),
-    String,
-> {
+/// Returns (container_handle, url, root_token). Dev mode only -- an in-memory
+/// server with a fixed root token, never a production shape.
+///
+/// The env vars are `BAO_`-prefixed and the readiness line reads "OpenBao
+/// server started!". The `VAULT_`-prefixed spellings are silently ignored: set
+/// `VAULT_DEV_ROOT_TOKEN_ID` and the server issues a random token instead, so
+/// every subsequent request 403s with nothing pointing at the cause.
+pub async fn start_vault_container()
+-> Result<(testcontainers::ContainerAsync<testcontainers::GenericImage>, String, String), String> {
+    use testcontainers::core::{IntoContainerPort, WaitFor};
     use testcontainers::runners::AsyncRunner;
-    use testcontainers_modules::hashicorp_vault::HashicorpVault;
+    use testcontainers::{GenericImage, ImageExt};
 
-    let node = HashicorpVault::default()
+    let node = GenericImage::new("openbao/openbao", OPENBAO_TAG)
+        .with_exposed_port(8200u16.tcp())
+        .with_wait_for(WaitFor::message_on_stdout("OpenBao server started"))
+        .with_env_var("BAO_DEV_ROOT_TOKEN_ID", "root")
+        .with_env_var("BAO_DEV_LISTEN_ADDRESS", "0.0.0.0:8200")
+        .with_cmd(["server", "-dev"])
         .start()
         .await
-        .map_err(|e| format!("failed to start Vault container: {e}"))?;
+        .map_err(|e| format!("failed to start OpenBao container: {e}"))?;
 
     let port = node
         .get_host_port_ipv4(8200)
         .await
-        .map_err(|e| format!("failed to get Vault port: {e}"))?;
+        .map_err(|e| format!("failed to get OpenBao port: {e}"))?;
 
     let url = format!("http://127.0.0.1:{port}");
-    // Vault's default dev root token when using the official image
-    Ok((node, url, "myroot".to_string()))
+    Ok((node, url, "root".to_string()))
 }
 
 /// Start a MinIO container and return (handle, endpoint, access_key, secret_key).
@@ -471,10 +501,12 @@ pub async fn start_minio_container() -> Result<
     ),
     String,
 > {
+    use testcontainers::ImageExt;
     use testcontainers::runners::AsyncRunner;
     use testcontainers_modules::minio::MinIO;
 
     let node = MinIO::default()
+        .with_tag(MINIO_TAG)
         .start()
         .await
         .map_err(|e| format!("failed to start MinIO container: {e}"))?;
