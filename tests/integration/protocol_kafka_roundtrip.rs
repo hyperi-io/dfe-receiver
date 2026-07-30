@@ -35,6 +35,7 @@ use prost::Message;
 use tokio_util::sync::CancellationToken;
 
 use crate::common::{kafka_backend, kafka_consume_next, kafka_consumer, test_topic};
+use crate::test_name;
 
 fn random_port() -> u16 {
     30000 + (uuid::Uuid::new_v4().as_u128() % 20000) as u16
@@ -81,7 +82,7 @@ fn kafka_config(kf: &crate::common::KafkaTestConfig, topic: &str) -> Config {
 
 #[tokio::test]
 async fn test_prometheus_rw_to_kafka_roundtrip() {
-    let Some((_handle, kf)) = kafka_backend().await else {
+    let Some((_handle, kf)) = kafka_backend(test_name!()).await else {
         eprintln!("Skipping: no Kafka backend available");
         return;
     };
@@ -180,7 +181,7 @@ async fn test_prometheus_rw_to_kafka_roundtrip() {
 
 #[tokio::test]
 async fn test_splunk_hec_to_kafka_roundtrip() {
-    let Some((_handle, kf)) = kafka_backend().await else {
+    let Some((_handle, kf)) = kafka_backend(test_name!()).await else {
         eprintln!("Skipping: no Kafka backend available");
         return;
     };
@@ -252,7 +253,7 @@ async fn test_splunk_hec_to_kafka_roundtrip() {
 
 #[tokio::test]
 async fn test_http_to_kafka_roundtrip() {
-    let Some((_handle, kf)) = kafka_backend().await else {
+    let Some((_handle, kf)) = kafka_backend(test_name!()).await else {
         eprintln!("Skipping: no Kafka backend available");
         return;
     };

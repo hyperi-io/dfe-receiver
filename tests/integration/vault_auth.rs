@@ -27,7 +27,7 @@ use dfe_receiver::server::auth::BearerTokenProvider;
 use tempfile::NamedTempFile;
 
 use crate::common::start_vault_container;
-use crate::skip_if_no_docker;
+use crate::{skip_if_no_docker, test_name};
 
 /// Write tokens to a temp file and return the path (held open by the caller).
 fn write_token_file(tokens: &[&str]) -> NamedTempFile {
@@ -201,7 +201,7 @@ async fn test_bearer_tokens_unknown_provider_rejected() {
 async fn test_bearer_tokens_loaded_from_vault_container() {
     skip_if_no_docker!();
 
-    let (_container, vault_url, root_token) = match start_vault_container().await {
+    let (_container, vault_url, root_token) = match start_vault_container(test_name!()).await {
         Ok(v) => v,
         Err(e) => {
             eprintln!("Skipping: {e}");

@@ -27,6 +27,7 @@ use dfe_receiver::sink::Sink;
 use dfe_receiver::sink::kafka::KafkaSink;
 
 use crate::common::{kafka_backend, kafka_consume_next, kafka_consumer, test_topic};
+use crate::test_name;
 
 /// Build a KafkaSink pointed at the given test backend config.
 fn make_sink(kf: &crate::common::KafkaTestConfig) -> KafkaSink {
@@ -36,7 +37,7 @@ fn make_sink(kf: &crate::common::KafkaTestConfig) -> KafkaSink {
 
 #[tokio::test]
 async fn test_kafka_sink_send_and_consume() {
-    let Some((_handle, kf)) = kafka_backend().await else {
+    let Some((_handle, kf)) = kafka_backend(test_name!()).await else {
         eprintln!("Skipping: no Kafka backend available (live auth failed and Docker unreachable)");
         return;
     };
@@ -67,7 +68,7 @@ async fn test_kafka_sink_send_and_consume() {
 
 #[tokio::test]
 async fn test_kafka_sink_send_many() {
-    let Some((_handle, kf)) = kafka_backend().await else {
+    let Some((_handle, kf)) = kafka_backend(test_name!()).await else {
         eprintln!("Skipping: no Kafka backend available (live auth failed and Docker unreachable)");
         return;
     };
@@ -107,7 +108,7 @@ async fn test_kafka_sink_send_many() {
 
 #[tokio::test]
 async fn test_kafka_sink_binary_payload() {
-    let Some((_handle, kf)) = kafka_backend().await else {
+    let Some((_handle, kf)) = kafka_backend(test_name!()).await else {
         eprintln!("Skipping: no Kafka backend available (live auth failed and Docker unreachable)");
         return;
     };
@@ -132,7 +133,7 @@ async fn test_kafka_sink_binary_payload() {
 
 #[tokio::test]
 async fn test_kafka_sink_large_payload() {
-    let Some((_handle, kf)) = kafka_backend().await else {
+    let Some((_handle, kf)) = kafka_backend(test_name!()).await else {
         eprintln!("Skipping: no Kafka backend available (live auth failed and Docker unreachable)");
         return;
     };
@@ -158,7 +159,7 @@ async fn test_kafka_sink_large_payload() {
 
 #[tokio::test]
 async fn test_kafka_sink_multiple_topics() {
-    let Some((_handle, kf)) = kafka_backend().await else {
+    let Some((_handle, kf)) = kafka_backend(test_name!()).await else {
         eprintln!("Skipping: no Kafka backend available (live auth failed and Docker unreachable)");
         return;
     };
@@ -198,7 +199,7 @@ async fn test_kafka_sink_multiple_topics() {
 
 #[tokio::test]
 async fn test_kafka_sink_invalid_topic_recoverable() {
-    let Some((_handle, kf)) = kafka_backend().await else {
+    let Some((_handle, kf)) = kafka_backend(test_name!()).await else {
         eprintln!("Skipping: no Kafka backend available (live auth failed and Docker unreachable)");
         return;
     };
