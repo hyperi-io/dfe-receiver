@@ -186,6 +186,11 @@ async fn test_bearer_tokens_unknown_provider_rejected() {
 ///      when that field is `Some`, so the lookup returns
 ///      `provider not configured: openbao` regardless of the feature.
 ///
+/// scalo 2.10.7 does NOT fix this, despite fixing the same shape elsewhere: its
+/// `secrets_config_for_lookup` is reached only from
+/// `scalo::secrets::resolve::resolve()`, and `load_from_secret` does not go
+/// through that -- it builds the config itself. Reason 2 above is unchanged.
+///
 /// To un-ignore: enable `secrets-vault` AND populate `SecretsConfig.openbao`
 /// from the app's secrets config in `load_from_secret`. Otherwise drop
 /// `vault` / `openbao` / `aws` from that match arm and its doc comment, and
