@@ -518,19 +518,12 @@ async fn test_grpc_auth_setup_failure_aborts_instead_of_serving_open() {
 
     let metrics = Arc::new(dfe_receiver::metrics::Metrics::default());
     let pipeline = Arc::new(
-        PipelineState::new(
-            SharedConfig::new(config.clone()),
-            CancellationToken::new(),
-        )
-        .await
-        .expect("Failed to create pipeline"),
+        PipelineState::new(SharedConfig::new(config.clone()), CancellationToken::new())
+            .await
+            .expect("Failed to create pipeline"),
     );
 
-    let handler = dfe_receiver::server::grpc::GrpcVectorHandler::new(
-        config,
-        pipeline,
-        metrics,
-    );
+    let handler = dfe_receiver::server::grpc::GrpcVectorHandler::new(config, pipeline, metrics);
 
     let shutdown = CancellationToken::new();
     // A downgrade-and-serve binds the port and stays pending until shutdown,
