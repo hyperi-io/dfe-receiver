@@ -156,6 +156,20 @@ impl BearerTokenProvider {
     ///
     /// If `secret_source` is configured, tokens will be loaded dynamically.
     /// Otherwise, static tokens from config are used.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the secret source fails to load AND no static
+    /// tokens are configured to fall back to. A zero-token provider accepts
+    /// nothing, so reporting success there is a total auth outage behind a
+    /// warn line. "Using static tokens" only holds when there are static
+    /// tokens.
+    ///
+    /// `create_auth_state` builds a provider for `header` mode too, so
+    /// `mode: header` with an unloadable `bearer.secret_source` and no static
+    /// tokens also refuses to start rather than serving header-only auth -- a
+    /// secret source that cannot load is a misconfiguration the operator has
+    /// to see.
     pub async fn from_config(config: &BearerConfig) -> Result<Self> {
         let provider = Self::new(&config.tokens);
 
@@ -163,6 +177,13 @@ impl BearerTokenProvider {
         if let Some(ref source) = config.secret_source
             && let Err(e) = provider.load_from_secret(source).await
         {
+            if config.tokens.is_empty() {
+                return Err(crate::error::Error::Config(format!(
+                    "bearer secret_source '{source}' failed to load ({e}) and no \
+                     static bearer tokens are configured -- refusing to start with \
+                     no usable tokens"
+                )));
+            }
             warn!(error = %e, source = %source, "Failed to load bearer tokens from secret, using static tokens");
         }
 
@@ -351,12 +372,22 @@ fn extract_client_ip(headers: &axum::http::HeaderMap) -> (Option<String>, Option
     (None, None)
 }
 
+/// Probe paths served without authentication.
+///
+/// `/livez` and `/readyz` are the whole probe surface (see
+/// `server::http::build_router`), and both are registered on the same router the
+/// auth layer wraps, so the exemption has to live here.
+pub const PROBE_PATHS: [&str; 2] = ["/livez", "/readyz"];
+
 /// Token-based authentication middleware.
 ///
 /// Validates authentication based on the configured mode:
 /// - `header`: Static header values
 /// - `bearer`: Bearer tokens (static or from secret manager)
 /// - `both`: Requires both token auth and mTLS
+///
+/// [`PROBE_PATHS`] are exempt: they carry no data and kubelet cannot
+/// authenticate.
 ///
 /// Logs failures at WARN level with structured fields for security monitoring.
 pub async fn token_auth_middleware(
@@ -365,6 +396,15 @@ pub async fn token_auth_middleware(
     next: Next,
 ) -> Response {
     let mode = AuthMode::from_str(&auth.config.mode);
+
+    // Kubelet does not send credentials, so an authenticated probe path fails
+    // liveness and crashloops a pod whose service is perfectly healthy. The
+    // exemption is exact-match on the two registered routes -- `path()` excludes
+    // the query string, and a prefix match would also exempt anything nested
+    // under those names.
+    if PROBE_PATHS.contains(&request.uri().path()) {
+        return next.run(request).await;
+    }
 
     // Skip if auth mode doesn't require token auth
     if !mode.requires_token_auth() {
@@ -417,14 +457,28 @@ pub async fn token_auth_middleware(
 ///
 /// Checks the `Authorization: Bearer <token>` header against valid tokens.
 /// Returns `None` if authentication passes, `Some(AuthError)` on failure.
+///
+/// A missing provider is a misconfiguration, not a pass. `create_auth_state`
+/// only builds a provider when `bearer.tokens` is non-empty or
+/// `bearer.secret_source` is set, so `mode: bearer` with neither leaves
+/// `bearer_provider` at `None`. `None` from this function means "no
+/// objection", which the middleware serves as authenticated -- so a missing
+/// provider must report an error instead. Mirrors what `validate_header_auth`
+/// does for an empty accepted-headers list.
+///
+/// The `Header`/`Both` branch of `token_auth_middleware` only calls this when
+/// `bearer_provider.is_some()`, so header auth is unaffected.
 #[inline]
 pub fn validate_bearer_auth(
     auth: &AuthState,
     headers: &axum::http::HeaderMap,
 ) -> Option<AuthError> {
     let Some(ref provider) = auth.bearer_provider else {
-        // No bearer provider configured, skip bearer auth
-        return None;
+        error!("Bearer auth required but no token provider configured");
+        return Some(AuthError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: "server_misconfigured".into(),
+        });
     };
 
     // Check for Authorization header
@@ -851,15 +905,32 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_bearer_auth_no_provider() {
+    fn test_validate_bearer_auth_no_provider_is_misconfiguration() {
         let config = bearer_config();
         let auth = AuthState::new(config);
 
         let mut headers = HeaderMap::new();
         headers.insert("authorization", "Bearer any-token".parse().unwrap());
 
-        // No provider configured, should skip bearer auth
-        assert!(validate_bearer_auth(&auth, &headers).is_none());
+        // A missing provider under bearer mode must be reported, not skipped:
+        // the middleware reads "no objection" as "authenticated".
+        let err = validate_bearer_auth(&auth, &headers)
+            .expect("missing bearer provider must not be treated as a pass");
+        assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(err.message, "server_misconfigured");
+    }
+
+    #[test]
+    fn test_validate_bearer_auth_no_provider_no_header() {
+        // No provider and no header: still an error, not a pass.
+        let config = bearer_config();
+        let auth = AuthState::new(config);
+        let headers = HeaderMap::new();
+
+        assert!(
+            validate_bearer_auth(&auth, &headers).is_some(),
+            "missing bearer provider must not be treated as a pass"
+        );
     }
 
     // Common header tests

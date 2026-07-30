@@ -358,6 +358,197 @@ async fn test_bearer_auth_invalid_token() {
     shutdown.cancel();
 }
 
+/// Kubelet must be able to probe a server with auth switched ON.
+///
+/// `/livez` and `/readyz` are registered on the same router the auth layer
+/// wraps, and kubelet sends no credentials. Without an exemption the probe gets
+/// a 401, liveness fails, and the pod crashloops while the service is perfectly
+/// healthy. Every other probe test in this file runs with `mode: none`, which is
+/// the one configuration where the middleware cannot reject anything -- so the
+/// probes were only ever exercised where auth was off.
+#[tokio::test]
+async fn test_probe_paths_answer_with_bearer_auth_enabled() {
+    let port = random_port();
+    let mut config = test_config(port, 10_000, 30_000, "bearer");
+    config.server.auth.bearer = BearerConfig {
+        tokens: vec!["valid-token-123".to_string()],
+        secret_source: None,
+        refresh_interval_secs: 300,
+    };
+
+    let (url, shutdown) = start_test_server(config).await;
+    let client = reqwest::Client::new();
+
+    for path in ["/livez", "/readyz"] {
+        let response = client
+            .get(format!("{url}{path}"))
+            .send()
+            .await
+            .expect("Request failed");
+        assert!(
+            response.status().is_success(),
+            "{path} returned {} with bearer auth on; kubelet sends no \
+             credentials, so this crashloops the pod",
+            response.status()
+        );
+    }
+
+    // The exemption must not extend past the probe paths themselves.
+    let response = client
+        .post(format!("{url}/ingest"))
+        .header("content-type", "application/json")
+        .body(r#"{"test":"data"}"#)
+        .send()
+        .await
+        .expect("Request failed");
+    assert_eq!(
+        response.status().as_u16(),
+        401,
+        "/ingest must still require a token"
+    );
+
+    shutdown.cancel();
+}
+
+/// `auth.mode: bearer` with no tokens and no secret source must NOT serve
+/// unauthenticated traffic.
+///
+/// `create_auth_state` only builds a `BearerTokenProvider` when
+/// `bearer.tokens` is non-empty or `bearer.secret_source` is set. With
+/// neither, `AuthState.bearer_provider` is `None`, and a missing provider
+/// must not read as "nothing to check" -- `validate_bearer_auth` returning
+/// `None` is what the middleware serves as authenticated.
+///
+/// `validate_header_auth` applies the same rule: no accepted headers under a
+/// header-requiring mode returns 500 `server_misconfigured`. Asserts only
+/// that the request is not accepted, not which rejection is chosen.
+#[tokio::test]
+async fn test_bearer_mode_without_tokens_rejects_unauthenticated() {
+    let port = random_port();
+    let mut config = test_config(port, 10_000, 30_000, "bearer");
+    // The misconfiguration: bearer mode asked for, no token source supplied.
+    config.server.auth.bearer = BearerConfig {
+        tokens: vec![],
+        secret_source: None,
+        refresh_interval_secs: 300,
+    };
+
+    let (url, shutdown) = start_test_server(config).await;
+    let client = reqwest::Client::new();
+
+    // No authorization header at all.
+    let response = client
+        .post(format!("{url}/ingest"))
+        .header("content-type", "application/json")
+        .body(r#"{"test":"data"}"#)
+        .send()
+        .await
+        .expect("Request failed");
+
+    let status = response.status();
+    assert!(
+        !status.is_success(),
+        "bearer mode with no configured tokens accepted an unauthenticated \
+         request (status {status})"
+    );
+
+    shutdown.cancel();
+}
+
+/// A caller presenting any bearer token at all must not be accepted when the
+/// server has no tokens to compare it against.
+#[tokio::test]
+async fn test_bearer_mode_without_tokens_rejects_arbitrary_token() {
+    let port = random_port();
+    let mut config = test_config(port, 10_000, 30_000, "bearer");
+    config.server.auth.bearer = BearerConfig {
+        tokens: vec![],
+        secret_source: None,
+        refresh_interval_secs: 300,
+    };
+
+    let (url, shutdown) = start_test_server(config).await;
+    let client = reqwest::Client::new();
+
+    let response = client
+        .post(format!("{url}/ingest"))
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer anything-at-all")
+        .body(r#"{"test":"data"}"#)
+        .send()
+        .await
+        .expect("Request failed");
+
+    let status = response.status();
+    assert!(
+        !status.is_success(),
+        "bearer mode with no configured tokens accepted an arbitrary token \
+         (status {status})"
+    );
+
+    shutdown.cancel();
+}
+
+/// A failed auth setup must abort the gRPC listener, not downgrade it.
+///
+/// `run_server` reads `auth_state: None` as "register the service with no
+/// interceptor", so `GrpcVectorHandler::start` must propagate a
+/// `create_auth_state` failure rather than carry on with `None` -- otherwise
+/// the outcome is a wide-open gRPC port and a process that started
+/// successfully. Same shape in `server/otlp/mod.rs` for the
+/// logs/traces/metrics services.
+///
+/// The config here reaches it: bearer mode, no static tokens, and a secret
+/// source that cannot load.
+#[tokio::test]
+async fn test_grpc_auth_setup_failure_aborts_instead_of_serving_open() {
+    use dfe_receiver::server::traits::ProtocolHandler;
+
+    let http_port = random_port();
+    let grpc_port = random_port();
+    let mut config = test_config(http_port, 10_000, 30_000, "none");
+    config.grpc.enabled = true;
+    config.grpc.bind_address = format!("127.0.0.1:{grpc_port}");
+    config.grpc.auth.mode = "bearer".to_string();
+    config.grpc.auth.bearer = BearerConfig {
+        tokens: vec![],
+        secret_source: Some("file:/nonexistent/path/grpc-tokens".to_string()),
+        refresh_interval_secs: 0,
+    };
+
+    let metrics = Arc::new(dfe_receiver::metrics::Metrics::default());
+    let pipeline = Arc::new(
+        PipelineState::new(
+            SharedConfig::new(config.clone()),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("Failed to create pipeline"),
+    );
+
+    let handler = dfe_receiver::server::grpc::GrpcVectorHandler::new(
+        config,
+        pipeline,
+        metrics,
+    );
+
+    let shutdown = CancellationToken::new();
+    // A downgrade-and-serve binds the port and stays pending until shutdown,
+    // so the timeout elapsing is itself the failure signal.
+    let outcome =
+        tokio::time::timeout(Duration::from_secs(3), handler.start(shutdown.clone())).await;
+    shutdown.cancel();
+
+    let started = outcome.expect(
+        "gRPC handler is serving after its bearer auth source failed to load -- \
+         the listener came up with no auth interceptor",
+    );
+    assert!(
+        started.is_err(),
+        "gRPC handler returned Ok after its bearer auth source failed to load"
+    );
+}
+
 // =============================================================================
 // Request Timeout Tests
 // =============================================================================

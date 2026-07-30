@@ -198,15 +198,14 @@ impl ProtocolHandler for GrpcVectorHandler {
     }
 
     async fn start(&self, shutdown: CancellationToken) -> Result<()> {
-        // Create auth state for gRPC if auth is configured
+        // Create auth state for gRPC if auth is configured.
+        //
+        // A failure here is fatal, not a downgrade: `run_server` reads
+        // `auth_state: None` as "register the service with no interceptor", so
+        // degrading would serve a wide-open gRPC port and report a successful
+        // start.
         let auth_state = if AuthMode::from_str(&self.config.grpc.auth.mode) != AuthMode::None {
-            match create_auth_state(&self.config.grpc.auth).await {
-                Ok(auth) => Some(auth),
-                Err(e) => {
-                    warn!(error = %e, "Failed to create gRPC auth state, running without auth");
-                    None
-                }
-            }
+            Some(create_auth_state(&self.config.grpc.auth).await?)
         } else {
             None
         };

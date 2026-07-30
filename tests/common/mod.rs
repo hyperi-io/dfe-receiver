@@ -587,6 +587,12 @@ pub async fn kafka_backend() -> Option<(KafkaHandle, KafkaTestConfig)> {
         }
         if matches!(mode, TestMode::Docker) {
             // Docker mode is explicit — don't silently fall back
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "TEST_MODE=docker in CI but the compose stack at {} is not \
+                 reachable -- Kafka tests must RUN here, not skip.",
+                cfg.brokers
+            );
             return None;
         }
     }
@@ -597,7 +603,19 @@ pub async fn kafka_backend() -> Option<(KafkaHandle, KafkaTestConfig)> {
             KafkaHandle::Container(Box::new(container)),
             kafka_plain_config(&bootstrap),
         )),
-        Err(_) => None,
+        Err(e) => {
+            // Same rule as `skip_if_no_docker!`. Every caller reads `None` as
+            // "skip", so in CI a container that will not start reports green
+            // with none of the Kafka integration surface exercised. A gate that
+            // disappears along with its environment is not a gate.
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "no Kafka backend in CI and the container would not start ({e}) -- \
+                 Kafka tests must RUN here, not skip. Skipping would report green \
+                 while testing nothing."
+            );
+            None
+        }
     }
 }
 
