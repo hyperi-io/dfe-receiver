@@ -112,12 +112,24 @@ impl Sink for LoaderSink {
         result
     }
 
+    /// Flush all queued messages.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Transport`] when the timeout expires with messages
+    /// still in flight -- same rule as `KafkaSink::flush`: an unconditional
+    /// `Ok(())` makes the orchestrator's shutdown-flush check unreachable.
     async fn flush(&self) -> Result<()> {
         if let Some(ref producer) = self.producer {
             use std::time::Duration;
             let remaining = producer.flush(Duration::from_secs(30));
             if remaining > 0 {
                 error!(remaining = remaining, "Loader flush timed out");
+                self.healthy.store(false, Ordering::Relaxed);
+                return Err(Error::Transport(format!(
+                    "loader flush timed out with {remaining} messages still in \
+                     flight -- they are lost on exit"
+                )));
             }
             debug!("Loader sink flush complete");
         }

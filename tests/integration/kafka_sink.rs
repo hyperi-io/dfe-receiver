@@ -215,3 +215,47 @@ async fn test_kafka_sink_invalid_topic_recoverable() {
         .expect("sink unusable after invalid topic attempt");
     sink.flush().await.expect("flush should succeed");
 }
+
+/// A flush that times out with messages in flight must return `Err`.
+///
+/// `PipelineOrchestrator::run` gates its shutdown handling on
+/// `if let Err(e) = kafka.flush().await`. An `error!` line plus `Ok(())`
+/// leaves that branch unreachable however many messages are stranded, and the
+/// process exits reporting a clean shutdown while losing every undelivered
+/// record.
+///
+/// No broker and no Docker needed, deliberately: librdkafka accepts produce
+/// calls into its local queue whether or not a broker is reachable, so an
+/// unroutable address leaves messages in flight -- and this rule has to hold
+/// in the configuration where container tests skip.
+///
+/// Takes ~30s: `KafkaSink::flush` hardcodes a 30-second librdkafka flush
+/// timeout, and the profile's `message.timeout.ms` is longer than that, so
+/// the records are still queued when the flush gives up.
+#[tokio::test]
+async fn test_kafka_sink_flush_timeout_is_an_error_not_a_clean_shutdown() {
+    use dfe_receiver::config::KafkaConfig;
+
+    // TEST-NET-1 (RFC 5737), reserved for documentation -- never routable.
+    let cfg = KafkaConfig {
+        brokers: vec!["192.0.2.1:9092".to_string()],
+        ..KafkaConfig::default()
+    };
+    let sink = KafkaSink::new(&cfg).expect("producer construction is local-only");
+
+    sink.send("unreachable-topic", Bytes::from(r#"{"stranded":true}"#))
+        .await
+        .expect("librdkafka queues locally regardless of broker reachability");
+
+    let result = sink.flush().await;
+    assert!(
+        result.is_err(),
+        "flush reported success with messages still in flight -- the \
+         orchestrator's shutdown-flush check cannot fire and the records are \
+         lost silently"
+    );
+    assert!(
+        !sink.is_healthy(),
+        "a sink that could not flush must not report healthy"
+    );
+}

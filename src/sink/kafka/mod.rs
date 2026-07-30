@@ -92,6 +92,14 @@ impl Sink for KafkaSink {
     }
 
     /// Flush all queued messages (blocks until delivered or timeout).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Transport`] when the timeout expires with messages
+    /// still in flight -- those are lost when the process exits.
+    /// `PipelineOrchestrator::run` gates its shutdown handling on
+    /// `if let Err(e) = kafka.flush().await`, so an unconditional `Ok(())`
+    /// would make that branch unreachable however wedged the broker is.
     async fn flush(&self) -> Result<()> {
         use std::time::Duration;
         let remaining = self.producer.flush(Duration::from_secs(30));
@@ -100,6 +108,11 @@ impl Sink for KafkaSink {
                 remaining = remaining,
                 "Kafka flush timed out with messages in flight"
             );
+            self.healthy.store(false, Ordering::Relaxed);
+            return Err(Error::Transport(format!(
+                "kafka flush timed out with {remaining} messages still in flight -- \
+                 they are lost on exit"
+            )));
         }
         Ok(())
     }
