@@ -832,9 +832,9 @@ dependencies = [
 
 [[package]]
 name = "crossbeam-epoch"
-version = "0.9.18"
+version = "0.9.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b82ac4a3c2ca9c3460964f020e1402edd5753411d7737aa39c3714ad1b5420e"
+checksum = "2d6914041f254d6e9176c01941b21115dcfb7089e55135a35411081bd106ef3f"
 dependencies = [
  "crossbeam-utils",
 ]
@@ -3768,9 +3768,9 @@ dependencies = [
 
 [[package]]
 name = "scalo"
-version = "2.10.5"
+version = "2.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac8b4e3d5a365458dee7e5718fee7859e8f7ec9a8993aa7c19ebe112ccceb0bc"
+checksum = "37df18d30d189c011ffffc1fdaa4d317449725afdb488efea489c8f81d4b4aab"
 dependencies = [
  "aes-gcm",
  "axum",

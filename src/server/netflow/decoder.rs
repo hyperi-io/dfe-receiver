@@ -209,9 +209,7 @@ pub struct NetflowDecoder {
     // and tracks counts per exporter scope.
     //
     // Currently the bound on `max_exporters` (whole exporters evicted via LRU)
-    // is the only template-related backstop. Spec:
-    // docs/superpowers/specs/2026-05-20-netflow-sflow-design.md
-    // "Known limitations (v1)".
+    // is the only template-related backstop.
     _max_per_exporter: usize,
     max_exporters: usize,
     metrics: FlowMetrics,
@@ -349,8 +347,7 @@ impl FlowDecoder for NetflowDecoder {
     ///   2. we add a custom error classifier that inspects netgauze error
     ///      strings (brittle, defer until needed).
     ///
-    /// See: docs/superpowers/specs/2026-05-20-netflow-sflow-design.md
-    /// "Known limitations (v1)" section.
+    /// Known limitation, tracked rather than solved.
     fn is_template_miss(err: &Self::DecodeError) -> bool {
         matches!(err, NetflowError::TemplateMiss { .. })
     }

@@ -1091,7 +1091,7 @@ impl Default for DlqConfig {
 
 impl DlqConfig {
     /// Convert to scalo DlqConfig for the unified DLQ module.
-    pub fn to_rustlib_config(&self) -> scalo::dlq::DlqConfig {
+    pub fn to_scalo_config(&self) -> scalo::dlq::DlqConfig {
         use scalo::dlq::{DlqMode, FileDlqConfig, KafkaDlqConfig};
 
         let mode = match self.mode.as_str() {
@@ -1122,7 +1122,7 @@ impl DlqConfig {
 
 impl KafkaConfig {
     /// Convert to scalo transport KafkaConfig with a given client ID suffix.
-    fn to_rustlib_config_with_suffix(&self, suffix: &str) -> scalo::transport::KafkaConfig {
+    fn to_scalo_config_with_suffix(&self, suffix: &str) -> scalo::transport::KafkaConfig {
         // Receiver's Kafka transports are produce-only (syslog -> Kafka). scalo
         // 2.9 dropped the explicit role field for a profile-based config: an
         // empty group (and no topics) means scalo builds no idle consumer (#44).
@@ -1162,13 +1162,13 @@ impl KafkaConfig {
     }
 
     /// Convert to scalo transport KafkaConfig for the main producer sink.
-    pub fn to_rustlib_kafka_config_for_producer(&self) -> scalo::transport::KafkaConfig {
-        self.to_rustlib_config_with_suffix("")
+    pub fn to_scalo_kafka_config_for_producer(&self) -> scalo::transport::KafkaConfig {
+        self.to_scalo_config_with_suffix("")
     }
 
     /// Convert to scalo transport KafkaConfig for DLQ producer.
-    pub fn to_rustlib_kafka_config(&self) -> scalo::transport::KafkaConfig {
-        self.to_rustlib_config_with_suffix("-dlq")
+    pub fn to_scalo_kafka_config(&self) -> scalo::transport::KafkaConfig {
+        self.to_scalo_config_with_suffix("-dlq")
     }
 }
 
@@ -1844,7 +1844,7 @@ mod tests {
     }
 
     #[test]
-    fn test_kafka_overrides_passed_to_rustlib() {
+    fn test_kafka_overrides_passed_to_scalo() {
         let mut config = KafkaConfig {
             brokers: vec!["localhost:9092".to_string()],
             ..KafkaConfig::default()
@@ -1853,13 +1853,13 @@ mod tests {
             .librdkafka_overrides
             .insert("message.max.bytes".to_string(), "2097152".to_string());
 
-        let rustlib = config.to_rustlib_kafka_config_for_producer();
+        let scalo = config.to_scalo_kafka_config_for_producer();
         assert_eq!(
-            rustlib.librdkafka_overrides.get("statistics.interval.ms"),
+            scalo.librdkafka_overrides.get("statistics.interval.ms"),
             Some(&"5000".to_string()),
         );
         assert_eq!(
-            rustlib.librdkafka_overrides.get("message.max.bytes"),
+            scalo.librdkafka_overrides.get("message.max.bytes"),
             Some(&"2097152".to_string()),
         );
     }
@@ -1874,9 +1874,9 @@ kafka:
     statistics.interval.ms: "5000"
 "#;
         let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
-        let rustlib = config.kafka.to_rustlib_kafka_config_for_producer();
+        let scalo = config.kafka.to_scalo_kafka_config_for_producer();
         assert_eq!(
-            rustlib.librdkafka_overrides.get("statistics.interval.ms"),
+            scalo.librdkafka_overrides.get("statistics.interval.ms"),
             Some(&"5000".to_string()),
             "user config must override the default"
         );

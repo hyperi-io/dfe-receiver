@@ -32,7 +32,7 @@ pub fn contract() -> DeploymentContract {
     DeploymentContract {
         app_name: "dfe-receiver".into(),
         binary_name: "dfe-receiver".into(),
-        native_deps: NativeDepsContract::for_rustlib_features(
+        native_deps: NativeDepsContract::for_scalo_features(
             &[
                 "config",
                 "config-reload",

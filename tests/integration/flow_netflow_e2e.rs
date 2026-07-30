@@ -45,6 +45,7 @@ use dfe_receiver::server::traits::ProtocolHandler;
 use tokio_util::sync::CancellationToken;
 
 use crate::common::{kafka_backend, kafka_consume_next, kafka_consumer};
+use crate::test_name;
 
 // ---------------------------------------------------------------------------
 // No-op FlowMetrics for integration tests.
@@ -196,7 +197,7 @@ async fn netflow_v5_end_to_end_to_kafka() {
     // ------------------------------------------------------------------
     // 1. Kafka backend (live, docker, or testcontainers fallback).
     // ------------------------------------------------------------------
-    let Some((_kafka_handle, kf)) = kafka_backend().await else {
+    let Some((_kafka_handle, kf)) = kafka_backend(test_name!()).await else {
         eprintln!("Skipping: no Kafka backend available (no live infra and Docker unavailable)");
         return;
     };
@@ -409,7 +410,7 @@ fn encode_pair(template: NetFlowV9Packet, data: NetFlowV9Packet) -> (Vec<u8>, Ve
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn netflow_v9_end_to_end_to_kafka() {
-    let Some((_kafka_handle, kf)) = kafka_backend().await else {
+    let Some((_kafka_handle, kf)) = kafka_backend(test_name!()).await else {
         eprintln!("Skipping: no Kafka backend available");
         return;
     };
@@ -482,7 +483,7 @@ async fn netflow_v9_end_to_end_to_kafka() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn netflow_nsel_end_to_end_to_kafka() {
-    let Some((_kafka_handle, kf)) = kafka_backend().await else {
+    let Some((_kafka_handle, kf)) = kafka_backend(test_name!()).await else {
         eprintln!("Skipping: no Kafka backend available");
         return;
     };

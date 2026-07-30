@@ -31,7 +31,7 @@ pub enum SinkBackend<S: ReceiverSink + 'static> {
     /// In-memory buffer with circuit breaker (default, no disk).
     InMemory(InMemoryBuffer<S>),
     /// scalo TieredSink with disk spool (opt-in via spillover config).
-    Tiered(scalo::tiered_sink::TieredSink<adapter::RustlibSinkAdapter<S>>),
+    Tiered(scalo::tiered_sink::TieredSink<adapter::ScaloSinkAdapter<S>>),
 }
 
 #[async_trait]

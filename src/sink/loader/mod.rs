@@ -39,10 +39,10 @@ impl LoaderSink {
     /// Create a new loader sink.
     pub fn new(config: &LoaderConfig, kafka_config: &KafkaConfig) -> Result<Self> {
         let producer = if config.transport == "kafka" && !kafka_config.brokers.is_empty() {
-            let mut rustlib_config = kafka_config.to_rustlib_kafka_config_for_producer();
-            rustlib_config.client_id = format!("{}-loader", kafka_config.client_id);
+            let mut scalo_config = kafka_config.to_scalo_kafka_config_for_producer();
+            scalo_config.client_id = format!("{}-loader", kafka_config.client_id);
 
-            let producer = KafkaProducer::new(&rustlib_config, ProducerProfile::HighThroughput)
+            let producer = KafkaProducer::new(&scalo_config, ProducerProfile::HighThroughput)
                 .map_err(|e| Error::Transport(format!("failed to create loader producer: {e}")))?;
 
             Some(producer)
@@ -112,12 +112,24 @@ impl Sink for LoaderSink {
         result
     }
 
+    /// Flush all queued messages.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Transport`] when the timeout expires with messages
+    /// still in flight -- same rule as `KafkaSink::flush`: an unconditional
+    /// `Ok(())` makes the orchestrator's shutdown-flush check unreachable.
     async fn flush(&self) -> Result<()> {
         if let Some(ref producer) = self.producer {
             use std::time::Duration;
             let remaining = producer.flush(Duration::from_secs(30));
             if remaining > 0 {
                 error!(remaining = remaining, "Loader flush timed out");
+                self.healthy.store(false, Ordering::Relaxed);
+                return Err(Error::Transport(format!(
+                    "loader flush timed out with {remaining} messages still in \
+                     flight -- they are lost on exit"
+                )));
             }
             debug!("Loader sink flush complete");
         }

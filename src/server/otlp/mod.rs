@@ -272,15 +272,13 @@ async fn run_grpc_server(
         None
     };
 
-    // Build auth interceptor if configured
+    // Build auth interceptor if configured.
+    //
+    // A failure here is fatal, not a downgrade: `auth_state: None` registers
+    // the logs/traces/metrics services with no interceptor, so degrading would
+    // serve three wide-open OTLP endpoints and report a successful start.
     let auth_state = if AuthMode::from_str(&config.auth.mode) != AuthMode::None {
-        match create_auth_state(&config.auth).await {
-            Ok(auth) => Some(auth),
-            Err(e) => {
-                warn!(error = %e, "Failed to create OTLP auth state, running without auth");
-                None
-            }
-        }
+        Some(create_auth_state(&config.auth).await?)
     } else {
         None
     };

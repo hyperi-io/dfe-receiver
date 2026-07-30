@@ -37,8 +37,8 @@ pub struct KafkaSink {
 impl KafkaSink {
     /// Create a new Kafka sink.
     pub fn new(config: &KafkaConfig) -> Result<Self> {
-        let rustlib_config = config.to_rustlib_kafka_config_for_producer();
-        let producer = KafkaProducer::new(&rustlib_config, ProducerProfile::HighThroughput)
+        let scalo_config = config.to_scalo_kafka_config_for_producer();
+        let producer = KafkaProducer::new(&scalo_config, ProducerProfile::HighThroughput)
             .map_err(|e| Error::Transport(format!("failed to create Kafka producer: {e}")))?;
 
         info!(
@@ -92,6 +92,14 @@ impl Sink for KafkaSink {
     }
 
     /// Flush all queued messages (blocks until delivered or timeout).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Transport`] when the timeout expires with messages
+    /// still in flight -- those are lost when the process exits.
+    /// `PipelineOrchestrator::run` gates its shutdown handling on
+    /// `if let Err(e) = kafka.flush().await`, so an unconditional `Ok(())`
+    /// would make that branch unreachable however wedged the broker is.
     async fn flush(&self) -> Result<()> {
         use std::time::Duration;
         let remaining = self.producer.flush(Duration::from_secs(30));
@@ -100,6 +108,11 @@ impl Sink for KafkaSink {
                 remaining = remaining,
                 "Kafka flush timed out with messages in flight"
             );
+            self.healthy.store(false, Ordering::Relaxed);
+            return Err(Error::Transport(format!(
+                "kafka flush timed out with {remaining} messages still in flight -- \
+                 they are lost on exit"
+            )));
         }
         Ok(())
     }

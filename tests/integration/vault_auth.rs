@@ -27,7 +27,7 @@ use dfe_receiver::server::auth::BearerTokenProvider;
 use tempfile::NamedTempFile;
 
 use crate::common::start_vault_container;
-use crate::skip_if_no_docker;
+use crate::{skip_if_no_docker, test_name};
 
 /// Write tokens to a temp file and return the path (held open by the caller).
 fn write_token_file(tokens: &[&str]) -> NamedTempFile {
@@ -173,13 +173,35 @@ async fn test_bearer_tokens_unknown_provider_rejected() {
 /// BearerTokenProvider, and verifies the token authenticates successfully.
 /// The container is stopped automatically when the test completes.
 ///
-/// Skips if Docker is unavailable or if the `secrets-vault` feature isn't
-/// compiled into scalo (graceful fallback is still exercised).
+/// Ignored because the `vault:` / `openbao:` secret source that
+/// `BearerTokenProvider::load_from_secret` accepts and documents
+/// (`src/server/auth.rs`) cannot resolve, for two independent reasons:
+///
+///   1. `[dependencies] scalo` enables `secrets` but not `secrets-vault`, so
+///      scalo compiles the `SecretSource::OpenBao` arm to a hard
+///      `ProviderNotConfigured` error.
+///   2. With `secrets-vault` enabled it still fails. `load_from_secret` builds
+///      `SecretsConfig { sources, cache, ..Default::default() }`, leaving
+///      `openbao: None`; `SecretsManager::new` only constructs the provider
+///      when that field is `Some`, so the lookup returns
+///      `provider not configured: openbao` regardless of the feature.
+///
+/// scalo 2.10.7 does NOT fix this, despite fixing the same shape elsewhere: its
+/// `secrets_config_for_lookup` is reached only from
+/// `scalo::secrets::resolve::resolve()`, and `load_from_secret` does not go
+/// through that -- it builds the config itself. Reason 2 above is unchanged.
+///
+/// To un-ignore: enable `secrets-vault` AND populate `SecretsConfig.openbao`
+/// from the app's secrets config in `load_from_secret`. Otherwise drop
+/// `vault` / `openbao` / `aws` from that match arm and its doc comment, and
+/// delete this test -- an advertised provider that always errors is worse than
+/// no provider.
 #[tokio::test]
+#[ignore = "the vault:/openbao: bearer-token provider cannot work as wired; see doc comment"]
 async fn test_bearer_tokens_loaded_from_vault_container() {
     skip_if_no_docker!();
 
-    let (_container, vault_url, root_token) = match start_vault_container().await {
+    let (_container, vault_url, root_token) = match start_vault_container(test_name!()).await {
         Ok(v) => v,
         Err(e) => {
             eprintln!("Skipping: {e}");
@@ -238,19 +260,75 @@ async fn test_bearer_tokens_loaded_from_vault_container() {
     )
     .await;
 
-    // If `secrets-vault` feature is compiled: tokens loaded. Otherwise
-    // graceful fallback (0 tokens, warning logged). Both validate the
-    // integration path.
-    if provider.token_count() == 2 {
-        assert!(provider.is_valid("vault-token-1"));
-        assert!(provider.is_valid("vault-token-2"));
-        assert!(!provider.is_valid("not-in-vault"));
-    } else {
-        eprintln!(
-            "Note: scalo compiled without secrets-vault feature; \
-             test exercised graceful fallback path only"
-        );
+    assert_eq!(
+        provider.token_count(),
+        2,
+        "vault: source produced {} tokens instead of 2 -- if this is 0, the \
+         scalo secrets-vault feature is not compiled in and the vault:/openbao: \
+         provider advertised by BearerTokenProvider::load_from_secret cannot \
+         work at all",
+        provider.token_count()
+    );
+    assert!(provider.is_valid("vault-token-1"));
+    assert!(provider.is_valid("vault-token-2"));
+    assert!(!provider.is_valid("not-in-vault"));
+}
+
+// ---------------------------------------------------------------------------
+// Secret-source failure must not read as a successful start
+// ---------------------------------------------------------------------------
+
+/// A `vault:` secret source with no static fallback must fail, not succeed
+/// with zero tokens.
+///
+/// `load_from_secret` accepts `vault:` / `openbao:` sources and advertises
+/// them in its docs, but `SecretSource::OpenBao` always resolves to
+/// `ProviderNotConfigured` here. A warn line plus `Ok` with a provider
+/// holding nothing means the receiver starts clean and then rejects every
+/// request; "using static tokens" is untrue when `tokens` is empty.
+#[tokio::test]
+async fn test_vault_source_with_no_static_tokens_is_an_error() {
+    let config = BearerConfig {
+        tokens: vec![],
+        secret_source: Some("vault:secret/data/nowhere:tokens".to_string()),
+        refresh_interval_secs: 0,
+    };
+
+    let result = BearerTokenProvider::from_config(&config).await;
+
+    match result {
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(
+                msg.contains("no usable tokens") || msg.contains("static bearer tokens"),
+                "error should name the empty-token-set cause, got: {msg}"
+            );
+        }
+        Ok(provider) => panic!(
+            "from_config reported success with {} tokens after the only \
+             configured secret source failed to load",
+            provider.token_count()
+        ),
     }
+}
+
+/// Same rule for an unreachable file source with no static fallback.
+///
+/// The `file:` provider is always compiled in, so this covers the rule without
+/// depending on any cargo feature.
+#[tokio::test]
+async fn test_missing_file_source_with_no_static_tokens_is_an_error() {
+    let config = BearerConfig {
+        tokens: vec![],
+        secret_source: Some("file:/nonexistent/path/tokens".to_string()),
+        refresh_interval_secs: 0,
+    };
+
+    assert!(
+        BearerTokenProvider::from_config(&config).await.is_err(),
+        "an unloadable secret source with no static fallback must not report \
+         success -- a zero-token provider rejects every request"
+    );
 }
 
 // ---------------------------------------------------------------------------

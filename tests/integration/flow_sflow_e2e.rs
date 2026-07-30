@@ -44,6 +44,7 @@ use dfe_receiver::server::traits::ProtocolHandler;
 use tokio_util::sync::CancellationToken;
 
 use crate::common::{kafka_backend, kafka_consume_next, kafka_consumer};
+use crate::test_name;
 
 // ---------------------------------------------------------------------------
 // No-op FlowMetrics for integration tests (see flow_netflow_e2e.rs for the
@@ -211,7 +212,7 @@ fn flow_kafka_config(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sflow_v5_end_to_end_to_kafka() {
-    let Some((_kafka_handle, kf)) = kafka_backend().await else {
+    let Some((_kafka_handle, kf)) = kafka_backend(test_name!()).await else {
         eprintln!("Skipping: no Kafka backend available (no live infra and Docker unavailable)");
         return;
     };

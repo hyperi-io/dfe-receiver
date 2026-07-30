@@ -15,6 +15,11 @@
 #[allow(dead_code)]
 mod common;
 
+// A leak check has to fail the test when the container is still there, and the
+// poll loop it sits after cannot express that as an assert.
+#[allow(clippy::panic)]
+#[path = "integration/container_hygiene.rs"]
+mod container_hygiene;
 #[path = "integration/flow_corpus.rs"]
 mod flow_corpus;
 #[path = "integration/flow_netflow_e2e.rs"]

@@ -27,17 +27,17 @@ use crate::sink::Sink as ReceiverSink;
 
 /// Adapts a receiver [`Sink`](ReceiverSink) to scalo's [`TransportSender`], so it
 /// can be wrapped directly in a `TieredSink` for disk spillover.
-pub struct RustlibSinkAdapter<S: ReceiverSink> {
+pub struct ScaloSinkAdapter<S: ReceiverSink> {
     inner: Arc<S>,
 }
 
-impl<S: ReceiverSink + 'static> RustlibSinkAdapter<S> {
+impl<S: ReceiverSink + 'static> ScaloSinkAdapter<S> {
     pub fn new(inner: Arc<S>) -> Self {
         Self { inner }
     }
 }
 
-impl<S: ReceiverSink + 'static> TransportBase for RustlibSinkAdapter<S> {
+impl<S: ReceiverSink + 'static> TransportBase for ScaloSinkAdapter<S> {
     async fn close(&self) -> TransportResult<()> {
         // Best-effort flush; the inner sink owns its own connection lifecycle.
         let _ = self.inner.flush().await;
@@ -53,7 +53,7 @@ impl<S: ReceiverSink + 'static> TransportBase for RustlibSinkAdapter<S> {
     }
 }
 
-impl<S: ReceiverSink + 'static> TransportSender for RustlibSinkAdapter<S> {
+impl<S: ReceiverSink + 'static> TransportSender for ScaloSinkAdapter<S> {
     async fn send(&self, key: &str, payload: Bytes) -> SendResult {
         match self.inner.send(key, payload).await {
             Ok(()) => SendResult::Ok,
@@ -129,7 +129,7 @@ mod tests {
     #[tokio::test]
     async fn send_forwards_key_as_topic() {
         let fake = Arc::new(FakeSink::new());
-        let adapter = RustlibSinkAdapter::new(Arc::clone(&fake));
+        let adapter = ScaloSinkAdapter::new(Arc::clone(&fake));
 
         let result = adapter.send("orders", Bytes::from_static(b"body")).await;
         assert!(matches!(result, SendResult::Ok));
@@ -142,7 +142,7 @@ mod tests {
     async fn send_failure_reports_backpressured_for_spill() {
         let fake = Arc::new(FakeSink::new());
         fake.fail.store(true, Ordering::SeqCst);
-        let adapter = RustlibSinkAdapter::new(fake);
+        let adapter = ScaloSinkAdapter::new(fake);
 
         // A transient failure must spill (Backpressured), never drop (Fatal).
         let result = adapter.send("orders", Bytes::from_static(b"body")).await;
@@ -152,7 +152,7 @@ mod tests {
     #[tokio::test]
     async fn send_batch_default_routes_each_record_by_key() {
         let fake = Arc::new(FakeSink::new());
-        let adapter = RustlibSinkAdapter::new(Arc::clone(&fake));
+        let adapter = ScaloSinkAdapter::new(Arc::clone(&fake));
 
         let batch = [record("topic-a", b"a"), record("topic-b", b"b")];
         let result = adapter.send_batch(&batch).await;
@@ -171,7 +171,7 @@ mod tests {
     #[tokio::test]
     async fn is_healthy_reflects_inner() {
         let fake = Arc::new(FakeSink::new());
-        let adapter = RustlibSinkAdapter::new(Arc::clone(&fake));
+        let adapter = ScaloSinkAdapter::new(Arc::clone(&fake));
         assert!(adapter.is_healthy());
 
         fake.healthy.store(false, Ordering::SeqCst);

@@ -23,7 +23,7 @@
 use std::time::Duration;
 
 use crate::common::start_minio_container;
-use crate::skip_if_no_docker;
+use crate::{skip_if_no_docker, test_name};
 
 /// Basic MinIO health check — ensures the container starts and serves the
 /// S3 health endpoint. This is the minimum required to validate that
@@ -32,13 +32,14 @@ use crate::skip_if_no_docker;
 async fn test_minio_container_starts_and_responds() {
     skip_if_no_docker!();
 
-    let (_container, endpoint, _access_key, _secret_key) = match start_minio_container().await {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("Skipping: {e}");
-            return;
-        }
-    };
+    let (_container, endpoint, _access_key, _secret_key) =
+        match start_minio_container(test_name!()).await {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("Skipping: {e}");
+                return;
+            }
+        };
 
     // MinIO's OWN liveness endpoint, not ours. It is upstream's spelling and we
     // do not get to pick it -- leave it alone when the fleet renames its probes.
@@ -71,13 +72,14 @@ async fn test_minio_container_starts_and_responds() {
 async fn test_minio_s3_endpoint_reachable() {
     skip_if_no_docker!();
 
-    let (_container, endpoint, _access_key, _secret_key) = match start_minio_container().await {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("Skipping: {e}");
-            return;
-        }
-    };
+    let (_container, endpoint, _access_key, _secret_key) =
+        match start_minio_container(test_name!()).await {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("Skipping: {e}");
+                return;
+            }
+        };
 
     // Hit the S3 endpoint root — should return an XML error (no auth)
     // not a connection refusal. This proves the S3 emulator is listening.
