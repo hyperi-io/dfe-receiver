@@ -59,7 +59,7 @@ esac
 # needed network plus gh/jq on every single test run. Bump deliberately; Vector
 # minor releases change CLI flags and config schema.
 # renovate: datasource=github-releases depName=vectordotdev/vector
-DEFAULT_VECTOR_VERSION="0.56.0"
+DEFAULT_VECTOR_VERSION="0.57.0"
 
 WANT_VERSION="${VECTOR_VERSION:-$DEFAULT_VECTOR_VERSION}"
 
