@@ -80,7 +80,7 @@ serde_yaml_ng = "0.10"
 axum = "0.8"
 bytes = "1"
 tower = "0.5"
-tower-http = { version = "0.6", features = ["timeout", "compression-zstd", "limit"] }
+tower-http = { version = "0.7", features = ["timeout", "compression-zstd", "limit"] }
 http = "1"
 hyper = { version = "1", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio", "server", "server-auto", "service"] }
@@ -111,7 +111,7 @@ ring = "0.17"
 
 # Performance
 rustc-hash = "2"
-compact_str = "0.9"
+compact_str = "0.10"
 parking_lot = "0.12"
 
 # Error handling
@@ -136,7 +136,7 @@ flate2 = "1"
 snap = "1.1"
 
 # Encoding
-base64 = "0.22"
+base64 = "0.23"
 
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }
@@ -150,7 +150,7 @@ socket2 = ">=0.6.3, <0.7"
 dashmap = ">=6.1, <7"
 
 # Optional allocators
-tikv-jemallocator = { version = "0.6", optional = true }
+tikv-jemallocator = { version = "0.7", optional = true }
 mimalloc = { version = "0.1", optional = true }
 
 # Optional pgo-driver dependencies (feature-gated)
@@ -174,7 +174,7 @@ temp-env = { version = "0.3", features = ["async_closure"] }
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["kafka", "hashicorp_vault", "minio"] }
 pcap-file = ">=2.0, <3"
-sha2 = ">=0.10, <0.11"
+sha2 = ">=0.10, <0.12"
 
 # Contract artefact e2e (tests/e2e/contract_artefacts.rs) — pulls in
 # probe/skip/cluster helpers from scalo's test_support module.
