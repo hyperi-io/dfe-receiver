@@ -268,7 +268,7 @@ Deploy the sidecar in the same pod as receiver:
 # values.yaml (Helm)
 extraContainers:
   - name: vector-sidecar
-    image: timberio/vector:0.54.0-alpine
+    image: timberio/vector:0.57.0-alpine
     args: ["--config", "/etc/vector/vector.yaml"]
     volumeMounts:
       - name: vector-config
@@ -419,7 +419,7 @@ services:
       start_period: 10s
 
   vector-sidecar:
-    image: timberio/vector:0.54.0-alpine
+    image: timberio/vector:0.57.0-alpine
     depends_on:
       dfe-receiver:
         condition: service_healthy
