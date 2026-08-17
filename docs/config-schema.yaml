@@ -1316,7 +1316,7 @@ $defs:
         description: |-
           DLQ topic name: when non-empty, every Kafka DLQ write routes here
           (routing=common). Empty selects per-destination `{dest}{topic_suffix}`
-          routing.
+          routing -- reachable via config file only (flat-env drops empty values).
         type: string
         default: dlq_land
       topic_suffix:

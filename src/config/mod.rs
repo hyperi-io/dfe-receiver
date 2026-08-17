@@ -1074,7 +1074,7 @@ pub struct DlqConfig {
 
     /// DLQ topic name: when non-empty, every Kafka DLQ write routes here
     /// (routing=common). Empty selects per-destination `{dest}{topic_suffix}`
-    /// routing.
+    /// routing -- reachable via config file only (flat-env drops empty values).
     pub topic: String,
 
     /// Topic suffix for per-table routing.
@@ -1111,7 +1111,13 @@ impl DlqConfig {
             "fan_out" => DlqMode::FanOut,
             "file_only" => DlqMode::FileOnly,
             "kafka_only" => DlqMode::KafkaOnly,
-            _ => DlqMode::Cascade,
+            "cascade" | "" => DlqMode::Cascade,
+            other => {
+                // A typo'd mode must not silently pick a backend -- cascade
+                // includes the file backend, which is an EROFS no-op deployed.
+                tracing::warn!(mode = %other, "unknown dlq.mode, using cascade");
+                DlqMode::Cascade
+            }
         };
 
         scalo::dlq::DlqConfig {
@@ -1736,6 +1742,38 @@ mod tests {
                 assert_eq!(config.routing.dlq.mode, "kafka_only");
             },
         );
+    }
+
+    #[test]
+    fn dlq_to_scalo_topic_selects_common_routing() {
+        let cfg = DlqConfig {
+            topic: "dfe_receiver_dlq".to_string(),
+            ..DlqConfig::default()
+        };
+        let rc = cfg.to_scalo_config();
+        assert_eq!(rc.kafka.common_topic, "dfe_receiver_dlq");
+        assert_eq!(rc.kafka.routing, scalo::dlq::DlqRouting::Common);
+    }
+
+    #[test]
+    fn dlq_to_scalo_empty_topic_keeps_per_table_routing() {
+        let cfg = DlqConfig {
+            topic: String::new(),
+            ..DlqConfig::default()
+        };
+        let rc = cfg.to_scalo_config();
+        assert_eq!(rc.kafka.routing, scalo::dlq::DlqRouting::PerTable);
+    }
+
+    #[test]
+    fn dlq_to_scalo_unknown_mode_falls_back_to_cascade() {
+        let cfg = DlqConfig {
+            mode: "kafka-only".to_string(),
+            ..DlqConfig::default()
+        };
+        let rc = cfg.to_scalo_config();
+        assert_eq!(rc.mode, scalo::dlq::DlqMode::Cascade);
+        assert!(rc.enabled);
     }
 
     #[test]
