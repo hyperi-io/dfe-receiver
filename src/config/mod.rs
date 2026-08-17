@@ -288,6 +288,17 @@ impl ApplyFlatEnv for Config {
             self.routing.topic_suffix = v;
         }
 
+        // DLQ (fleet-uniform names: DLQ_ENABLED / DLQ_TOPIC / DLQ_MODE)
+        if let Some(v) = flat_env::flat_env_bool(prefix, "DLQ_ENABLED") {
+            self.routing.dlq.enabled = v;
+        }
+        if let Some(v) = flat_env::flat_env_string(prefix, "DLQ_TOPIC") {
+            self.routing.dlq.topic = v;
+        }
+        if let Some(v) = flat_env::flat_env_string(prefix, "DLQ_MODE") {
+            self.routing.dlq.mode = v;
+        }
+
         // Buffer
         if let Some(v) = flat_env::flat_env_parsed::<usize>(prefix, "MEMORY_LIMIT") {
             self.buffer.memory_limit = v;
@@ -1061,7 +1072,9 @@ pub struct DlqConfig {
     /// Backend mode: cascade (default), fan_out, file_only, kafka_only.
     pub mode: String,
 
-    /// DLQ topic name (used as common_topic for Kafka backend).
+    /// DLQ topic name: when non-empty, every Kafka DLQ write routes here
+    /// (routing=common). Empty selects per-destination `{dest}{topic_suffix}`
+    /// routing.
     pub topic: String,
 
     /// Topic suffix for per-table routing.
@@ -1113,6 +1126,11 @@ impl DlqConfig {
                 enabled: self.kafka_enabled,
                 topic_suffix: self.topic_suffix.clone(),
                 common_topic: self.topic.clone(),
+                routing: if self.topic.is_empty() {
+                    scalo::dlq::DlqRouting::PerTable
+                } else {
+                    scalo::dlq::DlqRouting::Common
+                },
                 ..KafkaDlqConfig::default()
             },
             ..scalo::dlq::DlqConfig::default()
@@ -1700,6 +1718,24 @@ mod tests {
             config.apply_flat_env(ENV_PREFIX);
             assert!(!config.server.auth.include_common_header);
         });
+    }
+
+    #[test]
+    fn test_env_override_dlq() {
+        with_env(
+            &[
+                ("DFE_RECEIVER_DLQ_ENABLED", "true"),
+                ("DFE_RECEIVER_DLQ_TOPIC", "dfe_receiver_dlq"),
+                ("DFE_RECEIVER_DLQ_MODE", "kafka_only"),
+            ],
+            || {
+                let mut config = Config::default();
+                config.apply_flat_env(ENV_PREFIX);
+                assert!(config.routing.dlq.enabled);
+                assert_eq!(config.routing.dlq.topic, "dfe_receiver_dlq");
+                assert_eq!(config.routing.dlq.mode, "kafka_only");
+            },
+        );
     }
 
     #[test]

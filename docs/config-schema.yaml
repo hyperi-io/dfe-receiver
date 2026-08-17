@@ -1313,7 +1313,10 @@ $defs:
         type: string
         default: cascade
       topic:
-        description: DLQ topic name (used as common_topic for Kafka backend).
+        description: |-
+          DLQ topic name: when non-empty, every Kafka DLQ write routes here
+          (routing=common). Empty selects per-destination `{dest}{topic_suffix}`
+          routing.
         type: string
         default: dlq_land
       topic_suffix:
