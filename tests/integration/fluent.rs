@@ -108,7 +108,12 @@ async fn start_fluent_handler(config: Config) -> (CancellationToken, Arc<Metrics
         .expect("Failed to create pipeline"),
     );
 
-    let handler = FluentHandler::new(config.fluent.clone(), pipeline, metrics.clone());
+    let handler = FluentHandler::new(
+        config.fluent.clone(),
+        config.raw_capture_for(&config.fluent.raw_capture),
+        pipeline,
+        metrics.clone(),
+    );
 
     let handler_shutdown = shutdown.clone();
     tokio::spawn(async move {

@@ -107,6 +107,11 @@
           "include_common_header": true,
           "header_name": "",
           "header_values": []
+        },
+        "raw_capture": {
+          "enabled": null,
+          "max_bytes": null,
+          "on_oversize": null
         }
       }
     },
@@ -171,6 +176,11 @@
           "include_common_header": true,
           "header_name": "",
           "header_values": []
+        },
+        "raw_capture": {
+          "enabled": null,
+          "max_bytes": null,
+          "on_oversize": null
         }
       }
     },
@@ -205,6 +215,11 @@
           "include_common_header": true,
           "header_name": "",
           "header_values": []
+        },
+        "raw_capture": {
+          "enabled": null,
+          "max_bytes": null,
+          "on_oversize": null
         }
       }
     },
@@ -239,6 +254,11 @@
           "include_common_header": true,
           "header_name": "",
           "header_values": []
+        },
+        "raw_capture": {
+          "enabled": null,
+          "max_bytes": null,
+          "on_oversize": null
         }
       }
     },
@@ -259,6 +279,11 @@
           "key_secret": null,
           "ca_secret": null,
           "refresh_interval_secs": 3600
+        },
+        "raw_capture": {
+          "enabled": null,
+          "max_bytes": null,
+          "on_oversize": null
         }
       }
     },
@@ -279,6 +304,11 @@
           "key_secret": null,
           "ca_secret": null,
           "refresh_interval_secs": 3600
+        },
+        "raw_capture": {
+          "enabled": null,
+          "max_bytes": null,
+          "on_oversize": null
         }
       }
     },
@@ -319,7 +349,21 @@
           "topic": "sflow_land"
         },
         "split": null,
-        "experimental": true
+        "experimental": true,
+        "raw_capture": {
+          "enabled": null,
+          "max_bytes": null,
+          "on_oversize": null
+        }
+      }
+    },
+    "raw_capture": {
+      "description": "Common raw-payload capture default, inherited by every transport that\nsupports capture. Per-transport `raw_capture:` blocks override it\nfield by field. See [`raw_capture`].",
+      "$ref": "#/$defs/RawCaptureConfig",
+      "default": {
+        "enabled": null,
+        "max_bytes": null,
+        "on_oversize": null
       }
     },
     "validation": {
@@ -843,8 +887,68 @@
             "header_name": "",
             "header_values": []
           }
+        },
+        "raw_capture": {
+          "description": "Raw-payload capture override (inherits the common `raw_capture` block).\n\nOTLP arrives as protobuf, so `_raw` carries the `generic`-mode\nrendering of the record -- the least-shaped decode we produce. In\n`generic` mode it is therefore a copy of the event itself.",
+          "$ref": "#/$defs/RawCaptureConfig",
+          "default": {
+            "enabled": null,
+            "max_bytes": null,
+            "on_oversize": null
+          }
         }
       }
+    },
+    "RawCaptureConfig": {
+      "description": "Raw-capture settings as written in config, at either cascade level.\n\nEvery field is `Option` so an unset field means \"inherit\", not \"off\".",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Capture the original payload into `_raw`.",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "max_bytes": {
+          "description": "Maximum captured bytes; 0 means unlimited.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0,
+          "default": null
+        },
+        "on_oversize": {
+          "description": "Behaviour when the payload exceeds `max_bytes`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OversizePolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      }
+    },
+    "OversizePolicy": {
+      "description": "What to do with a payload larger than `max_bytes`.",
+      "oneOf": [
+        {
+          "description": "Keep the leading `max_bytes` and flag it with `_raw_truncated: true`.",
+          "type": "string",
+          "const": "truncate"
+        },
+        {
+          "description": "Emit no `_raw` at all for this event.",
+          "type": "string",
+          "const": "omit"
+        }
+      ]
     },
     "LumberjackConfig": {
       "description": "Lumberjack v2 (Beats) protocol configuration.\n\nAccepts data from Elastic Beats agents (Filebeat, Winlogbeat, etc.)\nover the Lumberjack v2 wire protocol on TCP/TLS.",
@@ -951,6 +1055,15 @@
             "header_name": "",
             "header_values": []
           }
+        },
+        "raw_capture": {
+          "description": "Raw-payload capture override (inherits the common `raw_capture` block).\n\nOn `/services/collector/event`, `_raw` carries the submitted `event`\nvalue before HEC metadata is merged in. On `/services/collector/raw`\nit carries the original line bytes.",
+          "$ref": "#/$defs/RawCaptureConfig",
+          "default": {
+            "enabled": null,
+            "max_bytes": null,
+            "on_oversize": null
+          }
         }
       }
     },
@@ -1014,6 +1127,15 @@
             "include_common_header": true,
             "header_name": "",
             "header_values": []
+          }
+        },
+        "raw_capture": {
+          "description": "Raw-payload capture override (inherits the common `raw_capture` block).\n\nThe strongest case for capture: `_raw` holds the wire line including\nthe PRI and header, none of which survives into the parsed envelope.",
+          "$ref": "#/$defs/RawCaptureConfig",
+          "default": {
+            "enabled": null,
+            "max_bytes": null,
+            "on_oversize": null
           }
         }
       }
@@ -1081,6 +1203,15 @@
             "header_name": "",
             "header_values": []
           }
+        },
+        "raw_capture": {
+          "description": "Raw-payload capture override (inherits the common `raw_capture` block).\n\nRemote Write arrives as snappy-framed protobuf, so `_raw` carries the\n`native`-mode rendering of the sample -- the least-shaped decode we\nproduce. In `native` mode it is therefore a copy of the event itself.",
+          "$ref": "#/$defs/RawCaptureConfig",
+          "default": {
+            "enabled": null,
+            "max_bytes": null,
+            "on_oversize": null
+          }
         }
       }
     },
@@ -1119,6 +1250,15 @@
             "ca_secret": null,
             "refresh_interval_secs": 3600
           }
+        },
+        "raw_capture": {
+          "description": "Raw-payload capture override (inherits the common `raw_capture` block).\n\nForward arrives as msgpack, so `_raw` carries the record's verbatim\nmsgpack-to-JSON decode, before the tag, timestamp and `_source` this\nhandler adds.",
+          "$ref": "#/$defs/RawCaptureConfig",
+          "default": {
+            "enabled": null,
+            "max_bytes": null,
+            "on_oversize": null
+          }
         }
       }
     },
@@ -1156,6 +1296,15 @@
             "key_secret": null,
             "ca_secret": null,
             "refresh_interval_secs": 3600
+          }
+        },
+        "raw_capture": {
+          "description": "Raw-payload capture override (inherits the common `raw_capture` block).\n\n`_raw` holds the GELF message exactly as it arrived, before the\n`message`, `severity` and `_source` fields this handler derives.",
+          "$ref": "#/$defs/RawCaptureConfig",
+          "default": {
+            "enabled": null,
+            "max_bytes": null,
+            "on_oversize": null
           }
         }
       }
@@ -1258,6 +1407,15 @@
           "description": "EXPERIMENTAL marker. When true (default), the handler emits a startup\nWARN log and sets `dfe_handler_experimental{handler=\"flow\"} 1`.\nFlipped to false in a follow-up PR after stability period.",
           "type": "boolean",
           "default": true
+        },
+        "raw_capture": {
+          "description": "Raw-record capture override (inherits the common `raw_capture` block).\n\n`_raw` carries the decoder's verbatim record rendering: a JSON array\nof every record in `canonical` mode, the single record in `exploded`.",
+          "$ref": "#/$defs/RawCaptureConfig",
+          "default": {
+            "enabled": null,
+            "max_bytes": null,
+            "on_oversize": null
+          }
         }
       }
     },
@@ -1277,10 +1435,10 @@
       }
     },
     "OutputMode": {
+      "description": "Shape of the emitted event: one per packet, or one per flow record.\n\nRaw record retention is no longer a mode. It is\n`flow.raw_capture.enabled`, which composes with either shape and writes\nthe common-header `_raw` field like every other transport.",
       "type": "string",
       "enum": [
         "canonical",
-        "canonical_with_raw",
         "exploded"
       ]
     },

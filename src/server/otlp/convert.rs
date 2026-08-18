@@ -20,7 +20,9 @@
 use bytes::Bytes;
 
 use super::pb;
+use crate::config::RawCapture;
 use crate::error::{Error, Result};
+use crate::server::raw_capture;
 
 /// OTLP conversion output mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -66,6 +68,29 @@ pub struct ConvertedPayload {
     pub json: Bytes,
     /// Signal type for routing.
     pub signal: OtlpSignal,
+}
+
+/// Attach the generic rendering of a record as `_raw` on the emitted event.
+///
+/// OTLP arrives as protobuf, which cannot go into a text column, so the
+/// generic mode's JSON stands in as the verbatim decode: it is the
+/// least-shaped rendering the receiver produces. In generic mode the two are
+/// the same document, so `_raw` is a copy -- documented on
+/// `otlp.raw_capture` and warned about at startup.
+fn attach_generic_raw(
+    event: &mut serde_json::Value,
+    generic: &serde_json::Value,
+    raw_capture: RawCapture,
+) -> Result<()> {
+    let Some(obj) = event.as_object_mut() else {
+        return Ok(());
+    };
+    let prepared = raw_capture::prepare_serialised(generic, raw_capture)
+        .map_err(|e| Error::Validation(format!("OTLP raw capture failed: {e}")))?;
+    if let Some(prepared) = prepared {
+        raw_capture::attach_prepared_to_map(obj, prepared);
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -236,6 +261,7 @@ fn resource_attributes_map(
 pub fn convert_logs(
     request: &pb::collector::logs::v1::ExportLogsServiceRequest,
     mode: OtlpMode,
+    raw_capture: RawCapture,
 ) -> Result<Vec<ConvertedPayload>> {
     let mut payloads = Vec::new();
 
@@ -248,7 +274,7 @@ pub fn convert_logs(
             let scope_version = scope_logs.scope.as_ref().map_or("", |s| s.version.as_str());
 
             for log in &scope_logs.log_records {
-                let json = match mode {
+                let mut json = match mode {
                     OtlpMode::HyperDx => log_to_hyperdx_json(
                         log,
                         &service_name,
@@ -260,6 +286,12 @@ pub fn convert_logs(
                         log_to_generic_json(log, &resource_attrs, scope_name, scope_version)
                     }
                 };
+
+                if raw_capture.enabled {
+                    let generic =
+                        log_to_generic_json(log, &resource_attrs, scope_name, scope_version);
+                    attach_generic_raw(&mut json, &generic, raw_capture)?;
+                }
 
                 let bytes = serde_json::to_vec(&json).map_err(|e| {
                     Error::Validation(format!("OTLP log serialisation failed: {e}"))
@@ -371,6 +403,7 @@ fn severity_number_to_text(n: i32) -> String {
 pub fn convert_traces(
     request: &pb::collector::trace::v1::ExportTraceServiceRequest,
     mode: OtlpMode,
+    raw_capture: RawCapture,
 ) -> Result<Vec<ConvertedPayload>> {
     let mut payloads = Vec::new();
 
@@ -386,7 +419,7 @@ pub fn convert_traces(
                 .map_or("", |s| s.version.as_str());
 
             for span in &scope_spans.spans {
-                let json = match mode {
+                let mut json = match mode {
                     OtlpMode::HyperDx => span_to_hyperdx_json(
                         span,
                         &service_name,
@@ -398,6 +431,12 @@ pub fn convert_traces(
                         span_to_generic_json(span, &resource_attrs, scope_name, scope_version)
                     }
                 };
+
+                if raw_capture.enabled {
+                    let generic =
+                        span_to_generic_json(span, &resource_attrs, scope_name, scope_version);
+                    attach_generic_raw(&mut json, &generic, raw_capture)?;
+                }
 
                 let bytes = serde_json::to_vec(&json).map_err(|e| {
                     Error::Validation(format!("OTLP span serialisation failed: {e}"))
@@ -568,6 +607,7 @@ fn span_to_generic_json(
 pub fn convert_metrics(
     request: &pb::collector::metrics::v1::ExportMetricsServiceRequest,
     mode: OtlpMode,
+    raw_capture: RawCapture,
 ) -> Result<Vec<ConvertedPayload>> {
     let mut payloads = Vec::new();
 
@@ -579,34 +619,18 @@ pub fn convert_metrics(
                 let metric_name = &metric.name;
 
                 if let Some(ref data) = metric.data {
-                    let points = match data {
-                        pb::metrics::v1::metric::Data::Gauge(g) => {
-                            convert_gauge_points(metric_name, &g.data_points, &resource_attrs, mode)
+                    let mut points = metric_points(metric_name, data, &resource_attrs, mode);
+
+                    // The generic rendering of the same points is what _raw
+                    // carries; the converters are deterministic, so the two
+                    // vectors line up point for point.
+                    if raw_capture.enabled {
+                        let generic =
+                            metric_points(metric_name, data, &resource_attrs, OtlpMode::Generic);
+                        for (json, generic) in points.iter_mut().zip(generic.iter()) {
+                            attach_generic_raw(json, generic, raw_capture)?;
                         }
-                        pb::metrics::v1::metric::Data::Sum(s) => {
-                            convert_sum_points(metric_name, &s.data_points, &resource_attrs, mode)
-                        }
-                        pb::metrics::v1::metric::Data::Histogram(h) => convert_histogram_points(
-                            metric_name,
-                            &h.data_points,
-                            &resource_attrs,
-                            mode,
-                        ),
-                        pb::metrics::v1::metric::Data::ExponentialHistogram(eh) => {
-                            convert_exp_histogram_points(
-                                metric_name,
-                                &eh.data_points,
-                                &resource_attrs,
-                                mode,
-                            )
-                        }
-                        pb::metrics::v1::metric::Data::Summary(s) => convert_summary_points(
-                            metric_name,
-                            &s.data_points,
-                            &resource_attrs,
-                            mode,
-                        ),
-                    };
+                    }
 
                     for json in points {
                         let bytes = serde_json::to_vec(&json).map_err(|e| {
@@ -623,6 +647,32 @@ pub fn convert_metrics(
     }
 
     Ok(payloads)
+}
+
+/// Render one metric's data points in the given mode.
+fn metric_points(
+    metric_name: &str,
+    data: &pb::metrics::v1::metric::Data,
+    resource_attrs: &serde_json::Map<String, serde_json::Value>,
+    mode: OtlpMode,
+) -> Vec<serde_json::Value> {
+    match data {
+        pb::metrics::v1::metric::Data::Gauge(g) => {
+            convert_gauge_points(metric_name, &g.data_points, resource_attrs, mode)
+        }
+        pb::metrics::v1::metric::Data::Sum(s) => {
+            convert_sum_points(metric_name, &s.data_points, resource_attrs, mode)
+        }
+        pb::metrics::v1::metric::Data::Histogram(h) => {
+            convert_histogram_points(metric_name, &h.data_points, resource_attrs, mode)
+        }
+        pb::metrics::v1::metric::Data::ExponentialHistogram(eh) => {
+            convert_exp_histogram_points(metric_name, &eh.data_points, resource_attrs, mode)
+        }
+        pb::metrics::v1::metric::Data::Summary(s) => {
+            convert_summary_points(metric_name, &s.data_points, resource_attrs, mode)
+        }
+    }
 }
 
 /// Convert gauge data points.
@@ -960,7 +1010,7 @@ mod tests {
             }],
         };
 
-        let payloads = convert_logs(&request, OtlpMode::HyperDx).unwrap();
+        let payloads = convert_logs(&request, OtlpMode::HyperDx, RawCapture::OFF).unwrap();
         assert_eq!(payloads.len(), 1);
 
         let json: serde_json::Value = serde_json::from_slice(&payloads[0].json).unwrap();
@@ -1006,7 +1056,7 @@ mod tests {
             }],
         };
 
-        let payloads = convert_logs(&request, OtlpMode::Generic).unwrap();
+        let payloads = convert_logs(&request, OtlpMode::Generic, RawCapture::OFF).unwrap();
         assert_eq!(payloads.len(), 1);
 
         let json: serde_json::Value = serde_json::from_slice(&payloads[0].json).unwrap();
@@ -1165,7 +1215,7 @@ mod tests {
             }],
         };
 
-        let payloads = convert_logs(&request, OtlpMode::HyperDx).unwrap();
+        let payloads = convert_logs(&request, OtlpMode::HyperDx, RawCapture::OFF).unwrap();
         assert_eq!(payloads.len(), 1);
         let json: serde_json::Value = serde_json::from_slice(&payloads[0].json).unwrap();
 
@@ -1211,7 +1261,7 @@ mod tests {
             }],
         };
 
-        let payloads = convert_logs(&request, OtlpMode::HyperDx).unwrap();
+        let payloads = convert_logs(&request, OtlpMode::HyperDx, RawCapture::OFF).unwrap();
         assert_eq!(payloads.len(), 3);
     }
 
@@ -1220,7 +1270,7 @@ mod tests {
         let request = pb::collector::logs::v1::ExportLogsServiceRequest {
             resource_logs: vec![],
         };
-        let payloads = convert_logs(&request, OtlpMode::HyperDx).unwrap();
+        let payloads = convert_logs(&request, OtlpMode::HyperDx, RawCapture::OFF).unwrap();
         assert!(payloads.is_empty());
     }
 
@@ -1270,7 +1320,7 @@ mod tests {
             }],
         };
 
-        let payloads = convert_traces(&request, OtlpMode::HyperDx).unwrap();
+        let payloads = convert_traces(&request, OtlpMode::HyperDx, RawCapture::OFF).unwrap();
         assert_eq!(payloads.len(), 1);
         let json: serde_json::Value = serde_json::from_slice(&payloads[0].json).unwrap();
 
@@ -1313,7 +1363,7 @@ mod tests {
             }],
         };
 
-        let payloads = convert_traces(&request, OtlpMode::Generic).unwrap();
+        let payloads = convert_traces(&request, OtlpMode::Generic, RawCapture::OFF).unwrap();
         assert_eq!(payloads.len(), 1);
         let json: serde_json::Value = serde_json::from_slice(&payloads[0].json).unwrap();
         assert_eq!(json["_signal"], "trace");
@@ -1354,7 +1404,7 @@ mod tests {
             }],
         };
 
-        let payloads = convert_metrics(&request, OtlpMode::HyperDx).unwrap();
+        let payloads = convert_metrics(&request, OtlpMode::HyperDx, RawCapture::OFF).unwrap();
         assert!(!payloads.is_empty());
     }
 
@@ -1363,7 +1413,7 @@ mod tests {
         let request = pb::collector::metrics::v1::ExportMetricsServiceRequest {
             resource_metrics: vec![],
         };
-        let payloads = convert_metrics(&request, OtlpMode::HyperDx).unwrap();
+        let payloads = convert_metrics(&request, OtlpMode::HyperDx, RawCapture::OFF).unwrap();
         assert!(payloads.is_empty());
     }
 
@@ -1418,5 +1468,150 @@ mod tests {
         // Unknown defaults to HyperDx (matches existing test)
         assert_eq!(OtlpMode::from_str(""), OtlpMode::HyperDx);
         assert_eq!(OtlpMode::from_str("invalid-mode"), OtlpMode::HyperDx);
+    }
+
+    // =========================================================================
+    // Raw capture
+    // =========================================================================
+
+    fn one_log_request() -> pb::collector::logs::v1::ExportLogsServiceRequest {
+        pb::collector::logs::v1::ExportLogsServiceRequest {
+            resource_logs: vec![pb::logs::v1::ResourceLogs {
+                resource: None,
+                scope_logs: vec![pb::logs::v1::ScopeLogs {
+                    scope: None,
+                    log_records: vec![pb::logs::v1::LogRecord {
+                        time_unix_nano: 1_771_459_200_000_000_000,
+                        observed_time_unix_nano: 0,
+                        severity_number: 17,
+                        severity_text: "ERROR".to_string(),
+                        body: Some(pb::common::v1::AnyValue {
+                            value: Some(pb::common::v1::any_value::Value::StringValue(
+                                "boom".to_string(),
+                            )),
+                        }),
+                        attributes: vec![],
+                        dropped_attributes_count: 0,
+                        flags: 0,
+                        trace_id: vec![],
+                        span_id: vec![],
+                        event_name: String::new(),
+                    }],
+                    schema_url: String::new(),
+                }],
+                schema_url: String::new(),
+            }],
+        }
+    }
+
+    #[test]
+    fn logs_capture_off_emits_no_raw_field() {
+        let payloads =
+            convert_logs(&one_log_request(), OtlpMode::HyperDx, RawCapture::OFF).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&payloads[0].json).unwrap();
+        assert!(json.get("_raw").is_none());
+    }
+
+    #[test]
+    fn logs_capture_carries_the_generic_rendering() {
+        let payloads =
+            convert_logs(&one_log_request(), OtlpMode::HyperDx, RawCapture::on()).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&payloads[0].json).unwrap();
+
+        // The HyperDX event is shaped as before.
+        assert_eq!(json["SeverityText"], "ERROR");
+        assert_eq!(json["Body"], "boom");
+
+        // _raw is the generic rendering of the same record.
+        let captured: serde_json::Value =
+            serde_json::from_str(json["_raw"].as_str().unwrap()).unwrap();
+        assert_eq!(captured["_signal"], "log");
+        assert_eq!(captured["body"], "boom");
+        assert_eq!(captured["severity_text"], "ERROR");
+    }
+
+    #[test]
+    fn traces_capture_carries_the_generic_rendering() {
+        let request = pb::collector::trace::v1::ExportTraceServiceRequest {
+            resource_spans: vec![pb::trace::v1::ResourceSpans {
+                resource: None,
+                scope_spans: vec![pb::trace::v1::ScopeSpans {
+                    scope: None,
+                    spans: vec![pb::trace::v1::Span {
+                        trace_id: vec![0x11; 16],
+                        span_id: vec![0x22; 8],
+                        name: "GET /health".to_string(),
+                        start_time_unix_nano: 1_771_459_200_000_000_000,
+                        end_time_unix_nano: 1_771_459_200_005_000_000,
+                        ..Default::default()
+                    }],
+                    schema_url: String::new(),
+                }],
+                schema_url: String::new(),
+            }],
+        };
+
+        let payloads = convert_traces(&request, OtlpMode::HyperDx, RawCapture::on()).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&payloads[0].json).unwrap();
+
+        let captured: serde_json::Value =
+            serde_json::from_str(json["_raw"].as_str().unwrap()).unwrap();
+        assert_eq!(captured["_signal"], "trace");
+        assert_eq!(captured["name"], "GET /health");
+    }
+
+    #[test]
+    fn metrics_capture_lines_raw_up_with_each_point() {
+        let request = pb::collector::metrics::v1::ExportMetricsServiceRequest {
+            resource_metrics: vec![pb::metrics::v1::ResourceMetrics {
+                resource: None,
+                scope_metrics: vec![pb::metrics::v1::ScopeMetrics {
+                    scope: None,
+                    metrics: vec![pb::metrics::v1::Metric {
+                        name: "cpu_seconds".to_string(),
+                        data: Some(pb::metrics::v1::metric::Data::Gauge(
+                            pb::metrics::v1::Gauge {
+                                data_points: vec![
+                                    pb::metrics::v1::NumberDataPoint {
+                                        time_unix_nano: 1_771_459_200_000_000_000,
+                                        value: Some(
+                                            pb::metrics::v1::number_data_point::Value::AsDouble(
+                                                1.0,
+                                            ),
+                                        ),
+                                        ..Default::default()
+                                    },
+                                    pb::metrics::v1::NumberDataPoint {
+                                        time_unix_nano: 1_771_459_201_000_000_000,
+                                        value: Some(
+                                            pb::metrics::v1::number_data_point::Value::AsDouble(
+                                                2.0,
+                                            ),
+                                        ),
+                                        ..Default::default()
+                                    },
+                                ],
+                            },
+                        )),
+                        ..Default::default()
+                    }],
+                    schema_url: String::new(),
+                }],
+                schema_url: String::new(),
+            }],
+        };
+
+        let payloads = convert_metrics(&request, OtlpMode::HyperDx, RawCapture::on()).unwrap();
+        assert_eq!(payloads.len(), 2);
+
+        // Each event's _raw must be ITS point, not the first one twice.
+        for (payload, expected) in payloads.iter().zip([1.0, 2.0]) {
+            let json: serde_json::Value = serde_json::from_slice(&payload.json).unwrap();
+            assert_eq!(json["Value"], expected);
+            let captured: serde_json::Value =
+                serde_json::from_str(json["_raw"].as_str().unwrap()).unwrap();
+            assert_eq!(captured["value"], expected);
+            assert_eq!(captured["metric_name"], "cpu_seconds");
+        }
     }
 }

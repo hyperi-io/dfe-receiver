@@ -46,6 +46,8 @@ mod otlp;
 mod prometheus_rw;
 #[path = "integration/protocol_kafka_roundtrip.rs"]
 mod protocol_kafka_roundtrip;
+#[path = "integration/raw_capture.rs"]
+mod raw_capture;
 #[path = "integration/splunk_hec.rs"]
 mod splunk_hec;
 #[path = "integration/syslog.rs"]

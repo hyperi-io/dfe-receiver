@@ -110,7 +110,12 @@ async fn test_prometheus_rw_to_kafka_roundtrip() {
         .await
         .expect("pipeline init"),
     );
-    let handler = PrometheusRwHandler::new(config.prometheus_rw.clone(), pipeline, metrics.clone());
+    let handler = PrometheusRwHandler::new(
+        config.prometheus_rw.clone(),
+        config.raw_capture_for(&config.prometheus_rw.raw_capture),
+        pipeline,
+        metrics.clone(),
+    );
     let handler_shutdown = shutdown.clone();
     tokio::spawn(async move {
         let _ = handler.start(handler_shutdown).await;
@@ -208,7 +213,12 @@ async fn test_splunk_hec_to_kafka_roundtrip() {
         .await
         .expect("pipeline init"),
     );
-    let handler = SplunkHecHandler::new(config.splunk_hec.clone(), pipeline, metrics.clone());
+    let handler = SplunkHecHandler::new(
+        config.splunk_hec.clone(),
+        config.raw_capture_for(&config.splunk_hec.raw_capture),
+        pipeline,
+        metrics.clone(),
+    );
     let handler_shutdown = shutdown.clone();
     tokio::spawn(async move {
         let _ = handler.start(handler_shutdown).await;

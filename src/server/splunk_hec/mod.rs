@@ -35,7 +35,7 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 use tracing::{debug, info};
 
-use crate::config::SplunkHecConfig;
+use crate::config::{RawCapture, SplunkHecConfig};
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
@@ -48,6 +48,8 @@ use self::convert::{RawMetadata, hec_event_to_json, parse_hec_events, raw_to_jso
 /// Splunk HEC protocol handler.
 pub struct SplunkHecHandler {
     config: SplunkHecConfig,
+    /// Raw capture already resolved against the common `raw_capture` block.
+    raw_capture: RawCapture,
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
 }
@@ -56,11 +58,13 @@ impl SplunkHecHandler {
     /// Create a new Splunk HEC handler.
     pub fn new(
         config: SplunkHecConfig,
+        raw_capture: RawCapture,
         pipeline: Arc<PipelineState>,
         metrics: Arc<Metrics>,
     ) -> Self {
         Self {
             config,
+            raw_capture,
             pipeline,
             metrics,
         }
@@ -80,6 +84,7 @@ impl ProtocolHandler for SplunkHecHandler {
     async fn start(&self, shutdown: CancellationToken) -> Result<()> {
         run_hec_server(
             &self.config,
+            self.raw_capture,
             self.pipeline.clone(),
             self.metrics.clone(),
             shutdown,
@@ -180,6 +185,8 @@ impl IntoResponse for HecError {
 struct HecState {
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
+    /// Raw capture already resolved against the common `raw_capture` block.
+    raw_capture: RawCapture,
 }
 
 // ---------------------------------------------------------------------------
@@ -189,6 +196,7 @@ struct HecState {
 /// Run the Splunk HEC HTTP server.
 async fn run_hec_server(
     config: &SplunkHecConfig,
+    raw_capture: RawCapture,
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
     shutdown: CancellationToken,
@@ -199,6 +207,7 @@ async fn run_hec_server(
     let state = HecState {
         pipeline,
         metrics: metrics.clone(),
+        raw_capture,
     };
 
     // Security configuration
@@ -342,7 +351,7 @@ async fn event_handler(
     // Amortises backpressure check and memory tracking across all events.
     let mut payloads = Vec::with_capacity(events.len());
     for event in events {
-        let json = hec_event_to_json(event).map_err(|e| {
+        let json = hec_event_to_json(event, state.raw_capture).map_err(|e| {
             state.metrics.inc_requests_error("splunk_hec");
             HecError::invalid_data(&e.to_string())
         })?;
@@ -437,7 +446,7 @@ async fn raw_handler(
         if line.is_empty() {
             continue;
         }
-        let json = raw_to_json(line, &metadata).map_err(|e| {
+        let json = raw_to_json(line, &metadata, state.raw_capture).map_err(|e| {
             state.metrics.inc_requests_error("splunk_hec");
             HecError::internal(&e.to_string())
         })?;

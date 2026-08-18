@@ -23,6 +23,7 @@ pub mod netflow;
 #[cfg(feature = "otlp")]
 pub mod otlp;
 pub mod prometheus_rw;
+pub mod raw_capture;
 pub mod sflow;
 pub mod splunk_hec;
 pub mod syslog;
@@ -112,6 +113,7 @@ impl Server {
         if config.otlp.enabled {
             handlers.push(Box::new(OtlpHandler::new(
                 config.otlp.clone(),
+                config.raw_capture_for(&config.otlp.raw_capture),
                 self.state.clone(),
                 self.metrics.clone(),
             )));
@@ -130,6 +132,7 @@ impl Server {
         if config.splunk_hec.enabled {
             handlers.push(Box::new(SplunkHecHandler::new(
                 config.splunk_hec.clone(),
+                config.raw_capture_for(&config.splunk_hec.raw_capture),
                 self.state.clone(),
                 self.metrics.clone(),
             )));
@@ -139,6 +142,7 @@ impl Server {
         if config.prometheus_rw.enabled {
             handlers.push(Box::new(PrometheusRwHandler::new(
                 config.prometheus_rw.clone(),
+                config.raw_capture_for(&config.prometheus_rw.raw_capture),
                 self.state.clone(),
                 self.metrics.clone(),
             )));
@@ -148,6 +152,7 @@ impl Server {
         if config.syslog.enabled {
             handlers.push(Box::new(SyslogHandler::new(
                 config.syslog.clone(),
+                config.raw_capture_for(&config.syslog.raw_capture),
                 self.state.clone(),
                 self.metrics.clone(),
             )));
@@ -157,6 +162,7 @@ impl Server {
         if config.fluent.enabled {
             handlers.push(Box::new(FluentHandler::new(
                 config.fluent.clone(),
+                config.raw_capture_for(&config.fluent.raw_capture),
                 self.state.clone(),
                 self.metrics.clone(),
             )));
@@ -166,6 +172,7 @@ impl Server {
         if config.gelf.enabled {
             handlers.push(Box::new(GelfHandler::new(
                 config.gelf.clone(),
+                config.raw_capture_for(&config.gelf.raw_capture),
                 self.state.clone(),
                 self.metrics.clone(),
             )));
@@ -176,7 +183,12 @@ impl Server {
         if config.flow.enabled || config.flow.split.is_some() {
             match self.flow_metrics.clone() {
                 Some(flow_metrics) => {
-                    match FlowHandler::new(config.flow.clone(), flow_metrics, self.state.clone()) {
+                    match FlowHandler::new(
+                        config.flow.clone(),
+                        config.raw_capture_for(&config.flow.raw_capture),
+                        flow_metrics,
+                        self.state.clone(),
+                    ) {
                         Ok(handler) => handlers.push(Box::new(handler)),
                         Err(e) => {
                             error!(error = %e, "Flow handler config invalid; skipping");

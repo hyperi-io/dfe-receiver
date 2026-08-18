@@ -28,7 +28,7 @@ use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 
-use crate::config::OtlpConfig;
+use crate::config::{OtlpConfig, RawCapture};
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
@@ -108,14 +108,21 @@ pub struct OtlpService {
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
     mode: OtlpMode,
+    raw_capture: RawCapture,
 }
 
 impl OtlpService {
-    fn new(pipeline: Arc<PipelineState>, metrics: Arc<Metrics>, mode: OtlpMode) -> Self {
+    fn new(
+        pipeline: Arc<PipelineState>,
+        metrics: Arc<Metrics>,
+        mode: OtlpMode,
+        raw_capture: RawCapture,
+    ) -> Self {
         Self {
             pipeline,
             metrics,
             mode,
+            raw_capture,
         }
     }
 
@@ -157,7 +164,7 @@ impl LogsService for OtlpService {
         self.metrics.inc_requests_total("otlp");
         let req = request.into_inner();
 
-        let payloads = convert::convert_logs(&req, self.mode)
+        let payloads = convert::convert_logs(&req, self.mode, self.raw_capture)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
         self.process_payloads(payloads).await?;
@@ -181,7 +188,7 @@ impl TraceService for OtlpService {
         self.metrics.inc_requests_total("otlp");
         let req = request.into_inner();
 
-        let payloads = convert::convert_traces(&req, self.mode)
+        let payloads = convert::convert_traces(&req, self.mode, self.raw_capture)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
         self.process_payloads(payloads).await?;
@@ -207,7 +214,7 @@ impl MetricsService for OtlpService {
         self.metrics.inc_requests_total("otlp");
         let req = request.into_inner();
 
-        let payloads = convert::convert_metrics(&req, self.mode)
+        let payloads = convert::convert_metrics(&req, self.mode, self.raw_capture)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
         self.process_payloads(payloads).await?;
@@ -252,6 +259,7 @@ fn make_auth_interceptor(
 /// Run the OTLP gRPC server on the specified address.
 async fn run_grpc_server(
     config: &OtlpConfig,
+    raw_capture: RawCapture,
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
     shutdown: CancellationToken,
@@ -262,7 +270,7 @@ async fn run_grpc_server(
         .map_err(|e| Error::Config(format!("invalid OTLP gRPC bind address: {e}")))?;
 
     let mode = OtlpMode::from_str(&config.mode);
-    let service = Arc::new(OtlpService::new(pipeline, metrics, mode));
+    let service = Arc::new(OtlpService::new(pipeline, metrics, mode, raw_capture));
 
     // Build TLS config if enabled
     let tls_config = if config.tls.enabled {
@@ -293,9 +301,24 @@ async fn run_grpc_server(
 
     // Register all three OTLP services on the same server.
     // tonic requires separate service instances for each trait impl.
-    let logs_svc = OtlpService::new(service.pipeline.clone(), service.metrics.clone(), mode);
-    let traces_svc = OtlpService::new(service.pipeline.clone(), service.metrics.clone(), mode);
-    let metrics_svc = OtlpService::new(service.pipeline.clone(), service.metrics.clone(), mode);
+    let logs_svc = OtlpService::new(
+        service.pipeline.clone(),
+        service.metrics.clone(),
+        mode,
+        raw_capture,
+    );
+    let traces_svc = OtlpService::new(
+        service.pipeline.clone(),
+        service.metrics.clone(),
+        mode,
+        raw_capture,
+    );
+    let metrics_svc = OtlpService::new(
+        service.pipeline.clone(),
+        service.metrics.clone(),
+        mode,
+        raw_capture,
+    );
 
     let router = if let Some(auth) = auth_state {
         let interceptor = make_auth_interceptor(auth);
@@ -337,6 +360,7 @@ async fn run_grpc_server(
 /// Run the OTLP HTTP server for `/v1/logs`, `/v1/metrics`, `/v1/traces`.
 async fn run_http_server(
     config: &OtlpConfig,
+    raw_capture: RawCapture,
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
     shutdown: CancellationToken,
@@ -353,6 +377,7 @@ async fn run_http_server(
         pipeline: Arc<PipelineState>,
         metrics: Arc<Metrics>,
         mode: OtlpMode,
+        raw_capture: RawCapture,
     }
 
     let addr: SocketAddr = config
@@ -366,6 +391,7 @@ async fn run_http_server(
         pipeline,
         metrics,
         mode,
+        raw_capture,
     };
 
     // Handler for OTLP HTTP logs
@@ -381,7 +407,7 @@ async fn run_http_server(
             &headers, &body,
         )?;
 
-        let payloads = convert::convert_logs(&request, state.mode)?;
+        let payloads = convert::convert_logs(&request, state.mode, state.raw_capture)?;
         let jsons: Vec<Bytes> = payloads.into_iter().map(|p| p.json).collect();
         let (_, first_err) = state.pipeline.process_batch(&jsons).await;
         if let Some(e) = first_err {
@@ -405,7 +431,7 @@ async fn run_http_server(
             &headers, &body,
         )?;
 
-        let payloads = convert::convert_traces(&request, state.mode)?;
+        let payloads = convert::convert_traces(&request, state.mode, state.raw_capture)?;
         let jsons: Vec<Bytes> = payloads.into_iter().map(|p| p.json).collect();
         let (_, first_err) = state.pipeline.process_batch(&jsons).await;
         if let Some(e) = first_err {
@@ -429,7 +455,7 @@ async fn run_http_server(
             &headers, &body,
         )?;
 
-        let payloads = convert::convert_metrics(&request, state.mode)?;
+        let payloads = convert::convert_metrics(&request, state.mode, state.raw_capture)?;
         let jsons: Vec<Bytes> = payloads.into_iter().map(|p| p.json).collect();
         let (_, first_err) = state.pipeline.process_batch(&jsons).await;
         if let Some(e) = first_err {
@@ -494,14 +520,22 @@ fn decode_otlp_request<T: prost::Message + Default>(
 /// OTLP protocol handler — runs gRPC (4317) and HTTP (4318) servers.
 pub struct OtlpHandler {
     config: OtlpConfig,
+    /// Raw capture already resolved against the common `raw_capture` block.
+    raw_capture: RawCapture,
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
 }
 
 impl OtlpHandler {
-    pub fn new(config: OtlpConfig, pipeline: Arc<PipelineState>, metrics: Arc<Metrics>) -> Self {
+    pub fn new(
+        config: OtlpConfig,
+        raw_capture: RawCapture,
+        pipeline: Arc<PipelineState>,
+        metrics: Arc<Metrics>,
+    ) -> Self {
         Self {
             config,
+            raw_capture,
             pipeline,
             metrics,
         }
@@ -519,23 +553,46 @@ impl ProtocolHandler for OtlpHandler {
     }
 
     async fn start(&self, shutdown: CancellationToken) -> Result<()> {
+        if self.raw_capture.enabled && OtlpMode::from_str(&self.config.mode) == OtlpMode::Generic {
+            warn!(
+                "otlp.raw_capture is on in generic mode: _raw duplicates the event, \
+                 roughly doubling produced bytes for no extra information"
+            );
+        }
+
         // Spawn gRPC and HTTP servers concurrently
         let grpc_config = self.config.clone();
+        let grpc_raw = self.raw_capture;
         let grpc_pipeline = self.pipeline.clone();
         let grpc_metrics = self.metrics.clone();
         let grpc_shutdown = shutdown.clone();
 
         let grpc_handle = tokio::spawn(async move {
-            run_grpc_server(&grpc_config, grpc_pipeline, grpc_metrics, grpc_shutdown).await
+            run_grpc_server(
+                &grpc_config,
+                grpc_raw,
+                grpc_pipeline,
+                grpc_metrics,
+                grpc_shutdown,
+            )
+            .await
         });
 
         let http_config = self.config.clone();
+        let http_raw = self.raw_capture;
         let http_pipeline = self.pipeline.clone();
         let http_metrics = self.metrics.clone();
         let http_shutdown = shutdown.clone();
 
         let http_handle = tokio::spawn(async move {
-            run_http_server(&http_config, http_pipeline, http_metrics, http_shutdown).await
+            run_http_server(
+                &http_config,
+                http_raw,
+                http_pipeline,
+                http_metrics,
+                http_shutdown,
+            )
+            .await
         });
 
         // Wait for shutdown

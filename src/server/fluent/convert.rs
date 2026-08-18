@@ -14,7 +14,9 @@
 use bytes::Bytes;
 use rmpv::Value;
 
+use crate::config::RawCapture;
 use crate::error::{Error, Result};
+use crate::server::raw_capture;
 
 /// Extract a unix timestamp (seconds) from a msgpack value.
 ///
@@ -84,8 +86,24 @@ fn msgpack_to_json(val: &Value) -> serde_json::Value {
 }
 
 /// Convert a single entry (timestamp + record) to pipeline JSON.
-fn entry_to_json(tag: &str, timestamp: f64, record: &Value) -> Result<Bytes> {
-    let mut obj = match msgpack_to_json(record) {
+///
+/// With capture enabled, `_raw` holds the record's verbatim msgpack-to-JSON
+/// decode -- the closest thing to the wire form that survives as text, since
+/// msgpack itself cannot go into a JSON string field.
+fn entry_to_json(
+    tag: &str,
+    timestamp: f64,
+    record: &Value,
+    raw_capture: RawCapture,
+) -> Result<Bytes> {
+    let decoded = msgpack_to_json(record);
+
+    // Snapshot the decode before the tag, timestamp and _source below turn it
+    // into an envelope.
+    let prepared = raw_capture::prepare_serialised(&decoded, raw_capture)
+        .map_err(|e| Error::Validation(format!("Fluent raw capture failed: {e}")))?;
+
+    let mut obj = match decoded {
         serde_json::Value::Object(map) => map,
         _ => {
             return Err(Error::Validation(
@@ -114,6 +132,10 @@ fn entry_to_json(tag: &str, timestamp: f64, record: &Value) -> Result<Bytes> {
         serde_json::Value::String("fluent".to_string()),
     );
 
+    if let Some(prepared) = prepared {
+        raw_capture::attach_prepared_to_map(&mut obj, prepared);
+    }
+
     serde_json::to_vec(&obj)
         .map(Bytes::from)
         .map_err(|e| Error::Validation(format!("Fluent JSON serialisation failed: {e}")))
@@ -125,7 +147,7 @@ fn entry_to_json(tag: &str, timestamp: f64, record: &Value) -> Result<Bytes> {
 /// - **Message mode**: `[tag, time, record, option?]`
 /// - **Forward mode**: `[tag, [[time, record], ...], option?]`
 /// - **PackedForward mode**: `[tag, packed_msgpack_bytes, option?]`
-pub fn fluent_to_json(msg: &Value) -> Result<Vec<Bytes>> {
+pub fn fluent_to_json(msg: &Value, raw_capture: RawCapture) -> Result<Vec<Bytes>> {
     let arr = msg
         .as_array()
         .ok_or_else(|| Error::Validation("Fluent Forward message is not an array".into()))?;
@@ -153,7 +175,7 @@ pub fn fluent_to_json(msg: &Value) -> Result<Vec<Bytes>> {
                     continue;
                 }
                 let ts = extract_timestamp(&entry_arr[0]);
-                payloads.push(entry_to_json(tag, ts, &entry_arr[1])?);
+                payloads.push(entry_to_json(tag, ts, &entry_arr[1], raw_capture)?);
             }
             Ok(payloads)
         }
@@ -170,7 +192,7 @@ pub fn fluent_to_json(msg: &Value) -> Result<Vec<Bytes>> {
                     && entry_arr.len() >= 2
                 {
                     let ts = extract_timestamp(&entry_arr[0]);
-                    payloads.push(entry_to_json(tag, ts, &entry_arr[1])?);
+                    payloads.push(entry_to_json(tag, ts, &entry_arr[1], raw_capture)?);
                 }
             }
             Ok(payloads)
@@ -184,7 +206,7 @@ pub fn fluent_to_json(msg: &Value) -> Result<Vec<Bytes>> {
                 ));
             }
             let ts = extract_timestamp(&arr[1]);
-            let payload = entry_to_json(tag, ts, &arr[2])?;
+            let payload = entry_to_json(tag, ts, &arr[2], raw_capture)?;
             Ok(vec![payload])
         }
     }
@@ -223,7 +245,7 @@ mod tests {
             Value::Integer(1_700_000_000.into()),
             make_record("message", "hello world"),
         ]);
-        let payloads = fluent_to_json(&msg).unwrap();
+        let payloads = fluent_to_json(&msg, RawCapture::OFF).unwrap();
         assert_eq!(payloads.len(), 1);
 
         let json: serde_json::Value = serde_json::from_slice(&payloads[0]).unwrap();
@@ -248,7 +270,7 @@ mod tests {
                 ]),
             ]),
         ]);
-        let payloads = fluent_to_json(&msg).unwrap();
+        let payloads = fluent_to_json(&msg, RawCapture::OFF).unwrap();
         assert_eq!(payloads.len(), 2);
 
         let j1: serde_json::Value = serde_json::from_slice(&payloads[0]).unwrap();
@@ -274,7 +296,7 @@ mod tests {
         rmpv::encode::write_value(&mut packed, &entry2).unwrap();
 
         let msg = Value::Array(vec![Value::String("app.log".into()), Value::Binary(packed)]);
-        let payloads = fluent_to_json(&msg).unwrap();
+        let payloads = fluent_to_json(&msg, RawCapture::OFF).unwrap();
         assert_eq!(payloads.len(), 2);
 
         let j1: serde_json::Value = serde_json::from_slice(&payloads[0]).unwrap();
@@ -297,7 +319,7 @@ mod tests {
             Value::Ext(0, data),
             make_record("msg", "with eventtime"),
         ]);
-        let payloads = fluent_to_json(&msg).unwrap();
+        let payloads = fluent_to_json(&msg, RawCapture::OFF).unwrap();
         assert_eq!(payloads.len(), 1);
 
         let json: serde_json::Value = serde_json::from_slice(&payloads[0]).unwrap();
@@ -312,7 +334,7 @@ mod tests {
             Value::Integer(0.into()),
             make_record("k", "v"),
         ]);
-        let payloads = fluent_to_json(&msg).unwrap();
+        let payloads = fluent_to_json(&msg, RawCapture::OFF).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&payloads[0]).unwrap();
         assert_eq!(json["_source"], "fluent");
     }
@@ -320,13 +342,13 @@ mod tests {
     #[test]
     fn test_not_array() {
         let msg = Value::String("bad".into());
-        assert!(fluent_to_json(&msg).is_err());
+        assert!(fluent_to_json(&msg, RawCapture::OFF).is_err());
     }
 
     #[test]
     fn test_too_few_elements() {
         let msg = Value::Array(vec![Value::String("tag".into())]);
-        assert!(fluent_to_json(&msg).is_err());
+        assert!(fluent_to_json(&msg, RawCapture::OFF).is_err());
     }
 
     #[test]
@@ -351,5 +373,88 @@ mod tests {
             make_record("k", "v"),
         ]);
         assert_eq!(extract_chunk_id(&msg), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Raw capture
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn capture_off_emits_no_raw_field() {
+        let msg = Value::Array(vec![
+            Value::String("app.log".into()),
+            Value::Integer(1_700_000_000.into()),
+            make_record("message", "hello"),
+        ]);
+        let payloads = fluent_to_json(&msg, RawCapture::OFF).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&payloads[0]).unwrap();
+        assert!(json.get("_raw").is_none());
+    }
+
+    #[test]
+    fn capture_adds_the_record_before_envelope_fields() {
+        let msg = Value::Array(vec![
+            Value::String("app.log".into()),
+            Value::Integer(1_700_000_000.into()),
+            make_record("message", "hello"),
+        ]);
+        let payloads = fluent_to_json(&msg, RawCapture::on()).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&payloads[0]).unwrap();
+
+        // Envelope fields are added as before.
+        assert_eq!(json["tag"], "app.log");
+        assert_eq!(json["message"], "hello");
+        assert_eq!(json["_source"], "fluent");
+
+        // _raw is the record's own decode, without tag/timestamp/_source.
+        let captured: serde_json::Value =
+            serde_json::from_str(json["_raw"].as_str().unwrap()).unwrap();
+        assert_eq!(captured["message"], "hello");
+        assert!(captured.get("tag").is_none());
+        assert!(captured.get("timestamp").is_none());
+        assert!(captured.get("_source").is_none());
+    }
+
+    #[test]
+    fn capture_applies_to_every_entry_in_forward_mode() {
+        let msg = Value::Array(vec![
+            Value::String("app.log".into()),
+            Value::Array(vec![
+                Value::Array(vec![
+                    Value::Integer(1_700_000_000.into()),
+                    make_record("msg", "one"),
+                ]),
+                Value::Array(vec![
+                    Value::Integer(1_700_000_001.into()),
+                    make_record("msg", "two"),
+                ]),
+            ]),
+        ]);
+        let payloads = fluent_to_json(&msg, RawCapture::on()).unwrap();
+        assert_eq!(payloads.len(), 2);
+
+        for (payload, expected) in payloads.iter().zip(["one", "two"]) {
+            let json: serde_json::Value = serde_json::from_slice(payload).unwrap();
+            let captured: serde_json::Value =
+                serde_json::from_str(json["_raw"].as_str().unwrap()).unwrap();
+            assert_eq!(captured["msg"], expected);
+        }
+    }
+
+    #[test]
+    fn capture_applies_in_packed_forward_mode() {
+        let entry = Value::Array(vec![
+            Value::Integer(1_700_000_000.into()),
+            make_record("msg", "packed"),
+        ]);
+        let mut packed = Vec::new();
+        rmpv::encode::write_value(&mut packed, &entry).unwrap();
+
+        let msg = Value::Array(vec![Value::String("app.log".into()), Value::Binary(packed)]);
+        let payloads = fluent_to_json(&msg, RawCapture::on()).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&payloads[0]).unwrap();
+        let captured: serde_json::Value =
+            serde_json::from_str(json["_raw"].as_str().unwrap()).unwrap();
+        assert_eq!(captured["msg"], "packed");
     }
 }

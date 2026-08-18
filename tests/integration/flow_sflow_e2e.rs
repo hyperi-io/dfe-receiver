@@ -232,8 +232,13 @@ async fn sflow_v5_end_to_end_to_kafka() {
             .await
             .expect("pipeline init"),
     );
-    let handler = FlowHandler::new(config.flow.clone(), noop_flow_metrics(), pipeline)
-        .expect("flow handler new");
+    let handler = FlowHandler::new(
+        config.flow.clone(),
+        config.raw_capture_for(&config.flow.raw_capture),
+        noop_flow_metrics(),
+        pipeline,
+    )
+    .expect("flow handler new");
 
     let handler_shutdown = shutdown.clone();
     let handler_task = tokio::spawn(async move {

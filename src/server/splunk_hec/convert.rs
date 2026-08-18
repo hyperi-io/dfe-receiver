@@ -15,7 +15,9 @@
 use bytes::Bytes;
 use serde::Deserialize;
 
+use crate::config::RawCapture;
 use crate::error::{Error, Result};
+use crate::server::raw_capture;
 
 /// A single Splunk HEC event as sent to `/services/collector/event`.
 ///
@@ -81,7 +83,13 @@ pub fn parse_hec_events(body: &[u8]) -> Result<Vec<HecEvent>> {
 ///
 /// If the event payload is a JSON object, metadata fields are injected into it.
 /// If it's a string or number, it's wrapped as `{"message": <value>, ...metadata}`.
-pub fn hec_event_to_json(event: HecEvent) -> Result<Bytes> {
+///
+/// With capture enabled, `_raw` holds the submitted `event` value as the
+/// sender wrote it, before the HEC metadata below is merged in.
+pub fn hec_event_to_json(event: HecEvent, raw_capture: RawCapture) -> Result<Bytes> {
+    let prepared = raw_capture::prepare_serialised(&event.event, raw_capture)
+        .map_err(|e| Error::Server(format!("HEC raw capture failed: {e}")))?;
+
     let mut obj = match event.event {
         serde_json::Value::Object(map) => map,
         serde_json::Value::String(s) => {
@@ -128,6 +136,10 @@ pub fn hec_event_to_json(event: HecEvent) -> Result<Bytes> {
         }
     }
 
+    if let Some(prepared) = prepared {
+        raw_capture::attach_prepared_to_map(&mut obj, prepared);
+    }
+
     let json =
         serde_json::to_vec(&obj).map_err(|e| Error::Server(format!("JSON serialize: {e}")))?;
 
@@ -144,7 +156,11 @@ pub struct RawMetadata {
 }
 
 /// Convert a raw text line to pipeline-ready JSON bytes.
-pub fn raw_to_json(line: &[u8], metadata: &RawMetadata) -> Result<Bytes> {
+///
+/// With capture enabled, `_raw` holds the line's bytes. `message` already
+/// carries the same text, but only `_raw` states when the bytes were not
+/// valid UTF-8 or exceeded the cap.
+pub fn raw_to_json(line: &[u8], metadata: &RawMetadata, raw_capture: RawCapture) -> Result<Bytes> {
     let message = String::from_utf8_lossy(line);
 
     let mut obj = serde_json::Map::new();
@@ -168,6 +184,8 @@ pub fn raw_to_json(line: &[u8], metadata: &RawMetadata) -> Result<Bytes> {
     if let Some(ref index) = metadata.index {
         obj.insert("index".into(), serde_json::Value::String(index.clone()));
     }
+
+    raw_capture::attach_to_map(&mut obj, line, raw_capture);
 
     let json =
         serde_json::to_vec(&obj).map_err(|e| Error::Server(format!("JSON serialize: {e}")))?;
@@ -206,7 +224,7 @@ mod tests {
     fn test_event_object_payload() {
         let body = br#"{"event":{"msg":"hello","level":"info"}}"#;
         let events = parse_hec_events(body).unwrap();
-        let json = hec_event_to_json(events.into_iter().next().unwrap()).unwrap();
+        let json = hec_event_to_json(events.into_iter().next().unwrap(), RawCapture::OFF).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
         assert_eq!(parsed["msg"], "hello");
         assert_eq!(parsed["level"], "info");
@@ -216,7 +234,7 @@ mod tests {
     fn test_event_string_payload() {
         let body = br#"{"event":"just a string"}"#;
         let events = parse_hec_events(body).unwrap();
-        let json = hec_event_to_json(events.into_iter().next().unwrap()).unwrap();
+        let json = hec_event_to_json(events.into_iter().next().unwrap(), RawCapture::OFF).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
         assert_eq!(parsed["message"], "just a string");
     }
@@ -225,7 +243,7 @@ mod tests {
     fn test_event_number_payload() {
         let body = br#"{"event":42}"#;
         let events = parse_hec_events(body).unwrap();
-        let json = hec_event_to_json(events.into_iter().next().unwrap()).unwrap();
+        let json = hec_event_to_json(events.into_iter().next().unwrap(), RawCapture::OFF).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
         assert_eq!(parsed["message"], 42);
     }
@@ -234,7 +252,7 @@ mod tests {
     fn test_metadata_injection() {
         let body = br#"{"event":{"msg":"test"},"time":1447828325.5,"host":"web01","source":"app","sourcetype":"json","index":"main"}"#;
         let events = parse_hec_events(body).unwrap();
-        let json = hec_event_to_json(events.into_iter().next().unwrap()).unwrap();
+        let json = hec_event_to_json(events.into_iter().next().unwrap(), RawCapture::OFF).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
         assert_eq!(parsed["msg"], "test");
         assert_eq!(parsed["_time"], 1_447_828_325.5);
@@ -248,7 +266,7 @@ mod tests {
     fn test_metadata_does_not_overwrite_event_fields() {
         let body = br#"{"event":{"host":"from-event"},"host":"from-metadata"}"#;
         let events = parse_hec_events(body).unwrap();
-        let json = hec_event_to_json(events.into_iter().next().unwrap()).unwrap();
+        let json = hec_event_to_json(events.into_iter().next().unwrap(), RawCapture::OFF).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
         // Event field takes precedence
         assert_eq!(parsed["host"], "from-event");
@@ -258,7 +276,7 @@ mod tests {
     fn test_fields_merge() {
         let body = br#"{"event":{"msg":"test"},"fields":{"env":"prod","region":"us-east"}}"#;
         let events = parse_hec_events(body).unwrap();
-        let json = hec_event_to_json(events.into_iter().next().unwrap()).unwrap();
+        let json = hec_event_to_json(events.into_iter().next().unwrap(), RawCapture::OFF).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
         assert_eq!(parsed["env"], "prod");
         assert_eq!(parsed["region"], "us-east");
@@ -296,7 +314,7 @@ mod tests {
             sourcetype: Some("syslog".into()),
             index: None,
         };
-        let json = raw_to_json(b"hello world", &metadata).unwrap();
+        let json = raw_to_json(b"hello world", &metadata, RawCapture::OFF).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
         assert_eq!(parsed["message"], "hello world");
         assert_eq!(parsed["host"], "web01");
@@ -308,9 +326,71 @@ mod tests {
     #[test]
     fn test_raw_to_json_no_metadata() {
         let metadata = RawMetadata::default();
-        let json = raw_to_json(b"plain text event", &metadata).unwrap();
+        let json = raw_to_json(b"plain text event", &metadata, RawCapture::OFF).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
         assert_eq!(parsed["message"], "plain text event");
         assert_eq!(parsed.as_object().unwrap().len(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Raw capture
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn capture_off_emits_no_raw_field() {
+        let events = parse_hec_events(br#"{"event":{"msg":"hello"}}"#).unwrap();
+        let json = hec_event_to_json(events.into_iter().next().unwrap(), RawCapture::OFF).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        assert!(parsed.get("_raw").is_none());
+    }
+
+    #[test]
+    fn event_capture_holds_the_payload_before_metadata_merge() {
+        let body = br#"{"event":{"msg":"hello"},"host":"web01","fields":{"env":"prod"}}"#;
+        let events = parse_hec_events(body).unwrap();
+        let json = hec_event_to_json(events.into_iter().next().unwrap(), RawCapture::on()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
+
+        // Metadata is merged into the event as before.
+        assert_eq!(parsed["msg"], "hello");
+        assert_eq!(parsed["host"], "web01");
+        assert_eq!(parsed["env"], "prod");
+
+        // _raw is what the sender put in `event`, and nothing else.
+        let captured: serde_json::Value =
+            serde_json::from_str(parsed["_raw"].as_str().unwrap()).unwrap();
+        assert_eq!(captured["msg"], "hello");
+        assert!(captured.get("host").is_none());
+        assert!(captured.get("env").is_none());
+    }
+
+    #[test]
+    fn event_capture_works_for_a_bare_string_payload() {
+        let events = parse_hec_events(br#"{"event":"just a string"}"#).unwrap();
+        let json = hec_event_to_json(events.into_iter().next().unwrap(), RawCapture::on()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
+
+        assert_eq!(parsed["message"], "just a string");
+        // The event value was a JSON string, so _raw holds it quoted.
+        assert_eq!(parsed["_raw"], r#""just a string""#);
+    }
+
+    #[test]
+    fn raw_endpoint_capture_keeps_the_line_bytes() {
+        let metadata = RawMetadata::default();
+        let json = raw_to_json(b"hello world", &metadata, RawCapture::on()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        assert_eq!(parsed["message"], "hello world");
+        assert_eq!(parsed["_raw"], "hello world");
+    }
+
+    #[test]
+    fn raw_endpoint_capture_flags_invalid_utf8() {
+        // `message` silently replaces the bad byte; only _raw_lossy says so.
+        let metadata = RawMetadata::default();
+        let json = raw_to_json(b"caf\xe9", &metadata, RawCapture::on()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        assert_eq!(parsed["_raw_lossy"], true);
+        assert!(parsed["_raw"].as_str().unwrap().contains('\u{fffd}'));
     }
 }

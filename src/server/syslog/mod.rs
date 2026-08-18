@@ -31,7 +31,7 @@ use tracing::{debug, error, info, warn};
 /// Debounced timestamp for syslog UDP recv error warnings (1 per 5s).
 static SYSLOG_UDP_WARN: AtomicU64 = AtomicU64::new(0);
 
-use crate::config::SyslogConfig;
+use crate::config::{RawCapture, SyslogConfig};
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
@@ -55,6 +55,7 @@ async fn run_udp(
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
     shutdown: CancellationToken,
+    raw_capture: RawCapture,
 ) -> Result<()> {
     let socket = UdpSocket::bind(bind_addr)
         .await
@@ -94,7 +95,7 @@ async fn run_udp(
                     }
                 };
 
-                match syslog_to_json(raw) {
+                match syslog_to_json(raw, raw_capture) {
                     Ok(payload) => {
                         if let Err(e) = pipeline.process(payload).await {
                             debug!(peer = %peer_addr, error = %e, "Failed to process syslog UDP event");
@@ -128,6 +129,7 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
     shutdown: CancellationToken,
     peer_addr: SocketAddr,
     max_message_size: usize,
+    raw_capture: RawCapture,
 ) {
     use tokio_stream::StreamExt;
 
@@ -145,7 +147,7 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
                         metrics.inc_requests_total("syslog");
                         metrics.add_bytes_received("syslog", raw.len() as u64);
 
-                        match syslog_to_json(&raw) {
+                        match syslog_to_json(&raw, raw_capture) {
                             Ok(payload) => {
                                 if let Err(e) = pipeline.process(payload).await {
                                     debug!(peer = %peer_addr, error = %e, "Failed to process syslog TCP event");
@@ -180,6 +182,7 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
 // ---------------------------------------------------------------------------
 
 /// Run the TCP syslog listener (plain or TLS).
+#[allow(clippy::too_many_arguments)]
 async fn run_tcp(
     bind_addr: SocketAddr,
     pipeline: Arc<PipelineState>,
@@ -187,6 +190,7 @@ async fn run_tcp(
     shutdown: CancellationToken,
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
     max_message_size: usize,
+    raw_capture: RawCapture,
     label: &str,
 ) -> Result<()> {
     let listener = TcpListener::bind(bind_addr)
@@ -235,13 +239,15 @@ async fn run_tcp(
 
                         debug!(peer = %peer_addr, "Syslog TLS connection established");
                         handle_tcp_connection(
-                            tls_stream, pipeline, metrics, conn_shutdown, peer_addr, max_message_size,
+                            tls_stream, pipeline, metrics, conn_shutdown, peer_addr,
+                            max_message_size, raw_capture,
                         ).await;
                     });
                 } else {
                     tokio::spawn(async move {
                         handle_tcp_connection(
-                            stream, pipeline, metrics, conn_shutdown, peer_addr, max_message_size,
+                            stream, pipeline, metrics, conn_shutdown, peer_addr,
+                            max_message_size, raw_capture,
                         ).await;
                     });
                 }
@@ -259,14 +265,22 @@ async fn run_tcp(
 /// Syslog protocol handler.
 pub struct SyslogHandler {
     config: SyslogConfig,
+    /// Raw capture already resolved against the common `raw_capture` block.
+    raw_capture: RawCapture,
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
 }
 
 impl SyslogHandler {
-    pub fn new(config: SyslogConfig, pipeline: Arc<PipelineState>, metrics: Arc<Metrics>) -> Self {
+    pub fn new(
+        config: SyslogConfig,
+        raw_capture: RawCapture,
+        pipeline: Arc<PipelineState>,
+        metrics: Arc<Metrics>,
+    ) -> Self {
         Self {
             config,
+            raw_capture,
             pipeline,
             metrics,
         }
@@ -298,6 +312,7 @@ impl ProtocolHandler for SyslogHandler {
             .map_err(|e| Error::Config(format!("invalid syslog TCP bind address: {e}")))?;
 
         let max_msg = self.config.max_message_size;
+        let raw_capture = self.raw_capture;
 
         // Spawn UDP listener
         let udp_handle = {
@@ -305,7 +320,9 @@ impl ProtocolHandler for SyslogHandler {
             let metrics = self.metrics.clone();
             let udp_shutdown = shutdown.clone();
             tokio::spawn(async move {
-                if let Err(e) = run_udp(udp_addr, pipeline, metrics, udp_shutdown).await {
+                if let Err(e) =
+                    run_udp(udp_addr, pipeline, metrics, udp_shutdown, raw_capture).await
+                {
                     error!(error = %e, "Syslog UDP listener failed");
                 }
             })
@@ -324,6 +341,7 @@ impl ProtocolHandler for SyslogHandler {
                     tcp_shutdown,
                     None,
                     max_msg,
+                    raw_capture,
                     "TCP",
                 )
                 .await
@@ -355,6 +373,7 @@ impl ProtocolHandler for SyslogHandler {
                         tls_shutdown,
                         Some(acceptor),
                         max_msg,
+                        raw_capture,
                         "TLS",
                     )
                     .await

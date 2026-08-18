@@ -109,7 +109,12 @@ async fn start_gelf_handler(config: Config) -> (CancellationToken, Arc<Metrics>)
         .expect("Failed to create pipeline"),
     );
 
-    let handler = GelfHandler::new(config.gelf.clone(), pipeline, metrics.clone());
+    let handler = GelfHandler::new(
+        config.gelf.clone(),
+        config.raw_capture_for(&config.gelf.raw_capture),
+        pipeline,
+        metrics.clone(),
+    );
 
     let handler_shutdown = shutdown.clone();
     tokio::spawn(async move {

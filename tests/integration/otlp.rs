@@ -66,7 +66,12 @@ async fn start_otlp_handler(config: Config) -> (CancellationToken, Arc<Metrics>)
         .expect("Failed to create pipeline"),
     );
 
-    let handler = OtlpHandler::new(config.otlp.clone(), pipeline, metrics.clone());
+    let handler = OtlpHandler::new(
+        config.otlp.clone(),
+        config.raw_capture_for(&config.otlp.raw_capture),
+        pipeline,
+        metrics.clone(),
+    );
 
     let handler_shutdown = shutdown.clone();
     tokio::spawn(async move {

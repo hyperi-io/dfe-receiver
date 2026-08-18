@@ -16,11 +16,15 @@ use std::net::IpAddr;
 
 use crate::config::IpFilterConfig;
 
+/// Shape of the emitted event: one per packet, or one per flow record.
+///
+/// Raw record retention is no longer a mode. It is
+/// `flow.raw_capture.enabled`, which composes with either shape and writes
+/// the common-header `_raw` field like every other transport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputMode {
     Canonical,
-    CanonicalWithRaw,
     Exploded,
 }
 
@@ -31,10 +35,18 @@ impl Default for OutputMode {
 }
 
 impl OutputMode {
+    /// Parse a config string, `None` for an unrecognised value.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "canonical" => Some(OutputMode::Canonical),
+            "exploded" => Some(OutputMode::Exploded),
+            _ => None,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             OutputMode::Canonical => "canonical",
-            OutputMode::CanonicalWithRaw => "canonical_with_raw",
             OutputMode::Exploded => "exploded",
         }
     }
@@ -200,6 +212,13 @@ pub struct FlowConfig {
     /// Flipped to false in a follow-up PR after stability period.
     #[serde(default = "yes")]
     pub experimental: bool,
+
+    /// Raw-record capture override (inherits the common `raw_capture` block).
+    ///
+    /// `_raw` carries the decoder's verbatim record rendering: a JSON array
+    /// of every record in `canonical` mode, the single record in `exploded`.
+    #[serde(default)]
+    pub raw_capture: crate::config::RawCaptureConfig,
 }
 
 fn default_bind() -> IpAddr {
@@ -233,6 +252,7 @@ impl Default for FlowConfig {
             sflow: SflowSubConfig::default(),
             split: None,
             experimental: true,
+            raw_capture: crate::config::RawCaptureConfig::default(),
         }
     }
 }
@@ -380,7 +400,53 @@ experimental: false
     #[test]
     fn output_mode_label_strings() {
         assert_eq!(OutputMode::Canonical.label(), "canonical");
-        assert_eq!(OutputMode::CanonicalWithRaw.label(), "canonical_with_raw");
+        assert_eq!(OutputMode::parse("exploded"), Some(OutputMode::Exploded));
+        assert_eq!(OutputMode::parse("CANONICAL"), Some(OutputMode::Canonical));
+        // Removed in favour of flow.raw_capture.enabled -- must not resolve.
+        assert_eq!(OutputMode::parse("canonical_with_raw"), None);
         assert_eq!(OutputMode::Exploded.label(), "exploded");
+    }
+
+    #[test]
+    fn removed_canonical_with_raw_fails_the_yaml_parse_loudly() {
+        // The breaking half of the flow fold: a config file still carrying the
+        // old mode must stop the receiver rather than silently downgrade to
+        // canonical and drop the raw records the operator asked for.
+        let yaml = "
+enabled: true
+output:
+  mode: canonical_with_raw
+";
+        let err = serde_yaml_ng::from_str::<FlowConfig>(yaml)
+            .expect_err("removed variant must not deserialise");
+        assert!(
+            err.to_string().contains("canonical_with_raw"),
+            "error should name the offending value: {err}"
+        );
+    }
+
+    #[test]
+    fn raw_capture_defaults_to_unset_so_it_inherits() {
+        let cfg = FlowConfig::default();
+        assert!(cfg.raw_capture.enabled.is_none());
+        assert!(cfg.raw_capture.max_bytes.is_none());
+    }
+
+    #[test]
+    fn raw_capture_parses_from_the_flow_block() {
+        let yaml = "
+enabled: true
+raw_capture:
+  enabled: true
+  max_bytes: 2048
+  on_oversize: omit
+";
+        let cfg: FlowConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(cfg.raw_capture.enabled, Some(true));
+        assert_eq!(cfg.raw_capture.max_bytes, Some(2048));
+        assert_eq!(
+            cfg.raw_capture.on_oversize,
+            Some(crate::config::OversizePolicy::Omit)
+        );
     }
 }

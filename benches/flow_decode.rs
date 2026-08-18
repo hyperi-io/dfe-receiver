@@ -22,6 +22,7 @@
 #![allow(clippy::unwrap_used)]
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use dfe_receiver::config::RawCapture;
 use dfe_receiver::server::flow::config::OutputMode;
 use dfe_receiver::server::flow::decoder::FlowDecoder;
 use dfe_receiver::server::flow::dispatch::ProtocolKind;
@@ -122,17 +123,21 @@ fn bench_envelope_canonical(c: &mut Criterion) {
     let now = "2026-05-20T00:00:00Z";
 
     let mut g = c.benchmark_group("envelope");
-    for mode in [
-        OutputMode::Canonical,
-        OutputMode::CanonicalWithRaw,
-        OutputMode::Exploded,
+    // Raw capture is orthogonal to the mode, so bench both settings of it:
+    // it is the cost an operator pays for turning `_raw` on.
+    for (mode, raw) in [
+        (OutputMode::Canonical, RawCapture::OFF),
+        (OutputMode::Canonical, RawCapture::on()),
+        (OutputMode::Exploded, RawCapture::OFF),
+        (OutputMode::Exploded, RawCapture::on()),
     ] {
+        let label = format!("{mode:?}_raw{}", raw.enabled);
         g.bench_with_input(
-            BenchmarkId::new("netflow_v5", format!("{mode:?}")),
-            &mode,
-            |b, &m| {
+            BenchmarkId::new("netflow_v5", label),
+            &(mode, raw),
+            |b, &(m, r)| {
                 b.iter(|| {
-                    let _ = render_packet::<NetflowDecoder>(&decoded, m, now, &mut buf);
+                    let _ = render_packet::<NetflowDecoder>(&decoded, m, r, now, &mut buf);
                 });
             },
         );

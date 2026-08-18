@@ -26,7 +26,7 @@ use tokio_util::codec::{Decoder, FramedRead};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use crate::config::GelfConfig;
+use crate::config::{GelfConfig, RawCapture};
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
@@ -114,6 +114,7 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
     shutdown: CancellationToken,
     peer_addr: SocketAddr,
     max_message_size: usize,
+    raw_capture: RawCapture,
 ) {
     use tokio_stream::StreamExt;
 
@@ -131,7 +132,7 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
                         metrics.inc_requests_total("gelf");
                         metrics.add_bytes_received("gelf", raw.len() as u64);
 
-                        match gelf_to_json(&raw) {
+                        match gelf_to_json(&raw, raw_capture) {
                             Ok(payload) => {
                                 if let Err(e) = pipeline.process(payload).await {
                                     debug!(peer = %peer_addr, error = %e, "Failed to process GELF event");
@@ -172,6 +173,7 @@ async fn run_tcp(
     shutdown: CancellationToken,
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
     max_message_size: usize,
+    raw_capture: RawCapture,
 ) -> Result<()> {
     let listener = TcpListener::bind(bind_addr)
         .await
@@ -218,13 +220,15 @@ async fn run_tcp(
                         };
 
                         handle_tcp_connection(
-                            tls_stream, pipeline, metrics, conn_shutdown, peer_addr, max_message_size,
+                            tls_stream, pipeline, metrics, conn_shutdown, peer_addr,
+                            max_message_size, raw_capture,
                         ).await;
                     });
                 } else {
                     tokio::spawn(async move {
                         handle_tcp_connection(
-                            stream, pipeline, metrics, conn_shutdown, peer_addr, max_message_size,
+                            stream, pipeline, metrics, conn_shutdown, peer_addr,
+                            max_message_size, raw_capture,
                         ).await;
                     });
                 }
@@ -242,14 +246,22 @@ async fn run_tcp(
 /// GELF protocol handler.
 pub struct GelfHandler {
     config: GelfConfig,
+    /// Raw capture already resolved against the common `raw_capture` block.
+    raw_capture: RawCapture,
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
 }
 
 impl GelfHandler {
-    pub fn new(config: GelfConfig, pipeline: Arc<PipelineState>, metrics: Arc<Metrics>) -> Self {
+    pub fn new(
+        config: GelfConfig,
+        raw_capture: RawCapture,
+        pipeline: Arc<PipelineState>,
+        metrics: Arc<Metrics>,
+    ) -> Self {
         Self {
             config,
+            raw_capture,
             pipeline,
             metrics,
         }
@@ -285,10 +297,19 @@ impl ProtocolHandler for GelfHandler {
         let pipeline = self.pipeline.clone();
         let metrics = self.metrics.clone();
         let tcp_shutdown = shutdown.clone();
+        let raw_capture = self.raw_capture;
 
         let tcp_handle = tokio::spawn(async move {
-            if let Err(e) =
-                run_tcp(addr, pipeline, metrics, tcp_shutdown, tls_acceptor, max_msg).await
+            if let Err(e) = run_tcp(
+                addr,
+                pipeline,
+                metrics,
+                tcp_shutdown,
+                tls_acceptor,
+                max_msg,
+                raw_capture,
+            )
+            .await
             {
                 error!(error = %e, "GELF TCP listener failed");
             }
