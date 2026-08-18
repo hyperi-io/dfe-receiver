@@ -39,6 +39,26 @@ Syslog, Fluent Forward, GELF, Prometheus Remote Write, Flow [NetFlow + sFlow
 
 ## Quick Start
 
+### Build prerequisites
+
+`protoc` must be on `PATH`. The gRPC, OTLP and Prometheus Remote Write
+protocols compile vendored `.proto` files at build time, and so does `scalo` --
+without it the build fails inside a dependency's build script rather than
+anywhere that names the missing package.
+
+```bash
+# Debian / Ubuntu
+sudo apt-get install -y protobuf-compiler
+
+# macOS
+brew install protobuf
+
+protoc --version
+```
+
+`cmake` and a C toolchain are also needed: `aws-lc-sys` (rustls' crypto
+backend) and `rdkafka-sys` both build native code from source.
+
 ```bash
 # Build
 cargo build --release
