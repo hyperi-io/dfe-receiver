@@ -44,15 +44,24 @@ fn random_port() -> u16 {
 /// Poll the loopback port until it accepts a TCP connection or the budget
 /// is exhausted. Replaces blind `sleep` waits that race the spawned
 /// handler's bind and produce ConnectionRefused on busy ARC runners.
+///
+/// The budget is generous because it is protecting against a race, not
+/// measuring anything: a loaded machine takes longer to get the handler bound,
+/// and the poll returns the instant it is up, so a larger ceiling costs
+/// nothing on a quiet one.
+const PORT_WAIT_BUDGET: Duration = Duration::from_secs(30);
+const PORT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
 async fn wait_for_port(port: u16) {
     let addr = format!("127.0.0.1:{port}");
-    for _ in 0..100 {
+    let deadline = tokio::time::Instant::now() + PORT_WAIT_BUDGET;
+    while tokio::time::Instant::now() < deadline {
         if tokio::net::TcpStream::connect(&addr).await.is_ok() {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(PORT_POLL_INTERVAL).await;
     }
-    panic!("port {port} never accepted connections within 5s");
+    panic!("port {port} never accepted connections within {PORT_WAIT_BUDGET:?}");
 }
 
 /// Build a config wired to route via Kafka (rather than the in-memory loader).
