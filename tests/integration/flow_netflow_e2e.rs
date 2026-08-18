@@ -96,10 +96,11 @@ fn noop_flow_metrics() -> FlowMetrics {
     }
 }
 
-/// Pick a random high UDP port to avoid privilege requirements and collisions
-/// with other tests running in parallel on the same host.
+/// A high UDP port the OS says is free, avoiding privilege requirements and
+/// the collisions a guessed port hits when tests run in parallel.
 fn random_udp_port() -> u16 {
-    20000 + (uuid::Uuid::new_v4().as_u128() % 30000) as u16
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind ephemeral udp port");
+    socket.local_addr().expect("local addr").port()
 }
 
 /// Wait until UDP port is bound by sending a probe and confirming no

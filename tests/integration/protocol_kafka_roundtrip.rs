@@ -37,8 +37,17 @@ use tokio_util::sync::CancellationToken;
 use crate::common::{kafka_backend, kafka_consume_next, kafka_consumer, test_topic};
 use crate::test_name;
 
+/// A port the OS says is free right now.
+///
+/// Guessing a random port in 30000-50000 collides on a busy runner -- that
+/// range is also where testcontainers maps its host ports -- and a collision
+/// makes the handler's bind fail, so the port never accepts and the wait below
+/// burns its whole budget on a server that was never listening.
 fn random_port() -> u16 {
-    30000 + (uuid::Uuid::new_v4().as_u128() % 20000) as u16
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    let port = listener.local_addr().expect("local addr").port();
+    drop(listener);
+    port
 }
 
 /// Poll the loopback port until it accepts a TCP connection or the budget
@@ -127,7 +136,11 @@ async fn test_prometheus_rw_to_kafka_roundtrip() {
     );
     let handler_shutdown = shutdown.clone();
     tokio::spawn(async move {
-        let _ = handler.start(handler_shutdown).await;
+        // Surfaced, not swallowed: a failed bind here used to be invisible,
+        // and the only symptom was the port wait below timing out.
+        if let Err(e) = handler.start(handler_shutdown).await {
+            eprintln!("handler exited with an error: {e}");
+        }
     });
     wait_for_port(rw_port).await;
 
@@ -230,7 +243,11 @@ async fn test_splunk_hec_to_kafka_roundtrip() {
     );
     let handler_shutdown = shutdown.clone();
     tokio::spawn(async move {
-        let _ = handler.start(handler_shutdown).await;
+        // Surfaced, not swallowed: a failed bind here used to be invisible,
+        // and the only symptom was the port wait below timing out.
+        if let Err(e) = handler.start(handler_shutdown).await {
+            eprintln!("handler exited with an error: {e}");
+        }
     });
     wait_for_port(hec_port).await;
 

@@ -35,7 +35,10 @@ use tokio_util::sync::CancellationToken;
 
 /// Get a random port for testing.
 fn random_port() -> u16 {
-    10000 + (uuid::Uuid::new_v4().as_u128() % 10000) as u16
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    let port = listener.local_addr().expect("local addr").port();
+    drop(listener);
+    port
 }
 
 /// Create a test config with specified settings.
