@@ -3,6 +3,8 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.15.21](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.20...v1.15.21) (2026-08-18)
+
 ## [1.15.20](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.19...v1.15.20) (2026-08-17)
 
 ## [1.15.19](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.18...v1.15.19) (2026-08-04)
