@@ -218,7 +218,7 @@ harness = false
 
 [[bin]]
 name = "pgo-driver"
-path = "src/bin/pgo-driver.rs"
+path = "src/bin/pgo_driver.rs"
 required-features = ["pgo-driver"]
 
 [lints.rust]
