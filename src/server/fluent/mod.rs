@@ -26,7 +26,7 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use crate::config::FluentConfig;
+use crate::config::{FluentConfig, RawCapture};
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
@@ -52,6 +52,7 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
     shutdown: CancellationToken,
     peer_addr: SocketAddr,
     max_buffer_size: usize,
+    raw_capture: RawCapture,
 ) {
     use tokio::io::AsyncReadExt;
 
@@ -107,7 +108,7 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
                     // Check for chunk ACK before processing
                     let chunk_id = extract_chunk_id(&msg);
 
-                    match fluent_to_json(&msg) {
+                    match fluent_to_json(&msg, raw_capture) {
                         Ok(payloads) => {
                             let (success, first_err) = pipeline.process_batch(&payloads).await;
                             if first_err.is_some() {
@@ -158,6 +159,7 @@ async fn run_tcp(
     shutdown: CancellationToken,
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
     max_buffer_size: usize,
+    raw_capture: RawCapture,
 ) -> Result<()> {
     let listener = TcpListener::bind(bind_addr)
         .await
@@ -205,14 +207,14 @@ async fn run_tcp(
 
                         handle_tcp_connection(
                             tls_stream, pipeline, metrics, conn_shutdown, peer_addr,
-                            max_buffer_size,
+                            max_buffer_size, raw_capture,
                         ).await;
                     });
                 } else {
                     tokio::spawn(async move {
                         handle_tcp_connection(
                             stream, pipeline, metrics, conn_shutdown, peer_addr,
-                            max_buffer_size,
+                            max_buffer_size, raw_capture,
                         ).await;
                     });
                 }
@@ -230,14 +232,22 @@ async fn run_tcp(
 /// Fluent Forward protocol handler.
 pub struct FluentHandler {
     config: FluentConfig,
+    /// Raw capture already resolved against the common `raw_capture` block.
+    raw_capture: RawCapture,
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
 }
 
 impl FluentHandler {
-    pub fn new(config: FluentConfig, pipeline: Arc<PipelineState>, metrics: Arc<Metrics>) -> Self {
+    pub fn new(
+        config: FluentConfig,
+        raw_capture: RawCapture,
+        pipeline: Arc<PipelineState>,
+        metrics: Arc<Metrics>,
+    ) -> Self {
         Self {
             config,
+            raw_capture,
             pipeline,
             metrics,
         }
@@ -272,6 +282,7 @@ impl ProtocolHandler for FluentHandler {
         let metrics = self.metrics.clone();
         let tcp_shutdown = shutdown.clone();
         let max_buffer_size = self.config.max_message_size;
+        let raw_capture = self.raw_capture;
 
         let tcp_handle = tokio::spawn(async move {
             if let Err(e) = run_tcp(
@@ -281,6 +292,7 @@ impl ProtocolHandler for FluentHandler {
                 tcp_shutdown,
                 tls_acceptor,
                 max_buffer_size,
+                raw_capture,
             )
             .await
             {

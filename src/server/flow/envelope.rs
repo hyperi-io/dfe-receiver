@@ -1,12 +1,18 @@
 //! Render a `DecodedPacket<R>` into JSON envelopes per the configured `OutputMode`.
 //!
-//! The three modes share top-level envelope fields (_source, protocol,
-//! version, exporter_ip, observation_domain, packet_seq, t_collected). Modes
-//! differ in whether they emit per-packet (Canonical/CanonicalWithRaw) or
-//! per-record (Exploded).
+//! Both modes share top-level envelope fields (_source, protocol, version,
+//! exporter_ip, observation_domain, packet_seq, t_collected). They differ in
+//! whether they emit per-packet (Canonical) or per-record (Exploded).
+//!
+//! Raw retention is orthogonal to the mode: with `flow.raw_capture.enabled`,
+//! each event also carries the decoder's verbatim record rendering in the
+//! common-header `_raw` field -- a JSON array of every record in Canonical
+//! mode, the single record in Exploded.
 
+use crate::config::RawCapture;
 use crate::server::flow::config::OutputMode;
 use crate::server::flow::decoder::{DecodedPacket, FlowDecoder};
+use crate::server::raw_capture;
 use std::io::{self, Write};
 use std::ops::Range;
 
@@ -17,31 +23,68 @@ use std::ops::Range;
 pub fn render_packet<D: FlowDecoder>(
     decoded: &DecodedPacket<D::Record>,
     mode: OutputMode,
+    raw: RawCapture,
     now_rfc3339: &str,
     buf: &mut Vec<u8>,
 ) -> io::Result<Vec<Range<usize>>> {
     buf.clear();
-    let mut ranges = Vec::new();
+    let mut ranges = Vec::with_capacity(match mode {
+        OutputMode::Canonical => 1,
+        OutputMode::Exploded => decoded.records.len(),
+    });
+
+    // One scratch buffer for the whole packet, reused across records. Only
+    // allocated when capture is on, and sized so the common case does not
+    // grow it.
+    let mut scratch = if raw.enabled {
+        Vec::with_capacity(RAW_SCRATCH_HINT_PER_RECORD * decoded.records.len().max(1))
+    } else {
+        Vec::new()
+    };
+
     match mode {
         OutputMode::Canonical => {
             let start = buf.len();
-            render_canonical_packet::<D>(decoded, now_rfc3339, buf)?;
-            ranges.push(start..buf.len());
-        }
-        OutputMode::CanonicalWithRaw => {
-            let start = buf.len();
-            render_canonical_with_raw::<D>(decoded, now_rfc3339, buf)?;
+            render_canonical_packet::<D>(decoded, raw, now_rfc3339, buf, &mut scratch)?;
             ranges.push(start..buf.len());
         }
         OutputMode::Exploded => {
             for (i, record) in decoded.records.iter().enumerate() {
                 let start = buf.len();
-                render_exploded_record::<D>(decoded, record, i, now_rfc3339, buf)?;
+                render_exploded_record::<D>(
+                    decoded,
+                    record,
+                    i,
+                    raw,
+                    now_rfc3339,
+                    buf,
+                    &mut scratch,
+                )?;
                 ranges.push(start..buf.len());
             }
         }
     }
     Ok(ranges)
+}
+
+/// Starting scratch capacity per flow record, in bytes.
+const RAW_SCRATCH_HINT_PER_RECORD: usize = 256;
+
+/// Render every record's verbatim form as a JSON array into `scratch`.
+fn raw_records_array<D: FlowDecoder>(
+    decoded: &DecodedPacket<D::Record>,
+    scratch: &mut Vec<u8>,
+) -> io::Result<()> {
+    scratch.clear();
+    scratch.push(b'[');
+    for (i, r) in decoded.records.iter().enumerate() {
+        if i > 0 {
+            scratch.push(b',');
+        }
+        D::render_raw(r, scratch)?;
+    }
+    scratch.push(b']');
+    Ok(())
 }
 
 fn write_envelope_head<D: FlowDecoder>(
@@ -69,8 +112,10 @@ fn write_envelope_head<D: FlowDecoder>(
 
 fn render_canonical_packet<D: FlowDecoder>(
     decoded: &DecodedPacket<D::Record>,
+    raw: RawCapture,
     now_rfc3339: &str,
     buf: &mut Vec<u8>,
+    scratch: &mut Vec<u8>,
 ) -> io::Result<()> {
     write_envelope_head::<D>(decoded, now_rfc3339, buf)?;
     buf.extend_from_slice(br#","record_count":"#);
@@ -82,33 +127,12 @@ fn render_canonical_packet<D: FlowDecoder>(
         }
         D::render_canonical(r, buf)?;
     }
-    buf.extend_from_slice(b"]}");
-    Ok(())
-}
-
-fn render_canonical_with_raw<D: FlowDecoder>(
-    decoded: &DecodedPacket<D::Record>,
-    now_rfc3339: &str,
-    buf: &mut Vec<u8>,
-) -> io::Result<()> {
-    write_envelope_head::<D>(decoded, now_rfc3339, buf)?;
-    buf.extend_from_slice(br#","record_count":"#);
-    write!(buf, "{}", decoded.records.len())?;
-    buf.extend_from_slice(br#","flows":["#);
-    for (i, r) in decoded.records.iter().enumerate() {
-        if i > 0 {
-            buf.push(b',');
-        }
-        D::render_canonical(r, buf)?;
+    buf.push(b']');
+    if raw.enabled {
+        raw_records_array::<D>(decoded, scratch)?;
+        raw_capture::append_to_json_buf(buf, scratch, raw);
     }
-    buf.extend_from_slice(br#"],"raw":["#);
-    for (i, r) in decoded.records.iter().enumerate() {
-        if i > 0 {
-            buf.push(b',');
-        }
-        D::render_raw(r, buf)?;
-    }
-    buf.extend_from_slice(b"]}");
+    buf.push(b'}');
     Ok(())
 }
 
@@ -116,8 +140,10 @@ fn render_exploded_record<D: FlowDecoder>(
     decoded: &DecodedPacket<D::Record>,
     record: &D::Record,
     record_index: usize,
+    raw: RawCapture,
     now_rfc3339: &str,
     buf: &mut Vec<u8>,
+    scratch: &mut Vec<u8>,
 ) -> io::Result<()> {
     write_envelope_head::<D>(decoded, now_rfc3339, buf)?;
     buf.extend_from_slice(br#","record_count":1,"record_index":"#);
@@ -126,6 +152,11 @@ fn render_exploded_record<D: FlowDecoder>(
     write!(buf, "{}", decoded.records.len())?;
     buf.extend_from_slice(br#","flow":"#);
     D::render_canonical(record, buf)?;
+    if raw.enabled {
+        scratch.clear();
+        D::render_raw(record, scratch)?;
+        raw_capture::append_to_json_buf(buf, scratch, raw);
+    }
     buf.push(b'}');
     Ok(())
 }
@@ -154,6 +185,7 @@ mod tests {
         let ranges = render_packet::<SflowDecoder>(
             &decoded,
             OutputMode::Canonical,
+            RawCapture::OFF,
             "2026-05-20T00:00:00Z",
             &mut buf,
         )
@@ -170,20 +202,117 @@ mod tests {
     }
 
     #[test]
-    fn canonical_with_raw_includes_raw_array() {
-        let decoded = fake_decoded_sflow_empty();
+    fn canonical_without_capture_has_no_raw_field() {
+        let mut decoded = fake_decoded_sflow_empty();
+        decoded.records.push(SflowRecord::Counter {
+            generic: None,
+            raw_json: r#"{"kind":"counter"}"#.into(),
+        });
         let mut buf = Vec::new();
         let ranges = render_packet::<SflowDecoder>(
             &decoded,
-            OutputMode::CanonicalWithRaw,
+            OutputMode::Canonical,
+            RawCapture::OFF,
+            "2026-05-20T00:00:00Z",
+            &mut buf,
+        )
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&buf[ranges[0].clone()]).unwrap();
+        assert!(parsed.get("_raw").is_none());
+    }
+
+    #[test]
+    fn canonical_capture_adds_raw_alongside_the_parsed_flows() {
+        let mut decoded = fake_decoded_sflow_empty();
+        decoded.records.push(SflowRecord::Counter {
+            generic: None,
+            raw_json: r#"{"kind":"counter","n":1}"#.into(),
+        });
+        decoded.records.push(SflowRecord::Counter {
+            generic: None,
+            raw_json: r#"{"kind":"counter","n":2}"#.into(),
+        });
+        let mut buf = Vec::new();
+        let ranges = render_packet::<SflowDecoder>(
+            &decoded,
+            OutputMode::Canonical,
+            RawCapture::on(),
             "2026-05-20T00:00:00Z",
             &mut buf,
         )
         .unwrap();
         assert_eq!(ranges.len(), 1);
-        let json = std::str::from_utf8(&buf[ranges[0].clone()]).unwrap();
-        assert!(json.contains(r#""flows":[]"#));
-        assert!(json.contains(r#""raw":[]"#));
+
+        let parsed: serde_json::Value = serde_json::from_slice(&buf[ranges[0].clone()]).unwrap();
+        // The parsed envelope is untouched; _raw is an addition to it.
+        assert_eq!(parsed["record_count"], 2);
+        assert_eq!(parsed["flows"].as_array().unwrap().len(), 2);
+        assert_eq!(parsed["_source"], "sflow");
+
+        // _raw is a STRING holding the verbatim record array, because the
+        // common-header column it lands in is text, not JSON.
+        let raw = parsed["_raw"].as_str().expect("_raw is a string");
+        let inner: serde_json::Value = serde_json::from_str(raw).unwrap();
+        assert_eq!(inner.as_array().unwrap().len(), 2);
+        assert_eq!(inner[0]["n"], 1);
+        assert_eq!(inner[1]["n"], 2);
+    }
+
+    #[test]
+    fn exploded_capture_puts_one_record_in_each_events_raw() {
+        let mut decoded = fake_decoded_sflow_empty();
+        decoded.records.push(SflowRecord::Counter {
+            generic: None,
+            raw_json: r#"{"n":1}"#.into(),
+        });
+        decoded.records.push(SflowRecord::Counter {
+            generic: None,
+            raw_json: r#"{"n":2}"#.into(),
+        });
+        let mut buf = Vec::new();
+        let ranges = render_packet::<SflowDecoder>(
+            &decoded,
+            OutputMode::Exploded,
+            RawCapture::on(),
+            "2026-05-20T00:00:00Z",
+            &mut buf,
+        )
+        .unwrap();
+        assert_eq!(ranges.len(), 2);
+
+        for (i, range) in ranges.iter().enumerate() {
+            let parsed: serde_json::Value = serde_json::from_slice(&buf[range.clone()]).unwrap();
+            let raw = parsed["_raw"].as_str().expect("_raw is a string");
+            let inner: serde_json::Value = serde_json::from_str(raw).unwrap();
+            assert_eq!(inner["n"], i + 1);
+        }
+    }
+
+    #[test]
+    fn oversize_capture_truncates_and_flags_the_event() {
+        let mut decoded = fake_decoded_sflow_empty();
+        decoded.records.push(SflowRecord::Counter {
+            generic: None,
+            raw_json: r#"{"padding":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#.into(),
+        });
+        let mut buf = Vec::new();
+        let ranges = render_packet::<SflowDecoder>(
+            &decoded,
+            OutputMode::Canonical,
+            crate::config::RawCapture {
+                enabled: true,
+                max_bytes: 8,
+                on_oversize: crate::config::OversizePolicy::Truncate,
+            },
+            "2026-05-20T00:00:00Z",
+            &mut buf,
+        )
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&buf[ranges[0].clone()]).unwrap();
+        assert_eq!(parsed["_raw_truncated"], true);
+        assert_eq!(parsed["_raw"].as_str().unwrap().len(), 8);
+        // Still a well-formed event even though _raw is now a JSON fragment.
+        assert_eq!(parsed["record_count"], 1);
     }
 
     #[test]
@@ -201,6 +330,7 @@ mod tests {
         let ranges = render_packet::<SflowDecoder>(
             &decoded,
             OutputMode::Exploded,
+            RawCapture::OFF,
             "2026-05-20T00:00:00Z",
             &mut buf,
         )
@@ -221,6 +351,7 @@ mod tests {
         let ranges = render_packet::<SflowDecoder>(
             &decoded,
             OutputMode::Exploded,
+            RawCapture::OFF,
             "2026-05-20T00:00:00Z",
             &mut buf,
         )

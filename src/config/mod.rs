@@ -17,8 +17,10 @@
 //! 6. defaults.yaml
 //! 7. Hard-coded defaults
 
+pub mod raw_capture;
 mod shared;
 
+pub use raw_capture::{OversizePolicy, RawCapture, RawCaptureConfig};
 pub use shared::SharedConfig;
 
 use std::collections::HashMap;
@@ -75,6 +77,11 @@ pub struct Config {
     /// Flow (NetFlow v5/v9 + IPFIX + sFlow v5) receiver configuration.
     pub flow: crate::server::flow::config::FlowConfig,
 
+    /// Common raw-payload capture default, inherited by every transport that
+    /// supports capture. Per-transport `raw_capture:` blocks override it
+    /// field by field. See [`raw_capture`].
+    pub raw_capture: RawCaptureConfig,
+
     /// Validation rules.
     pub validation: ValidationConfig,
 
@@ -125,6 +132,7 @@ impl Default for Config {
             fluent: FluentConfig::default(),
             gelf: GelfConfig::default(),
             flow: crate::server::flow::config::FlowConfig::default(),
+            raw_capture: RawCaptureConfig::default(),
             validation: ValidationConfig::default(),
             routing: RoutingConfig::default(),
             destinations: DestinationsConfig::default(),
@@ -196,6 +204,14 @@ impl Config {
         config.apply_flat_env(ENV_PREFIX);
         config.normalize();
         Ok(config)
+    }
+
+    /// Resolve a transport's raw-capture override against the common block.
+    ///
+    /// Called once per handler at construction, so the effective settings are
+    /// computed in one place rather than re-derived on the hot path.
+    pub fn raw_capture_for(&self, transport: &RawCaptureConfig) -> RawCapture {
+        transport.resolve(&self.raw_capture)
     }
 
     /// Validate the configuration.
@@ -344,11 +360,18 @@ impl ApplyFlatEnv for Config {
             self.flow.ports = v.iter().filter_map(|s| s.parse::<u16>().ok()).collect();
         }
         if let Some(v) = flat_env::flat_env_string(prefix, "FLOW_OUTPUT_MODE") {
-            self.flow.output.mode = match v.to_ascii_lowercase().as_str() {
-                "exploded" => crate::server::flow::config::OutputMode::Exploded,
-                "canonical_with_raw" => crate::server::flow::config::OutputMode::CanonicalWithRaw,
-                _ => crate::server::flow::config::OutputMode::Canonical,
-            };
+            // A typo'd mode must not silently pick an output shape. The YAML
+            // path errors on an unknown variant; this one warns and keeps the
+            // configured value, so both routes are loud.
+            match crate::server::flow::config::OutputMode::parse(&v) {
+                Some(mode) => self.flow.output.mode = mode,
+                None => tracing::warn!(
+                    mode = %v,
+                    current = self.flow.output.mode.label(),
+                    "unknown flow.output.mode, keeping current value \
+                     (canonical_with_raw was removed -- use flow.raw_capture.enabled)"
+                ),
+            }
         }
         if let Some(v) = flat_env::flat_env_parsed::<usize>(prefix, "FLOW_RECV_BUFFER_BYTES") {
             self.flow.recv_buffer_bytes = v;
@@ -372,6 +395,54 @@ impl ApplyFlatEnv for Config {
         }
         if let Some(v) = flat_env::flat_env_parsed::<u32>(prefix, "FLOW_RATE_LIMIT_BURST") {
             self.flow.rate_limit.burst = v;
+        }
+
+        // Raw capture -- common block, then one override per capturing
+        // transport. Both levels are reachable from the environment so a
+        // container can turn capture on for a single transport without
+        // shipping a config file.
+        apply_raw_capture_env(&mut self.raw_capture, prefix, "RAW_CAPTURE");
+        #[cfg(feature = "otlp")]
+        apply_raw_capture_env(&mut self.otlp.raw_capture, prefix, "OTLP_RAW_CAPTURE");
+        apply_raw_capture_env(
+            &mut self.splunk_hec.raw_capture,
+            prefix,
+            "SPLUNK_HEC_RAW_CAPTURE",
+        );
+        apply_raw_capture_env(&mut self.syslog.raw_capture, prefix, "SYSLOG_RAW_CAPTURE");
+        apply_raw_capture_env(
+            &mut self.prometheus_rw.raw_capture,
+            prefix,
+            "PROMETHEUS_RW_RAW_CAPTURE",
+        );
+        apply_raw_capture_env(&mut self.fluent.raw_capture, prefix, "FLUENT_RAW_CAPTURE");
+        apply_raw_capture_env(&mut self.gelf.raw_capture, prefix, "GELF_RAW_CAPTURE");
+        apply_raw_capture_env(&mut self.flow.raw_capture, prefix, "FLOW_RAW_CAPTURE");
+    }
+}
+
+/// Apply the three raw-capture keys for one cascade level.
+///
+/// `key` is the flat-env stem, e.g. `SYSLOG_RAW_CAPTURE`, giving
+/// `DFE_RECEIVER_SYSLOG_RAW_CAPTURE_ENABLED` and friends. An absent variable
+/// leaves the field unset, so it keeps inheriting rather than pinning a value.
+fn apply_raw_capture_env(cfg: &mut RawCaptureConfig, prefix: &str, key: &str) {
+    if let Some(v) = flat_env::flat_env_bool(prefix, &format!("{key}_ENABLED")) {
+        cfg.enabled = Some(v);
+    }
+    if let Some(v) = flat_env::flat_env_parsed::<usize>(prefix, &format!("{key}_MAX_BYTES")) {
+        cfg.max_bytes = Some(v);
+    }
+    if let Some(v) = flat_env::flat_env_string(prefix, &format!("{key}_ON_OVERSIZE")) {
+        match OversizePolicy::parse(&v) {
+            Some(policy) => cfg.on_oversize = Some(policy),
+            // Silently defaulting to truncate would keep oversized payloads
+            // an operator asked to drop, so say so and leave the setting be.
+            None => tracing::warn!(
+                key = %format!("{prefix}_{key}_ON_OVERSIZE"),
+                value = %v,
+                "unknown raw_capture.on_oversize, keeping current value (expected truncate|omit)"
+            ),
         }
     }
 }
@@ -705,6 +776,13 @@ pub struct OtlpConfig {
 
     /// Authentication configuration for OTLP endpoints.
     pub auth: AuthConfig,
+
+    /// Raw-payload capture override (inherits the common `raw_capture` block).
+    ///
+    /// OTLP arrives as protobuf, so `_raw` carries the `generic`-mode
+    /// rendering of the record -- the least-shaped decode we produce. In
+    /// `generic` mode it is therefore a copy of the event itself.
+    pub raw_capture: RawCaptureConfig,
 }
 
 #[cfg(feature = "otlp")]
@@ -715,6 +793,7 @@ impl Default for OtlpConfig {
             grpc_bind_address: "0.0.0.0:4317".to_string(),
             http_bind_address: "0.0.0.0:4318".to_string(),
             mode: "hyperdx".to_string(),
+            raw_capture: RawCaptureConfig::default(),
             tls: TlsConfig::default(),
             auth: AuthConfig {
                 mode: "none".to_string(),
@@ -782,6 +861,13 @@ pub struct SplunkHecConfig {
 
     /// Authentication configuration.
     pub auth: AuthConfig,
+
+    /// Raw-payload capture override (inherits the common `raw_capture` block).
+    ///
+    /// On `/services/collector/event`, `_raw` carries the submitted `event`
+    /// value before HEC metadata is merged in. On `/services/collector/raw`
+    /// it carries the original line bytes.
+    pub raw_capture: RawCaptureConfig,
 }
 
 impl Default for SplunkHecConfig {
@@ -791,6 +877,7 @@ impl Default for SplunkHecConfig {
             bind_address: "0.0.0.0:8088".to_string(),
             max_body_size: 10 * 1024 * 1024,
             request_timeout_ms: 30_000,
+            raw_capture: RawCaptureConfig::default(),
             tls: TlsConfig::default(),
             auth: AuthConfig {
                 mode: "none".to_string(),
@@ -827,6 +914,12 @@ pub struct SyslogConfig {
 
     /// Authentication configuration.
     pub auth: AuthConfig,
+
+    /// Raw-payload capture override (inherits the common `raw_capture` block).
+    ///
+    /// The strongest case for capture: `_raw` holds the wire line including
+    /// the PRI and header, none of which survives into the parsed envelope.
+    pub raw_capture: RawCaptureConfig,
 }
 
 impl Default for SyslogConfig {
@@ -837,6 +930,7 @@ impl Default for SyslogConfig {
             tcp_bind_address: "0.0.0.0:514".to_string(),
             tls_bind_address: "0.0.0.0:6514".to_string(),
             max_message_size: 64 * 1024,
+            raw_capture: RawCaptureConfig::default(),
             tls: TlsConfig::default(),
             auth: AuthConfig {
                 mode: "none".to_string(),
@@ -873,6 +967,13 @@ pub struct PrometheusRwConfig {
 
     /// Authentication configuration.
     pub auth: AuthConfig,
+
+    /// Raw-payload capture override (inherits the common `raw_capture` block).
+    ///
+    /// Remote Write arrives as snappy-framed protobuf, so `_raw` carries the
+    /// `native`-mode rendering of the sample -- the least-shaped decode we
+    /// produce. In `native` mode it is therefore a copy of the event itself.
+    pub raw_capture: RawCaptureConfig,
 }
 
 impl Default for PrometheusRwConfig {
@@ -881,6 +982,7 @@ impl Default for PrometheusRwConfig {
             enabled: false,
             bind_address: "0.0.0.0:9091".to_string(),
             mode: "native".to_string(),
+            raw_capture: RawCaptureConfig::default(),
             max_body_size: 10 * 1024 * 1024,
             request_timeout_ms: 30_000,
             tls: TlsConfig::default(),
@@ -910,6 +1012,13 @@ pub struct FluentConfig {
 
     /// TLS configuration.
     pub tls: TlsConfig,
+
+    /// Raw-payload capture override (inherits the common `raw_capture` block).
+    ///
+    /// Forward arrives as msgpack, so `_raw` carries the record's verbatim
+    /// msgpack-to-JSON decode, before the tag, timestamp and `_source` this
+    /// handler adds.
+    pub raw_capture: RawCaptureConfig,
 }
 
 impl Default for FluentConfig {
@@ -919,6 +1028,7 @@ impl Default for FluentConfig {
             bind_address: "0.0.0.0:24224".to_string(),
             max_message_size: 32 * 1024 * 1024,
             tls: TlsConfig::default(),
+            raw_capture: RawCaptureConfig::default(),
         }
     }
 }
@@ -941,6 +1051,12 @@ pub struct GelfConfig {
 
     /// TLS configuration.
     pub tls: TlsConfig,
+
+    /// Raw-payload capture override (inherits the common `raw_capture` block).
+    ///
+    /// `_raw` holds the GELF message exactly as it arrived, before the
+    /// `message`, `severity` and `_source` fields this handler derives.
+    pub raw_capture: RawCaptureConfig,
 }
 
 impl Default for GelfConfig {
@@ -950,6 +1066,7 @@ impl Default for GelfConfig {
             bind_address: "0.0.0.0:12201".to_string(),
             max_message_size: 1024 * 1024,
             tls: TlsConfig::default(),
+            raw_capture: RawCaptureConfig::default(),
         }
     }
 }
@@ -1982,17 +2099,112 @@ kafka:
 
     #[test]
     fn test_env_override_no_vars_set() {
-        let mut config = Config::default();
-        let original = config.clone();
-        config.apply_flat_env(ENV_PREFIX);
-        config.normalize();
-        assert_eq!(config.server.bind_address, original.server.bind_address);
-        assert_eq!(config.kafka.brokers, original.kafka.brokers);
-        assert_eq!(
-            config.routing.default_source,
-            original.routing.default_source
+        // Must go through temp_env even though it sets nothing: temp_env's
+        // guard is what serialises against the other env tests, and reading
+        // the process env unguarded means a concurrent with_env sets the very
+        // variables this asserts are absent.
+        temp_env::with_vars(
+            [
+                ("DFE_RECEIVER_BIND_ADDRESS", None::<&str>),
+                ("DFE_RECEIVER_KAFKA_BROKERS", None),
+                ("DFE_RECEIVER_DEFAULT_SOURCE", None),
+                ("DFE_RECEIVER_CONFIG_RELOAD_SECS", None),
+            ],
+            || {
+                let mut config = Config::default();
+                let original = config.clone();
+                config.apply_flat_env(ENV_PREFIX);
+                config.normalize();
+                assert_eq!(config.server.bind_address, original.server.bind_address);
+                assert_eq!(config.kafka.brokers, original.kafka.brokers);
+                assert_eq!(
+                    config.routing.default_source,
+                    original.routing.default_source
+                );
+                assert_eq!(config.config_reload_secs, original.config_reload_secs);
+            },
         );
-        assert_eq!(config.config_reload_secs, original.config_reload_secs);
+    }
+
+    // ---------------------------------------------------------------------
+    // Raw capture: flat env at both cascade levels
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn test_env_override_raw_capture_common() {
+        with_env(
+            &[
+                ("DFE_RECEIVER_RAW_CAPTURE_ENABLED", "true"),
+                ("DFE_RECEIVER_RAW_CAPTURE_MAX_BYTES", "2048"),
+                ("DFE_RECEIVER_RAW_CAPTURE_ON_OVERSIZE", "omit"),
+            ],
+            || {
+                let mut config = Config::default();
+                config.apply_flat_env(ENV_PREFIX);
+
+                let resolved = config.raw_capture_for(&config.syslog.raw_capture);
+                assert!(resolved.enabled);
+                assert_eq!(resolved.max_bytes, 2048);
+                assert_eq!(resolved.on_oversize, OversizePolicy::Omit);
+            },
+        );
+    }
+
+    #[test]
+    fn test_env_override_raw_capture_per_transport() {
+        with_env(
+            &[("DFE_RECEIVER_SYSLOG_RAW_CAPTURE_ENABLED", "true")],
+            || {
+                let mut config = Config::default();
+                config.apply_flat_env(ENV_PREFIX);
+
+                // Only the named transport is switched on; the rest still inherit
+                // the common block, which is still off.
+                assert!(config.raw_capture_for(&config.syslog.raw_capture).enabled);
+                assert!(!config.raw_capture_for(&config.gelf.raw_capture).enabled);
+            },
+        );
+    }
+
+    #[test]
+    fn test_env_override_raw_capture_transport_beats_common() {
+        with_env(
+            &[
+                ("DFE_RECEIVER_RAW_CAPTURE_ENABLED", "true"),
+                ("DFE_RECEIVER_GELF_RAW_CAPTURE_ENABLED", "false"),
+            ],
+            || {
+                let mut config = Config::default();
+                config.apply_flat_env(ENV_PREFIX);
+
+                assert!(config.raw_capture_for(&config.syslog.raw_capture).enabled);
+                assert!(!config.raw_capture_for(&config.gelf.raw_capture).enabled);
+            },
+        );
+    }
+
+    #[test]
+    fn test_env_override_raw_capture_unknown_policy_keeps_current() {
+        // A typo must not silently switch to truncate and retain payloads the
+        // operator asked to drop.
+        with_env(
+            &[
+                ("DFE_RECEIVER_RAW_CAPTURE_ON_OVERSIZE", "omit"),
+                ("DFE_RECEIVER_SYSLOG_RAW_CAPTURE_ON_OVERSIZE", "drop"),
+            ],
+            || {
+                let mut config = Config::default();
+                config.apply_flat_env(ENV_PREFIX);
+
+                assert!(config.syslog.raw_capture.on_oversize.is_none());
+                assert_eq!(
+                    config
+                        .raw_capture_for(&config.syslog.raw_capture)
+                        .on_oversize,
+                    OversizePolicy::Omit
+                );
+            },
+        );
     }
 
     // ---------------------------------------------------------------------

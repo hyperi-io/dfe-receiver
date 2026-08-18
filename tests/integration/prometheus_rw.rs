@@ -77,7 +77,12 @@ async fn start_rw_handler(config: Config) -> (CancellationToken, Arc<Metrics>, S
         .expect("Failed to create pipeline"),
     );
 
-    let handler = PrometheusRwHandler::new(config.prometheus_rw.clone(), pipeline, metrics.clone());
+    let handler = PrometheusRwHandler::new(
+        config.prometheus_rw.clone(),
+        config.raw_capture_for(&config.prometheus_rw.raw_capture),
+        pipeline,
+        metrics.clone(),
+    );
 
     let handler_shutdown = shutdown.clone();
     tokio::spawn(async move {

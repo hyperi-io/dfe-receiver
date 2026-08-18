@@ -14,7 +14,9 @@
 
 use bytes::Bytes;
 
+use crate::config::RawCapture;
 use crate::error::{Error, Result};
+use crate::server::raw_capture;
 
 /// Severity level names matching syslog levels 0-7.
 const SEVERITY_NAMES: [&str; 8] = [
@@ -33,7 +35,10 @@ const SEVERITY_NAMES: [&str; 8] = [
 /// Validates required fields and injects `_source: "gelf"` for routing.
 /// The original GELF fields are preserved; `short_message` is also
 /// copied to `message` for consistency with other handlers.
-pub fn gelf_to_json(raw: &[u8]) -> Result<Bytes> {
+///
+/// With `raw_capture` enabled, `_raw` additionally holds the message exactly
+/// as it arrived, before the fields derived above.
+pub fn gelf_to_json(raw: &[u8], raw_capture: RawCapture) -> Result<Bytes> {
     let mut obj: serde_json::Map<String, serde_json::Value> = serde_json::from_slice(raw)
         .map_err(|e| Error::Validation(format!("GELF JSON parse failed: {e}")))?;
 
@@ -75,6 +80,8 @@ pub fn gelf_to_json(raw: &[u8]) -> Result<Bytes> {
         serde_json::Value::String("gelf".to_string()),
     );
 
+    raw_capture::attach_to_map(&mut obj, raw, raw_capture);
+
     serde_json::to_vec(&obj)
         .map(Bytes::from)
         .map_err(|e| Error::Validation(format!("GELF JSON serialisation failed: {e}")))
@@ -92,7 +99,7 @@ mod tests {
     #[test]
     fn test_valid_gelf_message() {
         let raw = br#"{"version":"1.1","host":"web01","short_message":"Test message","level":6,"_user_id":"123"}"#;
-        let result = gelf_to_json(raw).unwrap();
+        let result = gelf_to_json(raw, RawCapture::OFF).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&result).unwrap();
 
         assert_eq!(json["version"], "1.1");
@@ -108,31 +115,31 @@ mod tests {
     #[test]
     fn test_missing_version() {
         let raw = br#"{"host":"web01","short_message":"Test"}"#;
-        assert!(gelf_to_json(raw).is_err());
+        assert!(gelf_to_json(raw, RawCapture::OFF).is_err());
     }
 
     #[test]
     fn test_missing_host() {
         let raw = br#"{"version":"1.1","short_message":"Test"}"#;
-        assert!(gelf_to_json(raw).is_err());
+        assert!(gelf_to_json(raw, RawCapture::OFF).is_err());
     }
 
     #[test]
     fn test_missing_short_message() {
         let raw = br#"{"version":"1.1","host":"web01"}"#;
-        assert!(gelf_to_json(raw).is_err());
+        assert!(gelf_to_json(raw, RawCapture::OFF).is_err());
     }
 
     #[test]
     fn test_invalid_json() {
         let raw = b"not json";
-        assert!(gelf_to_json(raw).is_err());
+        assert!(gelf_to_json(raw, RawCapture::OFF).is_err());
     }
 
     #[test]
     fn test_source_always_set() {
         let raw = br#"{"version":"1.1","host":"h","short_message":"m"}"#;
-        let result = gelf_to_json(raw).unwrap();
+        let result = gelf_to_json(raw, RawCapture::OFF).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&result).unwrap();
         assert_eq!(json["_source"], "gelf");
     }
@@ -142,7 +149,7 @@ mod tests {
         for level in 0u64..8 {
             let raw =
                 format!(r#"{{"version":"1.1","host":"h","short_message":"m","level":{level}}}"#);
-            let result = gelf_to_json(raw.as_bytes()).unwrap();
+            let result = gelf_to_json(raw.as_bytes(), RawCapture::OFF).unwrap();
             let json: serde_json::Value = serde_json::from_slice(&result).unwrap();
             assert_eq!(json["severity"], SEVERITY_NAMES[level as usize]);
         }
@@ -151,7 +158,7 @@ mod tests {
     #[test]
     fn test_custom_fields_preserved() {
         let raw = br#"{"version":"1.1","host":"h","short_message":"m","_env":"prod","_request_id":"abc"}"#;
-        let result = gelf_to_json(raw).unwrap();
+        let result = gelf_to_json(raw, RawCapture::OFF).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&result).unwrap();
         assert_eq!(json["_env"], "prod");
         assert_eq!(json["_request_id"], "abc");
@@ -160,7 +167,7 @@ mod tests {
     #[test]
     fn test_full_message_preserved() {
         let raw = br#"{"version":"1.1","host":"h","short_message":"brief","full_message":"detailed error\nwith stacktrace"}"#;
-        let result = gelf_to_json(raw).unwrap();
+        let result = gelf_to_json(raw, RawCapture::OFF).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&result).unwrap();
         assert_eq!(json["full_message"], "detailed error\nwith stacktrace");
     }
@@ -168,8 +175,50 @@ mod tests {
     #[test]
     fn test_timestamp_preserved() {
         let raw = br#"{"version":"1.1","host":"h","short_message":"m","timestamp":1678876543.123}"#;
-        let result = gelf_to_json(raw).unwrap();
+        let result = gelf_to_json(raw, RawCapture::OFF).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&result).unwrap();
         assert!((json["timestamp"].as_f64().unwrap() - 1_678_876_543.123).abs() < 0.001);
+    }
+
+    // -----------------------------------------------------------------------
+    // Raw capture
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn capture_off_emits_no_raw_field() {
+        let raw = br#"{"version":"1.1","host":"h","short_message":"m"}"#;
+        let json: serde_json::Value =
+            serde_json::from_slice(&gelf_to_json(raw, RawCapture::OFF).unwrap()).unwrap();
+        assert!(json.get("_raw").is_none());
+    }
+
+    #[test]
+    fn capture_adds_the_pre_normalisation_message() {
+        let raw = br#"{"version":"1.1","host":"web01","short_message":"boom","level":3}"#;
+        let json: serde_json::Value =
+            serde_json::from_slice(&gelf_to_json(raw, RawCapture::on()).unwrap()).unwrap();
+
+        // Derived fields are still added as before.
+        assert_eq!(json["message"], "boom");
+        assert_eq!(json["severity"], "error");
+        assert_eq!(json["_source"], "gelf");
+
+        // _raw carries the message before any of that was derived.
+        let captured: serde_json::Value =
+            serde_json::from_str(json["_raw"].as_str().unwrap()).unwrap();
+        assert_eq!(captured["short_message"], "boom");
+        assert!(captured.get("message").is_none());
+        assert!(captured.get("severity").is_none());
+        assert!(captured.get("_source").is_none());
+    }
+
+    #[test]
+    fn a_gelf_supplied_raw_field_wins_over_the_capture() {
+        // GELF custom fields are underscore-prefixed, so a sender can legally
+        // ship its own _raw. The event's own value must survive.
+        let raw = br#"{"version":"1.1","host":"h","short_message":"m","_raw":"sender's own"}"#;
+        let json: serde_json::Value =
+            serde_json::from_slice(&gelf_to_json(raw, RawCapture::on()).unwrap()).unwrap();
+        assert_eq!(json["_raw"], "sender's own");
     }
 }

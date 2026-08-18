@@ -35,7 +35,7 @@ pub trait FlowDecoder: Send + 'static {
     /// Render canonical schema into the provided buffer.
     fn render_canonical(record: &Self::Record, buf: &mut Vec<u8>) -> io::Result<()>;
 
-    /// Render verbatim parser output (for canonical_with_raw mode).
+    /// Render verbatim parser output (used by `flow.raw_capture`).
     fn render_raw(record: &Self::Record, buf: &mut Vec<u8>) -> io::Result<()>;
 
     /// Return the canonical `record_kind` string for this record.

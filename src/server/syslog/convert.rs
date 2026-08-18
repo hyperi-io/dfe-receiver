@@ -14,13 +14,21 @@
 use bytes::Bytes;
 use serde_json::Map;
 
+use crate::config::RawCapture;
 use crate::error::{Error, Result};
+use crate::server::raw_capture;
 
 /// Convert a raw syslog message string to pipeline-ready JSON bytes.
 ///
 /// Uses `syslog_loose::parse_message` which auto-detects RFC 5424 vs RFC 3164.
 /// The `_source` field is set to `"syslog"` for routing.
-pub fn syslog_to_json(raw: &str) -> Result<Bytes> {
+///
+/// With `raw` capture enabled the parsed fields are joined by `_raw` holding
+/// the wire line verbatim -- the PRI, the header and the original spacing,
+/// none of which survives the parse. It matters most on the lines that parse
+/// badly: `syslog_loose` never fails, so a malformed line silently lands its
+/// whole text in `message` and is indistinguishable from a clean parse.
+pub fn syslog_to_json(raw: &str, raw_capture: RawCapture) -> Result<Bytes> {
     let msg = syslog_loose::parse_message(raw, syslog_loose::Variant::Either);
 
     let mut obj = Map::new();
@@ -116,6 +124,8 @@ pub fn syslog_to_json(raw: &str) -> Result<Bytes> {
         serde_json::Value::String("syslog".to_string()),
     );
 
+    raw_capture::attach_str_to_map(&mut obj, raw, raw_capture);
+
     serde_json::to_vec(&obj)
         .map(Bytes::from)
         .map_err(|e| Error::Validation(format!("syslog JSON serialisation failed: {e}")))
@@ -133,7 +143,7 @@ mod tests {
     #[test]
     fn test_rfc5424_with_structured_data() {
         let raw = r#"<165>1 2026-03-03T10:30:00.123+11:00 web01 nginx 1234 ID47 [exampleSDID@32473 iut="3" eventSource="Application"] This is a test message"#;
-        let result = syslog_to_json(raw).unwrap();
+        let result = syslog_to_json(raw, RawCapture::OFF).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&result).unwrap();
 
         assert_eq!(json["message"], "This is a test message");
@@ -158,7 +168,7 @@ mod tests {
     #[test]
     fn test_rfc3164_bsd_format() {
         let raw = "<34>Oct 11 22:14:15 mymachine su: 'su root' failed for lonvick on /dev/pts/8";
-        let result = syslog_to_json(raw).unwrap();
+        let result = syslog_to_json(raw, RawCapture::OFF).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&result).unwrap();
 
         assert_eq!(json["hostname"], "mymachine");
@@ -174,7 +184,7 @@ mod tests {
     fn test_minimal_rfc3164() {
         // Minimal RFC 3164 with timestamp, hostname, and app
         let raw = "<13>Mar  3 10:00:00 myhost myapp: Hello world";
-        let result = syslog_to_json(raw).unwrap();
+        let result = syslog_to_json(raw, RawCapture::OFF).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&result).unwrap();
 
         assert!(json["message"].as_str().unwrap().contains("Hello world"));
@@ -189,7 +199,7 @@ mod tests {
     fn test_no_priority() {
         // Message without priority tag
         let raw = "Just a plain log message";
-        let result = syslog_to_json(raw).unwrap();
+        let result = syslog_to_json(raw, RawCapture::OFF).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&result).unwrap();
 
         assert!(
@@ -207,7 +217,7 @@ mod tests {
     #[test]
     fn test_rfc5424_no_structured_data() {
         let raw = "<14>1 2026-01-15T12:00:00Z myhost myapp 5678 - - Application started";
-        let result = syslog_to_json(raw).unwrap();
+        let result = syslog_to_json(raw, RawCapture::OFF).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&result).unwrap();
 
         assert_eq!(json["hostname"], "myhost");
@@ -219,7 +229,7 @@ mod tests {
     #[test]
     fn test_source_field_always_set() {
         let raw = "<0>test";
-        let result = syslog_to_json(raw).unwrap();
+        let result = syslog_to_json(raw, RawCapture::OFF).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&result).unwrap();
         assert_eq!(json["_source"], "syslog");
     }
@@ -227,11 +237,101 @@ mod tests {
     #[test]
     fn test_timestamp_is_rfc3339() {
         let raw = "<14>1 2026-03-03T10:30:00+11:00 host app - - - test";
-        let result = syslog_to_json(raw).unwrap();
+        let result = syslog_to_json(raw, RawCapture::OFF).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&result).unwrap();
 
         let ts = json["timestamp"].as_str().unwrap();
         // Should parse as valid chrono DateTime
         assert!(chrono::DateTime::parse_from_rfc3339(ts).is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // Raw capture
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn capture_off_emits_no_raw_field() {
+        let raw = "<34>Oct 11 22:14:15 mymachine su: failed";
+        let result = syslog_to_json(raw, RawCapture::OFF).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&result).unwrap();
+        assert!(json.get("_raw").is_none());
+    }
+
+    #[test]
+    fn capture_adds_raw_without_disturbing_the_parsed_fields() {
+        let raw =
+            r#"<165>1 2026-03-03T10:30:00.123+11:00 web01 nginx 1234 ID47 [ex@1 a="b"] hello"#;
+        let json: serde_json::Value =
+            serde_json::from_slice(&syslog_to_json(raw, RawCapture::on()).unwrap()).unwrap();
+
+        // Every parsed field is still exactly what it was without capture.
+        assert_eq!(json["message"], "hello");
+        assert_eq!(json["hostname"], "web01");
+        assert_eq!(json["appname"], "nginx");
+        assert_eq!(json["procid"], "1234");
+        assert_eq!(json["msgid"], "ID47");
+        assert_eq!(json["_source"], "syslog");
+        // _raw is an addition alongside them, byte-for-byte off the wire.
+        assert_eq!(json["_raw"], raw);
+    }
+
+    #[test]
+    fn raw_keeps_the_pri_that_the_parse_discards() {
+        // The PRI number itself appears nowhere in the parsed envelope --
+        // only the decoded facility/severity names do. Recovering "<165>"
+        // is the point of capturing.
+        let raw = "<165>1 2026-03-03T10:30:00Z web01 nginx - - - hello";
+        let json: serde_json::Value =
+            serde_json::from_slice(&syslog_to_json(raw, RawCapture::on()).unwrap()).unwrap();
+
+        assert_eq!(json["facility"], "local4");
+        assert_eq!(json["severity"], "notice");
+        assert!(json["_raw"].as_str().unwrap().starts_with("<165>"));
+    }
+
+    #[test]
+    fn raw_distinguishes_a_malformed_line_from_a_clean_parse() {
+        // syslog_loose never errors: this lands whole in `message`, which is
+        // indistinguishable from a well-formed message body. _raw is what
+        // tells the two apart downstream.
+        let raw = "<999 not really syslog at all";
+        let json: serde_json::Value =
+            serde_json::from_slice(&syslog_to_json(raw, RawCapture::on()).unwrap()).unwrap();
+
+        assert!(json.get("facility").is_none());
+        assert_eq!(json["_raw"], raw);
+    }
+
+    #[test]
+    fn oversized_line_truncates_and_flags() {
+        let raw = "<13>Mar  3 10:00:00 myhost myapp: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let cfg = RawCapture {
+            enabled: true,
+            max_bytes: 16,
+            on_oversize: crate::config::OversizePolicy::Truncate,
+        };
+        let json: serde_json::Value =
+            serde_json::from_slice(&syslog_to_json(raw, cfg).unwrap()).unwrap();
+
+        assert_eq!(json["_raw"], &raw[..16]);
+        assert_eq!(json["_raw_truncated"], true);
+        // The parsed fields are unaffected by the cap on _raw.
+        assert_eq!(json["hostname"], "myhost");
+    }
+
+    #[test]
+    fn oversized_line_can_be_dropped_instead() {
+        let raw = "<13>Mar  3 10:00:00 myhost myapp: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let cfg = RawCapture {
+            enabled: true,
+            max_bytes: 16,
+            on_oversize: crate::config::OversizePolicy::Omit,
+        };
+        let json: serde_json::Value =
+            serde_json::from_slice(&syslog_to_json(raw, cfg).unwrap()).unwrap();
+
+        assert!(json.get("_raw").is_none());
+        assert!(json.get("_raw_truncated").is_none());
+        assert_eq!(json["hostname"], "myhost");
     }
 }

@@ -93,7 +93,12 @@ async fn start_hec_handler(config: Config) -> (CancellationToken, Arc<Metrics>, 
         .expect("Failed to create pipeline"),
     );
 
-    let handler = SplunkHecHandler::new(config.splunk_hec.clone(), pipeline, metrics.clone());
+    let handler = SplunkHecHandler::new(
+        config.splunk_hec.clone(),
+        config.raw_capture_for(&config.splunk_hec.raw_capture),
+        pipeline,
+        metrics.clone(),
+    );
 
     let handler_shutdown = shutdown.clone();
     tokio::spawn(async move {

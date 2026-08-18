@@ -35,9 +35,9 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
-use tracing::info;
+use tracing::{info, warn};
 
-use crate::config::PrometheusRwConfig;
+use crate::config::{PrometheusRwConfig, RawCapture};
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
@@ -50,6 +50,8 @@ use self::convert::{PrometheusRwMode, write_request_to_json};
 /// Prometheus Remote Write protocol handler.
 pub struct PrometheusRwHandler {
     config: PrometheusRwConfig,
+    /// Raw capture already resolved against the common `raw_capture` block.
+    raw_capture: RawCapture,
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
 }
@@ -57,11 +59,13 @@ pub struct PrometheusRwHandler {
 impl PrometheusRwHandler {
     pub fn new(
         config: PrometheusRwConfig,
+        raw_capture: RawCapture,
         pipeline: Arc<PipelineState>,
         metrics: Arc<Metrics>,
     ) -> Self {
         Self {
             config,
+            raw_capture,
             pipeline,
             metrics,
         }
@@ -81,6 +85,7 @@ impl ProtocolHandler for PrometheusRwHandler {
     async fn start(&self, shutdown: CancellationToken) -> Result<()> {
         run_prometheus_rw_server(
             &self.config,
+            self.raw_capture,
             self.pipeline.clone(),
             self.metrics.clone(),
             shutdown,
@@ -98,6 +103,7 @@ struct RwState {
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
     mode: PrometheusRwMode,
+    raw_capture: RawCapture,
 }
 
 // ---------------------------------------------------------------------------
@@ -107,6 +113,7 @@ struct RwState {
 /// Run the Prometheus Remote Write HTTP server.
 async fn run_prometheus_rw_server(
     config: &PrometheusRwConfig,
+    raw_capture: RawCapture,
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
     shutdown: CancellationToken,
@@ -114,10 +121,18 @@ async fn run_prometheus_rw_server(
     let auth_state = create_auth_state(&config.auth).await?;
     let mode = PrometheusRwMode::from_str(&config.mode);
 
+    if raw_capture.enabled && mode == PrometheusRwMode::Native {
+        warn!(
+            "prometheus_rw.raw_capture is on in native mode: _raw duplicates the event, \
+             roughly doubling produced bytes for no extra information"
+        );
+    }
+
     let state = RwState {
         pipeline,
         metrics: metrics.clone(),
         mode,
+        raw_capture,
     };
 
     let max_body_size = config.max_body_size;
@@ -251,7 +266,7 @@ async fn write_handler(
     })?;
 
     // Convert to JSON events
-    let events = write_request_to_json(request, state.mode).map_err(|e| {
+    let events = write_request_to_json(request, state.mode, state.raw_capture).map_err(|e| {
         state.metrics.inc_requests_error("prometheus_rw");
         RwError::internal(&e.to_string())
     })?;

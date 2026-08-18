@@ -29,6 +29,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
 use tokio_util::sync::CancellationToken;
 
+use crate::config::RawCapture;
 use crate::error::{Error, Result};
 use crate::pipeline::PipelineState;
 use crate::server::flow::config::{FlowListenerConfig, OutputMode};
@@ -48,6 +49,8 @@ pub struct UdpFlowListener {
     netflow: Option<NetflowDecoder>,
     sflow: Option<SflowDecoder>,
     cfg: FlowListenerConfig,
+    /// Resolved against the common `raw_capture` block by the handler.
+    raw: RawCapture,
     metrics: FlowMetrics,
     pipeline: Arc<PipelineState>,
     ip_filter: Arc<IpFilter>,
@@ -62,6 +65,7 @@ impl UdpFlowListener {
         netflow: Option<NetflowDecoder>,
         sflow: Option<SflowDecoder>,
         cfg: FlowListenerConfig,
+        raw: RawCapture,
         metrics: FlowMetrics,
         pipeline: Arc<PipelineState>,
         ip_filter: Arc<IpFilter>,
@@ -72,6 +76,7 @@ impl UdpFlowListener {
             netflow,
             sflow,
             cfg,
+            raw,
             metrics,
             pipeline,
             ip_filter,
@@ -268,6 +273,7 @@ impl UdpFlowListener {
                     now_rfc3339,
                     json_buf,
                     &self.cfg,
+                    self.raw,
                     &self.metrics,
                     &self.pipeline,
                 )
@@ -287,6 +293,7 @@ impl UdpFlowListener {
                     now_rfc3339,
                     json_buf,
                     &self.cfg,
+                    self.raw,
                     &self.metrics,
                     &self.pipeline,
                 )
@@ -308,6 +315,7 @@ impl UdpFlowListener {
         now_rfc3339: &str,
         json_buf: &mut Vec<u8>,
         cfg: &FlowListenerConfig,
+        raw: RawCapture,
         metrics: &FlowMetrics,
         pipeline: &Arc<PipelineState>,
     ) {
@@ -344,13 +352,14 @@ impl UdpFlowListener {
         // downstream noise -- a v9 exporter refreshes templates periodically,
         // so this would fire on every refresh. Skip emission; the zero is
         // still recorded in `records_per_packet` above for observability.
-        // (Exploded mode already skips via its empty-ranges guard; this makes
-        // canonical and canonical_with_raw consistent.)
+        // (Exploded mode already skips via its empty-ranges guard; this keeps
+        // canonical consistent with it.)
         if packet.records.is_empty() {
             return;
         }
 
-        let ranges = match render_packet::<D>(&packet, cfg.output.mode, now_rfc3339, json_buf) {
+        let ranges = match render_packet::<D>(&packet, cfg.output.mode, raw, now_rfc3339, json_buf)
+        {
             Ok(r) => r,
             Err(_) => {
                 metrics
@@ -430,8 +439,8 @@ impl UdpFlowListener {
             return;
         }
 
-        // Canonical / CanonicalWithRaw modes: ranges.len() == 1 so the
-        // original simple loop is safe -- no partial-emit hazard.
+        // Canonical mode: ranges.len() == 1 so the simple loop is safe --
+        // no partial-emit hazard.
         for range in ranges {
             let bytes = Bytes::copy_from_slice(&json_buf[range]);
             match pipeline.process(bytes).await {

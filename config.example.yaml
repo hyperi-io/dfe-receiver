@@ -209,6 +209,75 @@ gelf:
     # key_secret: "vault:secret/tls:key"
     # refresh_interval_secs: 3600
 
+# Raw payload retention -- the common-header `_raw` field
+#
+# Keeps the original wire payload alongside the parsed JSON, in the `_raw`
+# text column of the dfe-schemas common header (timeseries profile). The
+# parsed event is NOT changed: `_raw` is an addition to it.
+#
+# dfe-loader normally fills `_raw` itself by renaming
+# first(logoriginal/_raw/raw/raw_log/message), and leaves it alone when it is
+# already present -- so receiver-side capture wins with no loader change. It
+# matters because the loader's fallback can only reach fields that survived
+# conversion: for syslog it lands `message`, the PARSED body, with the PRI,
+# the header and the exact spacing already gone. And because syslog parsing
+# never fails, a malformed line silently becomes `message = <whole line>` and
+# looks like a clean parse. Only `_raw` tells the two apart.
+#
+# OFF by default for two reasons.
+#
+# Cost: capture roughly doubles the produced bytes for text protocols, on top
+# of a full-text index downstream.
+#
+# Exposure: `_raw` is the payload BEFORE any parsing, so redaction, masking or
+# field-dropping applied downstream to the parsed fields does NOT reach it. A
+# password, token or PII value that a transform strips from `message` still
+# sits in `_raw`, in a full-text-indexed column. Turn capture on for a source
+# only when its raw payload is acceptable to retain at that sensitivity, and
+# redact `_raw` explicitly if the parsed fields are being redacted.
+#
+# Set here for every transport that supports capture; override per transport.
+# An unset field inherits, so "off" and "not configured" stay distinct.
+raw_capture:
+  enabled: false
+  max_bytes: 65536        # 0 = unlimited
+  on_oversize: truncate   # truncate (keep the head, flag `_raw_truncated`) | omit (emit no `_raw`)
+#
+# Per-transport override, e.g. capture syslog only:
+#
+# syslog:
+#   raw_capture:
+#     enabled: true
+#
+# Env vars work at both levels:
+#   DFE_RECEIVER_RAW_CAPTURE_ENABLED=true
+#   DFE_RECEIVER_SYSLOG_RAW_CAPTURE_ENABLED=true
+#   DFE_RECEIVER_SYSLOG_RAW_CAPTURE_MAX_BYTES=4096
+#   DFE_RECEIVER_SYSLOG_RAW_CAPTURE_ON_OVERSIZE=omit
+#
+# Supported on: syslog, gelf, fluent, splunk_hec, prometheus_rw, otlp, flow.
+# NOT offered on http, grpc or lumberjack -- those pass the payload through
+# untouched, so `_raw` would be a byte-for-byte copy of the event itself.
+#
+# What `_raw` holds, per transport:
+#   syslog        the wire line verbatim, PRI and header included
+#   gelf          the message as it arrived, before message/severity/_source
+#   fluent        the record's msgpack-to-JSON decode, before tag/timestamp
+#   splunk_hec    /event: the submitted `event` value before metadata merge
+#                 /raw:   the original line bytes
+#   prometheus_rw the `native`-mode rendering of the sample
+#   otlp          the `generic`-mode rendering of the record
+#   flow          the decoder's verbatim records (a JSON array in canonical
+#                 mode, the single record in exploded)
+#
+# In prometheus_rw `native` mode and otlp `generic` mode, `_raw` is a copy of
+# the event -- that IS the least-shaped rendering. Both warn at startup.
+#
+# Two markers ride along when they apply, so a mangled capture can never be
+# mistaken for a faithful one:
+#   _raw_truncated: true   the tail was dropped to respect max_bytes
+#   _raw_lossy: true       invalid UTF-8 was replaced with U+FFFD
+
 validation:
   require_json: true
   required_fields: []
@@ -335,8 +404,12 @@ flow:
   bind_address: "0.0.0.0"
   ports: [2055, 4739, 6343]   # all three common ports, all autosense (v5/v9/IPFIX/sFlow)
   output:
-    mode: canonical           # canonical | canonical_with_raw | exploded
+    mode: canonical           # canonical (one event per packet) | exploded (one per record)
     max_records_per_packet: 200
+  # BREAKING (was `output.mode: canonical_with_raw`, removed): raw record
+  # retention is now a raw_capture override, and composes with either mode.
+  # raw_capture:
+  #   enabled: true
   channel_capacity: 4096
   recv_buffer_bytes: 8388608  # 8 MiB SO_RCVBUF
   # ip_filter: see IpFilterConfig docs above

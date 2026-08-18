@@ -30,6 +30,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
+use crate::config::RawCapture;
 use crate::error::{Error, Result};
 use crate::pipeline::PipelineState;
 use crate::server::flow::config::{FlowConfig, FlowListenerConfig};
@@ -45,6 +46,8 @@ use crate::server::traits::ProtocolHandler;
 /// `ProtocolHandler` for the flow subsystem (NetFlow v5/v9, IPFIX, sFlow v5).
 pub struct FlowHandler {
     cfg: FlowConfig,
+    /// Raw capture already resolved against the common `raw_capture` block.
+    raw: RawCapture,
     metrics: FlowMetrics,
     pipeline: Arc<PipelineState>,
     /// Pre-rendered bind address summary, returned by `bind_address()`.
@@ -56,6 +59,7 @@ impl FlowHandler {
     /// Build a `FlowHandler`. Returns `Err` if config validation fails.
     pub fn new(
         cfg: FlowConfig,
+        raw: RawCapture,
         metrics: FlowMetrics,
         pipeline: Arc<PipelineState>,
     ) -> Result<Self> {
@@ -63,6 +67,7 @@ impl FlowHandler {
         let bind_address_summary = render_bind_summary(&cfg);
         Ok(Self {
             cfg,
+            raw,
             metrics,
             pipeline,
             bind_address_summary,
@@ -151,6 +156,7 @@ impl FlowHandler {
                 netflow,
                 sflow,
                 listener_cfg.clone(),
+                self.raw,
                 self.metrics.clone(),
                 self.pipeline.clone(),
                 ip_filter.clone(),
@@ -211,6 +217,7 @@ impl FlowHandler {
                     )),
                     None,
                     split.netflow.clone(),
+                    self.raw,
                     self.metrics.clone(),
                     self.pipeline.clone(),
                     ip_filter.clone(),
@@ -248,6 +255,7 @@ impl FlowHandler {
                     None,
                     Some(SflowDecoder::new()),
                     split.sflow.clone(),
+                    self.raw,
                     self.metrics.clone(),
                     self.pipeline.clone(),
                     ip_filter.clone(),
@@ -398,7 +406,12 @@ split:
     topic: y
 ";
         let cfg: FlowConfig = serde_yaml_ng::from_str(yaml).unwrap();
-        let result = FlowHandler::new(cfg, flow_metrics_for_test(), test_pipeline().await);
+        let result = FlowHandler::new(
+            cfg,
+            RawCapture::OFF,
+            flow_metrics_for_test(),
+            test_pipeline().await,
+        );
         assert!(result.is_err());
     }
 
@@ -408,8 +421,13 @@ split:
             enabled: true,
             ..Default::default()
         };
-        let handler =
-            FlowHandler::new(cfg, flow_metrics_for_test(), test_pipeline().await).unwrap();
+        let handler = FlowHandler::new(
+            cfg,
+            RawCapture::OFF,
+            flow_metrics_for_test(),
+            test_pipeline().await,
+        )
+        .unwrap();
         let addr = handler.bind_address();
         assert!(addr.contains(":2055/udp"));
         assert!(addr.contains(":4739/udp"));
@@ -429,8 +447,13 @@ split:
     topic: sflow_land
 ";
         let cfg: FlowConfig = serde_yaml_ng::from_str(yaml).unwrap();
-        let handler =
-            FlowHandler::new(cfg, flow_metrics_for_test(), test_pipeline().await).unwrap();
+        let handler = FlowHandler::new(
+            cfg,
+            RawCapture::OFF,
+            flow_metrics_for_test(),
+            test_pipeline().await,
+        )
+        .unwrap();
         let addr = handler.bind_address();
         assert!(addr.contains(":2055/udp"));
         assert!(addr.contains(":4739/udp"));
@@ -440,8 +463,13 @@ split:
     #[tokio::test]
     async fn name_is_flow() {
         let cfg = FlowConfig::default();
-        let handler =
-            FlowHandler::new(cfg, flow_metrics_for_test(), test_pipeline().await).unwrap();
+        let handler = FlowHandler::new(
+            cfg,
+            RawCapture::OFF,
+            flow_metrics_for_test(),
+            test_pipeline().await,
+        )
+        .unwrap();
         assert_eq!(handler.name(), "flow");
     }
 
@@ -449,8 +477,13 @@ split:
     async fn start_disabled_returns_immediately() {
         // Default config has enabled=false and split=None.
         let cfg = FlowConfig::default();
-        let handler =
-            FlowHandler::new(cfg, flow_metrics_for_test(), test_pipeline().await).unwrap();
+        let handler = FlowHandler::new(
+            cfg,
+            RawCapture::OFF,
+            flow_metrics_for_test(),
+            test_pipeline().await,
+        )
+        .unwrap();
         let shutdown = CancellationToken::new();
         // No need to cancel -- the disabled path returns Ok immediately.
         handler.start(shutdown).await.unwrap();
@@ -459,8 +492,13 @@ split:
     #[tokio::test]
     async fn is_disabled_when_neither_unified_nor_split() {
         let cfg = FlowConfig::default();
-        let handler =
-            FlowHandler::new(cfg, flow_metrics_for_test(), test_pipeline().await).unwrap();
+        let handler = FlowHandler::new(
+            cfg,
+            RawCapture::OFF,
+            flow_metrics_for_test(),
+            test_pipeline().await,
+        )
+        .unwrap();
         assert!(handler.is_disabled());
     }
 
@@ -470,8 +508,13 @@ split:
             enabled: true,
             ..Default::default()
         };
-        let handler =
-            FlowHandler::new(cfg, flow_metrics_for_test(), test_pipeline().await).unwrap();
+        let handler = FlowHandler::new(
+            cfg,
+            RawCapture::OFF,
+            flow_metrics_for_test(),
+            test_pipeline().await,
+        )
+        .unwrap();
         assert!(!handler.is_disabled());
     }
 
@@ -482,8 +525,13 @@ split:
             ports: vec![2055, 4739, 6343],
             ..Default::default()
         };
-        let handler =
-            FlowHandler::new(cfg, flow_metrics_for_test(), test_pipeline().await).unwrap();
+        let handler = FlowHandler::new(
+            cfg,
+            RawCapture::OFF,
+            flow_metrics_for_test(),
+            test_pipeline().await,
+        )
+        .unwrap();
         let mut ports = handler.union_ports();
         ports.sort_unstable();
         assert_eq!(ports, vec![2055, 4739, 6343]);
@@ -502,8 +550,13 @@ split:
     topic: s
 ";
         let cfg: FlowConfig = serde_yaml_ng::from_str(yaml).unwrap();
-        let handler =
-            FlowHandler::new(cfg, flow_metrics_for_test(), test_pipeline().await).unwrap();
+        let handler = FlowHandler::new(
+            cfg,
+            RawCapture::OFF,
+            flow_metrics_for_test(),
+            test_pipeline().await,
+        )
+        .unwrap();
         let mut ports = handler.union_ports();
         ports.sort_unstable();
         assert_eq!(ports, vec![2055, 4739, 6343, 7343]);

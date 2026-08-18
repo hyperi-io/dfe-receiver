@@ -286,6 +286,73 @@ metrics:
   address: "0.0.0.0:9090"
 ```
 
+### Raw payload retention
+
+Opt-in retention of the original wire payload in the dfe-schemas common-header
+`_raw` field. The parsed event is unchanged -- `_raw` is an addition to it.
+
+dfe-loader already fills `_raw` by renaming
+`first(logoriginal/_raw/raw/raw_log/message)`, and is a silent no-op when
+`_raw` is already present, so a receiver-populated value wins without any
+loader change. The reason to populate it here is fidelity the loader cannot
+recover: for syslog its fallback lands `message`, the parsed body, after the
+PRI, the header and the exact wire spacing are gone. `syslog_loose` never
+errors either, so a malformed line silently becomes `message = <whole line>`
+and is indistinguishable from a clean parse. Only `_raw` separates them.
+
+Capture is off by default for two reasons. It roughly doubles produced bytes
+for text protocols, on top of a full-text index downstream. And `_raw` is the
+payload *before* parsing, so redaction, masking or field-dropping applied
+downstream to the parsed fields does not reach it -- a credential or PII value
+stripped from `message` still sits in `_raw`, indexed for full-text search.
+Enable capture for a source only when retaining its raw payload at that
+sensitivity is acceptable, and redact `_raw` explicitly wherever the parsed
+fields are redacted.
+
+```yaml
+raw_capture:              # common default for every capturing transport
+  enabled: false
+  max_bytes: 65536        # 0 = unlimited
+  on_oversize: truncate   # truncate | omit
+syslog:
+  raw_capture:
+    enabled: true         # per-transport override, inherits the rest
+```
+
+Every field is optional at both levels: an unset field inherits, so "off" and
+"not configured" stay distinguishable. Flat env vars work at both levels
+(`DFE_RECEIVER_RAW_CAPTURE_ENABLED`,
+`DFE_RECEIVER_SYSLOG_RAW_CAPTURE_ENABLED`).
+
+| Transport | What `_raw` holds |
+|-----------|-------------------|
+| `syslog` | the wire line verbatim, PRI and header included |
+| `gelf` | the message as it arrived, before `message`/`severity`/`_source` |
+| `fluent` | the record's msgpack-to-JSON decode, before tag/timestamp |
+| `splunk_hec` | `/event`: the submitted `event` value before metadata merge; `/raw`: the original line bytes |
+| `prometheus_rw` | the `native`-mode rendering of the sample |
+| `otlp` | the `generic`-mode rendering of the record |
+| `flow` | the decoder's verbatim records -- a JSON array in `canonical`, the single record in `exploded` |
+
+`http`, `grpc` and `lumberjack` do not offer the knob: they pass the payload
+through untouched, so `_raw` would be a byte-for-byte copy of the event.
+
+For `prometheus_rw` in `native` mode and `otlp` in `generic` mode, `_raw` is a
+copy of the event, because that mode already IS the least-shaped rendering.
+Both log a warning at startup. The field is still emitted so downstream sees
+one schema whichever mode the receiver runs in.
+
+Two markers travel with the value when they apply, so a mangled capture cannot
+be mistaken for a faithful one:
+
+- `_raw_truncated: true` -- the tail was dropped to respect `max_bytes`
+- `_raw_lossy: true` -- invalid UTF-8 was replaced with U+FFFD
+
+`_raw` exists only in the `timeseries` common-header profile. A source using
+`minimal` or `passthrough` pays for capture at the receiver and has the field
+dropped at the loader; the receiver cannot see the destination profile, so
+this is not checked.
+
 ## Deployment
 
 ### Kubernetes with KEDA
@@ -640,8 +707,12 @@ log and sets `dfe_handler_experimental{handler="flow"} 1`. Set
 ### Output modes
 
 - `canonical` (default) -- one JSON envelope per UDP datagram with `flows: [...]` array
-- `canonical_with_raw` -- canonical + verbatim parser output in `raw: [...]`
 - `exploded` -- one JSON envelope per flow record (amplifies events; use for per-flow analytics)
+
+Raw record retention is no longer a mode. `flow.raw_capture.enabled` adds the
+decoder's verbatim output to the event's common-header `_raw` field, and works
+with either mode -- a JSON array of every record in `canonical`, the single
+record in `exploded`. See [Raw payload retention](#raw-payload-retention).
 
 ### Record kinds
 

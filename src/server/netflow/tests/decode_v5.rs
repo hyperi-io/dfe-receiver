@@ -138,6 +138,45 @@ fn v5_raw_render_round_trips_to_json() {
 }
 
 #[test]
+fn v5_envelope_capture_adds_raw_to_the_canonical_event() {
+    use crate::config::RawCapture;
+    use crate::server::flow::config::OutputMode;
+    use crate::server::flow::envelope::render_packet;
+
+    let pkt = build_v5_packet_with_one_flow();
+    let mut dec = NetflowDecoder::new(
+        1000,
+        10_000,
+        crate::server::flow::metrics::mock::flow_metrics_for_test(),
+    );
+    let exporter: IpAddr = "127.0.0.1".parse().unwrap();
+    let decoded = dec
+        .decode(&pkt, exporter, ProtocolKind::NetflowV5)
+        .expect("v5 decode succeeds");
+
+    let mut buf = Vec::new();
+    let ranges = render_packet::<NetflowDecoder>(
+        &decoded,
+        OutputMode::Canonical,
+        RawCapture::on(),
+        "2026-05-20T00:00:00Z",
+        &mut buf,
+    )
+    .expect("render succeeds");
+
+    let event: Value = serde_json::from_slice(&buf[ranges[0].clone()]).expect("event parses");
+    // The canonical flow fields are untouched; _raw is an addition.
+    assert_eq!(event["_source"], "netflow");
+    assert_eq!(event["flows"][0]["src_ip"], "10.0.0.1");
+
+    let captured: Value = serde_json::from_str(event["_raw"].as_str().expect("_raw is a string"))
+        .expect("raw parses");
+    // Parser-verbatim field names, not the canonical ones.
+    assert_eq!(captured[0]["src_addr"], "10.0.0.1");
+    assert_eq!(captured[0]["d_octets"], 1500);
+}
+
+#[test]
 fn rejects_v5_packet_shorter_than_header() {
     let pkt = vec![0x00, 0x05, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00];
     let mut dec = NetflowDecoder::new(
