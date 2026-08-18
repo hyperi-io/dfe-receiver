@@ -368,8 +368,14 @@ async fn test_http_to_kafka() {
     config.kafka.producer.batch_messages = 1;
     config.kafka.producer.linger_ms = 0;
 
-    // Use a random port
-    let port = 10000 + (uuid::Uuid::new_v4().as_u128() % 10000) as u16;
+    // A port the OS says is free, rather than a guess that collides on a busy
+    // runner and leaves the handler's bind failing silently.
+    let port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local addr").port();
+        drop(listener);
+        port
+    };
     config.server.bind_address = format!("127.0.0.1:{port}");
 
     let metrics = Arc::new(Metrics::default());

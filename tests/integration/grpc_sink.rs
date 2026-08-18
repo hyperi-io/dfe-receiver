@@ -29,7 +29,10 @@ use scalo::transport::grpc::{GrpcConfig, GrpcTransport};
 
 /// Allocate a random port for test isolation.
 fn random_port() -> u16 {
-    30000 + (uuid::Uuid::new_v4().as_u128() % 20000) as u16
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    let port = listener.local_addr().expect("local addr").port();
+    drop(listener);
+    port
 }
 
 /// Send with retry on transient backpressure.
