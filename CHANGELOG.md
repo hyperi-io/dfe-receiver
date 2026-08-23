@@ -3,6 +3,12 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.15.25](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.24...v1.15.25) (2026-08-23)
+
+### Bug Fixes
+
+* **deps:** clear the h2 and rkyv advisories, drop mimalloc, modernise the deny config ([7d842d0](https://github.com/hyperi-io/dfe-receiver/commit/7d842d0aab4f04de718b1655ee8c5b972b883d84))
+
 ## [1.15.24](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.23...v1.15.24) (2026-08-23)
 
 ### Bug Fixes
