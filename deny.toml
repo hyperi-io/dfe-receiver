@@ -1,9 +1,19 @@
+# Project:   dfe-receiver
+# File:      deny.toml
+# Purpose:   cargo-deny configuration for license and advisory checks
+# Language:  TOML
+#
+# License:   BUSL-1.1
+# Copyright: (c) 2026 HYPERI PTY LIMITED
+
+[graph]
+targets = []
+all-features = true
+
 [advisories]
-vulnerability = "deny"
-unmaintained = "warn"
+ignore = []
 
 [licenses]
-unlicensed = "deny"
 allow = [
     "BUSL-1.1",
     "MIT",
@@ -16,8 +26,28 @@ allow = [
     "MPL-2.0",
     "Unicode-DFS-2016",
     "Unicode-3.0",
+    "0BSD",
+    "Unlicense",
+    "OpenSSL",
+    "BSL-1.0",
+    # notify, via yaque, via scalo. Dual CC0-1.0 OR Artistic-2.0; both permissive.
+    "CC0-1.0",
+    "Artistic-2.0",
+    "CDLA-Permissive-2.0",
 ]
-copyleft = "warn"
+confidence-threshold = 0.8
+
+# BUSL-1.1 carries per-project Change Date and Additional Use Grant lines, so the
+# text scores too low for cargo-deny to identify it from the file alone.
+[[licenses.clarify]]
+name = "dfe-receiver"
+expression = "BUSL-1.1"
+license-files = [{ path = "LICENSE", hash = 0x1d547099 }]
+
+[[licenses.clarify]]
+name = "ring"
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
 
 [bans]
 wildcards = "deny"

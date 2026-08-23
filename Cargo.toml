@@ -149,9 +149,8 @@ nom = ">=8.0, <9"
 socket2 = ">=0.6.3, <0.7"
 dashmap = ">=6.1, <7"
 
-# Optional allocators
+# Optional allocator. DFE policy is jemalloc only.
 tikv-jemallocator = { version = "0.7", optional = true }
-mimalloc = { version = "0.1", optional = true }
 
 # Optional pgo-driver dependencies (feature-gated)
 reqwest = { version = "0.13", features = ["json"], optional = true }
@@ -184,7 +183,6 @@ scalo = { version = ">=2.10.7, <3", features = ["deployment-test-support"] }
 default = ["otlp"]
 otlp = []
 jemalloc = ["dep:tikv-jemallocator"]
-mimalloc = ["dep:mimalloc"]
 # PGO/profiling workload driver; not built by default. Used by
 # scripts/pgo-workload.sh during hyperi-ci Tier 2 builds.
 # NOTE: the `[[bin]] pgo-driver` target has `required-features =
@@ -218,7 +216,7 @@ harness = false
 
 [[bin]]
 name = "pgo-driver"
-path = "src/bin/pgo-driver.rs"
+path = "src/bin/pgo_driver.rs"
 required-features = ["pgo-driver"]
 
 [lints.rust]
