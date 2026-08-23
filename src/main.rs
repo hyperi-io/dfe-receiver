@@ -19,7 +19,7 @@
 #![allow(clippy::large_futures)]
 
 // =============================================================================
-// Global Allocator — DFE policy: jemalloc only, no mimalloc.
+// Global Allocator — DFE policy: jemalloc only.
 // =============================================================================
 // hyperi-ci's release-track build adds `--features jemalloc` automatically on
 // every channel. For local builds, opt in with: `cargo build --features jemalloc`.
