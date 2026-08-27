@@ -22,7 +22,7 @@ doctest = false
 
 [dependencies]
 # scalo shared library (crates.io)
-scalo = { version = ">=2.10.7, <3", features = [
+scalo = { version = ">=2.10.14, <3", features = [
     "config",
     "config-reload",
     "config-schema",
@@ -177,7 +177,7 @@ sha2 = ">=0.10, <0.12"
 
 # Contract artefact e2e (tests/e2e/contract_artefacts.rs) — pulls in
 # probe/skip/cluster helpers from scalo's test_support module.
-scalo = { version = ">=2.10.7, <3", features = ["deployment-test-support"] }
+scalo = { version = ">=2.10.14, <3", features = ["deployment-test-support"] }
 
 [features]
 default = ["otlp"]

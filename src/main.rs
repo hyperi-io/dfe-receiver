@@ -115,6 +115,17 @@ impl ServiceApp for App {
             "Config resolved"
         );
 
+        // Fire-and-forget startup version check; no-op unless the cascade
+        // sets version_check.enabled + api_url.
+        {
+            use scalo::version_check::{VersionCheck, VersionCheckConfig};
+            let checker = VersionCheck::new(VersionCheckConfig::from_cascade(
+                "dfe-receiver",
+                env!("CARGO_PKG_VERSION"),
+            ));
+            checker.check_on_startup();
+        }
+
         // Register receiver-specific metric groups on the runtime's existing manager.
         // ServiceRuntime already installed the global recorder and ServiceMetrics.
         //
