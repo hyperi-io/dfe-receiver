@@ -3,6 +3,12 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.15.26](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.25...v1.15.26) (2026-08-27)
+
+### Bug Fixes
+
+* scalo 2.10.14 + startup version check ([9adaabe](https://github.com/hyperi-io/dfe-receiver/commit/9adaabe8d12eed65a011456606abb762ad01e918))
+
 ## [1.15.25](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.24...v1.15.25) (2026-08-23)
 
 ### Bug Fixes
