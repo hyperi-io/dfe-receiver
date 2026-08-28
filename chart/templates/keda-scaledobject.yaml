@@ -20,7 +20,15 @@ spec:
       metadata:
         bootstrapServers: {{ .Values.config.kafka.brokers | quote }}
         consumerGroup: {{ .Values.keda.kafka.consumerGroup | default .Values.config.kafka.group_id | quote }}
-        topic: {{ .Values.keda.kafka.topic | default (index .Values.config.kafka.topics 0) | quote }}
+        {{- /* `default (index X 0)` would eagerly evaluate `index nil 0` and fail
+            lint when no topics are set. Use explicit conditional instead. */}}
+        {{- if .Values.keda.kafka.topic }}
+        topic: {{ .Values.keda.kafka.topic | quote }}
+        {{- else if .Values.config.kafka.topics }}
+        topic: {{ (index .Values.config.kafka.topics 0) | quote }}
+        {{- else }}
+        topic: ""
+        {{- end }}
         lagThreshold: {{ .Values.keda.kafka.lagThreshold | quote }}
         activationLagThreshold: {{ .Values.keda.kafka.activationLagThreshold | quote }}
         saslType: scram_sha512
@@ -31,13 +39,5 @@ spec:
       metricType: Utilization
       metadata:
         value: {{ .Values.keda.cpu.threshold | quote }}
-    {{- end }}
-    {{- if .Values.keda.prometheus.enabled }}
-    # Prometheus scaling pressure (tertiary scaler)
-    - type: prometheus
-      metadata:
-        serverAddress: {{ .Values.keda.prometheus.serverAddress | quote }}
-        query: {{ .Values.keda.prometheus.query | quote }}
-        threshold: {{ .Values.keda.prometheus.threshold | quote }}
     {{- end }}
 {{- end }}

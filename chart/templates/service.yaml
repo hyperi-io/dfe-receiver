@@ -35,27 +35,37 @@ spec:
       targetPort: 8088
       protocol: TCP
       name: hec
-    {{- if .Values.config.flow.enabled }}
-    {{- range .Values.config.flow.ports }}
-    - port: {{ . }}
-      targetPort: {{ . }}
+    - port: 9091
+      targetPort: 9091
+      protocol: TCP
+      name: prometheus-rw
+    - port: 514
+      targetPort: 514
+      protocol: TCP
+      name: syslog
+    - port: 6514
+      targetPort: 6514
+      protocol: TCP
+      name: syslog-tls
+    - port: 24224
+      targetPort: 24224
+      protocol: TCP
+      name: fluent
+    - port: 12201
+      targetPort: 12201
+      protocol: TCP
+      name: gelf
+    - port: 2055
+      targetPort: 2055
       protocol: UDP
-      name: flow-{{ . }}
-    {{- end }}
-    {{- end }}
-    {{- if .Values.config.flow.split }}
-    {{- range .Values.config.flow.split.netflow.ports }}
-    - port: {{ . }}
-      targetPort: {{ . }}
+      name: netflow
+    - port: 4739
+      targetPort: 4739
       protocol: UDP
-      name: flow-netflow-{{ . }}
-    {{- end }}
-    {{- range .Values.config.flow.split.sflow.ports }}
-    - port: {{ . }}
-      targetPort: {{ . }}
+      name: netflow-ipfix
+    - port: 6343
+      targetPort: 6343
       protocol: UDP
-      name: flow-sflow-{{ . }}
-    {{- end }}
-    {{- end }}
+      name: sflow
   selector:
     {{- include "dfe-receiver.selectorLabels" . | nindent 4 }}
