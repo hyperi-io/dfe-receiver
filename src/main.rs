@@ -115,17 +115,6 @@ impl ServiceApp for App {
             "Config resolved"
         );
 
-        // Fire-and-forget startup version check; no-op unless the cascade
-        // sets version_check.enabled + api_url.
-        {
-            use scalo::version_check::{VersionCheck, VersionCheckConfig};
-            let checker = VersionCheck::new(VersionCheckConfig::from_cascade(
-                "dfe-receiver",
-                env!("CARGO_PKG_VERSION"),
-            ));
-            checker.check_on_startup();
-        }
-
         // Register receiver-specific metric groups on the runtime's existing manager.
         // ServiceRuntime already installed the global recorder and ServiceMetrics.
         //
@@ -266,6 +255,15 @@ impl ServiceApp for App {
 
     fn deployment_contract(&self) -> Option<scalo::deployment::DeploymentContract> {
         Some(crate::deployment::contract())
+    }
+
+    fn version_check_defaults(&self) -> scalo::version_check::VersionCheckConfig {
+        // The runtime overlays the version_check cascade keys on this, so a
+        // deployment's explicit enabled: false always wins.
+        scalo::version_check::VersionCheckConfig {
+            api_url: "https://releases.hyperi.io/api/v1/check".into(),
+            ..Default::default()
+        }
     }
 }
 

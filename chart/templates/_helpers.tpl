@@ -61,7 +61,7 @@ Service account name.
 {{- end }}
 
 {{/*
-kafka secret name — use existing or generate from fullname.
+kafka secret name -- use existing or generate from fullname.
 */}}
 {{- define "dfe-receiver.kafkaSecretName" -}}
 {{- if .Values.kafka.existingSecret }}
@@ -72,7 +72,7 @@ kafka secret name — use existing or generate from fullname.
 {{- end }}
 
 {{/*
-auth secret name — use existing or generate from fullname.
+auth secret name -- use existing or generate from fullname.
 */}}
 {{- define "dfe-receiver.authSecretName" -}}
 {{- if .Values.auth.existingSecret }}
