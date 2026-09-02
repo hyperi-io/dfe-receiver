@@ -567,12 +567,19 @@ async fn ingest_handler(
 
     // Process through pipeline (timed)
     let start = std::time::Instant::now();
-    let result = match split_json_array(&body) {
+    let batch = split_json_array(&body);
+    let events = batch.as_ref().map_or(1, Vec::len);
+    // A batch fails as a whole, so without the count a partial failure and a
+    // total one look the same.
+    let (accepted, result) = match batch {
         Some(payloads) => {
-            let (_, first_err) = state.pipeline.process_batch(&payloads).await;
-            first_err.map_or(Ok(()), Err)
+            let (accepted, first_err) = state.pipeline.process_batch(&payloads).await;
+            (accepted, first_err.map_or(Ok(()), Err))
         }
-        None => state.pipeline.process(body).await,
+        None => {
+            let result = state.pipeline.process(body).await;
+            (usize::from(result.is_ok()), result)
+        }
     };
     let elapsed = start.elapsed();
     state
@@ -584,6 +591,7 @@ async fn ingest_handler(
             debug!(
                 transport = "http",
                 bytes = body_len,
+                events,
                 duration_us = elapsed.as_micros(),
                 "HTTP ingest request accepted"
             );
@@ -594,6 +602,8 @@ async fn ingest_handler(
             debug!(
                 transport = "http",
                 bytes = body_len,
+                events,
+                accepted,
                 duration_us = elapsed.as_micros(),
                 error = %e,
                 "HTTP ingest request failed"
@@ -608,16 +618,26 @@ async fn ingest_handler(
 ///
 /// A batched POST carries `[{...},{...}]`; forwarded whole it becomes one
 /// message holding an array, which downstream reads as a single event and
-/// rejects. Returns None for anything that is not an array, which stays a
-/// single event. Every other transport already splits before the pipeline.
+/// rejects. Returns None for anything that is not a well-formed array, which
+/// stays a single event. Every other transport already splits before the
+/// pipeline.
+///
+/// Each element is copied out as its original bytes: an integer wider than
+/// `u64` does not survive a parse to a value tree and back.
 fn split_json_array(body: &Bytes) -> Option<Vec<Bytes>> {
     if *body.iter().find(|b| !b.is_ascii_whitespace())? != b'[' {
         return None;
     }
-    let elements: Vec<serde_json::Value> = serde_json::from_slice(body).ok()?;
-    let mut payloads = Vec::with_capacity(elements.len());
-    for element in elements {
-        payloads.push(Bytes::from(serde_json::to_vec(&element).ok()?));
+    // The element iterator stops at the closing bracket, so anything trailing
+    // it would be dropped silently; this rejects the whole body instead.
+    sonic_rs::from_slice::<sonic_rs::LazyValue>(body).ok()?;
+    // A &[u8] input keeps every LazyValue borrowed from the body; a &Bytes
+    // input would copy it into a FastStr first.
+    let mut payloads = Vec::new();
+    for element in sonic_rs::to_array_iter(&body[..]) {
+        payloads.push(Bytes::copy_from_slice(
+            element.ok()?.as_raw_str().as_bytes(),
+        ));
     }
     Some(payloads)
 }
@@ -672,6 +692,49 @@ mod tests {
     fn a_malformed_array_is_not_split_and_is_left_to_validation() {
         let body = Bytes::from(r#"[{"a":1},"#);
         assert!(split_json_array(&body).is_none());
+    }
+
+    #[test]
+    fn an_element_reaches_kafka_byte_identical_to_the_same_object_posted_alone() {
+        // Each case reaches the destination untouched when posted alone, so it
+        // must survive batching too.
+        let cases = [
+            r#"{"id":123456789012345678901234}"#,
+            r#"{"a":"A"}"#,
+            r#"{"a":1,"a":2}"#,
+            r#"{"a":1.0,"b":1e2}"#,
+        ];
+        for object in cases {
+            let body = Bytes::from(format!("[{object}]"));
+            let payloads = split_json_array(&body).expect("an array body splits");
+            assert_eq!(payloads.len(), 1);
+            assert_eq!(
+                payloads[0],
+                Bytes::from(object),
+                "batching rewrote the element"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_array_carries_no_events() {
+        let payloads = split_json_array(&Bytes::from("[]")).expect("an array body splits");
+        assert!(payloads.is_empty());
+    }
+
+    #[test]
+    fn trailing_content_after_the_array_is_not_split() {
+        let body = Bytes::from(r#"[{"a":1}] and then some"#);
+        assert!(split_json_array(&body).is_none());
+    }
+
+    #[test]
+    fn nested_arrays_split_only_at_the_top_level() {
+        let body = Bytes::from(r#"[[1,2],{"a":[3]}]"#);
+        let payloads = split_json_array(&body).expect("an array body splits");
+        assert_eq!(payloads.len(), 2);
+        assert_eq!(payloads[0], Bytes::from("[1,2]"));
+        assert_eq!(payloads[1], Bytes::from(r#"{"a":[3]}"#));
     }
 
     fn test_auth_config() -> AuthConfig {

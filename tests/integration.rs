@@ -32,6 +32,8 @@ mod fluent;
 mod gelf;
 #[path = "integration/grpc_sink.rs"]
 mod grpc_sink;
+#[path = "integration/http_ingest.rs"]
+mod http_ingest;
 #[path = "integration/http_security.rs"]
 mod http_security;
 #[path = "integration/kafka_sink.rs"]
