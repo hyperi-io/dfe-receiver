@@ -129,7 +129,7 @@ spec:
                   name: {{ include "dfe-receiver.kafkaSecretName" . }}
                   key: {{ .Values.kafka.secretKeys.password }}
             # auth credentials via Secret (figment env cascade overrides file config)
-            - name: DFE_RECEIVER__SERVER__AUTH__BEARER__TOKENS
+            - name: DFE_RECEIVER_BEARER_TOKENS
               valueFrom:
                 secretKeyRef:
                   name: {{ include "dfe-receiver.authSecretName" . }}

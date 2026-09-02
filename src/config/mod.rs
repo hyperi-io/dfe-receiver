@@ -272,6 +272,15 @@ impl ApplyFlatEnv for Config {
         if let Some(v) = flat_env::flat_env_bool(prefix, "COMMON_HEADER") {
             self.server.auth.include_common_header = v;
         }
+        // Comma-separated, to match the Secret the chart mounts here.
+        if let Some(v) = flat_env::flat_env_string_sensitive(prefix, "BEARER_TOKENS") {
+            self.server.auth.bearer.tokens = v
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect();
+        }
 
         // Kafka
         if let Some(v) = flat_env::flat_env_list(prefix, "KAFKA_BROKERS") {
@@ -1934,6 +1943,25 @@ mod tests {
                 assert_eq!(sasl.mechanism, "SCRAM-SHA-512");
                 assert_eq!(sasl.username, "admin");
                 assert_eq!(sasl.password, "secret");
+            },
+        );
+    }
+
+    #[test]
+    fn test_env_override_bearer_tokens() {
+        with_env(
+            &[("DFE_RECEIVER_BEARER_TOKENS", "tok-a, tok-b ,,tok-c")],
+            || {
+                let mut config = Config::default();
+                config.apply_flat_env(ENV_PREFIX);
+                assert_eq!(
+                    config.server.auth.bearer.tokens,
+                    vec![
+                        "tok-a".to_string(),
+                        "tok-b".to_string(),
+                        "tok-c".to_string()
+                    ]
+                );
             },
         );
     }
