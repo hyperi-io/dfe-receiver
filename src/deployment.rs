@@ -453,7 +453,11 @@ mod tests {
                 .as_ref()
                 .unwrap_or_else(|| panic!("{} was not read: no sasl block", env.env_var));
             let landed = sasl.username == "sentinel-value" || sasl.password == "sentinel-value";
-            assert!(landed, "{} ({suffix}) was set and nothing read it", env.env_var);
+            assert!(
+                landed,
+                "{} ({suffix}) was set and nothing read it",
+                env.env_var
+            );
         }
     }
 
