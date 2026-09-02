@@ -36,16 +36,16 @@ fn random_port() -> u16 {
     port
 }
 
-/// Poll the loopback port until it accepts a connection.
-async fn wait_for_port(port: u16) {
+/// Poll the loopback port until it accepts a connection, up to `attempts`.
+async fn port_accepts(port: u16, attempts: u32) -> bool {
     let addr = format!("127.0.0.1:{port}");
-    for _ in 0..300 {
+    for _ in 0..attempts {
         if tokio::net::TcpStream::connect(&addr).await.is_ok() {
-            return;
+            return true;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    panic!("mock loader on port {port} never accepted connections");
+    false
 }
 
 /// Stand up the mock loader, retrying when a picked port is taken before bind.
@@ -55,9 +55,11 @@ async fn start_mock_loader() -> (String, GrpcTransport) {
         let port = random_port();
         let config = GrpcConfig::server(&format!("127.0.0.1:{port}"));
         match GrpcTransport::new(&config).await {
-            Ok(transport) => {
-                wait_for_port(port).await;
+            Ok(transport) if port_accepts(port, 300).await => {
                 return (format!("http://127.0.0.1:{port}"), transport);
+            }
+            Ok(_) => {
+                last_err = format!("port {port} never accepted");
             }
             Err(e) => {
                 last_err = e.to_string();
@@ -69,36 +71,44 @@ async fn start_mock_loader() -> (String, GrpcTransport) {
 }
 
 /// Start the HTTP server routing every event to `loader_endpoint`.
+///
+/// A port picked by `random_port` can be taken again before the server binds
+/// it, so a port that never accepts is retried rather than failed.
 async fn start_receiver(loader_endpoint: &str) -> (String, CancellationToken) {
-    let port = random_port();
+    for _ in 0..20 {
+        let port = random_port();
 
-    let mut config = Config::default();
-    config.server.bind_address = format!("127.0.0.1:{port}");
-    config.destinations.default = "loader".to_string();
-    config.loader.transport = "grpc".to_string();
-    config.loader.grpc_endpoint = Some(loader_endpoint.to_string());
+        let mut config = Config::default();
+        config.server.bind_address = format!("127.0.0.1:{port}");
+        config.destinations.default = "loader".to_string();
+        config.loader.transport = "grpc".to_string();
+        config.loader.grpc_endpoint = Some(loader_endpoint.to_string());
 
-    let shutdown = CancellationToken::new();
-    let pipeline = Arc::new(
-        PipelineState::new(SharedConfig::new(config.clone()), CancellationToken::new())
-            .await
-            .expect("pipeline init"),
-    );
+        let shutdown = CancellationToken::new();
+        let pipeline = Arc::new(
+            PipelineState::new(SharedConfig::new(config.clone()), CancellationToken::new())
+                .await
+                .expect("pipeline init"),
+        );
 
-    let bind_addr = config.server.bind_address.clone();
-    let server_shutdown = shutdown.clone();
-    tokio::spawn(async move {
-        let _ = http::run_server(
-            &bind_addr,
-            pipeline,
-            Arc::new(Metrics::default()),
-            server_shutdown,
-        )
-        .await;
-    });
-    wait_for_port(port).await;
+        let bind_addr = config.server.bind_address.clone();
+        let server_shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            let _ = http::run_server(
+                &bind_addr,
+                pipeline,
+                Arc::new(Metrics::default()),
+                server_shutdown,
+            )
+            .await;
+        });
 
-    (format!("http://127.0.0.1:{port}"), shutdown)
+        if port_accepts(port, 40).await {
+            return (format!("http://127.0.0.1:{port}"), shutdown);
+        }
+        shutdown.cancel();
+    }
+    panic!("receiver never accepted connections on any of 20 ports");
 }
 
 /// Collect records from the mock loader until `expected` arrive or time runs out.
@@ -145,6 +155,35 @@ async fn a_posted_json_array_becomes_one_event_per_element() {
             "the array reached the loader whole: {text}"
         );
         assert!(text.contains(want), "element out of order or lost: {text}");
+    }
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_posted_ndjson_body_becomes_one_event_per_line() {
+    // The deployment contract advertises NDJSON on this endpoint; unsplit it
+    // fails validation whole and lands in the DLQ, so the client sees 202 and
+    // no data.
+    let (endpoint, loader) = start_mock_loader().await;
+    let (url, shutdown) = start_receiver(&endpoint).await;
+
+    let status = post(
+        &url,
+        "{\"event_category\":\"a\"}\n{\"event_category\":\"b\"}\n{\"event_category\":\"c\"}",
+    )
+    .await;
+    assert!(status.is_success(), "ndjson ingest rejected: {status}");
+
+    let records = collect(&loader, 3).await;
+    assert_eq!(records.len(), 3, "expected one event per line");
+    for (record, want) in records.iter().zip(["a", "b", "c"]) {
+        let text = String::from_utf8_lossy(record);
+        assert!(
+            !text.contains('\n'),
+            "the ndjson body reached the loader whole: {text}"
+        );
+        assert!(text.contains(want), "line out of order or lost: {text}");
     }
 
     shutdown.cancel();

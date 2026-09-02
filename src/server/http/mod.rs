@@ -575,7 +575,7 @@ async fn ingest_handler(
 
     // Process through pipeline (timed)
     let start = std::time::Instant::now();
-    let batch = split_json_array(&body);
+    let batch = split_batch_body(&body);
     let events = match &batch {
         Some(Ok(payloads)) => payloads.len(),
         _ => 1,
@@ -624,6 +624,48 @@ async fn ingest_handler(
             Err(e)
         }
     }
+}
+
+/// Split a batched ingest body into one payload per event.
+///
+/// Covers the two shapes a single POST can carry more than one event in: a
+/// top-level JSON array, and newline-delimited JSON. Returns None for a body
+/// that is one event, which takes the unsplit path.
+fn split_batch_body(body: &Bytes) -> Option<Result<Vec<Bytes>>> {
+    split_json_array(body).or_else(|| split_ndjson(body))
+}
+
+/// Split a newline-delimited JSON body into one payload per line.
+///
+/// The deployment contract advertises NDJSON on this endpoint, but an
+/// unsplit NDJSON body fails validation as a whole and lands in the DLQ, so
+/// the client sees 202 and no data.
+///
+/// Splitting needs a rule that a pretty-printed single object cannot trip,
+/// since its lines are not JSON on their own: a body only splits when it has
+/// more than one non-blank line AND the first parses as a complete value. A
+/// later malformed line is left to per-event validation, which routes it to
+/// the DLQ without taking the rest of the batch with it.
+fn split_ndjson(body: &Bytes) -> Option<Result<Vec<Bytes>>> {
+    let lines: Vec<&[u8]> = body
+        .split(|&b| b == b'\n')
+        .map(<[u8]>::trim_ascii)
+        .filter(|line| !line.is_empty())
+        // Bound the scan itself: without it a body of "1\n" repeated builds a
+        // slice per two bytes before the cap below could reject it.
+        .take(MAX_BATCH_EVENTS + 1)
+        .collect();
+
+    if lines.len() < 2 {
+        return None;
+    }
+    sonic_rs::from_slice::<sonic_rs::LazyValue>(lines[0]).ok()?;
+    if lines.len() > MAX_BATCH_EVENTS {
+        return Some(Err(Error::Validation(format!(
+            "batch exceeds {MAX_BATCH_EVENTS} events"
+        ))));
+    }
+    Some(Ok(lines.into_iter().map(Bytes::copy_from_slice).collect()))
 }
 
 /// Split a top-level JSON array body into one payload per element.
@@ -685,6 +727,61 @@ mod tests {
         split_json_array(body)
             .expect("an array body splits")
             .expect("within the batch cap")
+    }
+
+    fn batch_ok(body: &Bytes) -> Vec<Bytes> {
+        split_batch_body(body)
+            .expect("a batched body splits")
+            .expect("within the batch cap")
+    }
+
+    #[test]
+    fn an_ndjson_body_becomes_one_event_per_line() {
+        let body = Bytes::from("{\"a\":1}\n{\"a\":2}\n{\"a\":3}");
+        let payloads = batch_ok(&body);
+        assert_eq!(payloads.len(), 3);
+        assert_eq!(payloads[0], Bytes::from(r#"{"a":1}"#));
+        assert_eq!(payloads[2], Bytes::from(r#"{"a":3}"#));
+    }
+
+    #[test]
+    fn ndjson_blank_and_crlf_lines_do_not_become_events() {
+        let body = Bytes::from("{\"a\":1}\r\n\r\n{\"a\":2}\n\n");
+        let payloads = batch_ok(&body);
+        assert_eq!(payloads.len(), 2);
+        assert_eq!(payloads[0], Bytes::from(r#"{"a":1}"#));
+        assert_eq!(payloads[1], Bytes::from(r#"{"a":2}"#));
+    }
+
+    #[test]
+    fn a_pretty_printed_object_is_not_shredded_into_lines() {
+        // Its first line is not a complete JSON value, which is what keeps a
+        // multi-line single object off the NDJSON path.
+        let body = Bytes::from("{\n  \"a\": 1,\n  \"b\": 2\n}");
+        assert!(split_batch_body(&body).is_none());
+    }
+
+    #[test]
+    fn a_later_malformed_ndjson_line_still_splits_for_per_event_validation() {
+        let body = Bytes::from("{\"a\":1}\nnot json\n{\"a\":2}");
+        let payloads = batch_ok(&body);
+        assert_eq!(payloads.len(), 3);
+        assert_eq!(payloads[1], Bytes::from("not json"));
+    }
+
+    #[test]
+    fn a_single_line_object_takes_the_unsplit_path() {
+        assert!(split_batch_body(&Bytes::from(r#"{"a":1}"#)).is_none());
+        assert!(split_batch_body(&Bytes::from("{\"a\":1}\n")).is_none());
+    }
+
+    #[test]
+    fn ndjson_over_the_cap_is_rejected() {
+        let body = Bytes::from(vec!["1"; MAX_BATCH_EVENTS + 1].join("\n"));
+        let err = split_batch_body(&body)
+            .expect("still a batch")
+            .expect_err("over the cap");
+        assert!(matches!(err, Error::Validation(_)), "{err}");
     }
 
     #[test]
