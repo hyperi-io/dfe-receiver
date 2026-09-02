@@ -42,6 +42,33 @@ use crate::validation::{ValidationResult, Validator};
 // Trace-level logging imports (only used for per-message tracing)
 use tracing::trace;
 
+/// Tracked bytes released on drop, so a cancelled request cannot leak them.
+///
+/// A client disconnect or request timeout drops the in-flight future between
+/// `add_bytes` and `release`, and the counter never decays: the guard then
+/// reports pressure forever, `/readyz` 503s while `/livez` keeps passing, and
+/// nothing restarts the pod.
+struct MemoryLease {
+    guard: Arc<MemoryGuard>,
+    bytes: u64,
+}
+
+impl MemoryLease {
+    fn acquire(guard: &Arc<MemoryGuard>, bytes: u64) -> Self {
+        guard.add_bytes(bytes);
+        Self {
+            guard: Arc::clone(guard),
+            bytes,
+        }
+    }
+}
+
+impl Drop for MemoryLease {
+    fn drop(&mut self) {
+        self.guard.release(self.bytes);
+    }
+}
+
 /// Shared pipeline state accessible from handlers.
 pub struct PipelineState {
     shared_config: SharedConfig,
@@ -296,16 +323,10 @@ impl PipelineState {
             info!("Memory pressure recovered");
         }
 
-        // Track memory
-        let payload_size = payload.len() as u64;
-        self.memory_guard.add_bytes(payload_size);
+        // Track memory; the lease releases even if this future is dropped.
+        let _lease = MemoryLease::acquire(&self.memory_guard, payload.len() as u64);
 
-        let result = self.process_inner(payload).await;
-
-        // Release memory tracking on completion
-        self.memory_guard.release(payload_size);
-
-        result
+        self.process_inner(payload).await
     }
 
     /// Process a batch of messages through the pipeline.
@@ -335,9 +356,10 @@ impl PipelineState {
             info!("Memory pressure recovered");
         }
 
-        // Track memory for the entire batch at once
+        // Track memory for the entire batch at once; released on drop, so a
+        // cancellation part-way through the loop cannot leak it.
         let total_bytes: u64 = payloads.iter().map(|p| p.len() as u64).sum();
-        self.memory_guard.add_bytes(total_bytes);
+        let _lease = MemoryLease::acquire(&self.memory_guard, total_bytes);
 
         let mut success_count = 0usize;
         let mut first_error: Option<Error> = None;
@@ -352,9 +374,6 @@ impl PipelineState {
                 }
             }
         }
-
-        // Release memory for the entire batch
-        self.memory_guard.release(total_bytes);
 
         (success_count, first_error)
     }
@@ -504,13 +523,12 @@ impl PipelineState {
             info!("Memory pressure recovered");
         }
 
-        // Track memory
-        let payload_size = payload.len() as u64;
-        self.memory_guard.add_bytes(payload_size);
+        // Track memory; the lease releases even if this future is dropped.
+        let _lease = MemoryLease::acquire(&self.memory_guard, payload.len() as u64);
 
         // Validate (acquire and release lock before any await)
         let validation = self.validator.read().validate(&payload);
-        let result = match validation {
+        match validation {
             ValidationResult::Valid => self.send_to_kafka(topic, payload).await,
             ValidationResult::Dlq(reason) => {
                 debug!(reason = %reason, "Message validation failed, routing to DLQ");
@@ -521,12 +539,7 @@ impl PipelineState {
                 security::input_validation_failure("json_validate", &reason, None);
                 Err(Error::Validation(reason))
             }
-        };
-
-        // Release memory tracking on completion
-        self.memory_guard.release(payload_size);
-
-        result
+        }
     }
 
     /// Send message to Kafka.
@@ -902,6 +915,40 @@ mod tests {
         // Should start without pressure
         assert!(!state.should_apply_backpressure());
         assert_eq!(state.memory_pressure(), MemoryPressure::Low);
+    }
+
+    #[tokio::test]
+    async fn memory_lease_releases_on_every_drop_path() {
+        // The lease is dropped however the future ends, so its Drop contract is
+        // what covers the cancellation path.
+        let state = test_state().await;
+        let guard = state.memory_guard().clone();
+        let before = guard.current_bytes();
+
+        {
+            let _lease = MemoryLease::acquire(&guard, 4096);
+            assert_eq!(
+                guard.current_bytes(),
+                before + 4096,
+                "acquire must track the bytes"
+            );
+        }
+
+        assert_eq!(
+            guard.current_bytes(),
+            before,
+            "drop must return the tracked bytes to baseline"
+        );
+    }
+
+    #[tokio::test]
+    async fn process_returns_tracked_bytes_to_baseline() {
+        let state = test_state().await;
+        let before = state.memory_guard().current_bytes();
+
+        let _ = state.process(Bytes::from(vec![b'x'; 4096])).await;
+
+        assert_eq!(state.memory_guard().current_bytes(), before);
     }
 
     #[tokio::test]
