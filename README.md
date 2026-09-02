@@ -79,7 +79,7 @@ DFE_RECEIVER_SERVER__BIND_ADDRESS=0.0.0.0:8080 ./target/release/dfe-receiver
 
 ## Configuration
 
-See [config.example.yaml](config.example.yaml) for full configuration reference.
+See [config.example.yaml](https://github.com/hyperi-io/dfe-receiver/blob/main/config.example.yaml) for full configuration reference.
 
 ### Minimal Configuration
 
