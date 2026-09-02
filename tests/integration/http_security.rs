@@ -41,6 +41,22 @@ fn random_port() -> u16 {
     port
 }
 
+/// Poll the loopback port until it accepts a connection, or panic on the budget.
+///
+/// A fixed sleep races the server's bind under parallel CI load and surfaces as
+/// `ConnectionRefused` on the test's own port; `grpc_sink.rs` hardened against
+/// the same failure.
+async fn wait_for_port(port: u16) {
+    let addr = format!("127.0.0.1:{port}");
+    for _ in 0..300 {
+        if tokio::net::TcpStream::connect(&addr).await.is_ok() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("HTTP server on port {port} never accepted connections within 15s");
+}
+
 /// Create a test config with specified settings.
 fn test_config(port: u16, max_body_size: usize, timeout_ms: u64, auth_mode: &str) -> Config {
     let mut config = Config::default();
@@ -84,8 +100,7 @@ async fn start_test_server(config: Config) -> (String, CancellationToken) {
         let _ = http::run_server(&bind_addr, pipeline, server_metrics, server_shutdown).await;
     });
 
-    // Wait for server to start
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    wait_for_port(port).await;
 
     let url = format!("http://127.0.0.1:{port}");
     (url, shutdown)
@@ -1288,7 +1303,7 @@ async fn test_503_when_pipeline_not_ready() {
             http::run_server(&bind_addr, server_pipeline, server_metrics, server_shutdown).await;
     });
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    wait_for_port(port).await;
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
