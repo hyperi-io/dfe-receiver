@@ -1,5 +1,5 @@
 // Project:   dfe-receiver
-// File:      tests/security_http.rs
+// File:      tests/integration/http_security.rs
 // Purpose:   Security tests for HTTP server hardening
 // Language:  Rust
 //
@@ -14,7 +14,7 @@
 //! - Authentication enforcement
 //! - TLS handshake timeouts (manual testing required)
 //!
-//! Run with: `cargo test --test security_http`
+//! Run with: `cargo test --test integration http_security`
 
 // Allow unwrap/expect in tests - they're the idiomatic way to fail fast
 #![allow(clippy::unwrap_used)]
@@ -44,10 +44,12 @@ fn random_port() -> u16 {
 /// Poll the loopback port until it accepts a connection, or panic on the budget.
 ///
 /// A fixed sleep races the server's bind under parallel CI load and surfaces as
-/// `ConnectionRefused` on the test's own port; `grpc_sink.rs` hardened against
-/// the same failure.
+/// `ConnectionRefused` on the test's own port. This is the polling half of the
+/// `grpc_sink.rs` hardening; that file also retries on a fresh port when the
+/// bind itself loses a `random_port` race, which these callers do not.
 async fn wait_for_port(port: u16) {
     let addr = format!("127.0.0.1:{port}");
+    // 300 x 50ms = 15s, generous because it guards a race rather than measuring.
     for _ in 0..300 {
         if tokio::net::TcpStream::connect(&addr).await.is_ok() {
             return;
@@ -97,7 +99,13 @@ async fn start_test_server(config: Config) -> (String, CancellationToken) {
     let bind_addr = config.server.bind_address.clone();
 
     tokio::spawn(async move {
-        let _ = http::run_server(&bind_addr, pipeline, server_metrics, server_shutdown).await;
+        // Surfaced, not swallowed: a failed bind is otherwise invisible and the
+        // only symptom is the port wait below spending its whole budget.
+        if let Err(e) =
+            http::run_server(&bind_addr, pipeline, server_metrics, server_shutdown).await
+        {
+            eprintln!("test HTTP server exited with an error: {e}");
+        }
     });
 
     wait_for_port(port).await;
@@ -1299,8 +1307,12 @@ async fn test_503_when_pipeline_not_ready() {
     let bind_addr = config.server.bind_address.clone();
 
     tokio::spawn(async move {
-        let _ =
-            http::run_server(&bind_addr, server_pipeline, server_metrics, server_shutdown).await;
+        // Surfaced, not swallowed: see start_test_server.
+        if let Err(e) =
+            http::run_server(&bind_addr, server_pipeline, server_metrics, server_shutdown).await
+        {
+            eprintln!("test HTTP server exited with an error: {e}");
+        }
     });
 
     wait_for_port(port).await;
