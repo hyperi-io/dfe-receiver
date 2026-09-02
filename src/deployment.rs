@@ -142,13 +142,15 @@ pub fn contract() -> DeploymentContract {
             SecretGroupContract {
                 group_name: "kafka".into(),
                 env_vars: vec![
+                    // apply_flat_env reads these; flat_env joins prefix and key
+                    // with ONE underscore, and the key is USER, not USERNAME.
                     SecretEnvContract {
-                        env_var: "DFE_RECEIVER__KAFKA__SASL__USERNAME".into(),
+                        env_var: "DFE_RECEIVER_KAFKA_SASL_USER".into(),
                         key_name: "username".into(),
                         secret_key: "kafka-username".into(),
                     },
                     SecretEnvContract {
-                        env_var: "DFE_RECEIVER__KAFKA__SASL__PASSWORD".into(),
+                        env_var: "DFE_RECEIVER_KAFKA_SASL_PASSWORD".into(),
                         key_name: "password".into(),
                         secret_key: "kafka-password".into(),
                     },
@@ -346,6 +348,8 @@ pub fn emit_dockerfile() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
+    use scalo::config::flat_env::ApplyFlatEnv;
 
     #[test]
     fn test_contract_fields() {
@@ -425,6 +429,32 @@ mod tests {
         assert_eq!(c.secrets.len(), 2);
         assert_eq!(c.secrets[0].group_name, "kafka");
         assert_eq!(c.secrets[1].group_name, "auth");
+    }
+
+    #[test]
+    fn every_declared_secret_env_var_reaches_the_config() {
+        // The chart is generated from these names. One the loader does not read
+        // mounts the Secret and is ignored, with nothing failing to say so.
+        let kafka = &contract().secrets[0];
+        for env in &kafka.env_vars {
+            let suffix = env
+                .env_var
+                .strip_prefix(&format!("{}_", crate::config::ENV_PREFIX))
+                .unwrap_or_else(|| panic!("{} does not carry the app prefix", env.env_var));
+
+            let mut config = Config::default();
+            temp_env::with_var(&env.env_var, Some("sentinel-value"), || {
+                config.apply_flat_env(crate::config::ENV_PREFIX);
+            });
+
+            let sasl = config
+                .kafka
+                .sasl
+                .as_ref()
+                .unwrap_or_else(|| panic!("{} was not read: no sasl block", env.env_var));
+            let landed = sasl.username == "sentinel-value" || sasl.password == "sentinel-value";
+            assert!(landed, "{} ({suffix}) was set and nothing read it", env.env_var);
+        }
     }
 
     #[test]
