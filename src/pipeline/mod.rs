@@ -48,22 +48,22 @@ use tracing::trace;
 /// `add_bytes` and `release`, and the counter never decays: the guard then
 /// reports pressure forever, `/readyz` 503s while `/livez` keeps passing, and
 /// nothing restarts the pod.
-struct MemoryLease {
-    guard: Arc<MemoryGuard>,
+#[must_use]
+struct MemoryLease<'a> {
+    guard: &'a MemoryGuard,
     bytes: u64,
 }
 
-impl MemoryLease {
-    fn acquire(guard: &Arc<MemoryGuard>, bytes: u64) -> Self {
+impl<'a> MemoryLease<'a> {
+    // Borrowed, not `Arc<MemoryGuard>`: the guard already outlives every caller,
+    // and cloning cost ~19ns of atomic traffic per event on the ingest path.
+    fn acquire(guard: &'a MemoryGuard, bytes: u64) -> Self {
         guard.add_bytes(bytes);
-        Self {
-            guard: Arc::clone(guard),
-            bytes,
-        }
+        Self { guard, bytes }
     }
 }
 
-impl Drop for MemoryLease {
+impl Drop for MemoryLease<'_> {
     fn drop(&mut self) {
         self.guard.release(self.bytes);
     }
@@ -323,7 +323,7 @@ impl PipelineState {
             info!("Memory pressure recovered");
         }
 
-        // Track memory; the lease releases even if this future is dropped.
+        // Tracked for the life of this future.
         let _lease = MemoryLease::acquire(&self.memory_guard, payload.len() as u64);
 
         self.process_inner(payload).await
@@ -356,8 +356,7 @@ impl PipelineState {
             info!("Memory pressure recovered");
         }
 
-        // Track memory for the entire batch at once; released on drop, so a
-        // cancellation part-way through the loop cannot leak it.
+        // One lease for the whole batch, held across every message.
         let total_bytes: u64 = payloads.iter().map(|p| p.len() as u64).sum();
         let _lease = MemoryLease::acquire(&self.memory_guard, total_bytes);
 
@@ -523,7 +522,7 @@ impl PipelineState {
             info!("Memory pressure recovered");
         }
 
-        // Track memory; the lease releases even if this future is dropped.
+        // Tracked for the life of this future.
         let _lease = MemoryLease::acquire(&self.memory_guard, payload.len() as u64);
 
         // Validate (acquire and release lock before any await)
@@ -941,10 +940,51 @@ mod tests {
         );
     }
 
+    /// A lease held across an await must release when the future is dropped.
+    ///
+    /// The scope-exit test above never suspends, so it cannot fail the way a
+    /// client disconnect does. `pending` guarantees the timeout drops the
+    /// future while the lease is still held.
+    #[tokio::test]
+    async fn memory_lease_releases_when_its_future_is_cancelled() {
+        let state = test_state().await;
+        let guard = state.memory_guard().clone();
+        let before = guard.current_bytes();
+        let held = Arc::clone(&guard);
+
+        let outcome = tokio::time::timeout(Duration::from_millis(50), async move {
+            let _lease = MemoryLease::acquire(&held, 4096);
+            assert_eq!(
+                held.current_bytes(),
+                before + 4096,
+                "the lease must be tracked before the future suspends"
+            );
+            std::future::pending::<()>().await;
+        })
+        .await;
+
+        assert!(
+            outcome.is_err(),
+            "the future must be dropped while suspended"
+        );
+        assert_eq!(
+            guard.current_bytes(),
+            before,
+            "cancelling a suspended future must release its tracked bytes"
+        );
+    }
+
     #[tokio::test]
     async fn process_returns_tracked_bytes_to_baseline() {
         let state = test_state().await;
         let before = state.memory_guard().current_bytes();
+
+        // Positive control: under backpressure `process` returns before it
+        // acquires anything, and the balance assertion below would pass vacuously.
+        assert!(
+            !state.should_apply_backpressure(),
+            "guard must be idle for this to exercise the accounting"
+        );
 
         let _ = state.process(Bytes::from(vec![b'x'; 4096])).await;
 
