@@ -567,7 +567,13 @@ async fn ingest_handler(
 
     // Process through pipeline (timed)
     let start = std::time::Instant::now();
-    let result = state.pipeline.process(body).await;
+    let result = match split_json_array(&body) {
+        Some(payloads) => {
+            let (_, first_err) = state.pipeline.process_batch(&payloads).await;
+            first_err.map_or(Ok(()), Err)
+        }
+        None => state.pipeline.process(body).await,
+    };
     let elapsed = start.elapsed();
     state
         .metrics
@@ -598,6 +604,24 @@ async fn ingest_handler(
     }
 }
 
+/// Split a top-level JSON array body into one payload per element.
+///
+/// A batched POST carries `[{...},{...}]`; forwarded whole it becomes one
+/// message holding an array, which downstream reads as a single event and
+/// rejects. Returns None for anything that is not an array, which stays a
+/// single event. Every other transport already splits before the pipeline.
+fn split_json_array(body: &Bytes) -> Option<Vec<Bytes>> {
+    if *body.iter().find(|b| !b.is_ascii_whitespace())? != b'[' {
+        return None;
+    }
+    let elements: Vec<serde_json::Value> = serde_json::from_slice(body).ok()?;
+    let mut payloads = Vec::with_capacity(elements.len());
+    for element in elements {
+        payloads.push(Bytes::from(serde_json::to_vec(&element).ok()?));
+    }
+    Some(payloads)
+}
+
 /// Liveness probe handler.
 async fn liveness_handler() -> &'static str {
     "OK"
@@ -616,6 +640,39 @@ async fn readiness_handler(State(state): State<HttpState>) -> StatusCode {
 mod tests {
     use super::*;
     use crate::config::{AcceptedHeader, AuthConfig, BearerConfig};
+
+    #[test]
+    fn a_json_array_body_splits_into_one_payload_per_element() {
+        let body = Bytes::from(r#"[{"a":1},{"a":2},{"a":3}]"#);
+        let payloads = split_json_array(&body).expect("an array body splits");
+        assert_eq!(payloads.len(), 3);
+        assert_eq!(payloads[0], Bytes::from(r#"{"a":1}"#));
+        assert_eq!(payloads[2], Bytes::from(r#"{"a":3}"#));
+    }
+
+    #[test]
+    fn leading_whitespace_does_not_hide_an_array() {
+        let body = Bytes::from("  \n\t[{\"a\":1}]");
+        assert_eq!(split_json_array(&body).expect("still an array").len(), 1);
+    }
+
+    #[test]
+    fn a_single_object_stays_one_event() {
+        let body = Bytes::from(r#"{"a":1}"#);
+        assert!(split_json_array(&body).is_none());
+    }
+
+    #[test]
+    fn a_non_json_body_stays_one_event() {
+        assert!(split_json_array(&Bytes::from("not json at all")).is_none());
+        assert!(split_json_array(&Bytes::from("")).is_none());
+    }
+
+    #[test]
+    fn a_malformed_array_is_not_split_and_is_left_to_validation() {
+        let body = Bytes::from(r#"[{"a":1},"#);
+        assert!(split_json_array(&body).is_none());
+    }
 
     fn test_auth_config() -> AuthConfig {
         AuthConfig {
