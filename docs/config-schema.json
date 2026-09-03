@@ -332,9 +332,9 @@
         "ip_filter": null,
         "rate_limit": {
           "enabled": false,
-          "packets_per_second": 0,
-          "burst": 0,
-          "cache_size": 0
+          "packets_per_second": 5000,
+          "burst": 10000,
+          "cache_size": 4096
         },
         "netflow": {
           "enabled": true,
@@ -1369,9 +1369,9 @@
           "$ref": "#/$defs/RateLimitConfig2",
           "default": {
             "enabled": false,
-            "packets_per_second": 0,
-            "burst": 0,
-            "cache_size": 0
+            "packets_per_second": 5000,
+            "burst": 10000,
+            "cache_size": 4096
           }
         },
         "netflow": {
@@ -1588,9 +1588,9 @@
           "$ref": "#/$defs/RateLimitConfig2",
           "default": {
             "enabled": false,
-            "packets_per_second": 0,
-            "burst": 0,
-            "cache_size": 0
+            "packets_per_second": 5000,
+            "burst": 10000,
+            "cache_size": 4096
           }
         },
         "template_cache": {
