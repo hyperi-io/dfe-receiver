@@ -55,8 +55,8 @@ struct MemoryLease<'a> {
 }
 
 impl<'a> MemoryLease<'a> {
-    // Borrowed, not `Arc<MemoryGuard>`: the guard already outlives every caller,
-    // and cloning cost ~19ns of atomic traffic per event on the ingest path.
+    // Borrowed, not `Arc<MemoryGuard>`: the borrow proves the lease cannot
+    // outlive the guard, and spends no refcount pair per event on the hot path.
     fn acquire(guard: &'a MemoryGuard, bytes: u64) -> Self {
         guard.add_bytes(bytes);
         Self { guard, bytes }
@@ -989,6 +989,68 @@ mod tests {
         let _ = state.process(Bytes::from(vec![b'x'; 4096])).await;
 
         assert_eq!(state.memory_guard().current_bytes(), before);
+    }
+
+    /// Cancelling `process` itself must return its bytes, not just the lease type.
+    ///
+    /// The two lease tests above build a `MemoryLease` by hand, so every one of
+    /// them stays green if the lease is deleted from `process`; the balance test
+    /// above stays green too, because a charge that never happens also balances.
+    /// This is the only test that reddens on a revert of the fix.
+    ///
+    /// A silent listener -- accepts the TCP connection, then never speaks HTTP/2
+    /// -- suspends the gRPC send, which is where a real request is dropped when
+    /// the client disconnects or the 30s request timeout fires. `Box::pin` owns
+    /// the future so `drop` actually drops it; `pin!` would only drop a borrow
+    /// and prove nothing.
+    #[tokio::test]
+    async fn cancelling_process_releases_its_tracked_bytes() {
+        use std::future::Future;
+        use std::task::{Context, Waker};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind silent listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let accepted = tokio::spawn(async move {
+            // Hold every stream open: dropping one would fail the send fast
+            // instead of leaving it suspended.
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+
+        let mut config = test_config();
+        config.loader.transport = "grpc".to_string();
+        config.loader.grpc_endpoint = Some(format!("http://{addr}"));
+        let state = test_state_with(config).await;
+
+        let payload = Bytes::from(r#"{"cancelled":true}"#);
+        let bytes = payload.len() as u64;
+        let before = state.memory_guard().current_bytes();
+
+        let mut inflight = Box::pin(state.process(payload));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(
+            inflight.as_mut().poll(&mut cx).is_pending(),
+            "process must still be in the sink for this to test cancellation"
+        );
+        assert_eq!(
+            state.memory_guard().current_bytes(),
+            before + bytes,
+            "process must charge the guard before it suspends"
+        );
+
+        drop(inflight);
+
+        assert_eq!(
+            state.memory_guard().current_bytes(),
+            before,
+            "dropping the suspended request must return its tracked bytes"
+        );
+
+        accepted.abort();
     }
 
     #[tokio::test]
