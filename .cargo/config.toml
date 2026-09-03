@@ -21,8 +21,6 @@ rustflags = ["-C", "target-cpu=generic"]    # NEON is baseline for ARM64
 [build]
 rustflags = ["-C", "target-cpu=native"]
 
-# Limit parallel jobs to reduce CPU/memory usage (prevents killing other processes)
-
 # =============================================================================
 # HyperI Private Cargo Registry (Artifactory)
 # =============================================================================
