@@ -527,3 +527,94 @@ async fn test_otlp_bytes_received_tracked() {
 
     shutdown.cancel();
 }
+
+// =============================================================================
+// Auth on the HTTP endpoint
+// =============================================================================
+//
+// `otlp.auth` is one block for both endpoints. It was applied to the gRPC
+// server only: run_http_server built its Router with three POST routes and no
+// auth layer, so a bearer mode with tokens configured closed 4317 and left 4318
+// accepting anything.
+
+/// A config with OTLP bearer auth armed on both endpoints.
+fn bearer_config(grpc_port: u16, http_port: u16) -> Config {
+    let mut config = test_config(grpc_port, http_port);
+    config.otlp.auth.mode = "bearer".to_string();
+    config.otlp.auth.bearer.tokens = vec!["otlp-secret".to_string()];
+    config
+}
+
+#[tokio::test]
+async fn otlp_http_rejects_a_post_with_no_token() {
+    let grpc_port = random_port();
+    let http_port = random_port();
+    let (shutdown, metrics) = start_otlp_handler(bearer_config(grpc_port, http_port)).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{http_port}/v1/logs"))
+        .header("content-type", "application/x-protobuf")
+        .body(build_logs_request().encode_to_vec())
+        .send()
+        .await
+        .expect("Failed to send OTLP HTTP request");
+
+    assert_eq!(
+        resp.status(),
+        401,
+        "an unauthenticated post reached the OTLP HTTP endpoint under bearer mode"
+    );
+    assert_eq!(
+        requests_total(&metrics),
+        0,
+        "the rejected post must not reach the pipeline"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn otlp_http_rejects_a_post_with_the_wrong_token() {
+    let grpc_port = random_port();
+    let http_port = random_port();
+    let (shutdown, _metrics) = start_otlp_handler(bearer_config(grpc_port, http_port)).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{http_port}/v1/traces"))
+        .header("content-type", "application/x-protobuf")
+        .header("authorization", "Bearer not-the-token")
+        .body(build_traces_request().encode_to_vec())
+        .send()
+        .await
+        .expect("Failed to send OTLP HTTP request");
+
+    assert_eq!(resp.status(), 401);
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn otlp_http_accepts_a_post_with_the_configured_token() {
+    let grpc_port = random_port();
+    let http_port = random_port();
+    let (shutdown, metrics) = start_otlp_handler(bearer_config(grpc_port, http_port)).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{http_port}/v1/logs"))
+        .header("content-type", "application/x-protobuf")
+        .header("authorization", "Bearer otlp-secret")
+        .body(build_logs_request().encode_to_vec())
+        .send()
+        .await
+        .expect("Failed to send OTLP HTTP request");
+
+    assert_eq!(
+        resp.status(),
+        200,
+        "a correctly authenticated post was refused: {:?}",
+        resp.text().await
+    );
+    assert!(requests_total(&metrics) > 0);
+
+    shutdown.cancel();
+}
