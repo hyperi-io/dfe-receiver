@@ -41,16 +41,31 @@ fn random_port() -> u16 {
     port
 }
 
-/// Poll the loopback port until it accepts a connection, or panic on the budget.
+/// Poll the loopback port until OUR server accepts, or panic on the budget.
 ///
 /// A fixed sleep races the server's bind under parallel CI load and surfaces as
 /// `ConnectionRefused` on the test's own port. This is the polling half of the
-/// `grpc_sink.rs` hardening; that file also retries on a fresh port when the
-/// bind itself loses a `random_port` race, which these callers do not.
-async fn wait_for_port(port: u16) {
+/// `grpc_sink.rs` hardening, with one addition that file gets for free: there,
+/// `GrpcTransport::new` has already proved the bind before the poll starts,
+/// whereas `run_server` only reports a failed bind by returning. Every
+/// integration test compiles into one binary and ~30 of them call
+/// `random_port`, so a port picked here can be taken before `run_server` binds
+/// it; the poll would then ratify the winner's listener and the assertions would
+/// run against a server with someone else's config. Watching the task means a
+/// lost race fails loudly instead. It is not airtight -- a connect that lands
+/// before our own bind is even attempted still slips through -- so treat a
+/// confusing failure in this file as a possible port collision.
+async fn wait_for_port(
+    port: u16,
+    server: &mut tokio::task::JoinHandle<Result<(), dfe_receiver::error::Error>>,
+) {
     let addr = format!("127.0.0.1:{port}");
     // 300 x 50ms = 15s, generous because it guards a race rather than measuring.
     for _ in 0..300 {
+        if server.is_finished() {
+            let outcome = server.await;
+            panic!("test HTTP server on port {port} exited before serving: {outcome:?}");
+        }
         if tokio::net::TcpStream::connect(&addr).await.is_ok() {
             return;
         }
@@ -75,6 +90,18 @@ fn test_config(port: u16, max_body_size: usize, timeout_ms: u64, auth_mode: &str
 
 /// Start a test server and return the URL.
 async fn start_test_server(config: Config) -> (String, CancellationToken) {
+    let (url, shutdown, _pipeline) = start_test_server_with_pipeline(config).await;
+    (url, shutdown)
+}
+
+/// Start a test server, also handing back the pipeline behind it.
+///
+/// Only `test_503_when_pipeline_not_ready` needs the handle, to drive the memory
+/// guard the readiness check reads; it used to re-implement this whole function
+/// for that one extra value.
+async fn start_test_server_with_pipeline(
+    config: Config,
+) -> (String, CancellationToken, Arc<PipelineState>) {
     let port = config
         .server
         .bind_address
@@ -96,22 +123,19 @@ async fn start_test_server(config: Config) -> (String, CancellationToken) {
 
     let server_shutdown = shutdown.clone();
     let server_metrics = metrics.clone();
+    let server_pipeline = pipeline.clone();
     let bind_addr = config.server.bind_address.clone();
 
-    tokio::spawn(async move {
-        // Surfaced, not swallowed: a failed bind is otherwise invisible and the
-        // only symptom is the port wait below spending its whole budget.
-        if let Err(e) =
-            http::run_server(&bind_addr, pipeline, server_metrics, server_shutdown).await
-        {
-            eprintln!("test HTTP server exited with an error: {e}");
-        }
+    // Returned, not swallowed: `wait_for_port` reads the task's exit as proof
+    // the bind failed, which is the only signal `run_server` gives.
+    let mut server = tokio::spawn(async move {
+        http::run_server(&bind_addr, server_pipeline, server_metrics, server_shutdown).await
     });
 
-    wait_for_port(port).await;
+    wait_for_port(port, &mut server).await;
 
     let url = format!("http://127.0.0.1:{port}");
-    (url, shutdown)
+    (url, shutdown, pipeline)
 }
 
 // =============================================================================
@@ -1283,46 +1307,21 @@ async fn test_503_when_pipeline_not_ready() {
     config.buffer.memory_limit = 100;
     config.buffer.pressure_threshold = 0.8;
 
-    let metrics = Arc::new(Metrics::default());
-    let shutdown = CancellationToken::new();
-    let pipeline = Arc::new(
-        PipelineState::new(
-            SharedConfig::new(config.clone()),
-            tokio_util::sync::CancellationToken::new(),
-        )
-        .await
-        .expect("Failed to create pipeline"),
-    );
+    let (url, shutdown, pipeline) = start_test_server_with_pipeline(config).await;
 
-    // Fill the buffer beyond pressure threshold (80% of 100 = 80 bytes)
+    // Fill the buffer beyond pressure threshold (80% of 100 = 80 bytes). The
+    // handler reads readiness per request, so applying pressure after the server
+    // is up is equivalent to applying it before.
     pipeline.memory_guard().add_bytes(90);
     assert!(
         !pipeline.is_ready(),
         "Pipeline should NOT be ready when buffer is under pressure"
     );
 
-    let server_shutdown = shutdown.clone();
-    let server_metrics = metrics.clone();
-    let server_pipeline = pipeline.clone();
-    let bind_addr = config.server.bind_address.clone();
-
-    tokio::spawn(async move {
-        // Surfaced, not swallowed: see start_test_server.
-        if let Err(e) =
-            http::run_server(&bind_addr, server_pipeline, server_metrics, server_shutdown).await
-        {
-            eprintln!("test HTTP server exited with an error: {e}");
-        }
-    });
-
-    wait_for_port(port).await;
-
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
         .unwrap();
-
-    let url = format!("http://127.0.0.1:{port}");
 
     // Send request while pipeline is under pressure
     let response = client
