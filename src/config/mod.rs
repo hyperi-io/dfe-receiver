@@ -228,6 +228,31 @@ impl Config {
             ));
         }
 
+        // mtls is enforced entirely at the TLS handshake -- the request path
+        // short-circuits for it (auth.rs: requires_token_auth excludes Mtls).
+        // Without TLS and a REQUIRED client cert it therefore authenticates
+        // nothing, while reading as though it does. `optional` is not enough:
+        // it validates a cert when one is offered and admits clients that
+        // offer none.
+        if self.server.auth.mode.eq_ignore_ascii_case("mtls") {
+            if !self.server.tls.enabled {
+                return Err(Error::Config(
+                    "server.auth.mode is 'mtls' but server.tls.enabled is false -- \
+                     mtls is enforced at the TLS handshake, so this accepts every \
+                     request unauthenticated"
+                        .into(),
+                ));
+            }
+            if !self.server.tls.client_auth.eq_ignore_ascii_case("required") {
+                return Err(Error::Config(format!(
+                    "server.auth.mode is 'mtls' but server.tls.client_auth is '{}' -- \
+                     it must be 'required', or clients presenting no certificate are \
+                     admitted",
+                    self.server.tls.client_auth
+                )));
+            }
+        }
+
         // Validate buffer config
         if self.buffer.pressure_threshold < 0.0 || self.buffer.pressure_threshold > 1.0 {
             return Err(Error::Config(
@@ -1771,6 +1796,50 @@ mod tests {
         let mut config = Config::default();
         // Default destination is kafka, so we need brokers
         config.kafka.brokers = vec!["localhost:9092".to_string()];
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn mtls_mode_without_tls_is_refused() {
+        // The trap: this reads as mutual TLS and enforces nothing, because the
+        // request path short-circuits for mtls and the handshake is not doing
+        // the work either.
+        let mut config = Config::default();
+        config.destinations.default = "loader".to_string();
+        config.server.auth.mode = "mtls".to_string();
+
+        let err = config.validate().expect_err("must not start");
+        assert!(
+            err.to_string().contains("tls.enabled is false"),
+            "the error must name the missing half, got: {err}"
+        );
+    }
+
+    #[test]
+    fn mtls_mode_with_optional_client_auth_is_refused() {
+        // `optional` validates a certificate when one is offered and admits
+        // clients that offer none, which is not authentication.
+        let mut config = Config::default();
+        config.destinations.default = "loader".to_string();
+        config.server.auth.mode = "mtls".to_string();
+        config.server.tls.enabled = true;
+        config.server.tls.client_auth = "optional".to_string();
+
+        let err = config.validate().expect_err("must not start");
+        assert!(
+            err.to_string().contains("must be 'required'"),
+            "the error must say what to set, got: {err}"
+        );
+    }
+
+    #[test]
+    fn mtls_mode_with_required_client_auth_is_accepted() {
+        let mut config = Config::default();
+        config.destinations.default = "loader".to_string();
+        config.server.auth.mode = "mtls".to_string();
+        config.server.tls.enabled = true;
+        config.server.tls.client_auth = "required".to_string();
+
         assert!(config.validate().is_ok());
     }
 
