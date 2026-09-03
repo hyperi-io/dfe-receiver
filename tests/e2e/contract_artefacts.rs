@@ -602,3 +602,101 @@ fn tier_b_argocd_application_sync_on_kind() {
         "applied Application missing identity annotations: {annotations}",
     );
 }
+
+// ============================================================================
+// Committed chart vs the generator
+// ============================================================================
+
+/// Collect a chart directory as relative-path -> contents.
+fn chart_files(root: &Path) -> std::collections::BTreeMap<String, String> {
+    fn walk(dir: &Path, root: &Path, out: &mut std::collections::BTreeMap<String, String>) {
+        for entry in std::fs::read_dir(dir).expect("read chart dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                walk(&path, root, out);
+            } else {
+                let rel = path
+                    .strip_prefix(root)
+                    .expect("path under root")
+                    .to_string_lossy()
+                    .into_owned();
+                out.insert(
+                    rel,
+                    std::fs::read_to_string(&path).expect("read chart file"),
+                );
+            }
+        }
+    }
+
+    let mut out = std::collections::BTreeMap::new();
+    walk(root, root, &mut out);
+    out
+}
+
+/// The committed `chart/` must be what the generator produces.
+///
+/// The tier-A test above proves the GENERATOR emits a chart that lints and
+/// templates. It says nothing about the directory we actually ship, which is
+/// what a deployment consumes -- nothing regenerates it at deploy time. That
+/// gap is not theoretical: dfe-fetcher shipped a chart missing
+/// `keda-triggerauth.yaml` while its ScaledObject kept an unconditional
+/// `authenticationRef` to the object that file creates, so KEDA could not
+/// resolve the reference and the app never scaled on lag
+/// (hyperi-io/dfe-fetcher#71).
+///
+/// Identity is `None` here because the committed Chart.yaml carries no
+/// `io.hyperi.contract.*` annotations -- `generate-artefacts` stamps those in
+/// CI, the checked-in chart comes from the un-stamped path.
+#[test]
+fn committed_chart_matches_the_generator() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    generate_chart(&test_contract(), tmp.path(), None).expect("generate_chart");
+
+    let generated = chart_files(tmp.path());
+    let chart_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("chart");
+    let committed = chart_files(&chart_dir);
+
+    let missing: Vec<_> = generated
+        .keys()
+        .filter(|k| !committed.contains_key(*k))
+        .collect();
+    let extra: Vec<_> = committed
+        .keys()
+        .filter(|k| !generated.contains_key(*k))
+        .collect();
+    assert!(
+        missing.is_empty() && extra.is_empty(),
+        "chart/ is out of step with the generator -- regenerate with \
+         `dfe-receiver --emit-helm chart`\n  generated but not committed: {missing:?}\n  \
+         committed but not generated: {extra:?}"
+    );
+
+    for (name, want) in &generated {
+        let have = committed.get(name).expect("presence checked above");
+        if have == want {
+            continue;
+        }
+        // Report the first differing line: dumping two whole charts at a
+        // reader is the same as reporting nothing.
+        let (line_no, from_generator, from_commit) = want
+            .lines()
+            .zip(have.lines())
+            .enumerate()
+            .find(|(_, (w, h))| w != h)
+            .map_or_else(
+                || {
+                    (
+                        0,
+                        format!("{} lines", want.lines().count()),
+                        format!("{} lines", have.lines().count()),
+                    )
+                },
+                |(i, (w, h))| (i + 1, w.to_string(), h.to_string()),
+            );
+        panic!(
+            "chart/{name} differs from the generator at line {line_no} -- regenerate with \
+             `dfe-receiver --emit-helm chart`\n  generator: {from_generator}\n  \
+             committed: {from_commit}"
+        );
+    }
+}
