@@ -415,6 +415,21 @@ impl ApplyFlatEnv for Config {
         if let Some(v) = flat_env::flat_env_bool(prefix, "COMMON_HEADER") {
             self.server.auth.include_common_header = v;
         }
+        // Bearer tokens arrive as a mounted Secret in the pod environment, so
+        // this is the route the chart takes -- the `auth` secret group in
+        // deployment.rs declares exactly this name. Split on comma and newline,
+        // matching how BearerTokenProvider::load_from_secret parses a secret
+        // payload, and read through the sensitive helper so no token reaches a
+        // log line.
+        if let Some(v) = flat_env::flat_env_string_sensitive(prefix, "AUTH_BEARER_TOKENS") {
+            self.server.auth.bearer.tokens = v
+                .lines()
+                .flat_map(|line| line.split(','))
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect();
+        }
 
         // Kafka
         if let Some(v) = flat_env::flat_env_list(prefix, "KAFKA_BROKERS") {
@@ -2216,6 +2231,49 @@ mod tests {
             let mut config = Config::default();
             config.apply_flat_env(ENV_PREFIX);
             assert!(!config.server.auth.include_common_header);
+        });
+    }
+
+    #[test]
+    fn bearer_tokens_arrive_from_the_environment() {
+        // The only route the chart has: a mounted Secret in the pod
+        // environment. Without this reader the auth Secret was mounted and read
+        // by nothing, and `auth.mode: bearer` came up with an empty token set.
+        with_env(&[("DFE_RECEIVER_AUTH_BEARER_TOKENS", "alpha,beta")], || {
+            let mut config = Config::default();
+            config.apply_flat_env(ENV_PREFIX);
+            assert_eq!(
+                config.server.auth.bearer.tokens,
+                vec!["alpha".to_string(), "beta".to_string()]
+            );
+        });
+    }
+
+    #[test]
+    fn bearer_tokens_from_the_environment_split_on_newlines_too() {
+        // A K8s Secret holding one token per line is as likely as a CSV, and
+        // BearerTokenProvider::load_from_secret accepts both.
+        with_env(
+            &[("DFE_RECEIVER_AUTH_BEARER_TOKENS", "alpha\n beta \n\ngamma")],
+            || {
+                let mut config = Config::default();
+                config.apply_flat_env(ENV_PREFIX);
+                assert_eq!(
+                    config.server.auth.bearer.tokens,
+                    vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()],
+                    "blank entries must not become empty tokens"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn bearer_tokens_from_config_survive_an_unset_environment() {
+        with_env(&[], || {
+            let mut config = Config::default();
+            config.server.auth.bearer.tokens = vec!["from-yaml".to_string()];
+            config.apply_flat_env(ENV_PREFIX);
+            assert_eq!(config.server.auth.bearer.tokens, vec!["from-yaml"]);
         });
     }
 

@@ -156,8 +156,13 @@ pub fn contract() -> DeploymentContract {
             },
             SecretGroupContract {
                 group_name: "auth".into(),
+                // apply_flat_env reads this one; flat_env joins the prefix and
+                // the key with ONE underscore, and the figment cascade that
+                // would have read the double-underscore form never runs in the
+                // container -- entrypoint_args pass --config, which takes
+                // Config::load_from_file and skips config::setup entirely.
                 env_vars: vec![SecretEnvContract {
-                    env_var: "DFE_RECEIVER__SERVER__AUTH__BEARER__TOKENS".into(),
+                    env_var: "DFE_RECEIVER_AUTH_BEARER_TOKENS".into(),
                     key_name: "bearer-tokens".into(),
                     secret_key: "bearer-tokens".into(),
                 }],
@@ -425,6 +430,52 @@ mod tests {
         assert_eq!(c.secrets.len(), 2);
         assert_eq!(c.secrets[0].group_name, "kafka");
         assert_eq!(c.secrets[1].group_name, "auth");
+    }
+
+    /// Every env var the contract declares must change the config it reaches.
+    ///
+    /// The chart is generated from these names, so one the app does not read
+    /// mounts a Secret into the pod environment and is ignored, with nothing
+    /// failing to say so. Comparing a full serialisation rather than one field
+    /// keeps this honest for secrets nobody has added yet.
+    ///
+    /// The `kafka` group is skipped here because PR #74 is repairing those two
+    /// names and lands its own walk over them; fold the two into one unskipped
+    /// loop once it merges.
+    #[test]
+    fn every_declared_secret_env_var_changes_the_config() {
+        use scalo::config::flat_env::ApplyFlatEnv;
+
+        for group in &contract().secrets {
+            if group.group_name == "kafka" {
+                continue;
+            }
+            for env in &group.env_vars {
+                // Baseline with the variable explicitly UNSET, so an unrelated
+                // DFE_RECEIVER_* var in the ambient environment cannot make the
+                // comparison pass for the wrong reason.
+                let mut baseline = crate::config::Config::default();
+                temp_env::with_var(&env.env_var, None::<&str>, || {
+                    baseline.apply_flat_env(crate::config::ENV_PREFIX);
+                });
+                let mut applied = crate::config::Config::default();
+                temp_env::with_var(&env.env_var, Some("sentinel-value"), || {
+                    applied.apply_flat_env(crate::config::ENV_PREFIX);
+                });
+
+                // assert! rather than assert_ne!: the two serialisations are
+                // the whole Config, and printing both on failure buries the
+                // one line that says which name is dead.
+                assert!(
+                    serde_json::to_value(&baseline).expect("serialise baseline")
+                        != serde_json::to_value(&applied).expect("serialise applied"),
+                    "{} is declared in the '{}' secret group, so the chart mounts it, \
+                     and setting it changes nothing in the config",
+                    env.env_var,
+                    group.group_name,
+                );
+            }
+        }
     }
 
     #[test]
