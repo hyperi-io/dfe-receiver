@@ -19,6 +19,60 @@ use sonic_rs::{JsonValueTrait, LazyValue, get_from_slice};
 
 use crate::config::{DestinationsConfig, RoutingConfig, SourceRule};
 
+/// Append `s` to `buf` as a quoted JSON string literal.
+///
+/// Source names are `[a-z0-9_]` in practice, so the common path writes the
+/// bytes straight through; a quote, backslash or control byte would break the
+/// record, so those go through serde rather than being written raw.
+fn push_json_string(buf: &mut Vec<u8>, s: &str) {
+    if s.bytes().any(|b| b == b'"' || b == b'\\' || b < 0x20) {
+        let escaped = serde_json::Value::String(s.to_owned()).to_string();
+        buf.extend_from_slice(escaped.as_bytes());
+        return;
+    }
+    buf.push(b'"');
+    buf.extend_from_slice(s.as_bytes());
+    buf.push(b'"');
+}
+
+/// Write `_source` into a JSON object payload, byte-level, no full parse.
+///
+/// dfe-loader picks the destination table from `_source` in the record, so a
+/// matched source rule that is never written down is lost on the loader route
+/// and every source lands in the default table.
+///
+/// Returns the payload untouched when it is not a JSON object or already
+/// carries a top-level `_source` -- the sender's value wins, and a second
+/// top-level key of the same name makes the loader's ClickHouse JSON column
+/// reject the whole record.
+#[must_use]
+pub fn stamp_source(payload: Bytes, source: &str) -> Bytes {
+    let raw = payload.as_ref();
+    let Some(insert_pos) = raw.iter().rposition(|&b| b == b'}') else {
+        return payload;
+    };
+    if get_from_slice(raw, ["_source"].as_slice()).is_ok() {
+        return payload;
+    }
+
+    let mut buf = Vec::with_capacity(raw.len() + source.len() + 16);
+    buf.extend_from_slice(&raw[..insert_pos]);
+
+    // No comma after `{`, and trailing whitespace before the brace is not content.
+    if let Some(pos) = raw[..insert_pos]
+        .iter()
+        .rposition(|b| !b.is_ascii_whitespace())
+        && raw[pos] != b'{'
+    {
+        buf.push(b',');
+    }
+
+    buf.extend_from_slice(b"\"_source\":");
+    push_json_string(&mut buf, source);
+    buf.extend_from_slice(&raw[insert_pos..]);
+    Bytes::from(buf)
+}
+
 /// Routing result with destination and topic.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RouteResult {
@@ -108,17 +162,34 @@ impl Router {
     /// This is a HOT PATH function - uses zero-copy field extraction.
     #[inline]
     pub fn route(&self, payload: &Bytes) -> RouteResult {
-        // Check destination rules first
-        let destination = self.determine_destination(payload);
+        self.route_with_source(payload).0
+    }
 
-        if destination == "loader" {
-            return RouteResult::Loader;
+    /// Route a message, returning the source a rule matched with the destination.
+    ///
+    /// The source is evaluated on the loader route as well as the Kafka one.
+    /// Only the Kafka route encodes it, in the topic name; on the loader route
+    /// nothing downstream can recover it unless the caller writes it into the
+    /// record, which is what [`stamp_source`] is for.
+    #[inline]
+    pub fn route_with_source(&self, payload: &Bytes) -> (RouteResult, Option<String>) {
+        let source = self.evaluate_source(payload);
+
+        if self.determine_destination(payload) == "loader" {
+            return (RouteResult::Loader, source);
         }
 
-        // Extract topic from payload
-        let topic = self.extract_topic(payload);
+        let topic = match source {
+            // Pre-computed source-to-topic entries already carry the suffix.
+            Some(ref s) => self
+                .source_to_topic
+                .get(s)
+                .cloned()
+                .unwrap_or_else(|| format!("{s}{}", self.topic_suffix)),
+            None => self.default_topic.clone(),
+        };
 
-        RouteResult::Kafka(topic)
+        (RouteResult::Kafka(topic), source)
     }
 
     /// Route a message to DLQ.
@@ -176,23 +247,6 @@ impl Router {
             }
         }
         None
-    }
-
-    /// Extract the topic from the payload using source rules.
-    #[inline]
-    fn extract_topic(&self, payload: &Bytes) -> String {
-        let source = match self.evaluate_source(payload) {
-            Some(s) => s,
-            None => return self.default_topic.clone(),
-        };
-
-        // Check pre-computed source-to-topic map (already has suffix)
-        if let Some(topic) = self.source_to_topic.get(&source) {
-            return topic.clone();
-        }
-
-        // Dynamic source: append suffix
-        format!("{source}{}", self.topic_suffix)
     }
 
     /// Extract a field value using pre-split parts (avoids split('.') per message).
@@ -447,6 +501,109 @@ mod tests {
             RouteResult::Kafka(topic) => assert_eq!(topic, "default_land"),
             _ => panic!("expected Kafka route"),
         }
+    }
+
+    // --- The matched source is written into the record ---
+    //
+    // dfe-loader reads `_source` out of the data to pick the table, and on the
+    // loader route no topic is computed, so a matched rule left unwritten sends
+    // every receiver-routed source to the default table.
+
+    fn kvproof_routing() -> RoutingConfig {
+        RoutingConfig {
+            source_rules: vec![SourceRule {
+                field: "app".to_string(),
+                mode: "key_value_set".to_string(),
+                match_value: Some("kvproof".to_string()),
+                source: Some("kvproof".to_string()),
+            }],
+            ..default_routing_config()
+        }
+    }
+
+    fn loader_destinations_config() -> DestinationsConfig {
+        DestinationsConfig {
+            default: "loader".to_string(),
+            rules: vec![],
+        }
+    }
+
+    #[test]
+    fn test_loader_route_reports_the_matched_source() {
+        let router = Router::new(&kvproof_routing(), &loader_destinations_config(), true);
+        let payload = Bytes::from(r#"{"app":"kvproof","message":"hello"}"#);
+
+        let (route, source) = router.route_with_source(&payload);
+        assert_eq!(route, RouteResult::Loader);
+        assert_eq!(source.as_deref(), Some("kvproof"));
+
+        let stamped = stamp_source(payload, "kvproof");
+        let parsed: serde_json::Value = serde_json::from_slice(&stamped).expect("valid JSON");
+        assert_eq!(parsed["_source"], "kvproof");
+        assert_eq!(parsed["message"], "hello");
+    }
+
+    #[test]
+    fn test_loader_route_with_no_match_reports_no_source() {
+        let router = Router::new(&kvproof_routing(), &loader_destinations_config(), true);
+        let payload = Bytes::from(r#"{"app":"something_else","message":"hello"}"#);
+
+        let (route, source) = router.route_with_source(&payload);
+        assert_eq!(route, RouteResult::Loader);
+        assert_eq!(source, None);
+    }
+
+    #[test]
+    fn test_kafka_route_reports_the_matched_source_with_the_topic() {
+        let router = Router::new(&kvproof_routing(), &default_destinations_config(), true);
+        let payload = Bytes::from(r#"{"app":"kvproof","message":"hello"}"#);
+
+        let (route, source) = router.route_with_source(&payload);
+        assert_eq!(route, RouteResult::Kafka("kvproof_land".to_string()));
+        assert_eq!(source.as_deref(), Some("kvproof"));
+    }
+
+    #[test]
+    fn test_route_with_source_is_silent_when_enrichment_is_disabled() {
+        let router = Router::new(&kvproof_routing(), &loader_destinations_config(), false);
+        let payload = Bytes::from(r#"{"app":"kvproof","message":"hello"}"#);
+
+        assert_eq!(router.route_with_source(&payload).1, None);
+    }
+
+    #[test]
+    fn test_stamp_source_leaves_an_existing_source_alone() {
+        let payload = Bytes::from(r#"{"app":"kvproof","_source":"crates_audit"}"#);
+        let stamped = stamp_source(payload.clone(), "kvproof");
+        assert_eq!(stamped, payload);
+    }
+
+    #[test]
+    fn test_stamp_source_into_an_empty_object() {
+        let stamped = stamp_source(Bytes::from("{}"), "kvproof");
+        assert_eq!(&stamped[..], br#"{"_source":"kvproof"}"#);
+    }
+
+    #[test]
+    fn test_stamp_source_escapes_the_name() {
+        let stamped = stamp_source(Bytes::from(r#"{"a":1}"#), r#"we"ird\name"#);
+        let parsed: serde_json::Value = serde_json::from_slice(&stamped).expect("valid JSON");
+        assert_eq!(parsed["_source"], r#"we"ird\name"#);
+    }
+
+    #[test]
+    fn test_stamp_source_leaves_a_non_object_payload_alone() {
+        let payload = Bytes::from("not json at all");
+        let stamped = stamp_source(payload.clone(), "kvproof");
+        assert_eq!(stamped, payload);
+    }
+
+    #[test]
+    fn test_stamp_source_ignores_a_nested_source() {
+        let stamped = stamp_source(Bytes::from(r#"{"inner":{"_source":"nested"}}"#), "kvproof");
+        let parsed: serde_json::Value = serde_json::from_slice(&stamped).expect("valid JSON");
+        assert_eq!(parsed["_source"], "kvproof");
+        assert_eq!(parsed["inner"]["_source"], "nested");
     }
 
     // --- Fetcher-origin sources: key_value_set on the top-level `_source` ---
