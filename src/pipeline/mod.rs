@@ -31,7 +31,7 @@ use crate::buffer::{InMemoryBuffer, MemoryGuard, MemoryGuardConfig, MemoryPressu
 use crate::config::{Config, SharedConfig};
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
-use crate::routing::{RouteResult, Router};
+use crate::routing::{self, RouteResult, Router};
 use crate::sink::Sink;
 use crate::sink::file::FileSink;
 use crate::sink::grpc::GrpcSink;
@@ -434,7 +434,16 @@ impl PipelineState {
         };
 
         // Route (read guard dropped before any .await)
-        let route = self.router.read().route(&payload);
+        let (route, matched_source) = self.router.read().route_with_source(&payload);
+
+        // The topic carries the source on the Kafka route and nothing carries it
+        // on the loader route, so a matched rule is written into the record --
+        // dfe-loader reads `_source` out of the data to pick the table.
+        let payload = match matched_source {
+            Some(source) => routing::stamp_source(payload, &source),
+            None => payload,
+        };
+
         match route {
             RouteResult::Kafka(ref topic) => {
                 trace!(topic = %topic, bytes = payload.len(), "Routing message to Kafka");
