@@ -47,6 +47,10 @@ server:
       # secret_source: "vault:secret/data/auth:bearer_tokens"
       refresh_interval_secs: 300
 
+# gRPC ingest. This listener serves `vector.Vector/PushEvents` only -- a Vector
+# `vector` sink, or scalo's VectorCompatClient. A scalo `GrpcTransport` client
+# (dfe-fetcher's `output.grpc`, dfe-receiver's own loader sink) speaks
+# `scalo.transport.v1.Transport/Push` and gets UNIMPLEMENTED here.
 grpc:
   enabled: false
   bind_address: "0.0.0.0:6000"
