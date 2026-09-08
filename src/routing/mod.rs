@@ -449,6 +449,98 @@ mod tests {
         }
     }
 
+    // --- Fetcher-origin sources: key_value_set on the top-level `_source` ---
+    //
+    // `field` is the bare key: `extract_field_cow` splits on '.' for nesting, so
+    // a `_json.` prefix would look for a nested object that is not there.
+
+    #[test]
+    fn test_fetcher_source_rule_routes_to_its_own_topic() {
+        let routing = RoutingConfig {
+            source_rules: vec![SourceRule {
+                field: "_source".to_string(),
+                mode: "key_value_set".to_string(),
+                match_value: Some("crates_audit".to_string()),
+                source: Some("crates_audit".to_string()),
+            }],
+            ..default_routing_config()
+        };
+        let router = Router::new(&routing, &default_destinations_config(), true);
+        let payload = Bytes::from(
+            r#"{"crate":"dfe-fetcher","_timestamp_fetcher":1757000000000,"_source":"crates_audit","_source_fetcher":"crates_io.crates"}"#,
+        );
+
+        match router.route(&payload) {
+            RouteResult::Kafka(topic) => assert_eq!(topic, "crates_audit_land"),
+            other => panic!("expected Kafka route, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_fetcher_source_rule_is_an_allow_list() {
+        let routing = RoutingConfig {
+            source_rules: vec![SourceRule {
+                field: "_source".to_string(),
+                mode: "key_value_set".to_string(),
+                match_value: Some("crates_audit".to_string()),
+                source: Some("crates_audit".to_string()),
+            }],
+            ..default_routing_config()
+        };
+        let router = Router::new(&routing, &default_destinations_config(), true);
+        let payload = Bytes::from(r#"{"_source":"someone_elses_table","data":"test"}"#);
+
+        match router.route(&payload) {
+            RouteResult::Kafka(topic) => assert_eq!(topic, "default_land"),
+            other => panic!("expected Kafka route, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_fetcher_source_rule_needs_enrichment_enabled() {
+        let routing = RoutingConfig {
+            source_rules: vec![SourceRule {
+                field: "_source".to_string(),
+                mode: "key_value_set".to_string(),
+                match_value: Some("crates_audit".to_string()),
+                source: Some("crates_audit".to_string()),
+            }],
+            ..default_routing_config()
+        };
+        // enrichment_enabled is server.auth.include_common_header; false switches
+        // every source rule off.
+        let router = Router::new(&routing, &default_destinations_config(), false);
+        let payload = Bytes::from(r#"{"_source":"crates_audit","data":"test"}"#);
+
+        match router.route(&payload) {
+            RouteResult::Kafka(topic) => assert_eq!(topic, "default_land"),
+            other => panic!("expected Kafka route, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_loader_destination_wins_over_the_source_rule() {
+        let routing = RoutingConfig {
+            source_rules: vec![SourceRule {
+                field: "_source".to_string(),
+                mode: "key_value_set".to_string(),
+                match_value: Some("crates_audit".to_string()),
+                source: Some("crates_audit".to_string()),
+            }],
+            ..default_routing_config()
+        };
+        let destinations = DestinationsConfig {
+            default: "loader".to_string(),
+            rules: vec![],
+        };
+        let router = Router::new(&routing, &destinations, true);
+        let payload = Bytes::from(r#"{"_source":"crates_audit","data":"test"}"#);
+
+        // No topic is computed on the loader route, so the loader picks the table
+        // from `_source` in the payload.
+        assert_eq!(router.route(&payload), RouteResult::Loader);
+    }
+
     // --- First match wins ---
 
     #[test]
