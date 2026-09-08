@@ -3,6 +3,12 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.15.28](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.27...v1.15.28) (2026-09-08)
+
+### Bug Fixes
+
+* **grpc:** accept gzip on the vector ingest, and pin _source routing ([1c3c3ba](https://github.com/hyperi-io/dfe-receiver/commit/1c3c3ba00f7c76cadb5afe960641ac7a23589101))
+
 ## [1.15.27](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.26...v1.15.27) (2026-08-28)
 
 ### Bug Fixes
