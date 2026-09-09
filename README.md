@@ -238,7 +238,7 @@ flowchart TB
     VAL --> RT["Router<br/>zero-copy field extract -> topic name"]
     RT --> TS["TieredSink (scalo)<br/>in-memory buffer + CircuitBreaker<br/>no disk spillover by design"]
     TS --> KAFKA[("Kafka topics<br/>librdkafka, batched / LZ4")]
-    TS --> LOADER["dfe-loader<br/>direct Kafka input topic"]
+    TS --> GRPC["Push listeners<br/>dfe-loader, transforms, archiver"]
     RT -. unmatched .-> DEF["default_land topic"]
 ```
 

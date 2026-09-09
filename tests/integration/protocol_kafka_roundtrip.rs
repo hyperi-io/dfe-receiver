@@ -81,7 +81,7 @@ fn kafka_config(kf: &crate::common::KafkaTestConfig, topic: &str) -> Config {
     config.server.auth.mode = "none".to_string();
 
     config.kafka = kf.to_receiver_kafka_config();
-    config.destinations.default = "kafka".to_string();
+    config.destinations.default = "kafka".into();
     // Route all traffic to the test topic (no _land suffix by overriding default_source)
     config.routing.default_source = topic.trim_end_matches("_land").to_string();
     config.routing.topic_suffix = "_land".to_string();

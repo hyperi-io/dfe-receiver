@@ -166,7 +166,7 @@ fn flow_kafka_config(
 
     // Kafka destination
     config.kafka = kf.to_receiver_kafka_config();
-    config.destinations.default = "kafka".to_string();
+    config.destinations.default = "kafka".into();
 
     // Route by the envelope's `_source` field, suffix `_land`.
     config.routing.default_source = "default".to_string();
