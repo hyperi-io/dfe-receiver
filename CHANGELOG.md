@@ -3,6 +3,12 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.15.31](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.30...v1.15.31) (2026-09-09)
+
+### Bug Fixes
+
+* an unmatched record is stamped _source main ([642ff80](https://github.com/hyperi-io/dfe-receiver/commit/642ff80adeaff6cb639c7f0f78bc34b67b889a35))
+
 ## [1.15.30](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.29...v1.15.30) (2026-09-09)
 
 ### Bug Fixes
