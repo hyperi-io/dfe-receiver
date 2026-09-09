@@ -160,7 +160,11 @@ impl PipelineState {
             let sink = match destinations_config.named.get(name) {
                 Some(spec) => match (&spec.grpc, &spec.kafka) {
                     (Some(grpc), _) => {
-                        let primary = GrpcSink::new(&grpc.endpoint).await?;
+                        // loader.timeout_ms bounds the loader's own Push RPC; a
+                        // declared destination has no timeout key of its own.
+                        let deadline = (name == crate::config::LOADER_DESTINATION)
+                            .then_some(config.loader.timeout_ms);
+                        let primary = GrpcSink::new(&grpc.endpoint, deadline).await?;
                         DestinationSink::Grpc(Arc::new(
                             build_sink_backend(primary, &config.buffer).await?,
                         ))

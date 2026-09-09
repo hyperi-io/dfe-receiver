@@ -363,10 +363,13 @@ kafka:
 #           thing the built-in `kafka` destination does, so kafka.brokers is
 #           required
 #   grpc    the loader's own Push listener at grpc_endpoint
-#   memory  no transport: the record is accepted and goes nowhere
+# `memory` (accept the record and discard it) exists for the ingest tests and
+# is refused at startup, so a deployment cannot land on it by accident.
 loader:
-  address: "dfe-loader:9000"
+  address: "dfe-loader:6000"
   transport: "kafka"
+  # Per-RPC deadline for the gRPC client, so a loader that stops answering
+  # cannot hold a sender task open.
   timeout_ms: 5000
   # grpc_endpoint: "http://dfe-loader:6000"  # when transport=grpc (defaults to http://{address})
 

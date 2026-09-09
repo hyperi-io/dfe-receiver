@@ -433,7 +433,7 @@
       "description": "dfe-loader connection configuration.",
       "$ref": "#/$defs/LoaderConfig",
       "default": {
-        "address": "dfe-loader:9000",
+        "address": "dfe-loader:6000",
         "transport": "kafka",
         "timeout_ms": 5000,
         "grpc_endpoint": null
@@ -2050,17 +2050,17 @@
       "type": "object",
       "properties": {
         "address": {
-          "description": "Loader address (used for Kafka mode reference; override with grpc_endpoint for gRPC mode).",
+          "description": "Loader address, the manifest's `endpoints.push` port (apps.yaml).\nOverride with grpc_endpoint to dial a different URI.",
           "type": "string",
-          "default": "dfe-loader:9000"
+          "default": "dfe-loader:6000"
         },
         "transport": {
-          "description": "Transport type (kafka, memory, grpc).",
+          "description": "Transport type (kafka, grpc; `memory` discards and is refused at startup).",
           "type": "string",
           "default": "kafka"
         },
         "timeout_ms": {
-          "description": "Connection timeout in milliseconds.",
+          "description": "Per-RPC deadline for the gRPC loader client, in milliseconds (0 = none).",
           "type": "integer",
           "format": "uint64",
           "minimum": 0,

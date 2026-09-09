@@ -402,8 +402,10 @@ readinessProbe:
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `receiver_messages_sent_kafka_total` | Counter | Messages sent to Kafka |
-| `receiver_messages_dlq_total` | Counter | Messages sent to DLQ |
+| `receiver_kafka_sends_total` | Counter | Messages sent to Kafka |
+| `receiver_kafka_bytes_sent_total` | Counter | Bytes sent to Kafka |
+| `receiver_kafka_send_errors_total` | Counter | Kafka send failures |
+| `records_dlq_total` | Counter | Messages sent to DLQ (scalo emits this one) |
 
 ### Scaling Metrics
 
