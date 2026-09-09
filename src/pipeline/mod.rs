@@ -452,12 +452,13 @@ impl PipelineState {
         };
 
         // Route (read guard dropped before any .await)
-        let (route, matched_source) = self.router.read().route_with_source(&payload);
+        let (route, routed_source) = self.router.read().route_with_source(&payload);
 
         // The topic carries the source on the Kafka route and nothing carries it
-        // on the loader route, so a matched rule is written into the record --
-        // dfe-loader reads `_source` out of the data to pick the table.
-        let payload = match matched_source {
+        // on the loader route, so the source is written into the record --
+        // dfe-loader reads `_source` out of the data to pick the table. An
+        // unmatched record carries the catch-all source, not nothing.
+        let payload = match routed_source {
             Some(source) => routing::stamp_source(payload, &source),
             None => payload,
         };
