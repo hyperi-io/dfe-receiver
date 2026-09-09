@@ -3,6 +3,12 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.15.32](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.31...v1.15.32) (2026-09-09)
+
+### Bug Fixes
+
+* wire, refuse or remove the four unwired loader keys ([#95](https://github.com/hyperi-io/dfe-receiver/issues/95)) ([5df1a00](https://github.com/hyperi-io/dfe-receiver/commit/5df1a00c1a37a8f9fef4d60522d271a60f685917))
+
 ## [1.15.31](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.30...v1.15.31) (2026-09-09)
 
 ### Bug Fixes
