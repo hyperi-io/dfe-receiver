@@ -260,7 +260,18 @@ impl Config {
             return Err(Error::Config(format!(
                 "loader.transport '{}' is not one of {}",
                 self.loader.transport,
-                LOADER_TRANSPORTS.join(", ")
+                DELIVERING_LOADER_TRANSPORTS.join(", ")
+            )));
+        }
+
+        // The discard transport reads as a working config and delivers nothing,
+        // so startup refuses it. A test that wants a brokerless pipeline builds
+        // the Config directly and never comes through here.
+        if self.loader.transport == DISCARD_TRANSPORT {
+            return Err(Error::Config(format!(
+                "loader.transport '{DISCARD_TRANSPORT}' accepts records and drops them; \
+                 use one of {}",
+                DELIVERING_LOADER_TRANSPORTS.join(", ")
             )));
         }
 
@@ -1431,7 +1442,14 @@ pub const BUS_DESTINATION: &str = "kafka";
 pub const LOADER_DESTINATION: &str = "loader";
 
 /// The transports `loader.transport` accepts.
-pub const LOADER_TRANSPORTS: [&str; 3] = ["kafka", "grpc", "memory"];
+pub const LOADER_TRANSPORTS: [&str; 3] = ["kafka", "grpc", DISCARD_TRANSPORT];
+
+/// The transports that deliver a record somewhere.
+pub const DELIVERING_LOADER_TRANSPORTS: [&str; 2] = ["kafka", "grpc"];
+
+/// The transport that accepts a record and drops it. It exists so an ingest
+/// test needs no broker; `Config::validate` refuses it, so it never starts.
+pub const DISCARD_TRANSPORT: &str = "memory";
 
 impl Default for DestinationsConfig {
     fn default() -> Self {
@@ -1693,13 +1711,14 @@ impl Default for ProducerConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct LoaderConfig {
-    /// Loader address (used for Kafka mode reference; override with grpc_endpoint for gRPC mode).
+    /// Loader address, the manifest's `endpoints.push` port (apps.yaml).
+    /// Override with grpc_endpoint to dial a different URI.
     pub address: String,
 
-    /// Transport type (kafka, memory, grpc).
+    /// Transport type (kafka, grpc; `memory` discards and is refused at startup).
     pub transport: String,
 
-    /// Connection timeout in milliseconds.
+    /// Per-RPC deadline for the gRPC loader client, in milliseconds (0 = none).
     pub timeout_ms: u64,
 
     /// gRPC endpoint URI for loader (only used when transport = "grpc").
@@ -1710,7 +1729,7 @@ pub struct LoaderConfig {
 impl Default for LoaderConfig {
     fn default() -> Self {
         Self {
-            address: "dfe-loader:9000".to_string(),
+            address: "dfe-loader:6000".to_string(),
             transport: "kafka".to_string(),
             timeout_ms: 5000,
             grpc_endpoint: None,
@@ -2043,6 +2062,33 @@ mod tests {
 
         let err = config.validate().unwrap_err().to_string();
         assert!(err.contains("loader.transport 'Kafka'"), "got: {err}");
+        assert!(err.contains("kafka, grpc"), "got: {err}");
+        assert!(!err.contains(DISCARD_TRANSPORT), "got: {err}");
+    }
+
+    /// The discard transport reads as a working config and delivers nothing, so
+    /// it never starts -- whatever else the config says.
+    #[test]
+    fn the_discard_transport_is_refused_at_startup() {
+        let mut config = Config::default();
+        config.kafka.brokers = vec!["localhost:9092".to_string()];
+        config.loader.transport = DISCARD_TRANSPORT.to_string();
+
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("accepts records and drops them"), "got: {err}");
+        assert!(err.contains("kafka, grpc"), "got: {err}");
+    }
+
+    /// The loader's default address is the port the manifest gives its Push
+    /// listener (dfe-infra apps.yaml `dfe-loader.endpoints.push`).
+    #[test]
+    fn the_loader_default_address_is_the_manifest_push_port() {
+        let config = Config::default();
+        assert_eq!(config.loader.address, "dfe-loader:6000");
+        assert_eq!(
+            config.loader.effective_grpc_endpoint(),
+            "http://dfe-loader:6000"
+        );
     }
 
     #[test]

@@ -33,7 +33,7 @@ use scalo::metrics::groups::{
     AppMetrics, BackpressureMetrics, BufferMetrics, CircuitBreakerMetrics, SinkMetrics,
 };
 use scalo::metrics::{
-    AuthFailureReason as RlAuthReason, TransportKind, ValidationFailureReason as RlValidationReason,
+    AuthFailureReason as RlAuthReason, ValidationFailureReason as RlValidationReason,
 };
 use scalo::scaling::{RateWindow, ScalingPressure};
 
@@ -69,7 +69,6 @@ pub struct Metrics {
     requests_error: AtomicU64,
     bytes_received: AtomicU64,
     messages_batched: AtomicU64,
-    messages_sent_kafka: AtomicU64,
     messages_dlq: AtomicU64,
     messages_spilled: AtomicU64,
     messages_drained: AtomicU64,
@@ -149,7 +148,6 @@ impl Metrics {
             requests_error: AtomicU64::new(0),
             bytes_received: AtomicU64::new(0),
             messages_batched: AtomicU64::new(0),
-            messages_sent_kafka: AtomicU64::new(0),
             messages_dlq: AtomicU64::new(0),
             messages_spilled: AtomicU64::new(0),
             messages_drained: AtomicU64::new(0),
@@ -315,15 +313,6 @@ impl Metrics {
     #[inline]
     pub fn inc_messages_batched(&self) {
         self.messages_batched.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Increment messages sent to Kafka counter.
-    #[inline]
-    pub fn add_messages_sent_kafka(&self, count: u64) {
-        self.messages_sent_kafka.fetch_add(count, Ordering::Relaxed);
-        if let Some(ref dfe) = self.dfe {
-            dfe.transport_sent(TransportKind::Kafka, count);
-        }
     }
 
     /// Increment DLQ messages counter.

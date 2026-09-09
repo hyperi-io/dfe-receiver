@@ -221,7 +221,7 @@ Key metrics:
 
 - `receiver_requests_total` - Total requests received
 - `receiver_bytes_received_total` - Total bytes ingested
-- `receiver_messages_sent_kafka_total` - Messages sent to Kafka
+- `receiver_kafka_sends_total` - Messages sent to Kafka
 - `receiver_scaling_pressure` - Scaling pressure for autoscaling (0-100)
 
 ## Architecture
