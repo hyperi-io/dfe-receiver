@@ -3,6 +3,13 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.15.30](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.29...v1.15.30) (2026-09-09)
+
+### Bug Fixes
+
+* named destinations with fan-out and hold-and-backpressure on direct ([06ed3e4](https://github.com/hyperi-io/dfe-receiver/commit/06ed3e4940d504431895c97ee56cf3c5947f3b2d))
+* rebuild on scalo 2.12.1 ([de72e17](https://github.com/hyperi-io/dfe-receiver/commit/de72e17c4774e4c7da4290420b2cacaf2f8182b0))
+
 ## [1.15.29](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.28...v1.15.29) (2026-09-08)
 
 ### Bug Fixes
