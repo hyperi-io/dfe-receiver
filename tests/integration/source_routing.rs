@@ -261,7 +261,7 @@ async fn test_grpc_push_accepts_gzip() {
 
     let client = VectorCompatClient::connect_lazy(&format!("http://127.0.0.1:{port}"))
         .expect("vector client");
-    let result = client.send_events(&[fetcher_record("default")]).await;
+    let result = client.send_events(&[fetcher_record("main")]).await;
     let received = drain_loader(&loader, 1).await;
     shutdown.cancel();
 

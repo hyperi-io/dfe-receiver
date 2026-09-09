@@ -245,7 +245,7 @@ pub fn contract() -> DeploymentContract {
                 }
             },
             "routing": {
-                "default_source": "default",
+                "default_source": "main",
                 "topic_suffix": "_land"
             },
             "metrics": {

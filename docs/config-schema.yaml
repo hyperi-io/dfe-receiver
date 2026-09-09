@@ -320,7 +320,7 @@ properties:
     $ref: '#/$defs/RoutingConfig'
     default:
       source_rules: []
-      default_source: default
+      default_source: main
       topic_suffix: _land
       source_to_topic: {}
       legacy_compat: false
@@ -1400,7 +1400,7 @@ $defs:
       default_source:
         description: Default source when no rule matches.
         type: string
-        default: default
+        default: main
       topic_suffix:
         description: Suffix appended to source to form topic name.
         type: string

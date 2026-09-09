@@ -40,7 +40,7 @@ fn push_json_string(buf: &mut Vec<u8>, s: &str) {
 ///
 /// dfe-loader picks the destination table from `_source` in the record, so a
 /// matched source rule that is never written down is lost on the loader route
-/// and every source lands in the default table.
+/// and every source lands in the `main` table.
 ///
 /// Returns the payload untouched when it is not a JSON object or already
 /// carries a top-level `_source` -- the sender's value wins, and a second
@@ -380,21 +380,13 @@ impl Router {
 }
 
 impl Default for Router {
+    /// Built from the default configs, so every topic name is authored once.
     fn default() -> Self {
-        Self {
-            source_rules: vec![],
-            topic_suffix: "_land".to_string(),
-            default_topic: "default_land".to_string(),
-            source_to_topic: FxHashMap::default(),
-            dlq_topic: "dlq_land".to_string(),
-            dlq_enabled: true,
-            default_destination: ResolvedDestinations::new(
-                &crate::config::DestinationRef::default(),
-                &DestinationsConfig::default(),
-            ),
-            destination_rules: vec![],
-            enrichment_enabled: true,
-        }
+        Self::new(
+            &RoutingConfig::default(),
+            &DestinationsConfig::default(),
+            true,
+        )
     }
 }
 
@@ -403,7 +395,6 @@ impl Default for Router {
 mod tests {
     use super::*;
     use crate::config::{DestinationRule as ConfigRule, DlqConfig, SourceRule};
-    use std::collections::HashMap;
 
     /// The route went to the bus under `topic`.
     #[track_caller]
@@ -420,14 +411,7 @@ mod tests {
     }
 
     fn default_routing_config() -> RoutingConfig {
-        RoutingConfig {
-            default_source: "default".to_string(),
-            source_rules: vec![],
-            topic_suffix: "_land".to_string(),
-            source_to_topic: HashMap::new(),
-            legacy_compat: false,
-            dlq: DlqConfig::default(),
-        }
+        RoutingConfig::default()
     }
 
     fn legacy_routing_config() -> RoutingConfig {
@@ -474,7 +458,7 @@ mod tests {
         );
         let payload = Bytes::from(r#"{"data": "test"}"#);
 
-        assert_bus(&router.route(&payload), "default_land");
+        assert_bus(&router.route(&payload), "main_land");
     }
 
     // --- key_value_use: if field exists, use its value as source ---
@@ -510,7 +494,7 @@ mod tests {
         let router = Router::new(&routing, &default_destinations_config(), true);
         let payload = Bytes::from(r#"{"data": "test"}"#);
 
-        assert_bus(&router.route(&payload), "default_land");
+        assert_bus(&router.route(&payload), "main_land");
     }
 
     // --- key_present: if field exists, use configured source ---
@@ -546,7 +530,7 @@ mod tests {
         let router = Router::new(&routing, &default_destinations_config(), true);
         let payload = Bytes::from(r#"{"data": "test"}"#);
 
-        assert_bus(&router.route(&payload), "default_land");
+        assert_bus(&router.route(&payload), "main_land");
     }
 
     // --- key_value_set: if field == match_value, use configured source ---
@@ -582,7 +566,7 @@ mod tests {
         let router = Router::new(&routing, &default_destinations_config(), true);
         let payload = Bytes::from(r#"{"type": "netflow", "data": "test"}"#);
 
-        assert_bus(&router.route(&payload), "default_land");
+        assert_bus(&router.route(&payload), "main_land");
     }
 
     // --- The matched source is written into the record ---
@@ -726,7 +710,7 @@ mod tests {
         let router = Router::new(&routing, &default_destinations_config(), true);
         let payload = Bytes::from(r#"{"_source":"someone_elses_table","data":"test"}"#);
 
-        assert_bus(&router.route(&payload), "default_land");
+        assert_bus(&router.route(&payload), "main_land");
     }
 
     #[test]
@@ -745,7 +729,7 @@ mod tests {
         let router = Router::new(&routing, &default_destinations_config(), false);
         let payload = Bytes::from(r#"{"_source":"crates_audit","data":"test"}"#);
 
-        assert_bus(&router.route(&payload), "default_land");
+        assert_bus(&router.route(&payload), "main_land");
     }
 
     #[test]
@@ -812,7 +796,7 @@ mod tests {
         let router = Router::new(&routing, &default_destinations_config(), false);
         let payload = Bytes::from(r#"{"_source": "auth", "data": "test"}"#);
 
-        assert_bus(&router.route(&payload), "default_land");
+        assert_bus(&router.route(&payload), "main_land");
     }
 
     // --- source_to_topic remapping ---
@@ -874,7 +858,7 @@ mod tests {
         let payload = Bytes::from(r#"{"event_category": "auth", "data": "test"}"#);
 
         // No rules, no legacy compat → default source
-        assert_bus(&router.route(&payload), "default_land");
+        assert_bus(&router.route(&payload), "main_land");
     }
 
     #[test]
@@ -1025,7 +1009,7 @@ mod tests {
         };
         let router = Router::new(&routing, &default_destinations_config(), true);
 
-        assert_bus(&router.route_dlq("test error"), "default_land");
+        assert_bus(&router.route_dlq("test error"), "main_land");
     }
 
     // --- Edge cases ---
@@ -1068,7 +1052,7 @@ mod tests {
             r#"{"event_category": ["auth"]}"#,
         ] {
             let payload = Bytes::from(payload_str);
-            assert_bus(&router.route(&payload), "default_land");
+            assert_bus(&router.route(&payload), "main_land");
         }
     }
 

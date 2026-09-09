@@ -296,7 +296,7 @@ routing:
   source_rules:
     - field: "_source"
       mode: "key_value_use"       # use the value of _source as the source
-  default_source: "default"
+  default_source: "main"
   topic_suffix: "_land"
   legacy_compat: false  # also check tags.event.category / event_category
   # source_to_topic:

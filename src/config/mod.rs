@@ -1225,7 +1225,7 @@ impl Default for RoutingConfig {
     fn default() -> Self {
         Self {
             source_rules: vec![],
-            default_source: "default".to_string(),
+            default_source: "main".to_string(),
             topic_suffix: "_land".to_string(),
             source_to_topic: HashMap::new(),
             legacy_compat: false,
