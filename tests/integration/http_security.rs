@@ -49,8 +49,9 @@ fn test_config(port: u16, max_body_size: usize, timeout_ms: u64, auth_mode: &str
     config.server.request_timeout_ms = timeout_ms;
     config.server.auth.mode = auth_mode.to_string();
 
-    // Use loader destination to avoid Kafka dependency
-    config.destinations.default = "loader".to_string();
+    // The loader on its memory transport: accepted, sent nowhere, no broker.
+    config.destinations.default = "loader".into();
+    config.loader.transport = "memory".to_string();
 
     config
 }

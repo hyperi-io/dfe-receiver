@@ -1758,23 +1758,42 @@
       }
     },
     "DestinationsConfig": {
-      "description": "Destinations configuration.",
+      "description": "The named destination set: where a matched record goes.\n\n`kafka` and `loader` are always available without being declared -- the bus\n(the record's own topic) and the app named by the `loader` block. Any other\nname is declared here as a sibling key, so a match rule can send a record to\na transform's Push listener, or fan it out to several destinations at once:\n\n```yaml\ndestinations:\n  default: loader\n  rules:\n    - match_field: app\n      match_value: orders\n      destination: [transform-orders, archiver]\n  transform-orders:\n    grpc:\n      endpoint: \"http://dfe-transform-orders:6000\"\n  archiver:\n    grpc:\n      endpoint: \"http://dfe-archiver:6000\"\n```",
       "type": "object",
       "properties": {
         "default": {
-          "description": "Default destination (kafka or loader).",
-          "type": "string",
+          "description": "Destination for records no rule matches.",
+          "$ref": "#/$defs/DestinationRef",
           "default": "kafka"
         },
         "rules": {
-          "description": "Routing rules for destination selection.",
+          "description": "Routing rules for destination selection (first match wins).",
           "type": "array",
           "items": {
             "$ref": "#/$defs/DestinationRule"
           },
           "default": []
         }
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/DestinationSpec"
       }
+    },
+    "DestinationRef": {
+      "description": "One destination name, or a list of them to fan a matched record out to.\n\nA fan-out is delivered when every destination has accepted it.",
+      "anyOf": [
+        {
+          "description": "A single destination name.",
+          "type": "string"
+        },
+        {
+          "description": "Several destination names -- the record goes to all of them.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      ]
     },
     "DestinationRule": {
       "description": "Destination routing rule.",
@@ -1789,8 +1808,8 @@
           "type": "string"
         },
         "destination": {
-          "description": "Destination for matched messages.",
-          "type": "string"
+          "description": "Destination for matched messages: one name, or a list to fan out.",
+          "$ref": "#/$defs/DestinationRef"
         }
       },
       "required": [
@@ -1798,6 +1817,63 @@
         "match_value",
         "destination"
       ]
+    },
+    "DestinationSpec": {
+      "description": "A declared destination: exactly one transport block.",
+      "type": "object",
+      "properties": {
+        "grpc": {
+          "description": "Deliver over gRPC to a scalo Push listener (a transform, the loader, the\narchiver).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GrpcDestination"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "kafka": {
+          "description": "Deliver over the bus.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/KafkaDestination"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      }
+    },
+    "GrpcDestination": {
+      "description": "A gRPC destination -- the address of a scalo Push listener.",
+      "type": "object",
+      "properties": {
+        "endpoint": {
+          "description": "Endpoint URI, e.g. `http://dfe-transform-orders:6000`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "endpoint"
+      ]
+    },
+    "KafkaDestination": {
+      "description": "A bus destination.",
+      "type": "object",
+      "properties": {
+        "topic": {
+          "description": "Fixed topic for this destination. Unset means the topic the record's\nsource resolves to, which is what the built-in `kafka` destination does.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      }
     },
     "KafkaConfig": {
       "description": "Kafka producer configuration.",

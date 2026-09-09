@@ -214,6 +214,41 @@ impl Config {
         transport.resolve(&self.raw_capture)
     }
 
+    /// The destination set with the built-in `loader` compiled into a declared
+    /// destination, so every consumer sees one kind of destination.
+    ///
+    /// `loader.transport: kafka` is a bus destination with no fixed topic --
+    /// the record lands on the topic its source resolves to, exactly as the
+    /// built-in `kafka` destination does. `grpc` is a gRPC destination at the
+    /// loader's endpoint. `memory` stays unresolved: it has no transport, so
+    /// the pipeline discards what reaches it.
+    #[must_use]
+    pub fn resolved_destinations(&self) -> DestinationsConfig {
+        let mut resolved = self.destinations.clone();
+        let referenced = resolved
+            .referenced_names()
+            .any(|name| name == LOADER_DESTINATION);
+        if !referenced || resolved.named.contains_key(LOADER_DESTINATION) {
+            return resolved;
+        }
+
+        let spec = match self.loader.transport.as_str() {
+            "kafka" => DestinationSpec {
+                grpc: None,
+                kafka: Some(KafkaDestination::default()),
+            },
+            "grpc" => DestinationSpec {
+                grpc: Some(GrpcDestination {
+                    endpoint: self.loader.effective_grpc_endpoint(),
+                }),
+                kafka: None,
+            },
+            _ => return resolved,
+        };
+        resolved.named.insert(LOADER_DESTINATION.to_string(), spec);
+        resolved
+    }
+
     /// Validate the configuration.
     pub fn validate(&self) -> Result<()> {
         // Validate server config
@@ -221,10 +256,50 @@ impl Config {
             return Err(Error::Config("server.bind_address is required".into()));
         }
 
-        // Validate Kafka config if Kafka destination enabled
-        if self.destinations.default == "kafka" && self.kafka.brokers.is_empty() {
+        if !LOADER_TRANSPORTS.contains(&self.loader.transport.as_str()) {
+            return Err(Error::Config(format!(
+                "loader.transport '{}' is not one of {}",
+                self.loader.transport,
+                LOADER_TRANSPORTS.join(", ")
+            )));
+        }
+
+        // Every destination a rule names must resolve, or matched records have
+        // nowhere to go and the failure only shows up under traffic.
+        for (name, spec) in &self.destinations.named {
+            match (&spec.grpc, &spec.kafka) {
+                (Some(grpc), None) if grpc.endpoint.is_empty() => {
+                    return Err(Error::Config(format!(
+                        "destinations.{name}.grpc.endpoint is required"
+                    )));
+                }
+                (Some(_), None) | (None, Some(_)) => {}
+                _ => {
+                    return Err(Error::Config(format!(
+                        "destinations.{name} needs exactly one of grpc or kafka"
+                    )));
+                }
+            }
+        }
+        for name in self.destinations.referenced_names() {
+            if !self.destinations.named.contains_key(name)
+                && name != BUS_DESTINATION
+                && name != LOADER_DESTINATION
+            {
+                return Err(Error::Config(format!(
+                    "destination '{name}' is not declared under destinations"
+                )));
+            }
+        }
+
+        // `loader` with `loader.transport: kafka` is a bus destination, so a
+        // brokerless config that routes there is refused here rather than per
+        // record under traffic.
+        if self.resolved_destinations().uses_bus() && self.kafka.brokers.is_empty() {
             return Err(Error::Config(
-                "kafka.brokers is required when using Kafka destination".into(),
+                "kafka.brokers is required when a destination is on the bus \
+                 (destinations, or loader.transport: kafka)"
+                    .into(),
             ));
         }
 
@@ -1313,24 +1388,159 @@ impl KafkaConfig {
     }
 }
 
-/// Destinations configuration.
+/// The named destination set: where a matched record goes.
+///
+/// `kafka` and `loader` are always available without being declared -- the bus
+/// (the record's own topic) and the app named by the `loader` block. Any other
+/// name is declared here as a sibling key, so a match rule can send a record to
+/// a transform's Push listener, or fan it out to several destinations at once:
+///
+/// ```yaml
+/// destinations:
+///   default: loader
+///   rules:
+///     - match_field: app
+///       match_value: orders
+///       destination: [transform-orders, archiver]
+///   transform-orders:
+///     grpc:
+///       endpoint: "http://dfe-transform-orders:6000"
+///   archiver:
+///     grpc:
+///       endpoint: "http://dfe-archiver:6000"
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct DestinationsConfig {
-    /// Default destination (kafka or loader).
-    pub default: String,
+    /// Destination for records no rule matches.
+    pub default: DestinationRef,
 
-    /// Routing rules for destination selection.
+    /// Routing rules for destination selection (first match wins).
     pub rules: Vec<DestinationRule>,
+
+    /// Declared destinations, keyed by name.
+    #[serde(flatten)]
+    pub named: std::collections::HashMap<String, DestinationSpec>,
 }
+
+/// The bus destination, available without being declared.
+pub const BUS_DESTINATION: &str = "kafka";
+
+/// The loader destination, available without being declared: it takes its
+/// transport and address from the `loader` config block.
+pub const LOADER_DESTINATION: &str = "loader";
+
+/// The transports `loader.transport` accepts.
+pub const LOADER_TRANSPORTS: [&str; 3] = ["kafka", "grpc", "memory"];
 
 impl Default for DestinationsConfig {
     fn default() -> Self {
         Self {
-            default: "kafka".to_string(),
+            default: DestinationRef::from(BUS_DESTINATION),
             rules: vec![],
+            named: std::collections::HashMap::new(),
         }
     }
+}
+
+impl DestinationsConfig {
+    /// Every destination name the config refers to, default and rules.
+    pub fn referenced_names(&self) -> impl Iterator<Item = &str> {
+        self.default
+            .names()
+            .iter()
+            .chain(self.rules.iter().flat_map(|r| r.destination.names()))
+            .map(String::as_str)
+    }
+
+    /// Whether `name` resolves to the bus: the built-in `kafka`, or a declared
+    /// destination with a `kafka` block.
+    pub fn is_bus(&self, name: &str) -> bool {
+        match self.named.get(name) {
+            Some(spec) => spec.kafka.is_some(),
+            None => name == BUS_DESTINATION,
+        }
+    }
+
+    /// Whether any referenced destination reaches the bus, so the config needs
+    /// brokers.
+    pub fn uses_bus(&self) -> bool {
+        self.referenced_names().any(|name| self.is_bus(name))
+    }
+}
+
+/// One destination name, or a list of them to fan a matched record out to.
+///
+/// A fan-out is delivered when every destination has accepted it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(untagged)]
+pub enum DestinationRef {
+    /// A single destination name.
+    One(String),
+    /// Several destination names -- the record goes to all of them.
+    Many(Vec<String>),
+}
+
+impl DestinationRef {
+    /// The names, one or many.
+    pub fn names(&self) -> &[String] {
+        match self {
+            Self::One(name) => std::slice::from_ref(name),
+            Self::Many(names) => names,
+        }
+    }
+}
+
+impl Default for DestinationRef {
+    fn default() -> Self {
+        Self::One(BUS_DESTINATION.to_string())
+    }
+}
+
+impl From<&str> for DestinationRef {
+    fn from(name: &str) -> Self {
+        Self::One(name.to_string())
+    }
+}
+
+impl From<String> for DestinationRef {
+    fn from(name: String) -> Self {
+        Self::One(name)
+    }
+}
+
+impl std::fmt::Display for DestinationRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.names().join(","))
+    }
+}
+
+/// A declared destination: exactly one transport block.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct DestinationSpec {
+    /// Deliver over gRPC to a scalo Push listener (a transform, the loader, the
+    /// archiver).
+    pub grpc: Option<GrpcDestination>,
+
+    /// Deliver over the bus.
+    pub kafka: Option<KafkaDestination>,
+}
+
+/// A gRPC destination -- the address of a scalo Push listener.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GrpcDestination {
+    /// Endpoint URI, e.g. `http://dfe-transform-orders:6000`.
+    pub endpoint: String,
+}
+
+/// A bus destination.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct KafkaDestination {
+    /// Fixed topic for this destination. Unset means the topic the record's
+    /// source resolves to, which is what the built-in `kafka` destination does.
+    pub topic: Option<String>,
 }
 
 /// Destination routing rule.
@@ -1342,8 +1552,8 @@ pub struct DestinationRule {
     /// Value to match.
     pub match_value: String,
 
-    /// Destination for matched messages.
-    pub destination: String,
+    /// Destination for matched messages: one name, or a list to fan out.
+    pub destination: DestinationRef,
 }
 
 /// Kafka producer configuration.
@@ -1577,6 +1787,36 @@ impl Default for BufferConfig {
     }
 }
 
+/// Records the in-memory queue holds when `memory_limit` is auto-detected.
+pub const DEFAULT_QUEUE_RECORDS: usize = 1000;
+
+/// What the in-memory queue refuses at.
+///
+/// One bound, picked by the config: an auto-detected `memory_limit` gives the
+/// queue no byte figure to work from, so it counts records instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueBound {
+    /// Hold at most this many records.
+    Records(usize),
+    /// Hold at most this many queued payload bytes.
+    Bytes(usize),
+}
+
+impl BufferConfig {
+    /// The bound the in-memory queue refuses at, so an unreachable destination
+    /// back-pressures the ingest instead of holding without limit.
+    ///
+    /// `pressure_threshold` is the share of `memory_limit` the queue may take,
+    /// leaving the rest of the limit for records in flight.
+    #[must_use]
+    pub fn queue_bound(&self) -> QueueBound {
+        if self.memory_limit == 0 {
+            return QueueBound::Records(DEFAULT_QUEUE_RECORDS);
+        }
+        QueueBound::Bytes((self.memory_limit as f64 * self.pressure_threshold) as usize)
+    }
+}
+
 /// Disk spillover configuration (opt-in, default disabled).
 ///
 /// When enabled, failed sends are spilled to disk via scalo's TieredSink
@@ -1777,15 +2017,63 @@ mod tests {
     #[test]
     fn test_config_validation_no_brokers_required_for_loader() {
         let mut config = Config::default();
-        config.destinations.default = "loader".to_string();
+        config.destinations.default = "loader".into();
+        config.loader.transport = "grpc".to_string();
         assert!(config.validate().is_ok());
+    }
+
+    /// The loader over the bus needs brokers, and says which two keys put it
+    /// there rather than dropping records under traffic.
+    #[test]
+    fn the_loader_on_the_bus_needs_brokers() {
+        let mut config = Config::default();
+        config.destinations.default = "loader".into();
+        config.loader.transport = "kafka".to_string();
+
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("kafka.brokers"), "got: {err}");
+        assert!(err.contains("loader.transport"), "got: {err}");
+    }
+
+    #[test]
+    fn an_unknown_loader_transport_is_refused() {
+        let mut config = Config::default();
+        config.kafka.brokers = vec!["localhost:9092".to_string()];
+        config.loader.transport = "Kafka".to_string();
+
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("loader.transport 'Kafka'"), "got: {err}");
     }
 
     #[test]
     fn test_invalid_pressure_threshold() {
         let mut config = Config::default();
+        config.kafka.brokers = vec!["localhost:9092".to_string()];
         config.buffer.pressure_threshold = 1.5;
-        assert!(config.validate().is_err());
+
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("buffer.pressure_threshold"), "got: {err}");
+    }
+
+    /// An auto-detected memory limit leaves the queue counting records.
+    #[test]
+    fn the_default_buffer_bound_counts_records() {
+        assert_eq!(
+            BufferConfig::default().queue_bound(),
+            QueueBound::Records(DEFAULT_QUEUE_RECORDS)
+        );
+    }
+
+    /// A configured memory limit bounds the queue in bytes, scaled by the
+    /// pressure threshold.
+    #[test]
+    fn a_configured_memory_limit_bounds_the_queue_in_bytes() {
+        let config = BufferConfig {
+            memory_limit: 8 * 1024 * 1024,
+            pressure_threshold: 0.75,
+            ..Default::default()
+        };
+        assert_eq!(config.queue_bound(), QueueBound::Bytes(6 * 1024 * 1024));
     }
 
     // -- env override tests --

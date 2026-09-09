@@ -172,7 +172,7 @@ fn kvproof_config(loader_endpoint: String) -> Config {
     let mut config = Config::default();
     config.server.bind_address = format!("127.0.0.1:{}", random_port());
     config.server.auth.mode = "none".to_string();
-    config.destinations.default = "loader".to_string();
+    config.destinations.default = "loader".into();
     config.loader.transport = "grpc".to_string();
     config.loader.grpc_endpoint = Some(loader_endpoint);
     config.routing.dlq.enabled = false;
@@ -209,7 +209,7 @@ async fn test_grpc_push_forwards_source_to_the_loader() {
     let mut config = Config::default();
     config.grpc.enabled = true;
     config.grpc.bind_address = format!("127.0.0.1:{}", random_port());
-    config.destinations.default = "loader".to_string();
+    config.destinations.default = "loader".into();
     config.loader.transport = "grpc".to_string();
     config.loader.grpc_endpoint = Some(loader_endpoint);
     config.routing.source_rules = vec![fetcher_source_rule("crates_audit")];
@@ -252,7 +252,7 @@ async fn test_grpc_push_accepts_gzip() {
     let mut config = Config::default();
     config.grpc.enabled = true;
     config.grpc.bind_address = format!("127.0.0.1:{}", random_port());
-    config.destinations.default = "loader".to_string();
+    config.destinations.default = "loader".into();
     config.loader.transport = "grpc".to_string();
     config.loader.grpc_endpoint = Some(loader_endpoint);
     config.routing.dlq.enabled = false;

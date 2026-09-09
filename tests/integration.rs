@@ -40,6 +40,8 @@ mod kafka_sink;
 mod lumberjack;
 #[path = "integration/minio_spool.rs"]
 mod minio_spool;
+#[path = "integration/named_destinations.rs"]
+mod named_destinations;
 #[path = "integration/otlp.rs"]
 mod otlp;
 #[path = "integration/prometheus_rw.rs"]

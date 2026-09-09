@@ -319,11 +319,12 @@ fn capabilities() -> Vec<scalo::deployment::Capability> {
                 ingest("flow", "NetFlow v5/v9 + IPFIX + sFlow v5."),
             ]),
         Capability::sink("destinations")
-            .description("Output destinations the receiver routes accepted events to.")
+            .description("The named destination set: a match rule sends accepted events to one destination or fans them out to several.")
             .maturity("stable")
             .children(vec![
-                Capability::service("kafka").description("Kafka producer (the primary destination)."),
-                Capability::service("loader").description("Direct gRPC connection to dfe-loader (broker-less low-latency path)."),
+                Capability::service("kafka").description("The bus, under the topic the event's source resolves to."),
+                Capability::service("loader").description("dfe-loader, over gRPC or the bus per the loader block."),
+                Capability::service("grpc").description("Any declared scalo Push listener -- a transform, the archiver -- by name."),
                 Capability::service("file_sink").description("Debug file sink (writes processed messages to a file)."),
             ]),
     ]

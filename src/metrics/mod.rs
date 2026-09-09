@@ -70,7 +70,6 @@ pub struct Metrics {
     bytes_received: AtomicU64,
     messages_batched: AtomicU64,
     messages_sent_kafka: AtomicU64,
-    messages_sent_loader: AtomicU64,
     messages_dlq: AtomicU64,
     messages_spilled: AtomicU64,
     messages_drained: AtomicU64,
@@ -151,7 +150,6 @@ impl Metrics {
             bytes_received: AtomicU64::new(0),
             messages_batched: AtomicU64::new(0),
             messages_sent_kafka: AtomicU64::new(0),
-            messages_sent_loader: AtomicU64::new(0),
             messages_dlq: AtomicU64::new(0),
             messages_spilled: AtomicU64::new(0),
             messages_drained: AtomicU64::new(0),
@@ -325,17 +323,6 @@ impl Metrics {
         self.messages_sent_kafka.fetch_add(count, Ordering::Relaxed);
         if let Some(ref dfe) = self.dfe {
             dfe.transport_sent(TransportKind::Kafka, count);
-        }
-    }
-
-    /// Increment messages sent to loader counter.
-    #[inline]
-    pub fn add_messages_sent_loader(&self, count: u64) {
-        self.messages_sent_loader
-            .fetch_add(count, Ordering::Relaxed);
-        if let Some(ref dfe) = self.dfe {
-            // Loader sink rides the gRPC transport.
-            dfe.transport_sent(TransportKind::Grpc, count);
         }
     }
 

@@ -59,8 +59,9 @@ fn test_config(hec_port: u16) -> Config {
     config.splunk_hec.enabled = true;
     config.splunk_hec.bind_address = format!("127.0.0.1:{hec_port}");
     config.splunk_hec.auth.mode = "none".to_string();
-    // Use loader destination to avoid Kafka dependency
-    config.destinations.default = "loader".to_string();
+    // The loader on its memory transport: accepted, sent nowhere, no broker.
+    config.destinations.default = "loader".into();
+    config.loader.transport = "memory".to_string();
     config
 }
 

@@ -384,7 +384,7 @@ mod tests {
     /// so no Kafka broker is required.
     async fn test_pipeline() -> Arc<PipelineState> {
         let mut config = Config::default();
-        config.destinations.default = "loader".to_string();
+        config.destinations.default = "loader".into();
         config.loader.transport = "memory".to_string();
         let state = PipelineState::new(SharedConfig::new(config), CancellationToken::new())
             .await

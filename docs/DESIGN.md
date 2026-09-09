@@ -84,8 +84,8 @@ dfe-receiver is a high-performance HTTP/gRPC receiver for PB/s scale data ingest
                          ┌──────────────────┼──────────────────┐
                          │                  │                  │
                ┌─────────▼─────────┐ ┌──────▼──────┐ ┌─────────▼─────────┐
-               │   Kafka Sink      │ │ DLQ Sink    │ │  Loader Sink      │
-               │   (rdkafka)       │ │             │ │  (scalo)          │
+               │   Kafka Sink      │ │ DLQ Sink    │ │  gRPC Sink        │
+               │   (rdkafka)       │ │             │ │  (scalo Push)     │
                └─────────┬─────────┘ └─────────────┘ └───────────────────┘
                          │
                ┌─────────▼─────────┐
@@ -403,7 +403,6 @@ readinessProbe:
 | Metric | Type | Description |
 |--------|------|-------------|
 | `receiver_messages_sent_kafka_total` | Counter | Messages sent to Kafka |
-| `receiver_messages_sent_loader_total` | Counter | Messages sent to loader |
 | `receiver_messages_dlq_total` | Counter | Messages sent to DLQ |
 
 ### Scaling Metrics

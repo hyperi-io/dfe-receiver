@@ -8,19 +8,19 @@
 
 //! Sink module for message delivery to destinations.
 //!
-//! Provides the `Sink` trait and implementations for Kafka and dfe-loader.
+//! Provides the `Sink` trait and implementations for the bus, a gRPC listener
+//! and a debug file.
 
 pub mod file;
 pub mod grpc;
 pub mod kafka;
-pub mod loader;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 
 use crate::error::Result;
 
-/// Trait for message sinks (Kafka, loader, etc.).
+/// Trait for message sinks (Kafka, gRPC, file).
 #[async_trait]
 pub trait Sink: Send + Sync {
     /// Send a message to the sink.
