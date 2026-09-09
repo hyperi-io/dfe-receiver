@@ -87,7 +87,7 @@ kafka:
     - "localhost:9092"
 
 routing:
-  default_source: "default"
+  default_source: "main"
   topic_suffix: "_land"
 ```
 
@@ -192,7 +192,7 @@ Messages are routed to Kafka topics based on source rules that extract JSON fiel
 
 ```yaml
 routing:
-  default_source: "default"
+  default_source: "main"
   topic_suffix: "_land"
   source_rules:
     - name: "auth_events"
@@ -206,7 +206,7 @@ routing:
 ```
 
 Given `{"event": {"category": "auth"}}`, routes to `logs_auth_land`.
-Unmatched messages route to `default_land` (default_source + topic_suffix).
+Unmatched messages route to `main_land` (default_source + topic_suffix).
 
 ## Metrics
 
@@ -239,7 +239,7 @@ flowchart TB
     RT --> TS["TieredSink (scalo)<br/>in-memory buffer + CircuitBreaker<br/>no disk spillover by design"]
     TS --> KAFKA[("Kafka topics<br/>librdkafka, batched / LZ4")]
     TS --> GRPC["Push listeners<br/>dfe-loader, transforms, archiver"]
-    RT -. unmatched .-> DEF["default_land topic"]
+    RT -. unmatched .-> DEF["main_land topic"]
 ```
 
 ## Development

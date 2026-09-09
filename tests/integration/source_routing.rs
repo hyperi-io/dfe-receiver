@@ -261,7 +261,7 @@ async fn test_grpc_push_accepts_gzip() {
 
     let client = VectorCompatClient::connect_lazy(&format!("http://127.0.0.1:{port}"))
         .expect("vector client");
-    let result = client.send_events(&[fetcher_record("default")]).await;
+    let result = client.send_events(&[fetcher_record("main")]).await;
     let received = drain_loader(&loader, 1).await;
     shutdown.cancel();
 
@@ -308,12 +308,12 @@ async fn test_http_ingest_stamps_the_matched_source_for_the_loader() {
     assert!(parsed["_timestamp_receiver"].is_number());
 }
 
-/// A payload no rule matches reaches the loader without a `_source`.
+/// A payload no rule matches reaches the loader stamped with the catch-all.
 ///
-/// The loader's own default table has to stand: an unmatched record must not
-/// acquire a source it was never routed to.
+/// The loader route carries no topic, so an unstamped record lands with
+/// `_source` NULL and a table picked by the loader's own fallback.
 #[tokio::test]
-async fn test_http_ingest_adds_no_source_when_no_rule_matches() {
+async fn test_http_ingest_stamps_the_catch_all_source_when_no_rule_matches() {
     let (loader_endpoint, loader) = start_mock_loader().await;
     let (port, shutdown) = start_receiver_http(kvproof_config(loader_endpoint)).await;
 
@@ -332,10 +332,9 @@ async fn test_http_ingest_adds_no_source_when_no_rule_matches() {
     assert_eq!(received.len(), 1);
     let parsed: serde_json::Value =
         serde_json::from_slice(&received[0]).expect("loader payload is JSON");
-    assert!(
-        parsed.get("_source").is_none(),
-        "an unmatched record must reach the loader without a source: {parsed}"
-    );
+    assert_eq!(parsed["_source"], "main");
+    assert_eq!(parsed["app"], "something_else");
+    assert_eq!(parsed["message"], "hello");
 }
 
 /// A sender's own `_source` survives a matching rule.

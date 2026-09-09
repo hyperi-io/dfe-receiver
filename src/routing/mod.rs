@@ -40,7 +40,7 @@ fn push_json_string(buf: &mut Vec<u8>, s: &str) {
 ///
 /// dfe-loader picks the destination table from `_source` in the record, so a
 /// matched source rule that is never written down is lost on the loader route
-/// and every source lands in the default table.
+/// and every source lands in the `main` table.
 ///
 /// Returns the payload untouched when it is not a JSON object or already
 /// carries a top-level `_source` -- the sender's value wins, and a second
@@ -122,6 +122,8 @@ pub struct Router {
     source_rules: Vec<SourceRule>,
     /// Topic suffix (e.g., "_land").
     topic_suffix: String,
+    /// `_source` for a record no rule matches.
+    default_source: String,
     /// Pre-computed default topic (avoids format!() on every message).
     default_topic: String,
     /// Source-to-topic remapping (pre-computed with suffix).
@@ -203,6 +205,7 @@ impl Router {
         Self {
             source_rules: routing.effective_source_rules(),
             topic_suffix: routing.topic_suffix.clone(),
+            default_source: routing.default_source.clone(),
             default_topic,
             source_to_topic,
             dlq_topic: routing.dlq.topic.clone(),
@@ -221,12 +224,16 @@ impl Router {
         self.route_with_source(payload).0
     }
 
-    /// Route a message, returning the source a rule matched with the destination.
+    /// Route a message, returning the source it belongs to with the destination.
     ///
     /// The source is evaluated on the loader route as well as the Kafka one.
     /// Only the Kafka route encodes it, in the topic name; on the loader route
     /// nothing downstream can recover it unless the caller writes it into the
     /// record, which is what [`stamp_source`] is for.
+    ///
+    /// A record no rule matches is the catch-all source, not an absent one:
+    /// it reports `default_source` so the loader gets a `_source` in the data
+    /// rather than a NULL column and a table picked by its own fallback.
     #[inline]
     pub fn route_with_source(&self, payload: &Bytes) -> (RouteResult, Option<String>) {
         let source = self.evaluate_source(payload);
@@ -285,7 +292,8 @@ impl Router {
 
     /// Evaluate source rules against the payload (first match wins).
     ///
-    /// Returns `None` when enrichment is disabled or no rule matches.
+    /// Falls back to `default_source` when no rule matches. Returns `None` only
+    /// when enrichment is disabled, which is the mode that adds no fields.
     #[inline]
     fn evaluate_source(&self, payload: &Bytes) -> Option<String> {
         if !self.enrichment_enabled {
@@ -313,7 +321,7 @@ impl Router {
                 _ => {}
             }
         }
-        None
+        Some(self.default_source.clone())
     }
 
     /// Extract a field value using pre-split parts (avoids split('.') per message).
@@ -380,21 +388,13 @@ impl Router {
 }
 
 impl Default for Router {
+    /// Built from the default configs, so every topic name is authored once.
     fn default() -> Self {
-        Self {
-            source_rules: vec![],
-            topic_suffix: "_land".to_string(),
-            default_topic: "default_land".to_string(),
-            source_to_topic: FxHashMap::default(),
-            dlq_topic: "dlq_land".to_string(),
-            dlq_enabled: true,
-            default_destination: ResolvedDestinations::new(
-                &crate::config::DestinationRef::default(),
-                &DestinationsConfig::default(),
-            ),
-            destination_rules: vec![],
-            enrichment_enabled: true,
-        }
+        Self::new(
+            &RoutingConfig::default(),
+            &DestinationsConfig::default(),
+            true,
+        )
     }
 }
 
@@ -403,7 +403,6 @@ impl Default for Router {
 mod tests {
     use super::*;
     use crate::config::{DestinationRule as ConfigRule, DlqConfig, SourceRule};
-    use std::collections::HashMap;
 
     /// The route went to the bus under `topic`.
     #[track_caller]
@@ -420,14 +419,7 @@ mod tests {
     }
 
     fn default_routing_config() -> RoutingConfig {
-        RoutingConfig {
-            default_source: "default".to_string(),
-            source_rules: vec![],
-            topic_suffix: "_land".to_string(),
-            source_to_topic: HashMap::new(),
-            legacy_compat: false,
-            dlq: DlqConfig::default(),
-        }
+        RoutingConfig::default()
     }
 
     fn legacy_routing_config() -> RoutingConfig {
@@ -474,7 +466,7 @@ mod tests {
         );
         let payload = Bytes::from(r#"{"data": "test"}"#);
 
-        assert_bus(&router.route(&payload), "default_land");
+        assert_bus(&router.route(&payload), "main_land");
     }
 
     // --- key_value_use: if field exists, use its value as source ---
@@ -510,7 +502,7 @@ mod tests {
         let router = Router::new(&routing, &default_destinations_config(), true);
         let payload = Bytes::from(r#"{"data": "test"}"#);
 
-        assert_bus(&router.route(&payload), "default_land");
+        assert_bus(&router.route(&payload), "main_land");
     }
 
     // --- key_present: if field exists, use configured source ---
@@ -546,7 +538,7 @@ mod tests {
         let router = Router::new(&routing, &default_destinations_config(), true);
         let payload = Bytes::from(r#"{"data": "test"}"#);
 
-        assert_bus(&router.route(&payload), "default_land");
+        assert_bus(&router.route(&payload), "main_land");
     }
 
     // --- key_value_set: if field == match_value, use configured source ---
@@ -582,14 +574,14 @@ mod tests {
         let router = Router::new(&routing, &default_destinations_config(), true);
         let payload = Bytes::from(r#"{"type": "netflow", "data": "test"}"#);
 
-        assert_bus(&router.route(&payload), "default_land");
+        assert_bus(&router.route(&payload), "main_land");
     }
 
-    // --- The matched source is written into the record ---
+    // --- The routed source is written into the record ---
     //
     // dfe-loader reads `_source` out of the data to pick the table, and on the
-    // loader route no topic is computed, so a matched rule left unwritten sends
-    // every receiver-routed source to the default table.
+    // loader route no topic is computed, so a source left unwritten sends every
+    // receiver-routed record to the `main` table.
 
     fn kvproof_routing() -> RoutingConfig {
         RoutingConfig {
@@ -626,13 +618,40 @@ mod tests {
     }
 
     #[test]
-    fn test_loader_route_with_no_match_reports_no_source() {
+    fn test_loader_route_with_no_match_reports_the_catch_all_source() {
         let router = Router::new(&kvproof_routing(), &loader_destinations_config(), true);
         let payload = Bytes::from(r#"{"app":"something_else","message":"hello"}"#);
 
         let (route, source) = router.route_with_source(&payload);
         assert_destinations(&route, &["loader"]);
-        assert_eq!(source, None);
+        assert_eq!(source.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn test_an_unmatched_record_is_stamped_with_the_catch_all_source() {
+        // The direct-to-loader route carries no topic, so without this stamp the
+        // catch-all rows land with `_source` NULL.
+        let router = Router::new(&kvproof_routing(), &loader_destinations_config(), true);
+        let payload = Bytes::from(r#"{"app":"something_else","message":"hello"}"#);
+
+        let (_, source) = router.route_with_source(&payload);
+        let stamped = stamp_source(payload, &source.expect("the catch-all source"));
+        let parsed: serde_json::Value = serde_json::from_slice(&stamped).expect("valid JSON");
+        assert_eq!(parsed["_source"], "main");
+        assert_eq!(parsed["message"], "hello");
+    }
+
+    #[test]
+    fn test_a_sender_supplied_source_survives_the_catch_all_stamp() {
+        // stamp_source leaves a top-level `_source` alone, so stamping every
+        // unmatched record does not overwrite what the sender already set.
+        let router = Router::new(&kvproof_routing(), &loader_destinations_config(), true);
+        let payload = Bytes::from(r#"{"app":"something_else","_source":"crates_audit"}"#);
+
+        let (_, source) = router.route_with_source(&payload);
+        let stamped = stamp_source(payload, &source.expect("the catch-all source"));
+        let parsed: serde_json::Value = serde_json::from_slice(&stamped).expect("valid JSON");
+        assert_eq!(parsed["_source"], "crates_audit");
     }
 
     #[test]
@@ -726,7 +745,7 @@ mod tests {
         let router = Router::new(&routing, &default_destinations_config(), true);
         let payload = Bytes::from(r#"{"_source":"someone_elses_table","data":"test"}"#);
 
-        assert_bus(&router.route(&payload), "default_land");
+        assert_bus(&router.route(&payload), "main_land");
     }
 
     #[test]
@@ -745,7 +764,7 @@ mod tests {
         let router = Router::new(&routing, &default_destinations_config(), false);
         let payload = Bytes::from(r#"{"_source":"crates_audit","data":"test"}"#);
 
-        assert_bus(&router.route(&payload), "default_land");
+        assert_bus(&router.route(&payload), "main_land");
     }
 
     #[test]
@@ -812,7 +831,7 @@ mod tests {
         let router = Router::new(&routing, &default_destinations_config(), false);
         let payload = Bytes::from(r#"{"_source": "auth", "data": "test"}"#);
 
-        assert_bus(&router.route(&payload), "default_land");
+        assert_bus(&router.route(&payload), "main_land");
     }
 
     // --- source_to_topic remapping ---
@@ -874,7 +893,7 @@ mod tests {
         let payload = Bytes::from(r#"{"event_category": "auth", "data": "test"}"#);
 
         // No rules, no legacy compat → default source
-        assert_bus(&router.route(&payload), "default_land");
+        assert_bus(&router.route(&payload), "main_land");
     }
 
     #[test]
@@ -1025,7 +1044,7 @@ mod tests {
         };
         let router = Router::new(&routing, &default_destinations_config(), true);
 
-        assert_bus(&router.route_dlq("test error"), "default_land");
+        assert_bus(&router.route_dlq("test error"), "main_land");
     }
 
     // --- Edge cases ---
@@ -1068,7 +1087,7 @@ mod tests {
             r#"{"event_category": ["auth"]}"#,
         ] {
             let payload = Bytes::from(payload_str);
-            assert_bus(&router.route(&payload), "default_land");
+            assert_bus(&router.route(&payload), "main_land");
         }
     }
 

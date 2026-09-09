@@ -21,7 +21,7 @@ dfe-receiver is a high-performance HTTP/gRPC receiver for PB/s scale data ingest
 3. **Routing**
    - Route to Kafka topics using configurable source rules (first match wins)
    - Rule modes: `key_present`, `key_value_set`, `key_value_use`
-   - Source-to-topic remapping and default source ("default")
+   - Source-to-topic remapping and default source ("main")
    - Legacy compat mode for `tags.event.category` / `event_category`
    - Support direct routing to dfe-loader
    - `_timestamp_receiver` enrichment (epoch ms injection)
@@ -254,7 +254,7 @@ routing:
   source_rules:
     - field: "_source"
       mode: "key_value_use"
-  default_source: "default"
+  default_source: "main"
   topic_suffix: "_land"
   legacy_compat: false
   # source_to_topic:
