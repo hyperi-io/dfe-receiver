@@ -3,6 +3,17 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.15.34](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.33...v1.15.34) (2026-09-10)
+
+### Bug Fixes
+
+* **auth:** close six settings that parse cleanly and enforce nothing ([ea7edf2](https://github.com/hyperi-io/dfe-receiver/commit/ea7edf206845eaa25ef3e09bee34a1db26d09e80)), closes [#74](https://github.com/hyperi-io/dfe-receiver/issues/74) [#74](https://github.com/hyperi-io/dfe-receiver/issues/74)
+* **config:** drop a comment describing a setting that is not there ([fa5fd70](https://github.com/hyperi-io/dfe-receiver/commit/fa5fd7052205dd9e36c0be81cd1bc6f25795b302))
+* **deployment:** declare the Kafka SASL env names the receiver actually reads ([be46260](https://github.com/hyperi-io/dfe-receiver/commit/be462606b743dc99309124e29264d85c1eb06451))
+* **deps:** raise the scalo floor to 2.12.1 ([2f45899](https://github.com/hyperi-io/dfe-receiver/commit/2f45899d1319b3dc46f2ffb658a547bc30b50e6f)), closes [#74](https://github.com/hyperi-io/dfe-receiver/issues/74) [#75](https://github.com/hyperi-io/dfe-receiver/issues/75) [#76](https://github.com/hyperi-io/dfe-receiver/issues/76) [#77](https://github.com/hyperi-io/dfe-receiver/issues/77) [#79](https://github.com/hyperi-io/dfe-receiver/issues/79) [#81](https://github.com/hyperi-io/dfe-receiver/issues/81)
+* **health:** stop a shared sink outage emptying the Service ([261aa4e](https://github.com/hyperi-io/dfe-receiver/commit/261aa4e2a4db058f3554e17ec793531e12f726cc))
+* **pipeline:** release tracked bytes when a request is cancelled ([8363c3a](https://github.com/hyperi-io/dfe-receiver/commit/8363c3a9c43fc9064f0a58f3ee37c4146fd6d1bb))
+
 ## [1.15.33](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.32...v1.15.33) (2026-09-10)
 
 ### Bug Fixes
