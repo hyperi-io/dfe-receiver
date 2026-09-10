@@ -101,8 +101,9 @@ fn test_config(lumberjack_port: u16) -> Config {
     // Enable Lumberjack
     config.lumberjack.enabled = true;
     config.lumberjack.bind_address = format!("127.0.0.1:{lumberjack_port}");
-    // Use loader destination to avoid Kafka dependency
-    config.destinations.default = "loader".to_string();
+    // The loader on its memory transport: accepted, sent nowhere, no broker.
+    config.destinations.default = "loader".into();
+    config.loader.transport = "memory".to_string();
     config
 }
 

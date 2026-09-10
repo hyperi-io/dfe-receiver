@@ -177,7 +177,13 @@ sha2 = ">=0.10, <0.12"
 
 # Contract artefact e2e (tests/e2e/contract_artefacts.rs) — pulls in
 # probe/skip/cluster helpers from scalo's test_support module.
-scalo = { version = ">=2.10.14, <3", features = ["deployment-test-support"] }
+# transport-grpc-vector-compat is test-only: it gives VectorCompatClient, the
+# same PushEvents client dfe-fetcher and Vector use, so the gRPC ingest path can
+# be driven in-process. Dev-dep features do not reach a release build.
+scalo = { version = ">=2.10.14, <3", features = [
+    "deployment-test-support",
+    "transport-grpc-vector-compat",
+] }
 
 [features]
 default = ["otlp"]
