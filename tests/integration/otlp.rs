@@ -52,7 +52,9 @@ fn test_config(grpc_port: u16, http_port: u16) -> Config {
     config.otlp.grpc_bind_address = format!("127.0.0.1:{grpc_port}");
     config.otlp.http_bind_address = format!("127.0.0.1:{http_port}");
     config.otlp.auth.mode = "none".to_string();
-    config.destinations.default = "loader".to_string();
+    // The loader on its memory transport: accepted, sent nowhere, no broker.
+    config.destinations.default = "loader".into();
+    config.loader.transport = "memory".to_string();
     config
 }
 

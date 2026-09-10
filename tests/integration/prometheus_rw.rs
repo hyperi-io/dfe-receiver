@@ -55,7 +55,9 @@ fn test_config_with_mode(rw_port: u16, mode: &str) -> Config {
     config.prometheus_rw.bind_address = format!("127.0.0.1:{rw_port}");
     config.prometheus_rw.mode = mode.to_string();
     config.prometheus_rw.auth.mode = "none".to_string();
-    config.destinations.default = "loader".to_string();
+    // The loader on its memory transport: accepted, sent nowhere, no broker.
+    config.destinations.default = "loader".into();
+    config.loader.transport = "memory".to_string();
     config
 }
 

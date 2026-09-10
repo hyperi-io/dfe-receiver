@@ -32,6 +32,8 @@ mod fluent;
 mod gelf;
 #[path = "integration/grpc_sink.rs"]
 mod grpc_sink;
+#[path = "integration/http_ingest.rs"]
+mod http_ingest;
 #[path = "integration/http_security.rs"]
 mod http_security;
 #[path = "integration/kafka_sink.rs"]
@@ -40,6 +42,8 @@ mod kafka_sink;
 mod lumberjack;
 #[path = "integration/minio_spool.rs"]
 mod minio_spool;
+#[path = "integration/named_destinations.rs"]
+mod named_destinations;
 #[path = "integration/otlp.rs"]
 mod otlp;
 #[path = "integration/prometheus_rw.rs"]
@@ -48,6 +52,8 @@ mod prometheus_rw;
 mod protocol_kafka_roundtrip;
 #[path = "integration/raw_capture.rs"]
 mod raw_capture;
+#[path = "integration/source_routing.rs"]
+mod source_routing;
 #[path = "integration/splunk_hec.rs"]
 mod splunk_hec;
 #[path = "integration/syslog.rs"]
