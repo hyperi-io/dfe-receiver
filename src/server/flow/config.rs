@@ -73,7 +73,7 @@ fn default_max_records() -> usize {
     200
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default, schemars::JsonSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct RateLimitConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -83,6 +83,25 @@ pub struct RateLimitConfig {
     pub burst: u32,
     #[serde(default = "default_rl_cache")]
     pub cache_size: usize,
+}
+
+// Default is written out rather than derived, like every other struct in this
+// file. The per-field serde defaults only run when the `rate_limit:` map is
+// PRESENT and a key inside it is missing; `#[serde(default)]` on the field that
+// holds this struct calls Default::default() for an absent map, and
+// FLOW_RATE_LIMIT_ENABLED can arm the limiter without the map ever existing.
+// A derived Default made that combination a zero rate over a zero burst, which
+// PerSourceRateLimiter reads as no tokens and no refill: every flow packet
+// dropped, counted as rate-limited, nothing in the log to say the rate was 0.
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            packets_per_second: default_pps(),
+            burst: default_burst(),
+            cache_size: default_rl_cache(),
+        }
+    }
 }
 
 fn default_pps() -> u32 {
@@ -423,6 +442,28 @@ output:
             err.to_string().contains("canonical_with_raw"),
             "error should name the offending value: {err}"
         );
+    }
+
+    #[test]
+    fn an_absent_rate_limit_map_still_carries_the_documented_rate() {
+        // `#[serde(default)]` on the field builds the whole struct from
+        // Default::default() when the map is absent, so the per-field serde
+        // defaults never run. Both routes must agree, or turning the limiter on
+        // from the environment arms a limiter nobody configured.
+        let absent: FlowConfig = serde_yaml_ng::from_str("enabled: true\n").unwrap();
+        let present: FlowConfig =
+            serde_yaml_ng::from_str("enabled: true\nrate_limit:\n  enabled: true\n").unwrap();
+
+        assert_eq!(absent.rate_limit.packets_per_second, default_pps());
+        assert_eq!(absent.rate_limit.burst, default_burst());
+        assert_eq!(absent.rate_limit.cache_size, default_rl_cache());
+        assert_eq!(
+            absent.rate_limit.packets_per_second, present.rate_limit.packets_per_second,
+            "an absent map and a half-filled one must resolve to the same rate"
+        );
+        assert_eq!(absent.rate_limit.burst, present.rate_limit.burst);
+        assert_eq!(absent.rate_limit.cache_size, present.rate_limit.cache_size);
+        assert!(!absent.rate_limit.enabled, "the limiter stays opt-in");
     }
 
     #[test]

@@ -158,9 +158,12 @@ pub fn contract() -> DeploymentContract {
             },
             SecretGroupContract {
                 group_name: "auth".into(),
+                // apply_flat_env reads this one; flat_env joins the prefix and
+                // the key with ONE underscore, and the figment cascade that
+                // would have read the double-underscore form never runs in the
+                // container -- entrypoint_args pass --config, which takes
+                // Config::load_from_file and skips config::setup entirely.
                 env_vars: vec![SecretEnvContract {
-                    // Same rule as the kafka pair above: ONE underscore, and
-                    // the suffix apply_flat_env actually reads.
                     env_var: "DFE_RECEIVER_BEARER_TOKENS".into(),
                     key_name: "bearer-tokens".into(),
                     secret_key: "bearer-tokens".into(),
@@ -434,6 +437,11 @@ mod tests {
         assert_eq!(c.secrets[1].group_name, "auth");
     }
 
+    /// Every env var the contract declares must reach the config.
+    ///
+    /// The chart is generated from these names, so one the app does not read
+    /// mounts a Secret into the pod environment and is ignored, with nothing
+    /// failing to say so.
     #[test]
     fn every_declared_secret_env_var_reaches_the_config() {
         // A declared name the binary never reads mounts a Secret that is

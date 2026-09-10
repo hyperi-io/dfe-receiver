@@ -191,6 +191,42 @@ mod tests {
     }
 
     #[test]
+    fn the_default_config_passes_traffic_once_enabled() {
+        // `enabled` is reachable on its own: DFE_RECEIVER_FLOW_RATE_LIMIT_ENABLED
+        // sets it against whatever the rest of the block already holds, and
+        // `#[serde(default)]` on the FlowConfig field means a config file with no
+        // `flow.rate_limit:` map at all fills the whole struct from
+        // RateLimitConfig::default() -- the per-field serde defaults never run.
+        // A zero burst and a zero rate is not a loose limiter, it is a closed
+        // gate: try_acquire finds no tokens, refills none, and drops the packet.
+        let rl = PerSourceRateLimiter::new(RateLimitConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        assert!(
+            rl.try_acquire(ip(1)),
+            "the default rate limit drops the first packet from a source, so \
+             turning the limiter on alone discards all flow traffic silently"
+        );
+    }
+
+    #[test]
+    fn the_default_cache_size_holds_a_source() {
+        // A zero cache_size evicts every bucket on each sweep.
+        let rl = PerSourceRateLimiter::new(RateLimitConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        let _ = rl.try_acquire(ip(1));
+        rl.evict_lru();
+        assert_eq!(
+            rl.bucket_count(),
+            1,
+            "the default cache_size evicts the bucket it just created"
+        );
+    }
+
+    #[test]
     fn enabled_reports_flag() {
         let off = PerSourceRateLimiter::new(RateLimitConfig {
             enabled: false,

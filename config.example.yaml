@@ -66,9 +66,13 @@ grpc:
     # key_secret: "vault:secret/tls:key"
     # refresh_interval_secs: 3600       # Hot-reload interval (1 hour)
 
-  # gRPC auth (same options as HTTP auth)
+  # gRPC auth. none, bearer, or mtls -- and mtls only alongside tls.enabled:
+  # true and tls.client_auth: required, since it is the handshake that does the
+  # work. `header` and `both` are refused: the interceptor reads the
+  # `authorization` metadata key and nothing else, so accepted_headers would
+  # never be consulted here.
   auth:
-    mode: "none"  # none, bearer
+    mode: "none"  # none, bearer, mtls
     # bearer:
     #   tokens: []
     #   secret_source: "file:/etc/secrets/grpc-tokens"
@@ -90,13 +94,11 @@ lumberjack:
     # key_secret: "vault:secret/tls:key"
     # refresh_interval_secs: 3600
 
-  # Auth (same options as HTTP/gRPC auth)
-  auth:
-    mode: "none"
-    # bearer:
-    #   tokens: []
-    #   secret_source: "file:/etc/secrets/beats-tokens"
-    #   refresh_interval_secs: 300
+  # NO application auth on this listener. A Lumberjack frame carries no
+  # credential, so nothing in the handler reads `lumberjack.auth` -- setting a
+  # mode there is refused at startup rather than accepted and ignored.
+  # Authenticate Beats clients at the handshake instead: tls.enabled: true with
+  # tls.client_auth: required and the CA the client certs are issued from.
 
 # Splunk HEC (HTTP Event Collector) protocol
 splunk_hec:
@@ -143,12 +145,13 @@ syslog:
     # key_secret: "vault:secret/tls:key"
     # refresh_interval_secs: 3600
 
-  auth:
-    mode: "none"
-    # bearer:
-    #   tokens: []
-    #   secret_source: "file:/etc/secrets/syslog-tokens"
-    #   refresh_interval_secs: 300
+  # NO application auth on this listener. A syslog line carries no credential,
+  # so nothing in the handler reads `syslog.auth` -- setting a mode there is
+  # refused at startup rather than accepted and ignored. Authenticate senders at
+  # the handshake instead, on the TLS listener above (RFC 5425, port 6514):
+  # tls.enabled: true with tls.client_auth: required. UDP and plain TCP syslog
+  # cannot be authenticated at all -- restrict them with server.ip_filter or at
+  # the network edge.
 
 # Prometheus Remote Write receiver (v1)
 prometheus_rw:

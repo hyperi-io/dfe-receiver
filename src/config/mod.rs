@@ -314,6 +314,8 @@ impl Config {
             ));
         }
 
+        self.validate_auth()?;
+
         // Validate buffer config
         if self.buffer.pressure_threshold < 0.0 || self.buffer.pressure_threshold > 1.0 {
             return Err(Error::Config(
@@ -333,6 +335,147 @@ impl Config {
 
         Ok(())
     }
+
+    /// Refuse an auth mode the listener that carries it does not enforce.
+    ///
+    /// Every listener owns an `auth:` block of the same shape, but they do not
+    /// all read the same amount of it, and a mode a listener ignores is not a
+    /// weaker door -- it is an open one that reads as shut. Each rule below
+    /// names the code that does or does not run.
+    fn validate_auth(&self) -> Result<()> {
+        // Always-on HTTP listener.
+        known_mode("server", &self.server.auth)?;
+        cert_half_is_enforced("server", &self.server.auth, &self.server.tls)?;
+
+        // gRPC and OTLP authenticate through a tonic interceptor that only
+        // calls validate_bearer_auth, so `header` and `both` never reach
+        // validate_header_auth on those ports.
+        if self.grpc.enabled {
+            known_mode("grpc", &self.grpc.auth)?;
+            bearer_only("grpc", &self.grpc.auth)?;
+            cert_half_is_enforced("grpc", &self.grpc.auth, &self.grpc.tls)?;
+        }
+        #[cfg(feature = "otlp")]
+        if self.otlp.enabled {
+            known_mode("otlp", &self.otlp.auth)?;
+            bearer_only("otlp", &self.otlp.auth)?;
+            cert_half_is_enforced("otlp", &self.otlp.auth, &self.otlp.tls)?;
+        }
+
+        // Both run the shared token_auth_middleware, so every mode but the
+        // certificate half is enforced.
+        if self.splunk_hec.enabled {
+            known_mode("splunk_hec", &self.splunk_hec.auth)?;
+            cert_half_is_enforced("splunk_hec", &self.splunk_hec.auth, &self.splunk_hec.tls)?;
+        }
+        if self.prometheus_rw.enabled {
+            known_mode("prometheus_rw", &self.prometheus_rw.auth)?;
+            cert_half_is_enforced(
+                "prometheus_rw",
+                &self.prometheus_rw.auth,
+                &self.prometheus_rw.tls,
+            )?;
+        }
+
+        // Nothing in either module reads its auth block at all.
+        if self.lumberjack.enabled {
+            no_application_auth("lumberjack", &self.lumberjack.auth)?;
+        }
+        if self.syslog.enabled {
+            no_application_auth("syslog", &self.syslog.auth)?;
+        }
+
+        Ok(())
+    }
+}
+
+/// The five modes `AuthMode::from_str` recognises.
+const AUTH_MODES: [&str; 5] = ["none", "header", "bearer", "mtls", "both"];
+
+/// Refuse a mode string outside [`AUTH_MODES`].
+///
+/// `AuthMode::from_str` maps anything it does not recognise to `None`, so a
+/// typo ("bearrer", "Bearer Token") silently disables authentication on a
+/// listener the operator believes is closed.
+fn known_mode(scope: &str, auth: &AuthConfig) -> Result<()> {
+    let mode = auth.mode.to_ascii_lowercase();
+    if mode.is_empty() || AUTH_MODES.contains(&mode.as_str()) {
+        return Ok(());
+    }
+    Err(Error::Config(format!(
+        "{scope}.auth.mode is '{}', which is not one of {} -- an unrecognised mode \
+         parses as 'none' and disables authentication on this listener",
+        auth.mode,
+        AUTH_MODES.join(", ")
+    )))
+}
+
+/// Require the TLS half of `mtls` / `both` to actually be armed.
+///
+/// Neither mode checks a certificate in the request path: `mtls` skips it
+/// entirely (auth.rs `requires_token_auth` excludes it) and `both` runs only
+/// its token half there. The certificate half is the TLS handshake, so without
+/// `tls.enabled` and a REQUIRED client certificate it authenticates nobody
+/// while reading as though it does. `optional` is not enough -- it validates a
+/// certificate when one is offered and admits clients that offer none.
+fn cert_half_is_enforced(scope: &str, auth: &AuthConfig, tls: &TlsConfig) -> Result<()> {
+    let mode = auth.mode.to_ascii_lowercase();
+    if mode != "mtls" && mode != "both" {
+        return Ok(());
+    }
+    if !tls.enabled {
+        return Err(Error::Config(format!(
+            "{scope}.auth.mode is '{mode}' but {scope}.tls.enabled is false -- the \
+             certificate half of that mode is enforced at the TLS handshake, so it \
+             accepts every client unauthenticated"
+        )));
+    }
+    if !tls.client_auth.eq_ignore_ascii_case("required") {
+        return Err(Error::Config(format!(
+            "{scope}.auth.mode is '{mode}' but {scope}.tls.client_auth is '{}' -- \
+             it must be 'required', or clients presenting no certificate are \
+             admitted",
+            tls.client_auth
+        )));
+    }
+    Ok(())
+}
+
+/// Refuse `header` and `both` on a listener whose interceptor is bearer-only.
+///
+/// `make_auth_interceptor` in server/grpc and server/otlp builds a HeaderMap
+/// holding one key, `authorization`, and calls `validate_bearer_auth`. It never
+/// calls `validate_header_auth`, so an `accepted_headers` list configured
+/// against those ports is never consulted.
+fn bearer_only(scope: &str, auth: &AuthConfig) -> Result<()> {
+    let mode = auth.mode.to_ascii_lowercase();
+    if mode != "header" && mode != "both" {
+        return Ok(());
+    }
+    Err(Error::Config(format!(
+        "{scope}.auth.mode is '{mode}' but the {scope} interceptor validates bearer \
+         tokens only -- accepted_headers is never consulted on this listener. Use \
+         'bearer', or 'mtls' with {scope}.tls.client_auth: required"
+    )))
+}
+
+/// Refuse any real mode on a listener that has no application auth at all.
+///
+/// The lumberjack and syslog modules contain no reference to their `auth`
+/// block: neither wire protocol carries a credential to check. A mode written
+/// there changed nothing and reported nothing.
+fn no_application_auth(scope: &str, auth: &AuthConfig) -> Result<()> {
+    known_mode(scope, auth)?;
+    let mode = auth.mode.to_ascii_lowercase();
+    if mode.is_empty() || mode == "none" {
+        return Ok(());
+    }
+    Err(Error::Config(format!(
+        "{scope}.auth.mode is '{mode}' but the {scope} listener has no application \
+         auth -- the wire protocol carries no credential and nothing reads this \
+         field. Authenticate clients at the handshake instead, with \
+         {scope}.tls.enabled: true and {scope}.tls.client_auth: required"
+    )))
 }
 
 /// Reload configuration from the same source.
@@ -358,8 +501,12 @@ impl ApplyFlatEnv for Config {
         if let Some(v) = flat_env::flat_env_bool(prefix, "COMMON_HEADER") {
             self.server.auth.include_common_header = v;
         }
-        // Newline or comma separated, matching the secret-source loader in
-        // server::auth, since both read the same bearer-tokens Secret.
+        // Bearer tokens arrive as a mounted Secret in the pod environment, so
+        // this is the route the chart takes -- the `auth` secret group in
+        // deployment.rs declares exactly this name. Split on comma and newline,
+        // matching how BearerTokenProvider::load_from_secret parses a secret
+        // payload, and read through the sensitive helper so no token reaches a
+        // log line.
         if let Some(v) = flat_env::flat_env_string_sensitive(prefix, "BEARER_TOKENS") {
             self.server.auth.bearer.tokens = v
                 .lines()
@@ -2057,9 +2204,257 @@ mod tests {
     }
 
     #[test]
+    fn mtls_mode_without_tls_is_refused() {
+        // The trap: this reads as mutual TLS and enforces nothing, because the
+        // request path short-circuits for mtls and the handshake is not doing
+        // the work either.
+        let mut config = Config::default();
+        // Direct gRPC, so validate() does not stop at the brokers rule first
+        // and each test below fails only on the auth rule it is about.
+        config.destinations.default = "loader".into();
+        config.loader.transport = "grpc".to_string();
+        config.server.auth.mode = "mtls".to_string();
+
+        let err = config.validate().expect_err("must not start");
+        assert!(
+            err.to_string().contains("tls.enabled is false"),
+            "the error must name the missing half, got: {err}"
+        );
+    }
+
+    #[test]
+    fn mtls_mode_with_optional_client_auth_is_refused() {
+        // `optional` validates a certificate when one is offered and admits
+        // clients that offer none, which is not authentication.
+        let mut config = Config::default();
+        // Direct gRPC, so validate() does not stop at the brokers rule first
+        // and each test below fails only on the auth rule it is about.
+        config.destinations.default = "loader".into();
+        config.loader.transport = "grpc".to_string();
+        config.server.auth.mode = "mtls".to_string();
+        config.server.tls.enabled = true;
+        config.server.tls.client_auth = "optional".to_string();
+
+        let err = config.validate().expect_err("must not start");
+        assert!(
+            err.to_string().contains("must be 'required'"),
+            "the error must say what to set, got: {err}"
+        );
+    }
+
+    #[test]
+    fn mtls_mode_with_required_client_auth_is_accepted() {
+        let mut config = Config::default();
+        // Direct gRPC, so validate() does not stop at the brokers rule first
+        // and each test below fails only on the auth rule it is about.
+        config.destinations.default = "loader".into();
+        config.loader.transport = "grpc".to_string();
+        config.server.auth.mode = "mtls".to_string();
+        config.server.tls.enabled = true;
+        config.server.tls.client_auth = "required".to_string();
+
+        assert!(config.validate().is_ok());
+    }
+
+    // -- auth modes a listener does not enforce --
+    //
+    // One shape, checked per listener: a mode that parses cleanly, changes the
+    // config that reaches the handler, and changes nothing about who gets in.
+
+    /// A config that validates, so each test below fails only on its own rule.
+    fn auth_base() -> Config {
+        let mut config = Config::default();
+        // Direct gRPC, so validate() does not stop at the brokers rule first
+        // and each test below fails only on the auth rule it is about.
+        config.destinations.default = "loader".into();
+        config.loader.transport = "grpc".to_string();
+        config
+    }
+
+    #[test]
+    fn both_mode_without_tls_is_refused() {
+        // `both` means token auth AND mTLS (see AuthMode's docs). Only the
+        // token half runs in the request path, so with TLS off the deployment
+        // gets one of the two things it asked for and no word about the other.
+        let mut config = auth_base();
+        config.server.auth.mode = "both".to_string();
+        config.server.auth.accepted_headers = vec![AcceptedHeader {
+            name: "x-api-key".to_string(),
+            values: vec!["k".to_string()],
+        }];
+
+        let err = config.validate().expect_err("must not start");
+        assert!(
+            err.to_string().contains("server.tls.enabled is false"),
+            "the error must name the missing half, got: {err}"
+        );
+    }
+
+    #[test]
+    fn both_mode_with_required_client_auth_is_accepted() {
+        let mut config = auth_base();
+        config.server.auth.mode = "both".to_string();
+        config.server.tls.enabled = true;
+        config.server.tls.client_auth = "required".to_string();
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn mtls_on_an_enabled_hec_listener_is_refused() {
+        // splunk_hec runs the same token_auth_middleware, which short-circuits
+        // for mtls -- so this admitted every HEC post on 8088.
+        let mut config = auth_base();
+        config.splunk_hec.enabled = true;
+        config.splunk_hec.auth.mode = "mtls".to_string();
+
+        let err = config.validate().expect_err("must not start");
+        assert!(
+            err.to_string().contains("splunk_hec.tls.enabled is false"),
+            "the error must name the listener, got: {err}"
+        );
+    }
+
+    #[test]
+    fn mtls_on_an_enabled_prometheus_rw_listener_is_refused() {
+        let mut config = auth_base();
+        config.prometheus_rw.enabled = true;
+        config.prometheus_rw.auth.mode = "mtls".to_string();
+
+        let err = config.validate().expect_err("must not start");
+        assert!(
+            err.to_string()
+                .contains("prometheus_rw.tls.enabled is false"),
+            "the error must name the listener, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_disabled_listener_does_not_block_startup() {
+        // The block is inert because the listener is not running, which is the
+        // one case where inert is honest. Refusing here would be noise.
+        let mut config = auth_base();
+        config.splunk_hec.enabled = false;
+        config.splunk_hec.auth.mode = "mtls".to_string();
+        config.syslog.enabled = false;
+        config.syslog.auth.mode = "bearer".to_string();
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn header_mode_on_grpc_is_refused() {
+        // make_auth_interceptor builds a HeaderMap carrying only
+        // `authorization` and calls validate_bearer_auth. An accepted_headers
+        // list configured here is never read.
+        let mut config = auth_base();
+        config.grpc.enabled = true;
+        config.grpc.auth.mode = "header".to_string();
+        config.grpc.auth.accepted_headers = vec![AcceptedHeader {
+            name: "x-api-key".to_string(),
+            values: vec!["k".to_string()],
+        }];
+
+        let err = config.validate().expect_err("must not start");
+        assert!(
+            err.to_string().contains("bearer tokens only"),
+            "the error must say what the interceptor does, got: {err}"
+        );
+    }
+
+    #[test]
+    fn bearer_mode_on_grpc_is_accepted() {
+        let mut config = auth_base();
+        config.grpc.enabled = true;
+        config.grpc.auth.mode = "bearer".to_string();
+        config.grpc.auth.bearer.tokens = vec!["t".to_string()];
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn an_auth_mode_on_syslog_is_refused() {
+        // Nothing in server/syslog references its auth block: there is no
+        // credential on a syslog line to check. Writing a mode here bought a
+        // wide-open 514 that read as authenticated.
+        let mut config = auth_base();
+        config.syslog.enabled = true;
+        config.syslog.auth.mode = "bearer".to_string();
+        config.syslog.auth.bearer.tokens = vec!["t".to_string()];
+
+        let err = config.validate().expect_err("must not start");
+        assert!(
+            err.to_string().contains("no application auth"),
+            "the error must say the listener has none, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("syslog.tls.client_auth: required"),
+            "the error must name the way that does work, got: {err}"
+        );
+    }
+
+    #[test]
+    fn an_auth_mode_on_lumberjack_is_refused() {
+        let mut config = auth_base();
+        config.lumberjack.enabled = true;
+        config.lumberjack.auth.mode = "bearer".to_string();
+
+        let err = config.validate().expect_err("must not start");
+        assert!(
+            err.to_string().contains("no application auth"),
+            "the error must say the listener has none, got: {err}"
+        );
+    }
+
+    #[test]
+    fn syslog_with_no_auth_mode_still_starts() {
+        let mut config = auth_base();
+        config.syslog.enabled = true;
+        config.syslog.tls.enabled = true;
+        config.syslog.tls.client_auth = "required".to_string();
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn a_misspelled_auth_mode_is_refused() {
+        // AuthMode::from_str maps anything unrecognised to None, so this was a
+        // wide-open listener that read as bearer-authenticated.
+        let mut config = auth_base();
+        config.server.auth.mode = "bearrer".to_string();
+
+        let err = config.validate().expect_err("must not start");
+        assert!(
+            err.to_string().contains("parses as 'none'"),
+            "the error must say what the typo actually does, got: {err}"
+        );
+    }
+
+    #[test]
+    fn every_documented_auth_mode_is_accepted_on_the_server_listener() {
+        // The five AuthMode::from_str recognises, so known_mode can never
+        // drift away from the parser it guards.
+        for mode in ["none", "header", "bearer"] {
+            let mut config = auth_base();
+            config.server.auth.mode = mode.to_string();
+            assert!(config.validate().is_ok(), "{mode} must be accepted");
+        }
+        for mode in ["mtls", "both"] {
+            let mut config = auth_base();
+            config.server.auth.mode = mode.to_string();
+            config.server.tls.enabled = true;
+            config.server.tls.client_auth = "required".to_string();
+            assert!(config.validate().is_ok(), "{mode} must be accepted");
+        }
+    }
+
+    #[test]
     fn test_config_validation_no_brokers_required_for_loader() {
         let mut config = Config::default();
+        // Direct gRPC, so validate() does not stop at the brokers rule first
+        // and each test below fails only on the auth rule it is about.
         config.destinations.default = "loader".into();
+        config.loader.transport = "grpc".to_string();
         config.loader.transport = "grpc".to_string();
         assert!(config.validate().is_ok());
     }
@@ -2069,7 +2464,10 @@ mod tests {
     #[test]
     fn the_loader_on_the_bus_needs_brokers() {
         let mut config = Config::default();
+        // Direct gRPC, so validate() does not stop at the brokers rule first
+        // and each test below fails only on the auth rule it is about.
         config.destinations.default = "loader".into();
+        config.loader.transport = "grpc".to_string();
         config.loader.transport = "kafka".to_string();
 
         let err = config.validate().unwrap_err().to_string();
@@ -2197,6 +2595,49 @@ mod tests {
             let mut config = Config::default();
             config.apply_flat_env(ENV_PREFIX);
             assert!(!config.server.auth.include_common_header);
+        });
+    }
+
+    #[test]
+    fn bearer_tokens_arrive_from_the_environment() {
+        // The only route the chart has: a mounted Secret in the pod
+        // environment. Without this reader the auth Secret was mounted and read
+        // by nothing, and `auth.mode: bearer` came up with an empty token set.
+        with_env(&[("DFE_RECEIVER_BEARER_TOKENS", "alpha,beta")], || {
+            let mut config = Config::default();
+            config.apply_flat_env(ENV_PREFIX);
+            assert_eq!(
+                config.server.auth.bearer.tokens,
+                vec!["alpha".to_string(), "beta".to_string()]
+            );
+        });
+    }
+
+    #[test]
+    fn bearer_tokens_from_the_environment_split_on_newlines_too() {
+        // A K8s Secret holding one token per line is as likely as a CSV, and
+        // BearerTokenProvider::load_from_secret accepts both.
+        with_env(
+            &[("DFE_RECEIVER_BEARER_TOKENS", "alpha\n beta \n\ngamma")],
+            || {
+                let mut config = Config::default();
+                config.apply_flat_env(ENV_PREFIX);
+                assert_eq!(
+                    config.server.auth.bearer.tokens,
+                    vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()],
+                    "blank entries must not become empty tokens"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn bearer_tokens_from_config_survive_an_unset_environment() {
+        with_env(&[], || {
+            let mut config = Config::default();
+            config.server.auth.bearer.tokens = vec!["from-yaml".to_string()];
+            config.apply_flat_env(ENV_PREFIX);
+            assert_eq!(config.server.auth.bearer.tokens, vec!["from-yaml"]);
         });
     }
 

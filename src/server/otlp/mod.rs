@@ -34,6 +34,7 @@ use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
 use crate::server::auth::{AuthMode, AuthState, validate_bearer_auth};
 use crate::server::http::create_auth_state;
+use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
 use crate::server::traits::ProtocolHandler;
 use convert::OtlpMode;
 
@@ -389,7 +390,7 @@ async fn run_http_server(
 
     let state = OtlpHttpState {
         pipeline,
-        metrics,
+        metrics: metrics.clone(),
         mode,
         raw_capture,
     };
@@ -466,22 +467,61 @@ async fn run_http_server(
         Ok(StatusCode::OK)
     }
 
+    // `otlp.auth` and `otlp.tls` describe the OTLP receiver, not one half of
+    // it. Both endpoints carry the same signals, so applying either to the gRPC
+    // server alone leaves 4318 as an unauthenticated plaintext door beside a
+    // closed 4317 -- with the config, and the startup log, reading as though
+    // both were shut.
+    let auth_state = create_auth_state(&config.auth).await?;
+
     let app = Router::new()
         .route("/v1/logs", post(logs_handler))
         .route("/v1/traces", post(traces_handler))
         .route("/v1/metrics", post(metrics_handler))
+        .layer(axum::middleware::from_fn_with_state(
+            auth_state,
+            crate::server::auth::token_auth_middleware,
+        ))
         .with_state(state);
 
     let listener = TcpListener::bind(addr)
         .await
         .map_err(|e| Error::Server(format!("failed to bind OTLP HTTP: {e}")))?;
 
-    info!(addr = %addr, mode = ?mode, "OTLP HTTP server listening");
+    // Same TLS wiring as the Splunk HEC listener, over the same `tls:` block
+    // the gRPC endpoint uses.
+    let tls_provider = if config.tls.enabled && uses_secrets(&config.tls) {
+        let provider = TlsCertProvider::new(config.tls.clone()).await?;
+        provider.start_refresh_task();
+        Some(provider)
+    } else {
+        None
+    };
+    let tls_acceptor = if tls_provider.is_some() {
+        None
+    } else {
+        build_tls_acceptor(&config.tls)?
+    };
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown.cancelled_owned())
-        .await
-        .map_err(|e| Error::Server(format!("OTLP HTTP server error: {e}")))?;
+    let ip_filter = crate::server::ip_filter::IpFilter::disabled();
+
+    let acceptor_handle = if let Some(ref provider) = tls_provider {
+        Some(provider.acceptor_handle())
+    } else {
+        tls_acceptor.map(|a| Arc::new(parking_lot::RwLock::new(a)))
+    };
+
+    if let Some(handle) = acceptor_handle {
+        info!(addr = %addr, mode = ?mode, tls = true, "OTLP HTTP server listening");
+        crate::server::http::run_tls_server(listener, app, handle, ip_filter, shutdown, metrics)
+            .await?;
+    } else {
+        info!(addr = %addr, mode = ?mode, tls = false, "OTLP HTTP server listening");
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown.cancelled_owned())
+            .await
+            .map_err(|e| Error::Server(format!("OTLP HTTP server error: {e}")))?;
+    }
 
     info!("OTLP HTTP server stopped");
     Ok(())
