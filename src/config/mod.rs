@@ -1952,7 +1952,9 @@ impl Default for FileSinkConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct BufferConfig {
-    /// Maximum memory for buffers in bytes (0 = auto-detect 67% of available).
+    /// Maximum memory for buffers in bytes (0 = scalo's MemoryGuard auto-detect:
+    /// 85% of the cgroup limit, capped at cgroup v2 `memory.high` when that is
+    /// lower, and total system memory when there is no cgroup).
     pub memory_limit: usize,
 
     /// Memory pressure threshold (0.0-1.0).

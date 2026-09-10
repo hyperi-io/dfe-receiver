@@ -279,7 +279,7 @@ kafka:
     compression: zstd
 
 buffer:
-  memory_limit: 0  # Auto (67% of available)
+  memory_limit: 0  # Auto (85% of the cgroup limit)
   pressure_threshold: 0.8
 
 metrics:
