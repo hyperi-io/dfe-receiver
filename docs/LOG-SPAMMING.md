@@ -219,7 +219,6 @@ Fix the worst offenders identified in the audit:
 |------|------|---------|-----|
 | `src/pipeline/mod.rs` | 205,315 | `warn!` per-request under memory pressure | State-transition logging |
 | `src/sink/kafka/mod.rs` | 61 | `error!` per failed Kafka send | Sampled (1 in 1000) + metric |
-| `src/sink/loader/mod.rs` | 95 | `error!` per failed loader send | Sampled (1 in 1000) + metric |
 | `src/server/syslog/mod.rs` | 73 | `warn!` per UDP recv error in tight loop | Debounced (5s interval) |
 | `src/server/lumberjack/mod.rs` | 94,135 | `warn!` per failed frame parse | Sampled (1 in 100) |
 

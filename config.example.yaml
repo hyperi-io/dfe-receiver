@@ -47,6 +47,10 @@ server:
       # secret_source: "vault:secret/data/auth:bearer_tokens"
       refresh_interval_secs: 300
 
+# gRPC ingest. This listener serves `vector.Vector/PushEvents` only -- a Vector
+# `vector` sink, or scalo's VectorCompatClient. A scalo `GrpcTransport` client
+# (dfe-fetcher's `output.grpc`, dfe-receiver's own loader sink) speaks
+# `scalo.transport.v1.Transport/Push` and gets UNIMPLEMENTED here.
 grpc:
   enabled: false
   bind_address: "0.0.0.0:6000"
@@ -292,7 +296,7 @@ routing:
   source_rules:
     - field: "_source"
       mode: "key_value_use"       # use the value of _source as the source
-  default_source: "default"
+  default_source: "main"
   topic_suffix: "_land"
   legacy_compat: false  # also check tags.event.category / event_category
   # source_to_topic:
@@ -301,13 +305,34 @@ routing:
     enabled: true
     topic: "dlq_land"
 
+# The named destination set. `kafka` (the bus, under the topic the record's
+# source resolves to) and `loader` (per the loader block below) are always
+# available; any other name is declared here as a sibling key. A rule's
+# destination may be a LIST, and the record then goes to every one of them --
+# that is how a record reaches the loader AND the archiver with no broker in
+# the path. A destination that stops accepting back-pressures the ingest (HTTP
+# 503); there is no DLQ fallback for a full destination, and the routing.dlq
+# topic below is for INVALID records only, so a deployment with no broker
+# should leave it disabled.
 destinations:
-  default: "kafka"  # kafka or loader
+  default: "kafka"
   rules: []
   # rules:
   #   - match_field: "tags.destination"
   #     match_value: "direct"
   #     destination: "loader"
+  #   - match_field: "app"
+  #     match_value: "orders"
+  #     destination: ["transform_orders", "archiver"]
+  # transform_orders:
+  #   grpc:
+  #     endpoint: "http://dfe-transform-orders:6000"
+  # archiver:
+  #   grpc:
+  #     endpoint: "http://dfe-archiver:6000"
+  # audit_bus:
+  #   kafka:
+  #     topic: "audit_land"     # unset = the record's own source topic
 
 kafka:
   brokers:
@@ -333,9 +358,18 @@ kafka:
   librdkafka_overrides:
     statistics.interval.ms: "0"
 
+# How the built-in `loader` destination delivers:
+#   kafka   the bus, under the topic the record's source resolves to -- the same
+#           thing the built-in `kafka` destination does, so kafka.brokers is
+#           required
+#   grpc    the loader's own Push listener at grpc_endpoint
+# `memory` (accept the record and discard it) exists for the ingest tests and
+# is refused at startup, so a deployment cannot land on it by accident.
 loader:
-  address: "dfe-loader:9000"
-  transport: "kafka"  # kafka, memory, grpc
+  address: "dfe-loader:6000"
+  transport: "kafka"
+  # Per-RPC deadline for the gRPC client, so a loader that stops answering
+  # cannot hold a sender task open.
   timeout_ms: 5000
   # grpc_endpoint: "http://dfe-loader:6000"  # when transport=grpc (defaults to http://{address})
 

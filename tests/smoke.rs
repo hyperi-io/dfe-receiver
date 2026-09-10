@@ -36,7 +36,7 @@ use dfe_receiver::pipeline::Orchestrator;
 async fn test_full_startup_lifecycle() {
     // Step 1: Load config (same as main.rs)
     let mut config = Config::default();
-    config.destinations.default = "loader".to_string();
+    config.destinations.default = "loader".into();
     config.loader.transport = "memory".to_string();
 
     // Step 2: Create metrics with DFE groups — this installs the global recorder.

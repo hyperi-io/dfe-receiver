@@ -21,7 +21,7 @@ dfe-receiver is a high-performance HTTP/gRPC receiver for PB/s scale data ingest
 3. **Routing**
    - Route to Kafka topics using configurable source rules (first match wins)
    - Rule modes: `key_present`, `key_value_set`, `key_value_use`
-   - Source-to-topic remapping and default source ("default")
+   - Source-to-topic remapping and default source ("main")
    - Legacy compat mode for `tags.event.category` / `event_category`
    - Support direct routing to dfe-loader
    - `_timestamp_receiver` enrichment (epoch ms injection)
@@ -84,8 +84,8 @@ dfe-receiver is a high-performance HTTP/gRPC receiver for PB/s scale data ingest
                          ┌──────────────────┼──────────────────┐
                          │                  │                  │
                ┌─────────▼─────────┐ ┌──────▼──────┐ ┌─────────▼─────────┐
-               │   Kafka Sink      │ │ DLQ Sink    │ │  Loader Sink      │
-               │   (rdkafka)       │ │             │ │  (scalo)          │
+               │   Kafka Sink      │ │ DLQ Sink    │ │  gRPC Sink        │
+               │   (rdkafka)       │ │             │ │  (scalo Push)     │
                └─────────┬─────────┘ └─────────────┘ └───────────────────┘
                          │
                ┌─────────▼─────────┐
@@ -254,7 +254,7 @@ routing:
   source_rules:
     - field: "_source"
       mode: "key_value_use"
-  default_source: "default"
+  default_source: "main"
   topic_suffix: "_land"
   legacy_compat: false
   # source_to_topic:
@@ -402,9 +402,10 @@ readinessProbe:
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `receiver_messages_sent_kafka_total` | Counter | Messages sent to Kafka |
-| `receiver_messages_sent_loader_total` | Counter | Messages sent to loader |
-| `receiver_messages_dlq_total` | Counter | Messages sent to DLQ |
+| `receiver_kafka_sends_total` | Counter | Messages sent to Kafka |
+| `receiver_kafka_bytes_sent_total` | Counter | Bytes sent to Kafka |
+| `receiver_kafka_send_errors_total` | Counter | Kafka send failures |
+| `records_dlq_total` | Counter | Messages sent to DLQ (scalo emits this one) |
 
 ### Scaling Metrics
 

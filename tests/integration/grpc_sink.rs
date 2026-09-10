@@ -101,7 +101,7 @@ async fn start_server() -> (String, GrpcTransport, u16) {
 async fn test_grpc_sink_delivers_message() {
     let (endpoint, server, _port) = start_server().await;
 
-    let sink = GrpcSink::new(&endpoint)
+    let sink = GrpcSink::new(&endpoint, None)
         .await
         .expect("GrpcSink creation failed");
 
@@ -126,7 +126,7 @@ async fn test_grpc_sink_delivers_message() {
 async fn test_grpc_sink_multiple_messages_preserved_order() {
     let (endpoint, server, _port) = start_server().await;
 
-    let sink = GrpcSink::new(&endpoint).await.expect("sink init");
+    let sink = GrpcSink::new(&endpoint, None).await.expect("sink init");
 
     // Send 10 ordered messages. Use retry helper: under parallel CI load,
     // the transport's outgoing queue can briefly fill between sequential
@@ -164,7 +164,7 @@ async fn test_grpc_sink_multiple_messages_preserved_order() {
 async fn test_grpc_sink_large_payload() {
     let (endpoint, server, _port) = start_server().await;
 
-    let sink = GrpcSink::new(&endpoint).await.expect("sink init");
+    let sink = GrpcSink::new(&endpoint, None).await.expect("sink init");
 
     // 256 KiB payload (well above typical event size)
     let payload_bytes: Vec<u8> = (0..256 * 1024).map(|i| (i % 256) as u8).collect();
@@ -186,7 +186,7 @@ async fn test_grpc_sink_large_payload() {
 #[tokio::test]
 async fn test_grpc_sink_fails_gracefully_when_server_unreachable() {
     // Connect to a port with no server — connection is lazy so init succeeds
-    let sink = GrpcSink::new("http://127.0.0.1:1")
+    let sink = GrpcSink::new("http://127.0.0.1:1", None)
         .await
         .expect("lazy connection should succeed");
 
@@ -202,7 +202,7 @@ async fn test_grpc_sink_fails_gracefully_when_server_unreachable() {
 async fn test_grpc_sink_recovers_after_server_restart() {
     let (endpoint, server1, port) = start_server().await;
 
-    let sink = GrpcSink::new(&endpoint).await.expect("sink init");
+    let sink = GrpcSink::new(&endpoint, None).await.expect("sink init");
 
     // Initial send succeeds
     sink.send("topic", Bytes::from(r#"{"phase":"before"}"#))
@@ -266,7 +266,7 @@ async fn test_grpc_sink_recovers_after_server_restart() {
 async fn test_grpc_sink_concurrent_sends() {
     let (endpoint, server, _port) = start_server().await;
 
-    let sink = Arc::new(GrpcSink::new(&endpoint).await.expect("sink init"));
+    let sink = Arc::new(GrpcSink::new(&endpoint, None).await.expect("sink init"));
 
     // Fire 50 concurrent sends. Retry on transient backpressure — the
     // transport queue can briefly fill under 50-way fan-out on CI runners.

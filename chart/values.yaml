@@ -146,7 +146,7 @@ config:
       compression: zstd
       acks: all
   routing:
-    default_source: default
+    default_source: main
     topic_suffix: _land
   metrics:
     enabled: true

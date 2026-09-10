@@ -21,6 +21,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
+use tonic::service::interceptor::InterceptedService;
 use tonic::{Request, Response, Status};
 use tracing::{debug, info, trace, warn};
 
@@ -254,12 +255,17 @@ pub async fn run_server(
             .map_err(|e| Error::Tls(format!("gRPC TLS config error: {e}")))?;
     }
 
-    // Apply auth interceptor or use plain service
+    // Gzip on both directions: scalo's VectorCompatClient compresses
+    // unconditionally, and a server without the encoding enabled rejects the RPC.
+    let vector_server = VectorServer::new(service)
+        .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
+        .send_compressed(tonic::codec::CompressionEncoding::Gzip);
+
     let router = if let Some(auth) = auth_state {
         let interceptor = make_auth_interceptor(auth);
-        builder.add_service(VectorServer::with_interceptor(service, interceptor))
+        builder.add_service(InterceptedService::new(vector_server, interceptor))
     } else {
-        builder.add_service(VectorServer::new(service))
+        builder.add_service(vector_server)
     };
 
     info!(addr = %addr, "gRPC server listening");
