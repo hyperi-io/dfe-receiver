@@ -2209,7 +2209,10 @@ mod tests {
         // request path short-circuits for mtls and the handshake is not doing
         // the work either.
         let mut config = Config::default();
-        config.destinations.default = "loader".to_string();
+        // Direct gRPC, so validate() does not stop at the brokers rule first
+        // and each test below fails only on the auth rule it is about.
+        config.destinations.default = "loader".into();
+        config.loader.transport = "grpc".to_string();
         config.server.auth.mode = "mtls".to_string();
 
         let err = config.validate().expect_err("must not start");
@@ -2224,7 +2227,10 @@ mod tests {
         // `optional` validates a certificate when one is offered and admits
         // clients that offer none, which is not authentication.
         let mut config = Config::default();
-        config.destinations.default = "loader".to_string();
+        // Direct gRPC, so validate() does not stop at the brokers rule first
+        // and each test below fails only on the auth rule it is about.
+        config.destinations.default = "loader".into();
+        config.loader.transport = "grpc".to_string();
         config.server.auth.mode = "mtls".to_string();
         config.server.tls.enabled = true;
         config.server.tls.client_auth = "optional".to_string();
@@ -2239,7 +2245,10 @@ mod tests {
     #[test]
     fn mtls_mode_with_required_client_auth_is_accepted() {
         let mut config = Config::default();
-        config.destinations.default = "loader".to_string();
+        // Direct gRPC, so validate() does not stop at the brokers rule first
+        // and each test below fails only on the auth rule it is about.
+        config.destinations.default = "loader".into();
+        config.loader.transport = "grpc".to_string();
         config.server.auth.mode = "mtls".to_string();
         config.server.tls.enabled = true;
         config.server.tls.client_auth = "required".to_string();
@@ -2255,7 +2264,10 @@ mod tests {
     /// A config that validates, so each test below fails only on its own rule.
     fn auth_base() -> Config {
         let mut config = Config::default();
-        config.destinations.default = "loader".to_string();
+        // Direct gRPC, so validate() does not stop at the brokers rule first
+        // and each test below fails only on the auth rule it is about.
+        config.destinations.default = "loader".into();
+        config.loader.transport = "grpc".to_string();
         config
     }
 
@@ -2439,7 +2451,10 @@ mod tests {
     #[test]
     fn test_config_validation_no_brokers_required_for_loader() {
         let mut config = Config::default();
+        // Direct gRPC, so validate() does not stop at the brokers rule first
+        // and each test below fails only on the auth rule it is about.
         config.destinations.default = "loader".into();
+        config.loader.transport = "grpc".to_string();
         config.loader.transport = "grpc".to_string();
         assert!(config.validate().is_ok());
     }
@@ -2449,7 +2464,10 @@ mod tests {
     #[test]
     fn the_loader_on_the_bus_needs_brokers() {
         let mut config = Config::default();
+        // Direct gRPC, so validate() does not stop at the brokers rule first
+        // and each test below fails only on the auth rule it is about.
         config.destinations.default = "loader".into();
+        config.loader.transport = "grpc".to_string();
         config.loader.transport = "kafka".to_string();
 
         let err = config.validate().unwrap_err().to_string();
@@ -2585,7 +2603,7 @@ mod tests {
         // The only route the chart has: a mounted Secret in the pod
         // environment. Without this reader the auth Secret was mounted and read
         // by nothing, and `auth.mode: bearer` came up with an empty token set.
-        with_env(&[("DFE_RECEIVER_AUTH_BEARER_TOKENS", "alpha,beta")], || {
+        with_env(&[("DFE_RECEIVER_BEARER_TOKENS", "alpha,beta")], || {
             let mut config = Config::default();
             config.apply_flat_env(ENV_PREFIX);
             assert_eq!(
@@ -2600,7 +2618,7 @@ mod tests {
         // A K8s Secret holding one token per line is as likely as a CSV, and
         // BearerTokenProvider::load_from_secret accepts both.
         with_env(
-            &[("DFE_RECEIVER_AUTH_BEARER_TOKENS", "alpha\n beta \n\ngamma")],
+            &[("DFE_RECEIVER_BEARER_TOKENS", "alpha\n beta \n\ngamma")],
             || {
                 let mut config = Config::default();
                 config.apply_flat_env(ENV_PREFIX);
