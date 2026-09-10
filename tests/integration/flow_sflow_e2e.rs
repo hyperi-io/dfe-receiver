@@ -186,9 +186,9 @@ fn flow_kafka_config(
     config.server.auth.mode = "none".to_string();
 
     config.kafka = kf.to_receiver_kafka_config();
-    config.destinations.default = "kafka".to_string();
+    config.destinations.default = "kafka".into();
 
-    config.routing.default_source = "default".to_string();
+    config.routing.default_source = "main".to_string();
     config.routing.topic_suffix = topic_suffix.to_string();
     config.routing.source_rules = vec![SourceRule {
         field: "_source".to_string(),

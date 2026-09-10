@@ -27,20 +27,38 @@ use scalo::UnifiedPressure;
 use scalo::dlq::{Dlq, DlqEntry};
 use scalo::logger::security;
 
+use rustc_hash::FxHashMap;
+
 use crate::buffer::{InMemoryBuffer, MemoryGuard, MemoryGuardConfig, MemoryPressure, SinkBackend};
 use crate::config::{Config, SharedConfig};
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
-use crate::routing::{RouteResult, Router};
+use crate::routing::{self, RouteResult, Router};
 use crate::sink::Sink;
 use crate::sink::file::FileSink;
 use crate::sink::grpc::GrpcSink;
 use crate::sink::kafka::KafkaSink;
-use crate::sink::loader::LoaderSink;
 use crate::validation::{ValidationResult, Validator};
 
 // Trace-level logging imports (only used for per-message tracing)
 use tracing::trace;
+
+/// What a named destination resolves to.
+///
+/// The name is the routing decision; this is the delivery. Every variant keeps
+/// the receiver's own buffer/spillover semantics in front of it, so a
+/// destination that stops accepting back-pressures the HTTP ingest rather than
+/// spilling records to a DLQ a brokerless deployment does not have.
+enum DestinationSink {
+    /// The bus, using the topic the record's source resolves to, or a topic
+    /// fixed by the destination.
+    Bus { topic: Option<Arc<str>> },
+    /// A scalo Push listener -- a transform, the loader, the archiver.
+    Grpc(Arc<SinkBackend<GrpcSink>>),
+    /// `loader.transport: memory` -- no transport, so the record is accepted
+    /// and goes nowhere.
+    Discard,
+}
 
 /// Shared pipeline state accessible from handlers.
 pub struct PipelineState {
@@ -48,8 +66,10 @@ pub struct PipelineState {
     validator: RwLock<Validator>,
     router: RwLock<Router>,
     kafka_sink: Option<Arc<SinkBackend<KafkaSink>>>,
-    loader_sink: Option<Arc<SinkBackend<LoaderSink>>>,
-    grpc_loader_sink: Option<Arc<SinkBackend<GrpcSink>>>,
+    /// The named destination set: name -> sink. Built once at startup, since
+    /// the endpoints are connections and a chart rolls the pod on any config
+    /// change.
+    destinations: FxHashMap<Arc<str>, DestinationSink>,
     file_sink: Option<Arc<FileSink>>,
     memory_guard: Arc<MemoryGuard>,
     /// Self-regulation pressure latch from the runtime governor.
@@ -94,9 +114,12 @@ impl PipelineState {
     ) -> Result<Self> {
         let config = shared_config.get();
         let validator = Validator::new(config.validation.clone());
+        // The built-in `loader` is compiled into a declared destination here, so
+        // the router and the sink set below both see one kind of destination.
+        let destinations_config = config.resolved_destinations();
         let router = Router::new(
             &config.routing,
-            &config.destinations,
+            &destinations_config,
             config.server.auth.include_common_header,
         );
         // Memory guard + pressure source of truth.
@@ -127,33 +150,40 @@ impl PipelineState {
             None
         };
 
-        // Determine if loader destination is in use
-        let loader_destination_active = config.destinations.default == "loader"
-            || config
-                .destinations
-                .rules
-                .iter()
-                .any(|r| r.destination == "loader");
-
-        // Initialise loader or gRPC loader sink with buffer wrapper
-        let (loader_sink, grpc_loader_sink) = if loader_destination_active {
-            if config.loader.transport == "grpc" {
-                let endpoint = config.loader.effective_grpc_endpoint();
-                let primary = GrpcSink::new(&endpoint).await?;
-                (
-                    None,
-                    Some(Arc::new(build_sink_backend(primary, &config.buffer).await?)),
-                )
-            } else {
-                let primary = LoaderSink::new(&config.loader, &config.kafka)?;
-                (
-                    Some(Arc::new(build_sink_backend(primary, &config.buffer).await?)),
-                    None,
-                )
+        // Build the named destination set: one sink per destination the config
+        // actually refers to, so an unused declaration opens no connection.
+        let mut destinations: FxHashMap<Arc<str>, DestinationSink> = FxHashMap::default();
+        for name in destinations_config.referenced_names() {
+            if destinations.contains_key(name) {
+                continue;
             }
-        } else {
-            (None, None)
-        };
+            let sink = match destinations_config.named.get(name) {
+                Some(spec) => match (&spec.grpc, &spec.kafka) {
+                    (Some(grpc), _) => {
+                        // loader.timeout_ms bounds the loader's own Push RPC; a
+                        // declared destination has no timeout key of its own.
+                        let deadline = (name == crate::config::LOADER_DESTINATION)
+                            .then_some(config.loader.timeout_ms);
+                        let primary = GrpcSink::new(&grpc.endpoint, deadline).await?;
+                        DestinationSink::Grpc(Arc::new(
+                            build_sink_backend(primary, &config.buffer).await?,
+                        ))
+                    }
+                    (None, Some(bus)) => DestinationSink::Bus {
+                        topic: bus.topic.as_deref().map(Arc::from),
+                    },
+                    (None, None) => {
+                        return Err(Error::Config(format!(
+                            "destination '{name}' needs exactly one of grpc or kafka"
+                        )));
+                    }
+                },
+                // `loader` survives resolution only on the memory transport.
+                None if name == crate::config::LOADER_DESTINATION => DestinationSink::Discard,
+                None => DestinationSink::Bus { topic: None },
+            };
+            destinations.insert(Arc::from(name), sink);
+        }
 
         // Initialise debug file sink if enabled
         let file_sink = if config.file_sink.enabled {
@@ -197,8 +227,7 @@ impl PipelineState {
             validator: RwLock::new(validator),
             router: RwLock::new(router),
             kafka_sink,
-            loader_sink,
-            grpc_loader_sink,
+            destinations,
             file_sink,
             memory_guard,
             pressure,
@@ -235,19 +264,12 @@ impl PipelineState {
             return false;
         }
 
-        if let Some(ref loader) = self.loader_sink
-            && !loader.is_healthy()
-        {
-            return false;
-        }
-
-        if let Some(ref grpc) = self.grpc_loader_sink
-            && !grpc.is_healthy()
-        {
-            return false;
-        }
-
-        true
+        // Every named destination must be able to take a record: a record the
+        // rules send to one of them cannot be served by the others.
+        self.destinations.values().all(|sink| match sink {
+            DestinationSink::Bus { .. } | DestinationSink::Discard => true,
+            DestinationSink::Grpc(s) => s.is_healthy(),
+        })
     }
 
     /// Get memory pressure level.
@@ -434,39 +456,35 @@ impl PipelineState {
         };
 
         // Route (read guard dropped before any .await)
-        let route = self.router.read().route(&payload);
-        match route {
-            RouteResult::Kafka(ref topic) => {
-                trace!(topic = %topic, bytes = payload.len(), "Routing message to Kafka");
-            }
-            RouteResult::Loader => {
-                trace!(bytes = payload.len(), "Routing message to loader");
-            }
-            RouteResult::Dlq(ref topic) => {
-                trace!(topic = %topic, bytes = payload.len(), "Routing message to DLQ topic");
-            }
-        }
+        let (route, routed_source) = self.router.read().route_with_source(&payload);
+
+        // The topic carries the source on the Kafka route and nothing carries it
+        // on the loader route, so the source is written into the record --
+        // dfe-loader reads `_source` out of the data to pick the table. An
+        // unmatched record carries the catch-all source, not nothing.
+        let payload = match routed_source {
+            Some(source) => routing::stamp_source(payload, &source),
+            None => payload,
+        };
+
         let dispatch_start = std::time::Instant::now();
         match route {
-            RouteResult::Kafka(topic) => {
-                self.send_to_kafka(&topic, payload.clone()).await?;
+            RouteResult::Send {
+                ref destinations,
+                ref topic,
+            } => {
+                self.send_to_destinations(destinations, topic.as_deref(), &payload)
+                    .await?;
                 trace!(
-                    topic = %topic,
+                    destinations = destinations.len(),
+                    topic = topic.as_deref().unwrap_or(""),
                     bytes = payload.len(),
                     duration_us = dispatch_start.elapsed().as_micros(),
-                    "Dispatched to Kafka"
+                    "Dispatched to destinations"
                 );
             }
-            RouteResult::Loader => {
-                self.send_to_loader(payload.clone()).await?;
-                trace!(
-                    bytes = payload.len(),
-                    duration_us = dispatch_start.elapsed().as_micros(),
-                    "Dispatched to loader"
-                );
-            }
-            RouteResult::Dlq(topic) => {
-                self.send_to_kafka(&topic, payload.clone()).await?;
+            RouteResult::Dlq(ref topic) => {
+                self.send_to_kafka(topic, payload.clone()).await?;
                 trace!(
                     topic = %topic,
                     bytes = payload.len(),
@@ -539,21 +557,40 @@ impl PipelineState {
         sink.send(topic, payload).await
     }
 
-    /// Send message to loader.
+    /// Deliver one record to every named destination the route chose.
     ///
-    /// Dispatches to the gRPC loader sink when `loader.transport = "grpc"`,
-    /// otherwise uses the Kafka-backed loader sink.
+    /// Delivered only when every destination has accepted: the first failure
+    /// propagates, and the ingest handler turns it into backpressure on the
+    /// sender, which re-sends the record. A destination that already accepted
+    /// sees it twice -- at-least-once, duplicates never loss.
     #[inline]
-    async fn send_to_loader(&self, payload: Bytes) -> Result<()> {
-        if let Some(ref sink) = self.grpc_loader_sink {
-            return sink.send("", payload).await;
+    async fn send_to_destinations(
+        &self,
+        destinations: &[Arc<str>],
+        topic: Option<&str>,
+        payload: &Bytes,
+    ) -> Result<()> {
+        for name in destinations {
+            let Some(sink) = self.destinations.get(name.as_ref()) else {
+                return Err(Error::Config(format!(
+                    "destination '{name}' is not configured"
+                )));
+            };
+            // Bytes clone is a refcount bump, not a payload copy.
+            match sink {
+                DestinationSink::Bus { topic: fixed } => {
+                    let topic = fixed.as_deref().or(topic).ok_or_else(|| {
+                        Error::Config(format!("destination '{name}' resolved no topic"))
+                    })?;
+                    self.send_to_kafka(topic, payload.clone()).await?;
+                }
+                // A gRPC listener takes the record itself, so it is sent with
+                // no wire key -- the source travels inside the record.
+                DestinationSink::Grpc(sink) => sink.send("", payload.clone()).await?,
+                DestinationSink::Discard => {}
+            }
         }
-
-        let Some(ref sink) = self.loader_sink else {
-            return Err(Error::Config("Loader sink not configured".into()));
-        };
-
-        sink.send("", payload).await
+        Ok(())
     }
 
     /// Send message to DLQ via unified scalo module (cascade: Kafka -> file).
@@ -566,13 +603,19 @@ impl PipelineState {
                 .map_err(|e| Error::Config(format!("DLQ send failed: {e}")))?;
             Ok(())
         } else {
-            // Fallback: route through Kafka sink (legacy behaviour)
+            // With no DLQ configured the record follows the routing table, so a
+            // brokerless deployment does not need a DLQ topic to reject a bad
+            // record.
             let dlq_route = { self.router.read().route_dlq(reason) };
             match dlq_route {
-                RouteResult::Dlq(topic) | RouteResult::Kafka(topic) => {
-                    self.send_to_kafka(&topic, payload.clone()).await
+                RouteResult::Dlq(topic) => self.send_to_kafka(&topic, payload.clone()).await,
+                RouteResult::Send {
+                    ref destinations,
+                    ref topic,
+                } => {
+                    self.send_to_destinations(destinations, topic.as_deref(), payload)
+                        .await
                 }
-                RouteResult::Loader => self.send_to_loader(payload.clone()).await,
             }
         }
     }
@@ -601,16 +644,13 @@ impl PipelineState {
             metrics.set_circuit_state(stats.circuit_state, stats.consecutive_failures);
         }
 
-        // Loader sink stats
-        if let Some(ref loader) = self.loader_sink {
-            let stats = loader.stats().await;
-            total_queue += stats.queue_size as u64;
-        }
-
-        // gRPC loader sink stats
-        if let Some(ref grpc) = self.grpc_loader_sink {
-            let stats = grpc.stats().await;
-            total_queue += stats.queue_size as u64;
+        // Named destination stats
+        for sink in self.destinations.values() {
+            let queue = match sink {
+                DestinationSink::Bus { .. } | DestinationSink::Discard => 0,
+                DestinationSink::Grpc(s) => s.stats().await.queue_size,
+            };
+            total_queue += queue as u64;
         }
 
         metrics.set_batch_queue_size(total_queue);
@@ -655,10 +695,15 @@ impl PipelineState {
     /// Called by the config change subscriber when `SharedConfig` is updated
     /// externally (e.g., by `ConfigReloader`). Does NOT update `SharedConfig`
     /// itself — that's already been done by the caller.
+    ///
+    /// Routing rules rebuild in place, so a rule pointed at a different
+    /// destination takes effect live. The destination SINKS do not: they are
+    /// live connections, and every app chart rolls the pod on a config change,
+    /// so a new or re-addressed destination arrives with the new pod.
     pub fn rebuild_components(&self, new_config: &Config) {
         let new_router = Router::new(
             &new_config.routing,
-            &new_config.destinations,
+            &new_config.resolved_destinations(),
             new_config.server.auth.include_common_header,
         );
         let new_validator = Validator::new(new_config.validation.clone());
@@ -666,6 +711,18 @@ impl PipelineState {
         *self.router.write() = new_router;
         *self.validator.write() = new_validator;
     }
+}
+
+/// Carry the receiver's spillover settings onto scalo's `TieredSink`.
+fn spillover_config(
+    spillover: &crate::config::SpilloverConfig,
+) -> scalo::tiered_sink::TieredSinkConfig {
+    let mut config = scalo::tiered_sink::TieredSinkConfig::new(&spillover.path);
+    config.disk_aware = Some(scalo::tiered_sink::DiskAwareConfig {
+        max_usage_percent: spillover.max_usage_percent,
+        poll_interval_secs: spillover.poll_interval_secs,
+    });
+    config
 }
 
 /// Build the appropriate `SinkBackend` based on spillover configuration.
@@ -680,15 +737,7 @@ async fn build_sink_backend<S: crate::sink::Sink + 'static>(
         let adapter = crate::buffer::adapter::ScaloSinkAdapter::new(Arc::new(primary));
         let spillover = &buffer_config.spillover;
 
-        let mut tiered_config = scalo::tiered_sink::TieredSinkConfig::new(&spillover.path);
-
-        // Configure disk-aware capacity management
-        tiered_config.disk_aware = Some(scalo::tiered_sink::DiskAwareConfig {
-            max_usage_percent: spillover.max_usage_percent,
-            poll_interval_secs: spillover.poll_interval_secs,
-        });
-
-        let tiered = scalo::tiered_sink::TieredSink::new(adapter, tiered_config)
+        let tiered = scalo::tiered_sink::TieredSink::new(adapter, spillover_config(spillover))
             .await
             .map_err(|e| Error::Config(format!("failed to create tiered sink: {e}")))?;
 
@@ -775,11 +824,11 @@ impl Orchestrator {
         if let Some(ref kafka) = self.state.kafka_sink {
             kafka.clone().start_drain_task(self.shutdown.clone());
         }
-        if let Some(ref loader) = self.state.loader_sink {
-            loader.clone().start_drain_task(self.shutdown.clone());
-        }
-        if let Some(ref grpc) = self.state.grpc_loader_sink {
-            grpc.clone().start_drain_task(self.shutdown.clone());
+        for sink in self.state.destinations.values() {
+            match sink {
+                DestinationSink::Bus { .. } | DestinationSink::Discard => {}
+                DestinationSink::Grpc(s) => s.clone().start_drain_task(self.shutdown.clone()),
+            }
         }
 
         // Periodic metrics update (1s interval)
@@ -810,16 +859,14 @@ impl Orchestrator {
             error!(error = %e, "Failed to flush Kafka sink");
         }
 
-        if let Some(ref loader) = self.state.loader_sink
-            && let Err(e) = loader.flush().await
-        {
-            error!(error = %e, "Failed to flush loader sink");
-        }
-
-        if let Some(ref grpc) = self.state.grpc_loader_sink
-            && let Err(e) = grpc.flush().await
-        {
-            error!(error = %e, "Failed to flush gRPC loader sink");
+        for (name, sink) in &self.state.destinations {
+            let flushed = match sink {
+                DestinationSink::Bus { .. } | DestinationSink::Discard => Ok(()),
+                DestinationSink::Grpc(s) => s.flush().await,
+            };
+            if let Err(e) = flushed {
+                error!(error = %e, destination = %name, "Failed to flush destination sink");
+            }
         }
 
         if let Some(ref fsink) = self.state.file_sink
@@ -840,7 +887,7 @@ mod tests {
     fn test_config() -> Config {
         let mut config = Config::default();
         // Use loader destination to avoid needing Kafka brokers
-        config.destinations.default = "loader".to_string();
+        config.destinations.default = "loader".into();
         config.loader.transport = "memory".to_string();
         config
     }
@@ -856,6 +903,93 @@ mod tests {
         PipelineState::new(SharedConfig::new(config), CancellationToken::new())
             .await
             .unwrap()
+    }
+
+    /// The spillover thresholds an operator sets reach scalo's TieredSink.
+    #[test]
+    fn spillover_settings_reach_the_tiered_sink() {
+        let spillover = crate::config::SpilloverConfig {
+            enabled: true,
+            path: std::path::PathBuf::from("/var/spool/somewhere-else"),
+            max_usage_percent: 0.55,
+            poll_interval_secs: 17,
+        };
+
+        let built = spillover_config(&spillover);
+
+        assert_eq!(built.spool_path, spillover.path);
+        let disk = built.disk_aware.unwrap();
+        assert!((disk.max_usage_percent - 0.55).abs() < f64::EPSILON);
+        assert_eq!(disk.poll_interval_secs, 17);
+    }
+
+    /// `loader.transport: kafka` is the bus with no fixed topic, so a record
+    /// lands on the topic its source resolves to.
+    #[test]
+    fn the_loader_on_the_bus_takes_the_record_topic() {
+        let mut config = Config::default();
+        config.destinations.default = "loader".into();
+        config.loader.transport = "kafka".to_string();
+
+        let resolved = config.resolved_destinations();
+
+        assert!(
+            resolved.uses_bus(),
+            "loader over kafka is a bus destination"
+        );
+        let spec = resolved.named.get("loader").unwrap();
+        assert!(spec.grpc.is_none());
+        assert_eq!(spec.kafka.as_ref().unwrap().topic, None);
+    }
+
+    /// `loader.transport: grpc` resolves to the loader's own endpoint.
+    #[test]
+    fn the_loader_over_grpc_resolves_to_its_endpoint() {
+        let mut config = Config::default();
+        config.destinations.default = "loader".into();
+        config.loader.transport = "grpc".to_string();
+
+        let resolved = config.resolved_destinations();
+
+        assert!(!resolved.uses_bus());
+        let endpoint = &resolved
+            .named
+            .get("loader")
+            .unwrap()
+            .grpc
+            .as_ref()
+            .unwrap()
+            .endpoint;
+        assert_eq!(endpoint, &config.loader.effective_grpc_endpoint());
+    }
+
+    /// A declared `loader` destination wins over the built-in one.
+    #[test]
+    fn a_declared_loader_destination_is_left_alone() {
+        let mut config = Config::default();
+        config.destinations.default = "loader".into();
+        config.loader.transport = "kafka".to_string();
+        config.destinations.named.insert(
+            "loader".to_string(),
+            crate::config::DestinationSpec {
+                grpc: Some(crate::config::GrpcDestination {
+                    endpoint: "http://elsewhere:6000".to_string(),
+                }),
+                kafka: None,
+            },
+        );
+
+        let resolved = config.resolved_destinations();
+
+        let endpoint = &resolved
+            .named
+            .get("loader")
+            .unwrap()
+            .grpc
+            .as_ref()
+            .unwrap()
+            .endpoint;
+        assert_eq!(endpoint, "http://elsewhere:6000");
     }
 
     #[tokio::test]

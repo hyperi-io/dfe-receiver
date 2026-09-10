@@ -1,0 +1,253 @@
+// Project:   dfe-receiver
+// File:      tests/integration/named_destinations.rs
+// Purpose:   Match rules to named gRPC destinations, and fan-out, in-process
+// Language:  Rust
+//
+// License:   BUSL-1.1
+// Copyright: (c) 2026 HYPERI PTY LIMITED
+
+//! A matched record reaches the destination its rule names, and only that one.
+//!
+//! Three scalo Push listeners stand in for a transform, the archiver and the
+//! loader. The assertion is the artefact -- which listener received the record
+//! -- not that a router returned a name.
+
+#![allow(clippy::unwrap_used)]
+#![allow(clippy::expect_used)]
+// The config structs put the inline PipelineState future just over clippy's
+// 16 KiB threshold, as in tests/integration/source_routing.rs.
+#![allow(clippy::large_futures)]
+
+use std::collections::HashMap;
+use std::time::Duration;
+
+use bytes::Bytes;
+use dfe_receiver::config::{
+    Config, DestinationRef, DestinationRule, DestinationSpec, GrpcDestination, SharedConfig,
+};
+use dfe_receiver::pipeline::PipelineState;
+use scalo::transport::TransportReceiver;
+use scalo::transport::grpc::{GrpcConfig, GrpcTransport};
+use tokio_util::sync::CancellationToken;
+
+/// Allocate a free loopback port.
+fn random_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    let port = listener.local_addr().expect("local addr").port();
+    drop(listener);
+    port
+}
+
+/// Poll until the port accepts a TCP connection, or fail after 15s.
+async fn wait_for_port(port: u16) {
+    let addr = format!("127.0.0.1:{port}");
+    for _ in 0..300 {
+        if tokio::net::TcpStream::connect(&addr).await.is_ok() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("nothing listening on 127.0.0.1:{port} within 15s");
+}
+
+/// Start a scalo Push listener: what a transform, the archiver and the loader
+/// all expose on the direct transport.
+async fn start_listener() -> (String, GrpcTransport) {
+    // The port is free when picked but can be taken before the bind lands under
+    // parallel CI load, so retry on a fresh one.
+    let mut last_err = String::new();
+    for _ in 0..20 {
+        let port = random_port();
+        let config = GrpcConfig::server(&format!("127.0.0.1:{port}"));
+        match GrpcTransport::new(&config).await {
+            Ok(transport) => {
+                wait_for_port(port).await;
+                return (format!("http://127.0.0.1:{port}"), transport);
+            }
+            Err(e) => {
+                last_err = e.to_string();
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    }
+    panic!("listener failed to start after 20 attempts: {last_err}");
+}
+
+/// Collect up to `want` records, or give up after `secs`.
+async fn drain(server: &GrpcTransport, want: usize, secs: u64) -> Vec<Bytes> {
+    let mut out = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
+    while out.len() < want && tokio::time::Instant::now() < deadline {
+        if let Ok(batch) = server.recv(want).await {
+            out.extend(batch.records.into_iter().map(|r| r.payload));
+        }
+    }
+    out
+}
+
+fn grpc_destination(endpoint: &str) -> DestinationSpec {
+    DestinationSpec {
+        grpc: Some(GrpcDestination {
+            endpoint: endpoint.to_string(),
+        }),
+        kafka: None,
+    }
+}
+
+fn app_rule(value: &str, destination: DestinationRef) -> DestinationRule {
+    DestinationRule {
+        match_field: "app".to_string(),
+        match_value: value.to_string(),
+        destination,
+    }
+}
+
+/// The receiver's destination set as the engine compiles it for a deployment
+/// with no broker: a transform, an archiver, and the loader as the default.
+fn config_with(named: HashMap<String, DestinationSpec>, rules: Vec<DestinationRule>) -> Config {
+    let mut config = Config::default();
+    config.server.auth.mode = "none".to_string();
+    config.routing.dlq.enabled = false;
+    config.destinations.default = "loader".into();
+    config.destinations.named = named;
+    config.destinations.rules = rules;
+    config
+}
+
+async fn pipeline_for(config: Config) -> PipelineState {
+    PipelineState::new(SharedConfig::new(config), CancellationToken::new())
+        .await
+        .expect("pipeline")
+}
+
+/// Rule A lands on endpoint A, rule B on endpoint B, and an unmatched record on
+/// the default -- each on its own listener, none on the others.
+#[tokio::test]
+async fn each_rule_reaches_only_its_own_destination() {
+    let (transform_endpoint, transform) = start_listener().await;
+    let (archiver_endpoint, archiver) = start_listener().await;
+    let (loader_endpoint, loader) = start_listener().await;
+
+    let mut named = HashMap::new();
+    named.insert(
+        "transform_orders".to_string(),
+        grpc_destination(&transform_endpoint),
+    );
+    named.insert("archiver".to_string(), grpc_destination(&archiver_endpoint));
+    named.insert("loader".to_string(), grpc_destination(&loader_endpoint));
+
+    let config = config_with(
+        named,
+        vec![
+            app_rule("orders", "transform_orders".into()),
+            app_rule("audit", "archiver".into()),
+        ],
+    );
+    let pipeline = pipeline_for(config).await;
+
+    pipeline
+        .process(Bytes::from(r#"{"app":"orders","id":1}"#))
+        .await
+        .expect("orders record accepted");
+    pipeline
+        .process(Bytes::from(r#"{"app":"audit","id":2}"#))
+        .await
+        .expect("audit record accepted");
+    pipeline
+        .process(Bytes::from(r#"{"app":"anything_else","id":3}"#))
+        .await
+        .expect("unmatched record accepted");
+
+    for (name, server, expect_id) in [
+        ("transform", &transform, 1),
+        ("archiver", &archiver, 2),
+        ("loader", &loader, 3),
+    ] {
+        let received = drain(server, 1, 10).await;
+        assert_eq!(
+            received.len(),
+            1,
+            "{name} received {} records",
+            received.len()
+        );
+        let record: serde_json::Value =
+            serde_json::from_slice(&received[0]).expect("valid JSON at {name}");
+        assert_eq!(record["id"], expect_id, "wrong record at {name}");
+    }
+}
+
+/// A rule whose destination is a LIST delivers the record to every one of them.
+#[tokio::test]
+async fn a_destination_list_fans_the_record_out() {
+    let (loader_endpoint, loader) = start_listener().await;
+    let (archiver_endpoint, archiver) = start_listener().await;
+
+    let mut named = HashMap::new();
+    named.insert("loader".to_string(), grpc_destination(&loader_endpoint));
+    named.insert("archiver".to_string(), grpc_destination(&archiver_endpoint));
+
+    let config = config_with(
+        named,
+        vec![app_rule(
+            "orders",
+            DestinationRef::Many(vec!["loader".to_string(), "archiver".to_string()]),
+        )],
+    );
+    let pipeline = pipeline_for(config).await;
+
+    pipeline
+        .process(Bytes::from(r#"{"app":"orders","id":7}"#))
+        .await
+        .expect("record accepted");
+
+    for (name, server) in [("loader", &loader), ("archiver", &archiver)] {
+        let received = drain(server, 1, 10).await;
+        assert_eq!(received.len(), 1, "{name} did not receive the record");
+        let record: serde_json::Value = serde_json::from_slice(&received[0]).expect("valid JSON");
+        assert_eq!(record["id"], 7, "wrong record at {name}");
+    }
+}
+
+/// A destination that cannot be reached HOLDS records in the receiver's buffer
+/// and then back-pressures the ingest, rather than dropping them to a DLQ that
+/// a deployment with no broker does not have.
+#[tokio::test]
+async fn an_unreachable_destination_holds_then_back_pressures_the_ingest() {
+    let mut named = HashMap::new();
+    named.insert(
+        "loader".to_string(),
+        // Nothing is listening here.
+        grpc_destination(&format!("http://127.0.0.1:{}", random_port())),
+    );
+
+    let mut config = config_with(named, vec![]);
+    // A 2 KiB buffer budget, so the queue fills in tens of records.
+    config.buffer.memory_limit = 2048;
+    let pipeline = pipeline_for(config).await;
+
+    // The buffer holds the first records, so the ingest keeps accepting.
+    for id in 0..10 {
+        pipeline
+            .process(Bytes::from(format!(r#"{{"app":"orders","id":{id}}}"#)))
+            .await
+            .expect("a held record is accepted, not rejected");
+    }
+
+    // Once the buffer is full the ingest is told to hold off -- the record is
+    // refused, never routed elsewhere.
+    let mut refused = false;
+    for id in 10..2_000 {
+        if pipeline
+            .process(Bytes::from(format!(r#"{{"app":"orders","id":{id}}}"#)))
+            .await
+            .is_err()
+        {
+            refused = true;
+            break;
+        }
+    }
+    assert!(
+        refused,
+        "a full buffer must back-pressure the ingest instead of accepting forever"
+    );
+}
