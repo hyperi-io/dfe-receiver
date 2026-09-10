@@ -142,13 +142,15 @@ pub fn contract() -> DeploymentContract {
             SecretGroupContract {
                 group_name: "kafka".into(),
                 env_vars: vec![
+                    // apply_flat_env reads these; flat_env joins prefix and key
+                    // with ONE underscore, and the key is USER, not USERNAME.
                     SecretEnvContract {
-                        env_var: "DFE_RECEIVER__KAFKA__SASL__USERNAME".into(),
+                        env_var: "DFE_RECEIVER_KAFKA_SASL_USER".into(),
                         key_name: "username".into(),
                         secret_key: "kafka-username".into(),
                     },
                     SecretEnvContract {
-                        env_var: "DFE_RECEIVER__KAFKA__SASL__PASSWORD".into(),
+                        env_var: "DFE_RECEIVER_KAFKA_SASL_PASSWORD".into(),
                         key_name: "password".into(),
                         secret_key: "kafka-password".into(),
                     },
@@ -162,7 +164,7 @@ pub fn contract() -> DeploymentContract {
                 // container -- entrypoint_args pass --config, which takes
                 // Config::load_from_file and skips config::setup entirely.
                 env_vars: vec![SecretEnvContract {
-                    env_var: "DFE_RECEIVER_AUTH_BEARER_TOKENS".into(),
+                    env_var: "DFE_RECEIVER_BEARER_TOKENS".into(),
                     key_name: "bearer-tokens".into(),
                     secret_key: "bearer-tokens".into(),
                 }],
@@ -250,7 +252,7 @@ pub fn contract() -> DeploymentContract {
                 }
             },
             "routing": {
-                "default_source": "default",
+                "default_source": "main",
                 "topic_suffix": "_land"
             },
             "metrics": {
@@ -324,11 +326,12 @@ fn capabilities() -> Vec<scalo::deployment::Capability> {
                 ingest("flow", "NetFlow v5/v9 + IPFIX + sFlow v5."),
             ]),
         Capability::sink("destinations")
-            .description("Output destinations the receiver routes accepted events to.")
+            .description("The named destination set: a match rule sends accepted events to one destination or fans them out to several.")
             .maturity("stable")
             .children(vec![
-                Capability::service("kafka").description("Kafka producer (the primary destination)."),
-                Capability::service("loader").description("Direct gRPC connection to dfe-loader (broker-less low-latency path)."),
+                Capability::service("kafka").description("The bus, under the topic the event's source resolves to."),
+                Capability::service("loader").description("dfe-loader, over gRPC or the bus per the loader block."),
+                Capability::service("grpc").description("Any declared scalo Push listener -- a transform, the archiver -- by name."),
                 Capability::service("file_sink").description("Debug file sink (writes processed messages to a file)."),
             ]),
     ]
@@ -351,6 +354,8 @@ pub fn emit_dockerfile() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
+    use scalo::config::flat_env::ApplyFlatEnv;
 
     #[test]
     fn test_contract_fields() {
@@ -432,47 +437,36 @@ mod tests {
         assert_eq!(c.secrets[1].group_name, "auth");
     }
 
-    /// Every env var the contract declares must change the config it reaches.
+    /// Every env var the contract declares must reach the config.
     ///
     /// The chart is generated from these names, so one the app does not read
     /// mounts a Secret into the pod environment and is ignored, with nothing
-    /// failing to say so. Comparing a full serialisation rather than one field
-    /// keeps this honest for secrets nobody has added yet.
-    ///
-    /// The `kafka` group is skipped here because PR #74 is repairing those two
-    /// names and lands its own walk over them; fold the two into one unskipped
-    /// loop once it merges.
+    /// failing to say so.
     #[test]
-    fn every_declared_secret_env_var_changes_the_config() {
-        use scalo::config::flat_env::ApplyFlatEnv;
-
+    fn every_declared_secret_env_var_reaches_the_config() {
+        // A declared name the binary never reads mounts a Secret that is
+        // silently ignored; the per-field mapping is pinned by the config tests.
         for group in &contract().secrets {
-            if group.group_name == "kafka" {
-                continue;
-            }
             for env in &group.env_vars {
-                // Baseline with the variable explicitly UNSET, so an unrelated
-                // DFE_RECEIVER_* var in the ambient environment cannot make the
-                // comparison pass for the wrong reason.
-                let mut baseline = crate::config::Config::default();
-                temp_env::with_var(&env.env_var, None::<&str>, || {
-                    baseline.apply_flat_env(crate::config::ENV_PREFIX);
-                });
-                let mut applied = crate::config::Config::default();
-                temp_env::with_var(&env.env_var, Some("sentinel-value"), || {
-                    applied.apply_flat_env(crate::config::ENV_PREFIX);
+                assert!(
+                    env.env_var
+                        .starts_with(&format!("{}_", crate::config::ENV_PREFIX)),
+                    "{} does not carry the app prefix",
+                    env.env_var
+                );
+
+                let sentinel = format!("sentinel-{}", env.key_name);
+                let mut config = Config::default();
+                temp_env::with_var(&env.env_var, Some(sentinel.as_str()), || {
+                    config.apply_flat_env(crate::config::ENV_PREFIX);
                 });
 
-                // assert! rather than assert_ne!: the two serialisations are
-                // the whole Config, and printing both on failure buries the
-                // one line that says which name is dead.
+                let applied = serde_json::to_string(&config).expect("config serialises");
                 assert!(
-                    serde_json::to_value(&baseline).expect("serialise baseline")
-                        != serde_json::to_value(&applied).expect("serialise applied"),
-                    "{} is declared in the '{}' secret group, so the chart mounts it, \
-                     and setting it changes nothing in the config",
+                    applied.contains(&sentinel),
+                    "{} ({}) was set and no config field read it",
                     env.env_var,
-                    group.group_name,
+                    group.group_name
                 );
             }
         }
@@ -506,6 +500,52 @@ mod tests {
             dockerfile.contains("COPY dfe-receiver /usr/local/bin/dfe-receiver"),
             "missing binary COPY in Dockerfile",
         );
+    }
+
+    /// Map a chart directory to relative path -> file body.
+    fn chart_files(root: &std::path::Path) -> std::collections::BTreeMap<String, String> {
+        let mut files = std::collections::BTreeMap::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read_dir") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    let rel = path.strip_prefix(root).expect("relative path");
+                    let body = std::fs::read_to_string(&path).expect("read chart file");
+                    files.insert(rel.display().to_string(), body);
+                }
+            }
+        }
+        files
+    }
+
+    #[test]
+    fn checked_in_chart_matches_generate_chart() {
+        // The chart is emitted from contract(), so a hand edit here is silently
+        // reverted the next time anything regenerates it.
+        const REGEN: &str = "regenerate with: `dfe-receiver --emit-helm chart`";
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        scalo::deployment::generate_chart(&contract(), tmp.path(), None).expect("generate_chart");
+        let expected = chart_files(tmp.path());
+        let committed =
+            chart_files(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("chart"));
+
+        let expected_names: Vec<&String> = expected.keys().collect();
+        let committed_names: Vec<&String> = committed.keys().collect();
+        assert_eq!(
+            committed_names, expected_names,
+            "chart/ file list differs from generate_chart() -- {REGEN}"
+        );
+        for (name, want) in &expected {
+            assert_eq!(
+                committed.get(name),
+                Some(want),
+                "chart/{name} differs from generate_chart() -- {REGEN}"
+            );
+        }
     }
 
     #[test]

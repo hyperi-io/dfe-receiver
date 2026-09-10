@@ -1,15 +1,25 @@
-.idea/
-.vscode/
+# OS junk
+.DS_Store
+Thumbs.db
 *.swp
 *.swo
 *~
-.DS_Store
-Thumbs.db
+
+# Editor / IDE local state
+.idea/
+.vscode/
+
+# Environment files (never commit -- contain secrets). The negations must
+# stay after the patterns they carve out of.
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
+!.env.example.*
+
+# Logs
 *.log
-target
+
+# Build output
 target/
 dist/
 dist-bin/
@@ -17,6 +27,26 @@ build/
 out/
 test-results/
 coverage/
+ci
+
+# Rust artefacts
+**/*.rs.bk
+*.pdb
+*.profraw
+*.profdata
+coverage-html/
+coverage.lcov
+tarpaulin-report.json
+cobertura.xml
+
+# cargo -- config.toml is committed, the rest of the directory is not.
+# The pattern excludes the CONTENTS rather than the directory: git will not
+# descend into an excluded directory, so `.cargo/` would make the negation
+# below unreachable for anything not already tracked.
+.cargo/*
+!.cargo/config.toml
+
+# Python tooling (scripts and CI helpers)
 __pycache__/
 *.py[cod]
 *.so
@@ -30,83 +60,28 @@ venv/
 htmlcov/
 .mypy_cache/
 .ruff_cache/
-**/*.rs.bk
-*.pdb
-*.profraw
-*.profdata
-coverage-html/
-coverage.lcov
-.cargo/
-!.cargo/config.toml
+
+# Local scratch. Bare patterns (no leading slash) match at ANY depth, so
+# these cover top-level .tmp/ and tmp/ as well as nested ones like
+# tests/tmp/. Mirrored in attach.py _DEFAULT_EXCLUDES.
 .tmp/
+tmp/
+
+# Git worktrees (local dev convenience)
 .worktrees/
-ci
 
-# Phase 2 batch integration
-
-# Local working files (not committed)
+# Agent and AI tooling state -- local only, mirrored in .git/info/exclude.
 docs/superpowers/
-.claude/
 hyperi-ai/
-.mcp.json
-CLAUDE.md
-STATE.md
-TODO.md
-.ai-version
-
-# OS junk (never useful in repo)
-.DS_Store
-Thumbs.db
-*.swp
-*.swo
-*~
-
-# Editor / IDE local state
-.idea/
-.vscode/
-
-# Local environment files (never commit -- contain secrets)
-.env
-.env.*
-!.env.example
-!.env.example.*
-
-# them alone if already present.
-docs/superpowers/
-.mcp.json
-.ai-version
-
-# committed -- mirrored in .git/info/exclude.
-CLAUDE.md
-TODO.md
-AGENTS.md
-GEMINI.md
 .claude/
 .codex/
 .cursor/
 .gemini/
 .cursorrules
-
-# Git worktrees (local dev convenience)
-.worktrees/
-
-# Rust build artefacts
-target/
-**/*.rs.bk
-*.pdb
-*.profraw
-*.profdata
-coverage-html/
-coverage.lcov
-tarpaulin-report.json
-cobertura.xml
-
-# cargo
-.cargo/
-!.cargo/config.toml
-
-# Local scratch / tmp (CORE.md: scratch goes here, gitignored, NOT
-# /tmp). Bare patterns (no leading slash) match a tmp dir at ANY
-# depth, so these cover top-level .tmp/ and tmp/ as well as nested
-# ones like tests/tmp/. Mirrored in attach.py _DEFAULT_EXCLUDES.
-tmp/
+.mcp.json
+.ai-version
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+STATE.md
+TODO.md

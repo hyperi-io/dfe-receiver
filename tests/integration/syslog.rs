@@ -64,8 +64,9 @@ fn test_config(udp_port: u16, tcp_port: u16) -> Config {
     config.syslog.tcp_bind_address = format!("127.0.0.1:{tcp_port}");
     // Disable TLS for tests
     config.syslog.tls.enabled = false;
-    // Use loader destination to avoid Kafka dependency
-    config.destinations.default = "loader".to_string();
+    // The loader on its memory transport: accepted, sent nowhere, no broker.
+    config.destinations.default = "loader".into();
+    config.loader.transport = "memory".to_string();
     config
 }
 

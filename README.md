@@ -1,5 +1,12 @@
 # dfe-receiver
 
+[![Build Status](https://github.com/hyperi-io/dfe-receiver/actions/workflows/ci.yml/badge.svg)](https://github.com/hyperi-io/dfe-receiver/actions)
+[![License](https://img.shields.io/badge/license-BUSL--1.1-blue)](https://github.com/hyperi-io/dfe-receiver/blob/main/LICENSE)
+
+> Agents speak ten different protocols and none of them speak yours. dfe-receiver
+> terminates all of them at one door, normalises to JSON, and hands the result to
+> Kafka or straight to the loader.
+
 High-performance HTTP/gRPC receiver for PB/s scale data ingestion.
 
 ## Overview
@@ -72,7 +79,7 @@ DFE_RECEIVER_SERVER__BIND_ADDRESS=0.0.0.0:8080 ./target/release/dfe-receiver
 
 ## Configuration
 
-See [config.example.yaml](config.example.yaml) for full configuration reference.
+See [config.example.yaml](https://github.com/hyperi-io/dfe-receiver/blob/main/config.example.yaml) for full configuration reference.
 
 ### Minimal Configuration
 
@@ -87,7 +94,7 @@ kafka:
     - "localhost:9092"
 
 routing:
-  default_source: "default"
+  default_source: "main"
   topic_suffix: "_land"
 ```
 
@@ -192,7 +199,7 @@ Messages are routed to Kafka topics based on source rules that extract JSON fiel
 
 ```yaml
 routing:
-  default_source: "default"
+  default_source: "main"
   topic_suffix: "_land"
   source_rules:
     - name: "auth_events"
@@ -206,7 +213,7 @@ routing:
 ```
 
 Given `{"event": {"category": "auth"}}`, routes to `logs_auth_land`.
-Unmatched messages route to `default_land` (default_source + topic_suffix).
+Unmatched messages route to `main_land` (default_source + topic_suffix).
 
 ## Metrics
 
@@ -221,7 +228,7 @@ Key metrics:
 
 - `receiver_requests_total` - Total requests received
 - `receiver_bytes_received_total` - Total bytes ingested
-- `receiver_messages_sent_kafka_total` - Messages sent to Kafka
+- `receiver_kafka_sends_total` - Messages sent to Kafka
 - `receiver_scaling_pressure` - Scaling pressure for autoscaling (0-100)
 
 ## Architecture
@@ -238,8 +245,8 @@ flowchart TB
     VAL --> RT["Router<br/>zero-copy field extract -> topic name"]
     RT --> TS["TieredSink (scalo)<br/>in-memory buffer + CircuitBreaker<br/>no disk spillover by design"]
     TS --> KAFKA[("Kafka topics<br/>librdkafka, batched / LZ4")]
-    TS --> LOADER["dfe-loader<br/>direct Kafka input topic"]
-    RT -. unmatched .-> DEF["default_land topic"]
+    TS --> GRPC["Push listeners<br/>dfe-loader, transforms, archiver"]
+    RT -. unmatched .-> DEF["main_land topic"]
 ```
 
 ## Development
@@ -302,8 +309,8 @@ open http://localhost:8080
 
 ## License
 
-This project is licensed under the Business Source License 1.1 (BUSL-1.1). See [LICENSE](LICENSE) for details.
+This project is licensed under the Business Source License 1.1 (BUSL-1.1). See [LICENSE](https://github.com/hyperi-io/dfe-receiver/blob/main/LICENSE) for details.
 
 Copyright (c) 2026 HYPERI PTY LIMITED
 
-For commercial licensing options, see [COMMERCIAL.md](COMMERCIAL.md).
+For commercial licensing options, see [COMMERCIAL.md](https://github.com/hyperi-io/dfe-receiver/blob/main/COMMERCIAL.md).
