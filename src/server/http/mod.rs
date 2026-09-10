@@ -63,6 +63,14 @@ const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// Idle connection timeout — close connections with no active streams.
 const CONNECTION_IDLE_TIMEOUT: Duration = Duration::from_mins(1);
 
+/// Most events one batched POST may carry.
+///
+/// `max_body_size` alone does not bound the split: a body of `[1,1,1,...]`
+/// yields one `Bytes` per two input bytes, so a 10 MiB body would allocate a
+/// vector tens of times its size. At this cap a full body still allows about
+/// 100 bytes per event, well under any real one.
+const MAX_BATCH_EVENTS: usize = 100_000;
+
 /// Build a hyper HTTP connection builder with hardened timeouts.
 ///
 /// Used by both TLS and plain-text server paths to ensure consistent
@@ -567,7 +575,24 @@ async fn ingest_handler(
 
     // Process through pipeline (timed)
     let start = std::time::Instant::now();
-    let result = state.pipeline.process(body).await;
+    let batch = split_batch_body(&body);
+    let events = match &batch {
+        Some(Ok(payloads)) => payloads.len(),
+        _ => 1,
+    };
+    // A batch fails as a whole, so without the count a partial failure and a
+    // total one look the same.
+    let (accepted, result) = match batch {
+        Some(Ok(payloads)) => {
+            let (accepted, first_err) = state.pipeline.process_batch(&payloads).await;
+            (accepted, first_err.map_or(Ok(()), Err))
+        }
+        Some(Err(oversize)) => (0, Err(oversize)),
+        None => {
+            let result = state.pipeline.process(body).await;
+            (usize::from(result.is_ok()), result)
+        }
+    };
     let elapsed = start.elapsed();
     state
         .metrics
@@ -578,6 +603,7 @@ async fn ingest_handler(
             debug!(
                 transport = "http",
                 bytes = body_len,
+                events,
                 duration_us = elapsed.as_micros(),
                 "HTTP ingest request accepted"
             );
@@ -588,6 +614,8 @@ async fn ingest_handler(
             debug!(
                 transport = "http",
                 bytes = body_len,
+                events,
+                accepted,
                 duration_us = elapsed.as_micros(),
                 error = %e,
                 "HTTP ingest request failed"
@@ -596,6 +624,84 @@ async fn ingest_handler(
             Err(e)
         }
     }
+}
+
+/// Split a batched ingest body into one payload per event.
+///
+/// Covers the two shapes a single POST can carry more than one event in: a
+/// top-level JSON array, and newline-delimited JSON. Returns None for a body
+/// that is one event, which takes the unsplit path.
+fn split_batch_body(body: &Bytes) -> Option<Result<Vec<Bytes>>> {
+    split_json_array(body).or_else(|| split_ndjson(body))
+}
+
+/// Split a newline-delimited JSON body into one payload per line.
+///
+/// The deployment contract advertises NDJSON on this endpoint, but an
+/// unsplit NDJSON body fails validation as a whole and lands in the DLQ, so
+/// the client sees 202 and no data.
+///
+/// Splitting needs a rule that a pretty-printed single object cannot trip,
+/// since its lines are not JSON on their own: a body only splits when it has
+/// more than one non-blank line AND the first parses as a complete value. A
+/// later malformed line is left to per-event validation, which routes it to
+/// the DLQ without taking the rest of the batch with it.
+fn split_ndjson(body: &Bytes) -> Option<Result<Vec<Bytes>>> {
+    let lines: Vec<&[u8]> = body
+        .split(|&b| b == b'\n')
+        .map(<[u8]>::trim_ascii)
+        .filter(|line| !line.is_empty())
+        // Bound the scan itself: without it a body of "1\n" repeated builds a
+        // slice per two bytes before the cap below could reject it.
+        .take(MAX_BATCH_EVENTS + 1)
+        .collect();
+
+    if lines.len() < 2 {
+        return None;
+    }
+    sonic_rs::from_slice::<sonic_rs::LazyValue>(lines[0]).ok()?;
+    if lines.len() > MAX_BATCH_EVENTS {
+        return Some(Err(Error::Validation(format!(
+            "batch exceeds {MAX_BATCH_EVENTS} events"
+        ))));
+    }
+    Some(Ok(lines.into_iter().map(Bytes::copy_from_slice).collect()))
+}
+
+/// Split a top-level JSON array body into one payload per element.
+///
+/// A batched POST carries `[{...},{...}]`; forwarded whole it becomes one
+/// message holding an array, which downstream reads as a single event and
+/// rejects. Returns None for anything that is not a well-formed array, which
+/// stays a single event. Every other transport already splits before the
+/// pipeline.
+///
+/// Each element is copied out as its original bytes: an integer wider than
+/// `u64` does not survive a parse to a value tree and back.
+///
+/// `Some(Err(..))` is an array that exceeded [`MAX_BATCH_EVENTS`] and must be
+/// rejected rather than forwarded whole.
+fn split_json_array(body: &Bytes) -> Option<Result<Vec<Bytes>>> {
+    if *body.iter().find(|b| !b.is_ascii_whitespace())? != b'[' {
+        return None;
+    }
+    // The element iterator stops at the closing bracket, so anything trailing
+    // it would be dropped silently; this rejects the whole body instead.
+    sonic_rs::from_slice::<sonic_rs::LazyValue>(body).ok()?;
+    // A &[u8] input keeps every LazyValue borrowed from the body; a &Bytes
+    // input would copy it into a FastStr first.
+    let mut payloads = Vec::new();
+    for element in sonic_rs::to_array_iter(&body[..]) {
+        if payloads.len() == MAX_BATCH_EVENTS {
+            return Some(Err(Error::Validation(format!(
+                "batch exceeds {MAX_BATCH_EVENTS} events"
+            ))));
+        }
+        payloads.push(Bytes::copy_from_slice(
+            element.ok()?.as_raw_str().as_bytes(),
+        ));
+    }
+    Some(Ok(payloads))
 }
 
 /// Liveness probe handler.
@@ -616,6 +722,162 @@ async fn readiness_handler(State(state): State<HttpState>) -> StatusCode {
 mod tests {
     use super::*;
     use crate::config::{AcceptedHeader, AuthConfig, BearerConfig};
+
+    fn split_ok(body: &Bytes) -> Vec<Bytes> {
+        split_json_array(body)
+            .expect("an array body splits")
+            .expect("within the batch cap")
+    }
+
+    fn batch_ok(body: &Bytes) -> Vec<Bytes> {
+        split_batch_body(body)
+            .expect("a batched body splits")
+            .expect("within the batch cap")
+    }
+
+    #[test]
+    fn an_ndjson_body_becomes_one_event_per_line() {
+        let body = Bytes::from("{\"a\":1}\n{\"a\":2}\n{\"a\":3}");
+        let payloads = batch_ok(&body);
+        assert_eq!(payloads.len(), 3);
+        assert_eq!(payloads[0], Bytes::from(r#"{"a":1}"#));
+        assert_eq!(payloads[2], Bytes::from(r#"{"a":3}"#));
+    }
+
+    #[test]
+    fn ndjson_blank_and_crlf_lines_do_not_become_events() {
+        let body = Bytes::from("{\"a\":1}\r\n\r\n{\"a\":2}\n\n");
+        let payloads = batch_ok(&body);
+        assert_eq!(payloads.len(), 2);
+        assert_eq!(payloads[0], Bytes::from(r#"{"a":1}"#));
+        assert_eq!(payloads[1], Bytes::from(r#"{"a":2}"#));
+    }
+
+    #[test]
+    fn a_pretty_printed_object_is_not_shredded_into_lines() {
+        // Its first line is not a complete JSON value, which is what keeps a
+        // multi-line single object off the NDJSON path.
+        let body = Bytes::from("{\n  \"a\": 1,\n  \"b\": 2\n}");
+        assert!(split_batch_body(&body).is_none());
+    }
+
+    #[test]
+    fn a_later_malformed_ndjson_line_still_splits_for_per_event_validation() {
+        let body = Bytes::from("{\"a\":1}\nnot json\n{\"a\":2}");
+        let payloads = batch_ok(&body);
+        assert_eq!(payloads.len(), 3);
+        assert_eq!(payloads[1], Bytes::from("not json"));
+    }
+
+    #[test]
+    fn a_single_line_object_takes_the_unsplit_path() {
+        assert!(split_batch_body(&Bytes::from(r#"{"a":1}"#)).is_none());
+        assert!(split_batch_body(&Bytes::from("{\"a\":1}\n")).is_none());
+    }
+
+    #[test]
+    fn ndjson_over_the_cap_is_rejected() {
+        let body = Bytes::from(vec!["1"; MAX_BATCH_EVENTS + 1].join("\n"));
+        let err = split_batch_body(&body)
+            .expect("still a batch")
+            .expect_err("over the cap");
+        assert!(matches!(err, Error::Validation(_)), "{err}");
+    }
+
+    #[test]
+    fn a_json_array_body_splits_into_one_payload_per_element() {
+        let body = Bytes::from(r#"[{"a":1},{"a":2},{"a":3}]"#);
+        let payloads = split_ok(&body);
+        assert_eq!(payloads.len(), 3);
+        assert_eq!(payloads[0], Bytes::from(r#"{"a":1}"#));
+        assert_eq!(payloads[2], Bytes::from(r#"{"a":3}"#));
+    }
+
+    #[test]
+    fn leading_whitespace_does_not_hide_an_array() {
+        let body = Bytes::from("  \n\t[{\"a\":1}]");
+        assert_eq!(split_ok(&body).len(), 1);
+    }
+
+    #[test]
+    fn a_single_object_stays_one_event() {
+        let body = Bytes::from(r#"{"a":1}"#);
+        assert!(split_json_array(&body).is_none());
+    }
+
+    #[test]
+    fn a_non_json_body_stays_one_event() {
+        assert!(split_json_array(&Bytes::from("not json at all")).is_none());
+        assert!(split_json_array(&Bytes::from("")).is_none());
+    }
+
+    #[test]
+    fn a_malformed_array_is_not_split_and_is_left_to_validation() {
+        let body = Bytes::from(r#"[{"a":1},"#);
+        assert!(split_json_array(&body).is_none());
+    }
+
+    #[test]
+    fn an_element_reaches_kafka_byte_identical_to_the_same_object_posted_alone() {
+        // Each case reaches the destination untouched when posted alone, so it
+        // must survive batching too.
+        let cases = [
+            r#"{"id":123456789012345678901234}"#,
+            r#"{"a":"A"}"#,
+            r#"{"a":1,"a":2}"#,
+            r#"{"a":1.0,"b":1e2}"#,
+        ];
+        for object in cases {
+            let body = Bytes::from(format!("[{object}]"));
+            let payloads = split_ok(&body);
+            assert_eq!(payloads.len(), 1);
+            assert_eq!(
+                payloads[0],
+                Bytes::from(object),
+                "batching rewrote the element"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_array_carries_no_events() {
+        assert!(split_ok(&Bytes::from("[]")).is_empty());
+    }
+
+    #[test]
+    fn an_array_at_the_cap_still_splits() {
+        let body = Bytes::from(format!("[{}]", vec!["1"; MAX_BATCH_EVENTS].join(",")));
+        assert_eq!(split_ok(&body).len(), MAX_BATCH_EVENTS);
+    }
+
+    #[test]
+    fn an_array_over_the_cap_is_rejected_rather_than_forwarded_whole() {
+        // Without the cap a body of two-byte elements allocates a vector many
+        // times the body size, which max_body_size does not bound.
+        let body = Bytes::from(format!("[{}]", vec!["1"; MAX_BATCH_EVENTS + 1].join(",")));
+        let err = split_json_array(&body)
+            .expect("still an array")
+            .expect_err("over the cap");
+        assert!(
+            matches!(err, Error::Validation(_)),
+            "an oversize batch must be a client error: {err}"
+        );
+    }
+
+    #[test]
+    fn trailing_content_after_the_array_is_not_split() {
+        let body = Bytes::from(r#"[{"a":1}] and then some"#);
+        assert!(split_json_array(&body).is_none());
+    }
+
+    #[test]
+    fn nested_arrays_split_only_at_the_top_level() {
+        let body = Bytes::from(r#"[[1,2],{"a":[3]}]"#);
+        let payloads = split_ok(&body);
+        assert_eq!(payloads.len(), 2);
+        assert_eq!(payloads[0], Bytes::from("[1,2]"));
+        assert_eq!(payloads[1], Bytes::from(r#"{"a":[3]}"#));
+    }
 
     fn test_auth_config() -> AuthConfig {
         AuthConfig {

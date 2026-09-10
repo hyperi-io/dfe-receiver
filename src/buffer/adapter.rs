@@ -9,7 +9,8 @@
 //! Expose the receiver's [`Sink`](ReceiverSink) as a scalo [`TransportSender`].
 //!
 //! scalo's `TieredSink` wraps a `TransportSender` and, on the cold path, spills
-//! whole [`Record`]s to disk -- payload, routing key and headers all survive a
+//! whole [`Record`](scalo::transport::Record)s to disk -- payload,
+//! routing key and headers all survive a
 //! replay, with zero serialisation cost on the happy path. The receiver routes
 //! by topic, so this adapter maps `Record.key` -> topic and forwards the payload
 //! to the inner receiver sink.
