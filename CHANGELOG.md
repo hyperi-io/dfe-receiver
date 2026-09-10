@@ -3,6 +3,44 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.15.33](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.32...v1.15.33) (2026-09-10)
+
+### Bug Fixes
+
+* **http:** split a batched ingest body into one event per element ([ab37eb9](https://github.com/hyperi-io/dfe-receiver/commit/ab37eb947ecbd002c45d15660197794dd9ec6d1f))
+* **test:** batched-ingest test names DestinationRef::One ([4ec613f](https://github.com/hyperi-io/dfe-receiver/commit/4ec613f84d233b1b58f775ef09e1f5ad8c4ce351))
+
+## [1.15.32](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.31...v1.15.32) (2026-09-09)
+
+### Bug Fixes
+
+* wire, refuse or remove the four unwired loader keys ([#95](https://github.com/hyperi-io/dfe-receiver/issues/95)) ([5df1a00](https://github.com/hyperi-io/dfe-receiver/commit/5df1a00c1a37a8f9fef4d60522d271a60f685917))
+
+## [1.15.31](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.30...v1.15.31) (2026-09-09)
+
+### Bug Fixes
+
+* an unmatched record is stamped _source main ([642ff80](https://github.com/hyperi-io/dfe-receiver/commit/642ff80adeaff6cb639c7f0f78bc34b67b889a35))
+
+## [1.15.30](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.29...v1.15.30) (2026-09-09)
+
+### Bug Fixes
+
+* named destinations with fan-out and hold-and-backpressure on direct ([06ed3e4](https://github.com/hyperi-io/dfe-receiver/commit/06ed3e4940d504431895c97ee56cf3c5947f3b2d))
+* rebuild on scalo 2.12.1 ([de72e17](https://github.com/hyperi-io/dfe-receiver/commit/de72e17c4774e4c7da4290420b2cacaf2f8182b0))
+
+## [1.15.29](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.28...v1.15.29) (2026-09-08)
+
+### Bug Fixes
+
+* **routing:** write the matched source into the record ([d3ba48d](https://github.com/hyperi-io/dfe-receiver/commit/d3ba48d2005046853207c21b7c2bbe7a0db25577))
+
+## [1.15.28](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.27...v1.15.28) (2026-09-08)
+
+### Bug Fixes
+
+* **grpc:** accept gzip on the vector ingest, and pin _source routing ([1c3c3ba](https://github.com/hyperi-io/dfe-receiver/commit/1c3c3ba00f7c76cadb5afe960641ac7a23589101))
+
 ## [1.15.27](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.26...v1.15.27) (2026-08-28)
 
 ### Bug Fixes

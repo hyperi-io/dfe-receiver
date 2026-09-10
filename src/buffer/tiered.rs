@@ -15,6 +15,7 @@
 //! This is the default buffer backend (no disk I/O). For opt-in disk spillover,
 //! see `SinkBackend::Tiered` which uses scalo's `TieredSink` with a disk spool.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -26,15 +27,66 @@ use scalo::tiered_sink::{CircuitBreaker, CircuitState};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::config::BufferConfig;
+use crate::config::{BufferConfig, QueueBound};
 use crate::error::Result;
 use crate::sink::Sink;
+
+/// Messages taken per drain cycle.
+const DRAIN_BATCH: usize = 100;
 
 /// Message queued during sink unavailability.
 #[derive(Clone)]
 struct SpillMessage {
     topic: String,
     payload: Bytes,
+}
+
+impl SpillMessage {
+    /// Bytes this message holds, for the queue's byte bound.
+    fn weight(&self) -> usize {
+        self.topic.len() + self.payload.len()
+    }
+}
+
+/// The spill queue and the bytes it holds, under one lock.
+#[derive(Default)]
+struct SpillQueue {
+    messages: VecDeque<SpillMessage>,
+    bytes: usize,
+}
+
+impl SpillQueue {
+    /// Whether one more message fits under `bound`.
+    fn accepts(&self, bound: QueueBound, weight: usize) -> bool {
+        match bound {
+            QueueBound::Records(max) => self.messages.len() < max,
+            QueueBound::Bytes(max) => self.bytes + weight <= max,
+        }
+    }
+
+    /// Whether the queue is at its bound and can take nothing more.
+    fn is_full(&self, bound: QueueBound) -> bool {
+        !self.accepts(bound, 1)
+    }
+
+    fn push_back(&mut self, msg: SpillMessage) {
+        self.bytes += msg.weight();
+        self.messages.push_back(msg);
+    }
+
+    /// Return undelivered messages to the front, so drain order is preserved.
+    fn push_front_all(&mut self, msgs: impl DoubleEndedIterator<Item = SpillMessage>) {
+        for msg in msgs.rev() {
+            self.bytes += msg.weight();
+            self.messages.push_front(msg);
+        }
+    }
+
+    fn take(&mut self, count: usize) -> Vec<SpillMessage> {
+        let taken: Vec<SpillMessage> = self.messages.drain(0..count).collect();
+        self.bytes -= taken.iter().map(SpillMessage::weight).sum::<usize>();
+        taken
+    }
 }
 
 /// InMemoryBuffer wraps a primary sink with circuit breaker and in-memory buffering.
@@ -46,9 +98,10 @@ pub struct InMemoryBuffer<S: Sink> {
     /// Primary sink (hot path).
     primary: Arc<S>,
     /// In-memory spillover queue.
-    spill_queue: Mutex<Vec<SpillMessage>>,
-    /// Maximum queue size before rejecting.
-    max_queue_size: usize,
+    spill_queue: Mutex<SpillQueue>,
+    /// What the queue refuses at, from `buffer.memory_limit` and
+    /// `buffer.pressure_threshold`.
+    bound: QueueBound,
     /// Circuit breaker from scalo with half-open state support.
     circuit: CircuitBreaker,
     /// Messages queued during outage.
@@ -59,12 +112,13 @@ pub struct InMemoryBuffer<S: Sink> {
 
 impl<S: Sink + Send + Sync + 'static> InMemoryBuffer<S> {
     /// Create a new tiered sink.
-    #[allow(unused_variables)]
     pub fn new(primary: S, config: &BufferConfig) -> Self {
+        let bound = config.queue_bound();
+        debug!(?bound, "In-memory buffer bound");
         Self {
             primary: Arc::new(primary),
-            spill_queue: Mutex::new(Vec::with_capacity(1000)),
-            max_queue_size: 1000,
+            spill_queue: Mutex::new(SpillQueue::default()),
+            bound,
             // Use scalo CircuitBreaker with proper half-open state
             circuit: CircuitBreaker::new(5, Duration::from_secs(30)),
             queued_count: AtomicU64::new(0),
@@ -81,16 +135,19 @@ impl<S: Sink + Send + Sync + 'static> InMemoryBuffer<S> {
 
     /// Queue a message for later delivery. Returns false if queue is full.
     fn queue_message(&self, topic: String, payload: Bytes) -> bool {
+        let msg = SpillMessage { topic, payload };
+        let weight = msg.weight();
         let mut queue = self.spill_queue.lock();
-        if queue.len() >= self.max_queue_size {
+        if !queue.accepts(self.bound, weight) {
             warn!(
-                queue_size = queue.len(),
-                max = self.max_queue_size,
+                queue_size = queue.messages.len(),
+                queue_bytes = queue.bytes,
+                bound = ?self.bound,
                 "In-memory queue full, rejecting message"
             );
             return false;
         }
-        queue.push(SpillMessage { topic, payload });
+        queue.push_back(msg);
         self.queued_count.fetch_add(1, Ordering::Relaxed);
         true
     }
@@ -104,31 +161,39 @@ impl<S: Sink + Send + Sync + 'static> InMemoryBuffer<S> {
 
         let messages: Vec<SpillMessage> = {
             let mut queue = self.spill_queue.lock();
-            if queue.is_empty() {
+            let count = queue.messages.len().min(DRAIN_BATCH);
+            if count == 0 {
                 return 0;
             }
-            // Take up to 100 messages per drain cycle
-            let count = queue.len().min(100);
-            queue.drain(0..count).collect()
+            queue.take(count)
         };
 
         let count = messages.len();
         let mut drained = 0;
+        let mut pending = messages.into_iter();
+        let mut failed = None;
 
-        for msg in messages {
+        for msg in pending.by_ref() {
             match self.primary.send(&msg.topic, msg.payload.clone()).await {
                 Ok(()) => {
                     drained += 1;
                     self.circuit.record_success().await;
                 }
                 Err(e) => {
-                    // Put back failed messages
                     self.circuit.record_failure().await;
-                    self.queue_message(msg.topic, msg.payload);
                     debug!(error = %e, "Drain failed, re-queuing message");
+                    failed = Some(msg);
                     break;
                 }
             }
+        }
+
+        // The failed message and everything behind it go back at the front, so a
+        // mid-batch failure loses nothing.
+        if let Some(msg) = failed {
+            let mut restore = vec![msg];
+            restore.extend(pending);
+            self.spill_queue.lock().push_front_all(restore.into_iter());
         }
 
         if drained > 0 {
@@ -146,10 +211,11 @@ impl<S: Sink + Send + Sync + 'static> InMemoryBuffer<S> {
 
     /// Get statistics.
     pub async fn stats(&self) -> InMemoryBufferStats {
+        let queue_size = self.spill_queue.lock().messages.len();
         InMemoryBufferStats {
             circuit_state: self.circuit.state().await,
             consecutive_failures: self.circuit.consecutive_failures(),
-            queue_size: self.spill_queue.lock().len(),
+            queue_size,
             queued_total: self.queued_count.load(Ordering::Relaxed),
             drained_total: self.drained_count.load(Ordering::Relaxed),
         }
@@ -248,8 +314,8 @@ impl<S: Sink + Send + Sync + 'static> Sink for InMemoryBuffer<S> {
 
     /// Check if the sink is healthy.
     fn is_healthy(&self) -> bool {
-        // Healthy if primary is healthy and queue isn't overflowing
-        self.primary.is_healthy() || self.spill_queue.lock().len() < self.max_queue_size
+        // Healthy while the primary is up, or the queue can still take a record.
+        self.primary.is_healthy() || !self.spill_queue.lock().is_full(self.bound)
     }
 }
 
@@ -344,6 +410,105 @@ mod tests {
         let stats = tiered.stats().await;
         assert!(stats.circuit_open());
         assert!(stats.consecutive_failures >= 5);
+    }
+
+    /// Fill a buffer whose primary always fails, and return how many records it
+    /// took before it refused.
+    async fn fill_until_refused(config: &BufferConfig, limit: usize) -> usize {
+        let buffer = InMemoryBuffer::new(TestSink::new(usize::MAX), config);
+        for held in 0..limit {
+            if buffer.send("t", Bytes::from("123456789")).await.is_err() {
+                return held;
+            }
+        }
+        limit
+    }
+
+    /// An auto-detected memory limit gives no byte figure, so the queue counts
+    /// records -- 1000 of them.
+    #[tokio::test]
+    async fn default_config_holds_a_thousand_records() {
+        let held = fill_until_refused(&BufferConfig::default(), 1_200).await;
+        assert_eq!(held, 1_000, "default queue took {held} records");
+    }
+
+    /// A configured memory limit bounds the queue in bytes, and the share of it
+    /// the queue may take comes from `pressure_threshold`.
+    #[tokio::test]
+    async fn a_configured_memory_limit_bounds_the_queue_in_bytes() {
+        let config = BufferConfig {
+            // 10 bytes per record: the "t" topic plus a 9-byte payload.
+            memory_limit: 100,
+            pressure_threshold: 0.5,
+            ..Default::default()
+        };
+        let held = fill_until_refused(&config, 100).await;
+        assert_eq!(held, 5, "a 50-byte budget took {held} records");
+    }
+
+    #[tokio::test]
+    async fn a_higher_pressure_threshold_holds_more() {
+        let config = BufferConfig {
+            memory_limit: 100,
+            pressure_threshold: 1.0,
+            ..Default::default()
+        };
+        let held = fill_until_refused(&config, 100).await;
+        assert_eq!(held, 10, "a 100-byte budget took {held} records");
+    }
+
+    /// Sink that accepts a set number of messages, then fails for good.
+    struct CapSink {
+        remaining: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Sink for CapSink {
+        async fn send(&self, _topic: &str, _payload: Bytes) -> Result<()> {
+            if self
+                .remaining
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+                .is_err()
+            {
+                return Err(Error::Transport("cap reached".into()));
+            }
+            Ok(())
+        }
+
+        async fn flush(&self) -> Result<()> {
+            Ok(())
+        }
+
+        fn is_healthy(&self) -> bool {
+            true
+        }
+    }
+
+    /// A mid-batch drain failure returns the rest of the batch to the queue
+    /// rather than dropping it.
+    #[tokio::test]
+    async fn a_failed_drain_keeps_the_records_behind_it() {
+        let buffer = InMemoryBuffer::new(
+            CapSink {
+                remaining: AtomicUsize::new(0),
+            },
+            &test_config(),
+        );
+
+        // Four sends fail and queue -- one short of tripping the circuit.
+        for _ in 0..4 {
+            let _ = buffer.send("t", Bytes::from("data")).await;
+        }
+        assert_eq!(buffer.stats().await.queue_size, 4);
+
+        // The primary takes one more, then fails for the rest of the batch.
+        buffer.primary.remaining.store(1, Ordering::Relaxed);
+        assert_eq!(buffer.try_drain().await, 1);
+        assert_eq!(
+            buffer.stats().await.queue_size,
+            3,
+            "the records behind the failure were dropped"
+        );
     }
 
     #[tokio::test]

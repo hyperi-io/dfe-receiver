@@ -96,7 +96,9 @@ fn test_config(gelf_port: u16) -> Config {
     config.gelf.enabled = true;
     config.gelf.bind_address = format!("127.0.0.1:{gelf_port}");
     config.gelf.tls.enabled = false;
-    config.destinations.default = "loader".to_string();
+    // The loader on its memory transport: accepted, sent nowhere, no broker.
+    config.destinations.default = "loader".into();
+    config.loader.transport = "memory".to_string();
     config
 }
 
