@@ -43,6 +43,33 @@ use crate::validation::{ValidationResult, Validator};
 // Trace-level logging imports (only used for per-message tracing)
 use tracing::trace;
 
+/// Tracked bytes released on drop, so a cancelled request cannot leak them.
+///
+/// A client disconnect or request timeout drops the in-flight future between
+/// `add_bytes` and `release`, and the counter never decays: the guard then
+/// reports pressure forever, `/readyz` 503s while `/livez` keeps passing, and
+/// nothing restarts the pod.
+#[must_use]
+struct MemoryLease<'a> {
+    guard: &'a MemoryGuard,
+    bytes: u64,
+}
+
+impl<'a> MemoryLease<'a> {
+    // Borrowed, not `Arc<MemoryGuard>`: the borrow proves the lease cannot
+    // outlive the guard, and spends no refcount pair per event on the hot path.
+    fn acquire(guard: &'a MemoryGuard, bytes: u64) -> Self {
+        guard.add_bytes(bytes);
+        Self { guard, bytes }
+    }
+}
+
+impl Drop for MemoryLease<'_> {
+    fn drop(&mut self) {
+        self.guard.release(self.bytes);
+    }
+}
+
 /// What a named destination resolves to.
 ///
 /// The name is the routing decision; this is the delivery. Every variant keeps
@@ -335,16 +362,10 @@ impl PipelineState {
             info!("Memory pressure recovered");
         }
 
-        // Track memory
-        let payload_size = payload.len() as u64;
-        self.memory_guard.add_bytes(payload_size);
+        // Tracked for the life of this future.
+        let _lease = MemoryLease::acquire(&self.memory_guard, payload.len() as u64);
 
-        let result = self.process_inner(payload).await;
-
-        // Release memory tracking on completion
-        self.memory_guard.release(payload_size);
-
-        result
+        self.process_inner(payload).await
     }
 
     /// Process a batch of messages through the pipeline.
@@ -374,9 +395,9 @@ impl PipelineState {
             info!("Memory pressure recovered");
         }
 
-        // Track memory for the entire batch at once
+        // One lease for the whole batch, held across every message.
         let total_bytes: u64 = payloads.iter().map(|p| p.len() as u64).sum();
-        self.memory_guard.add_bytes(total_bytes);
+        let _lease = MemoryLease::acquire(&self.memory_guard, total_bytes);
 
         let mut success_count = 0usize;
         let mut first_error: Option<Error> = None;
@@ -391,9 +412,6 @@ impl PipelineState {
                 }
             }
         }
-
-        // Release memory for the entire batch
-        self.memory_guard.release(total_bytes);
 
         (success_count, first_error)
     }
@@ -539,13 +557,12 @@ impl PipelineState {
             info!("Memory pressure recovered");
         }
 
-        // Track memory
-        let payload_size = payload.len() as u64;
-        self.memory_guard.add_bytes(payload_size);
+        // Tracked for the life of this future.
+        let _lease = MemoryLease::acquire(&self.memory_guard, payload.len() as u64);
 
         // Validate (acquire and release lock before any await)
         let validation = self.validator.read().validate(&payload);
-        let result = match validation {
+        match validation {
             ValidationResult::Valid => self.send_to_kafka(topic, payload).await,
             ValidationResult::Dlq(reason) => {
                 debug!(reason = %reason, "Message validation failed, routing to DLQ");
@@ -556,12 +573,7 @@ impl PipelineState {
                 security::input_validation_failure("json_validate", &reason, None);
                 Err(Error::Validation(reason))
             }
-        };
-
-        // Release memory tracking on completion
-        self.memory_guard.release(payload_size);
-
-        result
+        }
     }
 
     /// Send message to Kafka.
@@ -1076,6 +1088,143 @@ mod tests {
         // Should start without pressure
         assert!(!state.should_apply_backpressure());
         assert_eq!(state.memory_pressure(), MemoryPressure::Low);
+    }
+
+    #[tokio::test]
+    async fn memory_lease_releases_on_every_drop_path() {
+        // The lease is dropped however the future ends, so its Drop contract is
+        // what covers the cancellation path.
+        let state = test_state().await;
+        let guard = state.memory_guard().clone();
+        let before = guard.current_bytes();
+
+        {
+            let _lease = MemoryLease::acquire(&guard, 4096);
+            assert_eq!(
+                guard.current_bytes(),
+                before + 4096,
+                "acquire must track the bytes"
+            );
+        }
+
+        assert_eq!(
+            guard.current_bytes(),
+            before,
+            "drop must return the tracked bytes to baseline"
+        );
+    }
+
+    /// A lease held across an await must release when the future is dropped.
+    ///
+    /// The scope-exit test above never suspends, so it cannot fail the way a
+    /// client disconnect does. `pending` guarantees the timeout drops the
+    /// future while the lease is still held.
+    #[tokio::test]
+    async fn memory_lease_releases_when_its_future_is_cancelled() {
+        let state = test_state().await;
+        let guard = state.memory_guard().clone();
+        let before = guard.current_bytes();
+        let held = Arc::clone(&guard);
+
+        let outcome = tokio::time::timeout(Duration::from_millis(50), async move {
+            let _lease = MemoryLease::acquire(&held, 4096);
+            assert_eq!(
+                held.current_bytes(),
+                before + 4096,
+                "the lease must be tracked before the future suspends"
+            );
+            std::future::pending::<()>().await;
+        })
+        .await;
+
+        assert!(
+            outcome.is_err(),
+            "the future must be dropped while suspended"
+        );
+        assert_eq!(
+            guard.current_bytes(),
+            before,
+            "cancelling a suspended future must release its tracked bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn process_returns_tracked_bytes_to_baseline() {
+        let state = test_state().await;
+        let before = state.memory_guard().current_bytes();
+
+        // Positive control: under backpressure `process` returns before it
+        // acquires anything, and the balance assertion below would pass vacuously.
+        assert!(
+            !state.should_apply_backpressure(),
+            "guard must be idle for this to exercise the accounting"
+        );
+
+        let _ = state.process(Bytes::from(vec![b'x'; 4096])).await;
+
+        assert_eq!(state.memory_guard().current_bytes(), before);
+    }
+
+    /// Cancelling `process` itself must return its bytes, not just the lease type.
+    ///
+    /// The two lease tests above build a `MemoryLease` by hand, so every one of
+    /// them stays green if the lease is deleted from `process`; the balance test
+    /// above stays green too, because a charge that never happens also balances.
+    /// This is the only test that reddens on a revert of the fix.
+    ///
+    /// A silent listener -- accepts the TCP connection, then never speaks HTTP/2
+    /// -- suspends the gRPC send, which is where a real request is dropped when
+    /// the client disconnects or the 30s request timeout fires. `Box::pin` owns
+    /// the future so `drop` actually drops it; `pin!` would only drop a borrow
+    /// and prove nothing.
+    #[tokio::test]
+    async fn cancelling_process_releases_its_tracked_bytes() {
+        use std::future::Future;
+        use std::task::{Context, Waker};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind silent listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let accepted = tokio::spawn(async move {
+            // Hold every stream open: dropping one would fail the send fast
+            // instead of leaving it suspended.
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+
+        let mut config = test_config();
+        config.loader.transport = "grpc".to_string();
+        config.loader.grpc_endpoint = Some(format!("http://{addr}"));
+        let state = test_state_with(config).await;
+
+        let payload = Bytes::from(r#"{"cancelled":true}"#);
+        let bytes = payload.len() as u64;
+        let before = state.memory_guard().current_bytes();
+
+        let mut inflight = Box::pin(state.process(payload));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(
+            inflight.as_mut().poll(&mut cx).is_pending(),
+            "process must still be in the sink for this to test cancellation"
+        );
+        assert_eq!(
+            state.memory_guard().current_bytes(),
+            before + bytes,
+            "process must charge the guard before it suspends"
+        );
+
+        drop(inflight);
+
+        assert_eq!(
+            state.memory_guard().current_bytes(),
+            before,
+            "dropping the suspended request must return its tracked bytes"
+        );
+
+        accepted.abort();
     }
 
     #[tokio::test]
