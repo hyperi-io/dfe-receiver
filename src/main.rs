@@ -226,9 +226,11 @@ impl ServiceApp for App {
             Server::new(orchestrator.state(), metrics.clone())
         };
 
-        // Set readiness check on runtime's metrics manager (already serving)
+        // Set readiness check on runtime's metrics manager (already serving).
+        // probe_ready, not is_ready: the probe must not evict this pod for a
+        // sink outage every replica shares.
         let pipeline_for_ready = orchestrator.state();
-        runtime.set_readiness_check(move || pipeline_for_ready.is_ready());
+        runtime.set_readiness_check(move || pipeline_for_ready.probe_ready());
 
         // Run main server (blocks until shutdown)
         if let Err(e) = server.run(shutdown_token.clone()).await {

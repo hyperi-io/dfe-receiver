@@ -246,14 +246,12 @@ impl PipelineState {
         self.shared_config.clone()
     }
 
-    /// Check if the pipeline is ready to receive requests.
+    /// Admission check for a request: shed with 503 when this is false.
+    ///
+    /// Consults sink health as well as pressure, because accepting a record
+    /// the pipeline cannot deliver loses it.
     pub fn is_ready(&self) -> bool {
-        if !self.ready.load(Ordering::Relaxed) {
-            return false;
-        }
-
-        // Not ready under high pressure (originator brake source of truth).
-        if self.under_pressure() {
+        if !self.probe_ready() {
             return false;
         }
 
@@ -270,6 +268,25 @@ impl PipelineState {
             DestinationSink::Bus { .. } | DestinationSink::Discard => true,
             DestinationSink::Grpc(s) => s.is_healthy(),
         })
+    }
+
+    /// What `/readyz` answers: startup state and pressure, NOT sink health.
+    ///
+    /// A sink outage is shared by every replica, so failing the probe on it
+    /// empties the Service of endpoints fleet-wide and turns a degradation
+    /// into an outage. Shedding stays with [`is_ready`], which still answers
+    /// 503 + retry-after per request while the pod remains routable.
+    pub fn probe_ready(&self) -> bool {
+        if !self.ready.load(Ordering::Relaxed) {
+            return false;
+        }
+
+        // Not ready under high pressure (originator brake source of truth).
+        if self.under_pressure() {
+            return false;
+        }
+
+        true
     }
 
     /// Get memory pressure level.
@@ -1023,6 +1040,29 @@ mod tests {
     async fn test_pipeline_ready_check() {
         let state = test_state().await;
         assert!(state.is_ready());
+    }
+
+    #[tokio::test]
+    async fn pressure_fails_both_the_probe_and_admission() {
+        // Sink health is deliberately absent from probe_ready, which this does
+        // NOT cover: the test state's memory loader is always healthy and the
+        // sinks are concrete types with no seam to fail one. The divergence is
+        // held by construction and by the callers in main.rs and server/.
+        let mut config = test_config();
+        config.buffer.memory_limit = 1000;
+        config.buffer.pressure_threshold = 0.8;
+        let state = test_state_with(config).await;
+
+        assert!(state.probe_ready(), "a fresh pipeline must pass the probe");
+        assert!(state.is_ready(), "and must admit requests");
+
+        state.memory_guard().add_bytes(900);
+
+        assert!(
+            !state.probe_ready(),
+            "pressure must fail the probe -- a scale-out relieves it"
+        );
+        assert!(!state.is_ready(), "and must also stop admitting");
     }
 
     #[tokio::test]
