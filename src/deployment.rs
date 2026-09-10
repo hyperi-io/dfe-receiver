@@ -142,13 +142,15 @@ pub fn contract() -> DeploymentContract {
             SecretGroupContract {
                 group_name: "kafka".into(),
                 env_vars: vec![
+                    // apply_flat_env reads these; flat_env joins prefix and key
+                    // with ONE underscore, and the key is USER, not USERNAME.
                     SecretEnvContract {
-                        env_var: "DFE_RECEIVER__KAFKA__SASL__USERNAME".into(),
+                        env_var: "DFE_RECEIVER_KAFKA_SASL_USER".into(),
                         key_name: "username".into(),
                         secret_key: "kafka-username".into(),
                     },
                     SecretEnvContract {
-                        env_var: "DFE_RECEIVER__KAFKA__SASL__PASSWORD".into(),
+                        env_var: "DFE_RECEIVER_KAFKA_SASL_PASSWORD".into(),
                         key_name: "password".into(),
                         secret_key: "kafka-password".into(),
                     },
@@ -157,7 +159,9 @@ pub fn contract() -> DeploymentContract {
             SecretGroupContract {
                 group_name: "auth".into(),
                 env_vars: vec![SecretEnvContract {
-                    env_var: "DFE_RECEIVER__SERVER__AUTH__BEARER__TOKENS".into(),
+                    // Same rule as the kafka pair above: ONE underscore, and
+                    // the suffix apply_flat_env actually reads.
+                    env_var: "DFE_RECEIVER_BEARER_TOKENS".into(),
                     key_name: "bearer-tokens".into(),
                     secret_key: "bearer-tokens".into(),
                 }],
@@ -347,6 +351,8 @@ pub fn emit_dockerfile() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
+    use scalo::config::flat_env::ApplyFlatEnv;
 
     #[test]
     fn test_contract_fields() {
@@ -429,6 +435,36 @@ mod tests {
     }
 
     #[test]
+    fn every_declared_secret_env_var_reaches_the_config() {
+        // A declared name the binary never reads mounts a Secret that is
+        // silently ignored; the per-field mapping is pinned by the config tests.
+        for group in &contract().secrets {
+            for env in &group.env_vars {
+                assert!(
+                    env.env_var
+                        .starts_with(&format!("{}_", crate::config::ENV_PREFIX)),
+                    "{} does not carry the app prefix",
+                    env.env_var
+                );
+
+                let sentinel = format!("sentinel-{}", env.key_name);
+                let mut config = Config::default();
+                temp_env::with_var(&env.env_var, Some(sentinel.as_str()), || {
+                    config.apply_flat_env(crate::config::ENV_PREFIX);
+                });
+
+                let applied = serde_json::to_string(&config).expect("config serialises");
+                assert!(
+                    applied.contains(&sentinel),
+                    "{} ({}) was set and no config field read it",
+                    env.env_var,
+                    group.group_name
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_contract_serialises() {
         let c = contract();
         let json = c.to_json();
@@ -456,6 +492,52 @@ mod tests {
             dockerfile.contains("COPY dfe-receiver /usr/local/bin/dfe-receiver"),
             "missing binary COPY in Dockerfile",
         );
+    }
+
+    /// Map a chart directory to relative path -> file body.
+    fn chart_files(root: &std::path::Path) -> std::collections::BTreeMap<String, String> {
+        let mut files = std::collections::BTreeMap::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read_dir") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    let rel = path.strip_prefix(root).expect("relative path");
+                    let body = std::fs::read_to_string(&path).expect("read chart file");
+                    files.insert(rel.display().to_string(), body);
+                }
+            }
+        }
+        files
+    }
+
+    #[test]
+    fn checked_in_chart_matches_generate_chart() {
+        // The chart is emitted from contract(), so a hand edit here is silently
+        // reverted the next time anything regenerates it.
+        const REGEN: &str = "regenerate with: `dfe-receiver --emit-helm chart`";
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        scalo::deployment::generate_chart(&contract(), tmp.path(), None).expect("generate_chart");
+        let expected = chart_files(tmp.path());
+        let committed =
+            chart_files(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("chart"));
+
+        let expected_names: Vec<&String> = expected.keys().collect();
+        let committed_names: Vec<&String> = committed.keys().collect();
+        assert_eq!(
+            committed_names, expected_names,
+            "chart/ file list differs from generate_chart() -- {REGEN}"
+        );
+        for (name, want) in &expected {
+            assert_eq!(
+                committed.get(name),
+                Some(want),
+                "chart/{name} differs from generate_chart() -- {REGEN}"
+            );
+        }
     }
 
     #[test]

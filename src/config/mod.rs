@@ -358,6 +358,17 @@ impl ApplyFlatEnv for Config {
         if let Some(v) = flat_env::flat_env_bool(prefix, "COMMON_HEADER") {
             self.server.auth.include_common_header = v;
         }
+        // Newline or comma separated, matching the secret-source loader in
+        // server::auth, since both read the same bearer-tokens Secret.
+        if let Some(v) = flat_env::flat_env_string_sensitive(prefix, "BEARER_TOKENS") {
+            self.server.auth.bearer.tokens = v
+                .lines()
+                .flat_map(|line| line.split(','))
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect();
+        }
 
         // Kafka
         if let Some(v) = flat_env::flat_env_list(prefix, "KAFKA_BROKERS") {
@@ -721,7 +732,7 @@ fn default_true() -> bool {
 }
 
 /// Bearer token authentication configuration.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct BearerConfig {
     /// Static tokens (for dev/simple deployments).
@@ -745,6 +756,18 @@ impl Default for BearerConfig {
             secret_source: None,
             refresh_interval_secs: 300,
         }
+    }
+}
+
+/// `config-check` prints this Debug dump, and scalo's masker does not match a
+/// `tokens:` field name, so the values are redacted here.
+impl std::fmt::Debug for BearerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BearerConfig")
+            .field("tokens", &format_args!("<{} redacted>", self.tokens.len()))
+            .field("secret_source", &self.secret_source)
+            .field("refresh_interval_secs", &self.refresh_interval_secs)
+            .finish()
     }
 }
 
@@ -2273,6 +2296,25 @@ mod tests {
     }
 
     #[test]
+    fn test_env_override_bearer_tokens() {
+        with_env(
+            &[("DFE_RECEIVER_BEARER_TOKENS", "tok-a, tok-b ,,tok-c")],
+            || {
+                let mut config = Config::default();
+                config.apply_flat_env(ENV_PREFIX);
+                assert_eq!(
+                    config.server.auth.bearer.tokens,
+                    vec![
+                        "tok-a".to_string(),
+                        "tok-b".to_string(),
+                        "tok-c".to_string()
+                    ]
+                );
+            },
+        );
+    }
+
+    #[test]
     fn test_env_override_kafka_security_protocol() {
         // SSL variant
         with_env(
@@ -2544,6 +2586,48 @@ kafka:
     // ---------------------------------------------------------------------
     // Security: SASL password redaction in Debug output
     // ---------------------------------------------------------------------
+
+    #[test]
+    fn bearer_debug_redacts_tokens() {
+        let bearer = BearerConfig {
+            tokens: vec!["super-secret-token".to_string(), "another".to_string()],
+            secret_source: Some("file:/etc/secrets/tokens".to_string()),
+            refresh_interval_secs: 300,
+        };
+        let debug_output = format!("{bearer:?}");
+
+        assert!(
+            !debug_output.contains("super-secret-token") && !debug_output.contains("another"),
+            "token values must not appear in debug: {debug_output}"
+        );
+        assert!(
+            debug_output.contains('2'),
+            "token count should be visible: {debug_output}"
+        );
+        assert!(
+            debug_output.contains("file:/etc/secrets/tokens"),
+            "secret_source should stay visible: {debug_output}"
+        );
+    }
+
+    #[test]
+    fn bearer_tokens_env_accepts_newline_separated_secrets() {
+        with_env(
+            &[("DFE_RECEIVER_BEARER_TOKENS", "tok-a\ntok-b\n\ntok-c")],
+            || {
+                let mut config = Config::default();
+                config.apply_flat_env(ENV_PREFIX);
+                assert_eq!(
+                    config.server.auth.bearer.tokens,
+                    vec![
+                        "tok-a".to_string(),
+                        "tok-b".to_string(),
+                        "tok-c".to_string()
+                    ]
+                );
+            },
+        );
+    }
 
     #[test]
     fn test_sasl_debug_redacts_password() {
