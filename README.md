@@ -1,5 +1,12 @@
 # dfe-receiver
 
+[![Build Status](https://github.com/hyperi-io/dfe-receiver/actions/workflows/ci.yml/badge.svg)](https://github.com/hyperi-io/dfe-receiver/actions)
+[![License](https://img.shields.io/badge/license-BUSL--1.1-blue)](https://github.com/hyperi-io/dfe-receiver/blob/main/LICENSE)
+
+> Agents speak ten different protocols and none of them speak yours. dfe-receiver
+> terminates all of them at one door, normalises to JSON, and hands the result to
+> Kafka or straight to the loader.
+
 High-performance HTTP/gRPC receiver for PB/s scale data ingestion.
 
 ## Overview
@@ -72,7 +79,7 @@ DFE_RECEIVER_SERVER__BIND_ADDRESS=0.0.0.0:8080 ./target/release/dfe-receiver
 
 ## Configuration
 
-See [config.example.yaml](config.example.yaml) for full configuration reference.
+See [config.example.yaml](https://github.com/hyperi-io/dfe-receiver/blob/main/config.example.yaml) for full configuration reference.
 
 ### Minimal Configuration
 
@@ -302,8 +309,8 @@ open http://localhost:8080
 
 ## License
 
-This project is licensed under the Business Source License 1.1 (BUSL-1.1). See [LICENSE](LICENSE) for details.
+This project is licensed under the Business Source License 1.1 (BUSL-1.1). See [LICENSE](https://github.com/hyperi-io/dfe-receiver/blob/main/LICENSE) for details.
 
 Copyright (c) 2026 HYPERI PTY LIMITED
 
-For commercial licensing options, see [COMMERCIAL.md](COMMERCIAL.md).
+For commercial licensing options, see [COMMERCIAL.md](https://github.com/hyperi-io/dfe-receiver/blob/main/COMMERCIAL.md).
