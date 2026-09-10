@@ -1769,7 +1769,10 @@ $defs:
     type: object
     properties:
       memory_limit:
-        description: Maximum memory for buffers in bytes (0 = auto-detect 67% of available).
+        description: |-
+          Maximum memory for buffers in bytes (0 = scalo's MemoryGuard auto-detect:
+          85% of the cgroup limit, capped at cgroup v2 `memory.high` when that is
+          lower, and total system memory when there is no cgroup).
         type: integer
         format: uint
         minimum: 0
