@@ -3,6 +3,13 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.15.33](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.32...v1.15.33) (2026-09-10)
+
+### Bug Fixes
+
+* **http:** split a batched ingest body into one event per element ([ab37eb9](https://github.com/hyperi-io/dfe-receiver/commit/ab37eb947ecbd002c45d15660197794dd9ec6d1f))
+* **test:** batched-ingest test names DestinationRef::One ([4ec613f](https://github.com/hyperi-io/dfe-receiver/commit/4ec613f84d233b1b58f775ef09e1f5ad8c4ce351))
+
 ## [1.15.32](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.31...v1.15.32) (2026-09-09)
 
 ### Bug Fixes
