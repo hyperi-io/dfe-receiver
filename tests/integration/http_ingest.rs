@@ -21,7 +21,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use dfe_receiver::config::{Config, SharedConfig};
+use dfe_receiver::config::{Config, DestinationRef, SharedConfig};
 use dfe_receiver::metrics::Metrics;
 use dfe_receiver::pipeline::PipelineState;
 use dfe_receiver::server::http;
@@ -80,7 +80,7 @@ async fn start_receiver(loader_endpoint: &str) -> (String, CancellationToken) {
 
         let mut config = Config::default();
         config.server.bind_address = format!("127.0.0.1:{port}");
-        config.destinations.default = "loader".to_string();
+        config.destinations.default = DestinationRef::One("loader".to_string());
         config.loader.transport = "grpc".to_string();
         config.loader.grpc_endpoint = Some(loader_endpoint.to_string());
 
