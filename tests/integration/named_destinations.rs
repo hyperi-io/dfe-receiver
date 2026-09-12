@@ -26,6 +26,7 @@ use dfe_receiver::config::{
     Config, DestinationRef, DestinationRule, DestinationSpec, GrpcDestination, SharedConfig,
 };
 use dfe_receiver::pipeline::PipelineState;
+use scalo::memory::{MemoryGuard, MemoryGuardConfig, UsageSource};
 use scalo::transport::TransportReceiver;
 use scalo::transport::grpc::{GrpcConfig, GrpcTransport};
 use tokio_util::sync::CancellationToken;
@@ -118,6 +119,27 @@ async fn pipeline_for(config: Config) -> PipelineState {
     PipelineState::new(SharedConfig::new(config), CancellationToken::new())
         .await
         .expect("pipeline")
+}
+
+/// A pipeline whose guard reads its own reservations, so a synthetic byte
+/// budget means something in a process whose real usage dwarfs it.
+async fn pipeline_on_reservations(config: Config) -> PipelineState {
+    let guard = MemoryGuard::with_usage_source(
+        MemoryGuardConfig {
+            limit_bytes: config.buffer.memory_limit as u64,
+            pressure_threshold: config.buffer.pressure_threshold,
+            ..Default::default()
+        },
+        UsageSource::Reservations,
+    );
+    PipelineState::with_governor(
+        SharedConfig::new(config),
+        CancellationToken::new(),
+        None,
+        Some(std::sync::Arc::new(guard)),
+    )
+    .await
+    .expect("pipeline")
 }
 
 /// Rule A lands on endpoint A, rule B on endpoint B, and an unmatched record on
@@ -223,7 +245,7 @@ async fn an_unreachable_destination_holds_then_back_pressures_the_ingest() {
     let mut config = config_with(named, vec![]);
     // A 2 KiB buffer budget, so the queue fills in tens of records.
     config.buffer.memory_limit = 2048;
-    let pipeline = pipeline_for(config).await;
+    let pipeline = pipeline_on_reservations(config).await;
 
     // The buffer holds the first records, so the ingest keeps accepting.
     for id in 0..10 {

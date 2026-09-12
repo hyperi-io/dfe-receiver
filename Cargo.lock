@@ -3937,9 +3937,9 @@ dependencies = [
 
 [[package]]
 name = "scalo"
-version = "2.12.1"
+version = "2.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "18f7c7464c7c7e6923756f7adfee3a78d53ad12fa13a7953313265f098fe47af"
+checksum = "aac643024e640e390ddae3a0d065ff958f21a5baee1f255ea79bd664a15085c6"
 dependencies = [
  "aes-gcm",
  "axum",
