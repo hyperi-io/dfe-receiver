@@ -3,6 +3,14 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.15.35](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.34...v1.15.35) (2026-09-12)
+
+### Bug Fixes
+
+* **deps:** update dependency vectordotdev/vector to v0.58.0 ([#89](https://github.com/hyperi-io/dfe-receiver/issues/89)) ([1e4d892](https://github.com/hyperi-io/dfe-receiver/commit/1e4d8922408d3573c8adba4b1c57b1972516fff3))
+* **docs:** buffer.memory_limit auto-detects 85% of the cgroup limit, not 67% ([#100](https://github.com/hyperi-io/dfe-receiver/issues/100)) ([23f48b0](https://github.com/hyperi-io/dfe-receiver/commit/23f48b0e40008528df0d0b07d238250f87fddd71))
+* rebuild on scalo 2.12.2 ([ba47330](https://github.com/hyperi-io/dfe-receiver/commit/ba47330354c7773a2e919951e97aa3f9863e1bd3))
+
 ## [1.15.34](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.33...v1.15.34) (2026-09-10)
 
 ### Bug Fixes
