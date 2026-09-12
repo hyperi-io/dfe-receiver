@@ -31,6 +31,7 @@ use dfe_receiver::config::{AcceptedHeader, BearerConfig, Config, SharedConfig};
 use dfe_receiver::metrics::Metrics;
 use dfe_receiver::pipeline::PipelineState;
 use dfe_receiver::server::http;
+use scalo::memory::{MemoryGuard, MemoryGuardConfig, UsageSource};
 use tokio_util::sync::CancellationToken;
 
 /// Get a random port for testing.
@@ -91,17 +92,32 @@ fn test_config(port: u16, max_body_size: usize, timeout_ms: u64, auth_mode: &str
 
 /// Start a test server and return the URL.
 async fn start_test_server(config: Config) -> (String, CancellationToken) {
-    let (url, shutdown, _pipeline) = start_test_server_with_pipeline(config).await;
+    let (url, shutdown, _pipeline) = start_test_server_with_pipeline(config, None).await;
     (url, shutdown)
+}
+
+/// A guard reading its own reservations, so a synthetic byte budget means
+/// something in a process whose real usage dwarfs it.
+fn reservation_guard(config: &Config) -> Arc<MemoryGuard> {
+    Arc::new(MemoryGuard::with_usage_source(
+        MemoryGuardConfig {
+            limit_bytes: config.buffer.memory_limit as u64,
+            pressure_threshold: config.buffer.pressure_threshold,
+            ..Default::default()
+        },
+        UsageSource::Reservations,
+    ))
 }
 
 /// Start a test server, also handing back the pipeline behind it.
 ///
 /// Only `test_503_when_pipeline_not_ready` needs the handle, to drive the memory
 /// guard the readiness check reads; it used to re-implement this whole function
-/// for that one extra value.
+/// for that one extra value. It passes `guard` too, so the readiness check reads
+/// a guard whose usage the test controls.
 async fn start_test_server_with_pipeline(
     config: Config,
+    guard: Option<Arc<MemoryGuard>>,
 ) -> (String, CancellationToken, Arc<PipelineState>) {
     let port = config
         .server
@@ -114,9 +130,11 @@ async fn start_test_server_with_pipeline(
     let metrics = Arc::new(Metrics::default());
     let shutdown = CancellationToken::new();
     let pipeline = Arc::new(
-        PipelineState::new(
+        PipelineState::with_governor(
             SharedConfig::new(config.clone()),
             tokio_util::sync::CancellationToken::new(),
+            None,
+            guard,
         )
         .await
         .expect("Failed to create pipeline"),
@@ -1308,7 +1326,8 @@ async fn test_503_when_pipeline_not_ready() {
     config.buffer.memory_limit = 100;
     config.buffer.pressure_threshold = 0.8;
 
-    let (url, shutdown, pipeline) = start_test_server_with_pipeline(config).await;
+    let guard = reservation_guard(&config);
+    let (url, shutdown, pipeline) = start_test_server_with_pipeline(config, Some(guard)).await;
 
     // Fill the buffer beyond pressure threshold (80% of 100 = 80 bytes). The
     // handler reads readiness per request, so applying pressure after the server

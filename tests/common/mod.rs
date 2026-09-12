@@ -426,7 +426,12 @@ macro_rules! skip_if_no_docker {
 /// renovate: datasource=docker depName=apache/kafka-native
 const KAFKA_TAG: &str = "4.3.1";
 
-/// renovate: datasource=docker depName=minio/minio
+/// Docker Hub no longer serves `minio/minio` -- a pull is refused with "pull
+/// access denied ... repository does not exist" -- so the image is addressed at
+/// quay.io, which carries the same tags.
+///
+/// renovate: datasource=docker depName=quay.io/minio/minio
+const MINIO_IMAGE: &str = "quay.io/minio/minio";
 const MINIO_TAG: &str = "RELEASE.2025-09-07T16-13-09Z";
 
 /// OpenBao, not hashicorp/vault. The estate runs OpenBao and so does the
@@ -693,6 +698,7 @@ pub async fn start_minio_container(
     let name = container_name(Some(test), "minio");
     reap_stale(&name);
     let node = MinIO::default()
+        .with_name(MINIO_IMAGE)
         .with_tag(MINIO_TAG)
         .with_container_name(&name)
         .with_labels(test_labels("minio"))

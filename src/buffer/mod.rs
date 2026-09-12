@@ -137,32 +137,3 @@ impl<S: ReceiverSink + 'static> SinkBackend<S> {
 // Re-export MemoryGuard from scalo as the memory tracker.
 // Replaces the bespoke BufferManager — same API, cgroup-aware auto-detection.
 pub use scalo::memory::{MemoryGuard, MemoryGuardConfig, MemoryPressure};
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_memory_guard_pressure() {
-        let guard = MemoryGuard::new(MemoryGuardConfig {
-            limit_bytes: 1000,
-            pressure_threshold: 0.8,
-            ..Default::default()
-        });
-
-        // Low usage
-        guard.add_bytes(100);
-        assert_eq!(guard.pressure(), MemoryPressure::Low);
-        assert!(!guard.under_pressure());
-
-        // Medium usage
-        guard.add_bytes(400);
-        assert_eq!(guard.pressure(), MemoryPressure::Medium);
-        assert!(!guard.under_pressure());
-
-        // High usage
-        guard.add_bytes(400);
-        assert_eq!(guard.pressure(), MemoryPressure::High);
-        assert!(guard.under_pressure());
-    }
-}

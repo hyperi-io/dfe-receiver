@@ -157,6 +157,10 @@ impl PipelineState {
         // YAML-configured guard (env > YAML > cgroup auto-detect).
         let (memory_guard, pressure) = match (governor, runtime_memory_guard) {
             (Some(gov), Some(guard)) => (guard, Some(gov.pressure())),
+            // An injected guard is the caller's whether a governor came with it
+            // or not: building a second one leaves two guards accounting for the
+            // same process.
+            (None, Some(guard)) => (guard, None),
             _ => {
                 let mut mg_config = MemoryGuardConfig::from_env("DFE_RECEIVER");
                 if config.buffer.memory_limit > 0 && mg_config.limit_bytes == 0 {
@@ -934,6 +938,27 @@ mod tests {
             .unwrap()
     }
 
+    /// A pipeline whose guard reads its own reservations, so a synthetic byte
+    /// budget means something in a process whose real usage dwarfs it.
+    async fn test_state_on_reservations(config: Config) -> PipelineState {
+        let guard = MemoryGuard::with_usage_source(
+            MemoryGuardConfig {
+                limit_bytes: config.buffer.memory_limit as u64,
+                pressure_threshold: config.buffer.pressure_threshold,
+                ..Default::default()
+            },
+            scalo::memory::UsageSource::Reservations,
+        );
+        PipelineState::with_governor(
+            SharedConfig::new(config),
+            CancellationToken::new(),
+            None,
+            Some(Arc::new(guard)),
+        )
+        .await
+        .unwrap()
+    }
+
     /// The spillover thresholds an operator sets reach scalo's TieredSink.
     #[test]
     fn spillover_settings_reach_the_tiered_sink() {
@@ -1063,7 +1088,7 @@ mod tests {
         let mut config = test_config();
         config.buffer.memory_limit = 1000;
         config.buffer.pressure_threshold = 0.8;
-        let state = test_state_with(config).await;
+        let state = test_state_on_reservations(config).await;
 
         assert!(state.probe_ready(), "a fresh pipeline must pass the probe");
         assert!(state.is_ready(), "and must admit requests");
@@ -1083,7 +1108,7 @@ mod tests {
         config.buffer.memory_limit = 1000;
         config.buffer.pressure_threshold = 0.8;
 
-        let state = test_state_with(config).await;
+        let state = test_state_on_reservations(config).await;
 
         // Should start without pressure
         assert!(!state.should_apply_backpressure());
@@ -1096,19 +1121,21 @@ mod tests {
         // what covers the cancellation path.
         let state = test_state().await;
         let guard = state.memory_guard().clone();
-        let before = guard.current_bytes();
+        // The lease balance is `reserved_bytes`; `current_bytes` is what the
+        // kernel charges the process and moves on its own.
+        let before = guard.reserved_bytes();
 
         {
             let _lease = MemoryLease::acquire(&guard, 4096);
             assert_eq!(
-                guard.current_bytes(),
+                guard.reserved_bytes(),
                 before + 4096,
                 "acquire must track the bytes"
             );
         }
 
         assert_eq!(
-            guard.current_bytes(),
+            guard.reserved_bytes(),
             before,
             "drop must return the tracked bytes to baseline"
         );
@@ -1123,13 +1150,13 @@ mod tests {
     async fn memory_lease_releases_when_its_future_is_cancelled() {
         let state = test_state().await;
         let guard = state.memory_guard().clone();
-        let before = guard.current_bytes();
+        let before = guard.reserved_bytes();
         let held = Arc::clone(&guard);
 
         let outcome = tokio::time::timeout(Duration::from_millis(50), async move {
             let _lease = MemoryLease::acquire(&held, 4096);
             assert_eq!(
-                held.current_bytes(),
+                held.reserved_bytes(),
                 before + 4096,
                 "the lease must be tracked before the future suspends"
             );
@@ -1142,7 +1169,7 @@ mod tests {
             "the future must be dropped while suspended"
         );
         assert_eq!(
-            guard.current_bytes(),
+            guard.reserved_bytes(),
             before,
             "cancelling a suspended future must release its tracked bytes"
         );
@@ -1151,7 +1178,7 @@ mod tests {
     #[tokio::test]
     async fn process_returns_tracked_bytes_to_baseline() {
         let state = test_state().await;
-        let before = state.memory_guard().current_bytes();
+        let before = state.memory_guard().reserved_bytes();
 
         // Positive control: under backpressure `process` returns before it
         // acquires anything, and the balance assertion below would pass vacuously.
@@ -1162,7 +1189,7 @@ mod tests {
 
         let _ = state.process(Bytes::from(vec![b'x'; 4096])).await;
 
-        assert_eq!(state.memory_guard().current_bytes(), before);
+        assert_eq!(state.memory_guard().reserved_bytes(), before);
     }
 
     /// Cancelling `process` itself must return its bytes, not just the lease type.
@@ -1202,7 +1229,7 @@ mod tests {
 
         let payload = Bytes::from(r#"{"cancelled":true}"#);
         let bytes = payload.len() as u64;
-        let before = state.memory_guard().current_bytes();
+        let before = state.memory_guard().reserved_bytes();
 
         let mut inflight = Box::pin(state.process(payload));
         let mut cx = Context::from_waker(Waker::noop());
@@ -1211,7 +1238,7 @@ mod tests {
             "process must still be in the sink for this to test cancellation"
         );
         assert_eq!(
-            state.memory_guard().current_bytes(),
+            state.memory_guard().reserved_bytes(),
             before + bytes,
             "process must charge the guard before it suspends"
         );
@@ -1219,7 +1246,7 @@ mod tests {
         drop(inflight);
 
         assert_eq!(
-            state.memory_guard().current_bytes(),
+            state.memory_guard().reserved_bytes(),
             before,
             "dropping the suspended request must return its tracked bytes"
         );
