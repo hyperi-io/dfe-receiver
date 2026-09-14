@@ -39,7 +39,7 @@ RUN chmod +x /usr/local/bin/dfe-receiver
 RUN if id ubuntu >/dev/null 2>&1; then userdel -r ubuntu; fi && useradd --create-home --uid 1000 appuser
 USER appuser
 
-EXPOSE 9090 8080 6000 4317 4318 5044 8088 9091 514 6514 24224 12201 2055 4739 6343
+EXPOSE 9090 8080 6000 4317 4318 5044 8088 9091 8090 514 6514 24224 12201 2055 4739 6343
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD curl -sf http://localhost:9090/livez > /dev/null || exit 1

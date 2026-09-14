@@ -102,6 +102,11 @@ pub fn contract() -> DeploymentContract {
                 protocol: "TCP".into(),
             },
             PortContract {
+                name: "webhook".into(),
+                port: 8090,
+                protocol: "TCP".into(),
+            },
+            PortContract {
                 name: "syslog".into(),
                 port: 514,
                 protocol: "TCP".into(),
@@ -198,6 +203,10 @@ pub fn contract() -> DeploymentContract {
             "prometheus_rw": {
                 "enabled": false,
                 "bind_address": "0.0.0.0:9091"
+            },
+            "webhook": {
+                "enabled": false,
+                "bind_address": "0.0.0.0:8090"
             },
             "syslog": {
                 "enabled": false,
@@ -324,6 +333,9 @@ fn capabilities() -> Vec<scalo::deployment::Capability> {
                 ingest("fluent", "Fluent Forward protocol."),
                 ingest("gelf", "Graylog Extended Log Format."),
                 ingest("flow", "NetFlow v5/v9 + IPFIX + sFlow v5."),
+                Capability::new("ingest", "webhook")
+                    .description("Generic authenticated webhook intake: POST /webhook/{caller}, per-caller HMAC or static-header auth, per-caller topic.".to_string())
+                    .maturity("beta"),
             ]),
         Capability::sink("destinations")
             .description("The named destination set: a match rule sends accepted events to one destination or fans them out to several.")
@@ -411,7 +423,7 @@ mod tests {
     #[test]
     fn test_contract_ports() {
         let c = contract();
-        assert_eq!(c.extra_ports.len(), 14);
+        assert_eq!(c.extra_ports.len(), 15);
         let port_names: Vec<&str> = c.extra_ports.iter().map(|p| p.name.as_str()).collect();
         assert!(port_names.contains(&"http"));
         assert!(port_names.contains(&"grpc"));
@@ -420,6 +432,7 @@ mod tests {
         assert!(port_names.contains(&"beats"));
         assert!(port_names.contains(&"hec"));
         assert!(port_names.contains(&"prometheus-rw"));
+        assert!(port_names.contains(&"webhook"));
         assert!(port_names.contains(&"syslog"));
         assert!(port_names.contains(&"syslog-tls"));
         assert!(port_names.contains(&"fluent"));

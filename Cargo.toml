@@ -38,6 +38,9 @@ scalo = { version = ">=2.12.1, <3", features = [
     "tiered-sink",
     "runtime",
     "secrets",
+    # `vault:` secret refs (bearer tokens, webhook caller secrets) resolve
+    # through scalo's OpenBao provider, which only compiles in with this on.
+    "secrets-vault",
     "scaling",
     # CEL expression evaluation -- REQUIRED for the scalo ScalingEngine to
     # build (`#[cfg(all(scaling, expression))]`). Without it the horizontal
@@ -106,8 +109,14 @@ tower_governor = { version = "0.8", features = ["axum"] }
 ipnet = "2"
 ipnet-trie = "0.3"
 
-# Crypto (bearer token hashing for constant-time comparison)
+# Crypto (bearer token hashing for constant-time comparison, webhook HMAC)
 ring = "0.17"
+
+# CEL programs for the webhook per-caller filter. scalo compiles them
+# (`scalo::expression::compile`) but does not re-export the `Program` type, so
+# holding a compiled program across requests needs the crate directly. Same
+# range as scalo so cargo unifies to one copy.
+cel = { version = ">=0.13, <0.14", features = ["json"] }
 
 # Performance
 rustc-hash = "2"

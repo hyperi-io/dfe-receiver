@@ -123,6 +123,83 @@ fn hash_token(token: &str) -> TokenHash {
     out
 }
 
+/// Read the text of a secret from a `provider:path[:key]` reference.
+///
+/// Supported providers:
+/// - `file`: a local file (`file:/etc/secrets/tokens`), typically a mounted
+///   Kubernetes Secret
+/// - `vault` or `openbao`: an OpenBao KV v2 field
+///   (`vault:kv/data/dfe/auth:tokens`); the connection comes from the
+///   `secrets.openbao` config section or `VAULT_ADDR` plus a `VAULT_TOKEN` /
+///   AppRole / Kubernetes credential in the environment
+/// - `aws`: AWS Secrets Manager (`aws:prod/auth/tokens:bearer`)
+///
+/// Every read goes to the provider: scalo's disk cache is disabled here so a
+/// refresh sees a rotated value rather than the copy a previous
+/// `SecretsManager` wrote.
+pub async fn read_secret_source(source: &str) -> Result<String> {
+    use scalo::secrets::{SecretSource, SecretsConfig, SecretsManager};
+
+    let parts: Vec<&str> = source.splitn(3, ':').collect();
+    if parts.len() < 2 {
+        return Err(crate::error::Error::Config(format!(
+            "Invalid secret source format: {source}. Expected 'provider:path' or 'provider:path:key'"
+        )));
+    }
+
+    let provider_name = parts[0];
+    let path = parts[1];
+    let key = parts.get(2).copied();
+
+    let secret_source = match provider_name {
+        "file" => SecretSource::File {
+            path: path.to_string(),
+        },
+        "vault" | "openbao" => SecretSource::OpenBao {
+            path: path.to_string(),
+            key: key.unwrap_or("value").to_string(),
+        },
+        "aws" => SecretSource::Aws {
+            secret_id: path.to_string(),
+            key: key.map(String::from),
+        },
+        _ => {
+            return Err(crate::error::Error::Config(format!(
+                "Unknown secret provider: {provider_name}. Supported: file, vault, openbao, aws"
+            )));
+        }
+    };
+
+    // A default SecretsConfig has no OpenBao connection, and without one every
+    // `vault:` lookup is refused before an address is read.
+    let mut config = SecretsConfig::from_cascade();
+    if config.openbao.is_none() {
+        config.openbao = scalo::secrets::OpenBaoConfig::from_env();
+    }
+    if matches!(secret_source, SecretSource::OpenBao { .. }) && config.openbao.is_none() {
+        return Err(crate::error::Error::Config(format!(
+            "secret source '{source}' needs an OpenBao connection: set VAULT_ADDR plus \
+             one of VAULT_TOKEN, VAULT_ROLE_ID + VAULT_SECRET_ID or VAULT_K8S_ROLE, or \
+             declare a `secrets.openbao` section in the config"
+        )));
+    }
+    config.sources = [("secret".to_string(), secret_source)]
+        .into_iter()
+        .collect();
+    config.cache = scalo::secrets::CacheConfig {
+        enabled: false,
+        ..Default::default()
+    };
+    let secrets = SecretsManager::new(config)?;
+
+    let secret_value = if provider_name == "file" {
+        secrets.get_file(path).await?
+    } else {
+        secrets.get("secret").await?
+    };
+    Ok(secret_value.as_str()?.to_string())
+}
+
 /// Bearer token provider with dynamic secret loading.
 ///
 /// Supports loading tokens from:
@@ -192,74 +269,11 @@ impl BearerTokenProvider {
 
     /// Load tokens from a secret source.
     ///
-    /// Format: "provider:path" or "provider:path:key"
-    ///
-    /// Supported providers:
-    /// - `file`: Load from file path (e.g., "file:/etc/secrets/tokens")
-    /// - `vault` or `openbao`: Load from Vault/OpenBao (e.g., "vault:secret/data/auth:tokens")
-    /// - `aws`: Load from AWS Secrets Manager (e.g., "aws:prod/auth/tokens:bearer")
-    ///
-    /// For vault/aws providers, you need to configure the provider credentials in
-    /// the application secrets config.
+    /// The source is a `provider:path[:key]` reference as
+    /// [`read_secret_source`] accepts; the content is a newline- or
+    /// comma-separated token list.
     async fn load_from_secret(&self, source: &str) -> Result<()> {
-        let parts: Vec<&str> = source.splitn(3, ':').collect();
-        if parts.len() < 2 {
-            return Err(crate::error::Error::Config(format!(
-                "Invalid secret source format: {source}. Expected 'provider:path' or 'provider:path:key'"
-            )));
-        }
-
-        let provider_name = parts[0];
-        let path = parts[1];
-        let key = parts.get(2).copied();
-
-        // Use scalo secrets manager
-        use scalo::secrets::{SecretSource, SecretsConfig, SecretsManager};
-
-        // Build the secret source based on provider
-        let secret_source = match provider_name {
-            "file" => SecretSource::File {
-                path: path.to_string(),
-            },
-            "vault" | "openbao" => SecretSource::OpenBao {
-                path: path.to_string(),
-                key: key.unwrap_or("value").to_string(),
-            },
-            "aws" => SecretSource::Aws {
-                secret_id: path.to_string(),
-                key: key.map(String::from),
-            },
-            _ => {
-                return Err(crate::error::Error::Config(format!(
-                    "Unknown secret provider: {provider_name}. Supported: file, vault, openbao, aws"
-                )));
-            }
-        };
-
-        // Configure secrets manager with this source.
-        // Disable cache so each refresh reads the file fresh — the disk-backed cache
-        // in scalo would otherwise return stale data across SecretsManager instances.
-        let config = SecretsConfig {
-            sources: [("bearer_tokens".into(), secret_source)]
-                .into_iter()
-                .collect(),
-            cache: scalo::secrets::CacheConfig {
-                enabled: false,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let secrets = SecretsManager::new(config)?;
-
-        // For file sources, use get_file directly for simplicity
-        let secret_value = if provider_name == "file" {
-            secrets.get_file(path).await?
-        } else {
-            secrets.get("bearer_tokens").await?
-        };
-
-        // Parse tokens (newline or comma separated)
-        let content = secret_value.as_str()?;
+        let content = read_secret_source(source).await?;
         let new_hashes: HashSet<TokenHash> = content
             .lines()
             .flat_map(|line| line.split(','))

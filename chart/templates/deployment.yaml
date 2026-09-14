@@ -69,6 +69,9 @@ spec:
             - name: prometheus-rw
               containerPort: 9091
               protocol: TCP
+            - name: webhook
+              containerPort: 8090
+              protocol: TCP
             - name: syslog
               containerPort: 514
               protocol: TCP

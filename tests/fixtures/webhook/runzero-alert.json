@@ -1,0 +1,16 @@
+{
+  "captured_from": "runZero self-hosted console: an alert rule on the scan-completed event, the Default notification template, delivered to a webhook channel configured with one static header. The body is what runZero posted, byte for byte; the Host header and the header value are placeholders.",
+  "method": "POST",
+  "path": "/webhook/runzero",
+  "headers": {
+    "host": "<receiver-host>:<port>",
+    "user-agent": "runZero Notification (runzero.com)",
+    "content-length": "170",
+    "content-type": "application/json",
+    "x-webhook-secret": "<REDACTED>",
+    "accept-encoding": "gzip"
+  },
+  "body": {
+    "text": "*Site:* Primary\n*Scan result:* 0 new, 0 back, 0 offline, and 0 changed assets.\n*Rule triggering this notification:* dfe-receiver webhook capture (temporary)"
+  }
+}

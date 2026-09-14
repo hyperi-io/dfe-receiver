@@ -62,3 +62,5 @@ mod syslog;
 mod vault_auth;
 #[path = "integration/vector.rs"]
 mod vector;
+#[path = "integration/webhook.rs"]
+mod webhook;

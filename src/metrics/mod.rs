@@ -46,6 +46,11 @@ pub enum AuthFailureReason {
     InvalidToken,
     /// Invalid header value.
     InvalidHeader,
+    /// A webhook HMAC signature did not verify.
+    InvalidSignature,
+    /// A webhook signature was valid but its timestamp fell outside the
+    /// replay window.
+    StaleSignature,
 }
 
 /// Reason for validation failure (for metrics labels).
@@ -449,6 +454,10 @@ impl Metrics {
                     .fetch_add(1, Ordering::Relaxed);
                 ("invalid_header", RlAuthReason::MalformedToken)
             }
+            AuthFailureReason::InvalidSignature => {
+                ("invalid_signature", RlAuthReason::InvalidSignature)
+            }
+            AuthFailureReason::StaleSignature => ("stale_signature", RlAuthReason::Expired),
         };
         metrics::counter!(
             "receiver_auth_failures_total",
@@ -582,6 +591,12 @@ impl Metrics {
     #[inline]
     pub fn get_validation_failures_total(&self) -> u64 {
         self.validation_failures_total.load(Ordering::Relaxed)
+    }
+
+    /// Get oversized-body rejection count.
+    #[inline]
+    pub fn get_body_size_rejected_total(&self) -> u64 {
+        self.body_size_rejected_total.load(Ordering::Relaxed)
     }
 
     /// Get TLS handshake failure count.

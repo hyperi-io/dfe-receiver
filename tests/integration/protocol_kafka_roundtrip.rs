@@ -31,6 +31,7 @@ use dfe_receiver::server::prometheus_rw::PrometheusRwHandler;
 use dfe_receiver::server::prometheus_rw::proto;
 use dfe_receiver::server::splunk_hec::SplunkHecHandler;
 use dfe_receiver::server::traits::ProtocolHandler;
+use dfe_receiver::server::webhook::WebhookHandler;
 use prost::Message;
 use tokio_util::sync::CancellationToken;
 
@@ -279,6 +280,233 @@ async fn test_splunk_hec_to_kafka_roundtrip() {
         .expect("no message arrived on Kafka topic");
     let text = String::from_utf8_lossy(&received);
     assert!(text.contains("test event"), "payload mismatch: {text}");
+
+    shutdown.cancel();
+}
+
+// =========================================================================
+// Webhook -> Kafka
+// =========================================================================
+
+/// The captured runZero alert-rule webhook, delivered in `header` mode (the
+/// only mode runZero can drive: its webhook channel carries a URL and static
+/// headers, nothing signed), lands on the caller's topic stamped with
+/// `_source` and `_timestamp_receiver`.
+#[tokio::test]
+async fn test_webhook_to_kafka_roundtrip() {
+    use std::io::Write;
+
+    use dfe_receiver::config::{
+        WebhookAuthConfig, WebhookAuthMode, WebhookBody, WebhookCallerConfig,
+    };
+
+    let Some((_handle, kf)) = kafka_backend(test_name!()).await else {
+        eprintln!("Skipping: no Kafka backend available");
+        return;
+    };
+
+    // The fixture: method, headers (secret redacted) and the body as posted.
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("../fixtures/webhook/runzero-alert.json"))
+            .expect("fixture parses");
+    assert_eq!(fixture["method"], "POST");
+    assert_eq!(fixture["path"], "/webhook/runzero");
+    let body = serde_json::to_vec(&fixture["body"]).unwrap();
+
+    // The caller's secret lives in a file, as a mounted Secret would.
+    let mut secret_file = tempfile::NamedTempFile::new().unwrap();
+    writeln!(secret_file, "runzero-webhook-shared-secret").unwrap();
+    secret_file.flush().unwrap();
+
+    // The caller's topic is fixed by config and carries no suffix.
+    let topic = test_topic("webhook");
+    let mut config = kafka_config(&kf, &topic);
+    let webhook_port = random_port();
+    config.webhook.enabled = true;
+    config.webhook.bind_address = Some(format!("127.0.0.1:{webhook_port}"));
+    config.webhook.callers = vec![WebhookCallerConfig {
+        name: "runzero".to_string(),
+        topic: topic.clone(),
+        auth: WebhookAuthConfig {
+            mode: WebhookAuthMode::Header,
+            secret_source: format!("file:{}", secret_file.path().display()),
+            refresh_interval_secs: 0,
+            header: "x-webhook-secret".to_string(),
+            ..WebhookAuthConfig::default()
+        },
+        body: WebhookBody::Single,
+        filter: String::new(),
+    }];
+
+    // Subscribe BEFORE sending
+    let consumer = kafka_consumer(&kf, &topic).expect("consumer setup");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let metrics = Arc::new(Metrics::default());
+    let shutdown = CancellationToken::new();
+    let pipeline = Arc::new(
+        PipelineState::new(
+            SharedConfig::new(config.clone()),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("pipeline init"),
+    );
+    let handler = WebhookHandler::new(config, pipeline, metrics.clone());
+    let handler_shutdown = shutdown.clone();
+    tokio::spawn(async move {
+        if let Err(e) = handler.start(handler_shutdown).await {
+            eprintln!("handler exited with an error: {e}");
+        }
+    });
+    wait_for_port(webhook_port).await;
+
+    // Replay the capture: runZero's headers, the shared secret in place of
+    // the redacted value.
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://127.0.0.1:{webhook_port}/webhook/runzero"))
+        .header("content-type", "application/json")
+        .header(
+            "user-agent",
+            fixture["headers"]["user-agent"].as_str().unwrap(),
+        )
+        .header("accept-encoding", "gzip")
+        .header("x-webhook-secret", "runzero-webhook-shared-secret")
+        .body(body.clone())
+        .send()
+        .await
+        .expect("POST failed");
+    assert_eq!(
+        resp.status(),
+        202,
+        "webhook rejected: {}",
+        resp.text().await.unwrap()
+    );
+
+    let received = kafka_consume_next(&consumer, Duration::from_secs(30))
+        .await
+        .expect("no message arrived on the caller's topic");
+    let record: serde_json::Value =
+        serde_json::from_slice(&received).expect("the record on Kafka is JSON");
+    assert_eq!(record["_source"], "runzero", "record: {record}");
+    assert!(
+        record["_timestamp_receiver"].is_u64(),
+        "record must carry the receiver timestamp: {record}"
+    );
+    assert_eq!(
+        record["text"], fixture["body"]["text"],
+        "the product's fields must arrive untouched: {record}"
+    );
+
+    shutdown.cancel();
+}
+
+/// In `body: array` mode one bad element refuses the whole request, and the
+/// elements before it never reach the topic, so the sender's retry does not
+/// duplicate them.
+#[tokio::test]
+async fn test_webhook_array_with_a_bad_element_delivers_nothing() {
+    use std::io::Write;
+
+    use dfe_receiver::config::{
+        WebhookAuthConfig, WebhookAuthMode, WebhookBody, WebhookCallerConfig,
+    };
+
+    let Some((_handle, kf)) = kafka_backend(test_name!()).await else {
+        eprintln!("Skipping: no Kafka backend available");
+        return;
+    };
+
+    let mut secret_file = tempfile::NamedTempFile::new().unwrap();
+    writeln!(secret_file, "bulk-webhook-shared-secret").unwrap();
+    secret_file.flush().unwrap();
+
+    let topic = test_topic("webhook-array");
+    let mut config = kafka_config(&kf, &topic);
+    let webhook_port = random_port();
+    config.webhook.enabled = true;
+    config.webhook.bind_address = Some(format!("127.0.0.1:{webhook_port}"));
+    config.webhook.callers = vec![WebhookCallerConfig {
+        name: "bulk".to_string(),
+        topic: topic.clone(),
+        auth: WebhookAuthConfig {
+            mode: WebhookAuthMode::Header,
+            secret_source: format!("file:{}", secret_file.path().display()),
+            refresh_interval_secs: 0,
+            header: "x-webhook-secret".to_string(),
+            ..WebhookAuthConfig::default()
+        },
+        body: WebhookBody::Array,
+        filter: String::new(),
+    }];
+
+    // Subscribe BEFORE sending
+    let consumer = kafka_consumer(&kf, &topic).expect("consumer setup");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let metrics = Arc::new(Metrics::default());
+    let shutdown = CancellationToken::new();
+    let pipeline = Arc::new(
+        PipelineState::new(
+            SharedConfig::new(config.clone()),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("pipeline init"),
+    );
+    let handler = WebhookHandler::new(config, pipeline, metrics.clone());
+    let handler_shutdown = shutdown.clone();
+    tokio::spawn(async move {
+        if let Err(e) = handler.start(handler_shutdown).await {
+            eprintln!("handler exited with an error: {e}");
+        }
+    });
+    wait_for_port(webhook_port).await;
+
+    let client = reqwest::Client::new();
+    let url = format!("http://127.0.0.1:{webhook_port}/webhook/bulk");
+
+    // An object followed by a number: the request is refused as a whole.
+    let resp = client
+        .post(&url)
+        .header("content-type", "application/json")
+        .header("x-webhook-secret", "bulk-webhook-shared-secret")
+        .body(r#"[{"a":1}, 5]"#)
+        .send()
+        .await
+        .expect("POST failed");
+    assert_eq!(resp.status(), 400);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "record_not_an_object");
+
+    // A good request after it: the first record on the topic must be this
+    // one, not the refused request's leading element.
+    let resp = client
+        .post(&url)
+        .header("content-type", "application/json")
+        .header("x-webhook-secret", "bulk-webhook-shared-secret")
+        .body(r#"[{"a":2}]"#)
+        .send()
+        .await
+        .expect("POST failed");
+    assert_eq!(resp.status(), 202, "body: {}", resp.text().await.unwrap());
+
+    let received = kafka_consume_next(&consumer, Duration::from_secs(30))
+        .await
+        .expect("the accepted record never arrived on the caller's topic");
+    let record: serde_json::Value = serde_json::from_slice(&received).unwrap();
+    assert_eq!(
+        record["a"], 2,
+        "an element of the refused request reached the topic: {record}"
+    );
+    // Nothing follows it, so a leaked element on another partition shows too.
+    let extra = kafka_consume_next(&consumer, Duration::from_secs(3)).await;
+    assert!(
+        extra.is_none(),
+        "an element of the refused request reached the topic: {}",
+        String::from_utf8_lossy(extra.as_deref().unwrap_or_default())
+    );
 
     shutdown.cancel();
 }

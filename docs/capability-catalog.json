@@ -64,6 +64,12 @@
         "name": "flow",
         "description": "NetFlow v5/v9 + IPFIX + sFlow v5.",
         "maturity": "stable"
+      },
+      {
+        "kind": "ingest",
+        "name": "webhook",
+        "description": "Generic authenticated webhook intake: POST /webhook/{caller}, per-caller HMAC or static-header auth, per-caller topic.",
+        "maturity": "beta"
       }
     ]
   },
