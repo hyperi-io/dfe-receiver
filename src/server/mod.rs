@@ -29,6 +29,7 @@ pub mod splunk_hec;
 pub mod syslog;
 pub mod tls;
 pub mod traits;
+pub mod webhook;
 
 use std::sync::Arc;
 
@@ -51,6 +52,7 @@ use crate::server::prometheus_rw::PrometheusRwHandler;
 use crate::server::splunk_hec::SplunkHecHandler;
 use crate::server::syslog::SyslogHandler;
 use crate::server::traits::ProtocolHandler;
+use crate::server::webhook::WebhookHandler;
 
 /// Main server that manages protocol handlers.
 pub struct Server {
@@ -173,6 +175,16 @@ impl Server {
             handlers.push(Box::new(GelfHandler::new(
                 config.gelf.clone(),
                 config.raw_capture_for(&config.gelf.raw_capture),
+                self.state.clone(),
+                self.metrics.clone(),
+            )));
+        }
+
+        // Webhook intake on its own listener. With no bind_address the routes
+        // ride the HTTP handler's listener instead (see http::run_server).
+        if config.webhook.enabled && config.webhook.bind_address.is_some() {
+            handlers.push(Box::new(WebhookHandler::new(
+                config.clone(),
                 self.state.clone(),
                 self.metrics.clone(),
             )));

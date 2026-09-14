@@ -184,6 +184,55 @@ prometheus_rw:
     #   secret_source: "file:/etc/secrets/prometheus-tokens"
     #   refresh_interval_secs: 300
 
+# Generic authenticated webhook intake: POST /webhook/{caller}
+#
+# One route per declared caller. A caller is a product that pushes events
+# (an alert rule, a SaaS notification hook) and carries its own secret, its
+# own topic and its own body shape, so callers never share a credential and a
+# wrong secret is only tried against the caller the path names. Every record
+# lands on the caller's topic stamped with `_source: <caller>` and
+# `_timestamp_receiver`.
+#
+# bind_address unset: the routes ride the main ingest listener (server.tls,
+# server.ip_filter, server.rate_limit apply; server.auth does NOT -- the
+# caller's secret is the only credential). Set: an own listener under
+# webhook.tls, so a deployment can expose only this port to a product's
+# egress; server.ip_filter, server.rate_limit and max_concurrent_requests
+# still apply to it.
+webhook:
+  enabled: false
+  # bind_address: "0.0.0.0:8090"   # unset = share the ingest listener
+  max_body_size: 1048576           # 1 MiB; alerts are small, bulk goes to /ingest
+  request_timeout_ms: 10000
+  # tls: (own listener only; same keys as server.tls)
+  callers: []
+  # callers:
+  #   # A product that signs its requests: HMAC-SHA256 over "{timestamp}.{body}"
+  #   # with the timestamp in a second header, checked against a replay window.
+  #   - name: pager                          # POST /webhook/pager; _source = pager
+  #     topic: pager_land                    # verbatim, no routing.topic_suffix
+  #     auth:
+  #       mode: hmac
+  #       secret_source: "vault:kv/data/dfe/webhooks:pager"   # provider:path:key; no static field
+  #       refresh_interval_secs: 300
+  #       header: x-signature                # "sha256=<hex>" or bare hex
+  #       timestamp_header: x-timestamp      # unix seconds, part of the signed string
+  #       tolerance_secs: 300                # 401 stale_signature outside this window
+  #     body: single                         # single | array (array fans out per element)
+  #     filter: 'severity == "high"'         # optional CEL; false drops the record
+  #
+  #   # A product that can only attach static headers (runZero alert rules are
+  #   # one): the header value is the shared secret, compared as a hash. No
+  #   # integrity or replay protection -- opt in per caller, restrict the
+  #   # source with server.ip_filter.
+  #   - name: runzero
+  #     topic: runzero_alerts_land
+  #     auth:
+  #       mode: header
+  #       secret_source: "file:/run/secrets/runzero-webhook"
+  #       header: x-webhook-secret           # `authorization` also accepts "Bearer <secret>"
+  #     body: single
+
 # Fluent Forward protocol (Fluentd/Fluent Bit, msgpack over TCP)
 fluent:
   enabled: false

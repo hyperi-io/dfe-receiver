@@ -353,6 +353,68 @@ be mistaken for a faithful one:
 dropped at the loader; the receiver cannot see the destination profile, so
 this is not checked.
 
+## Webhook intake
+
+`POST /webhook/{caller}` is the door for products that push events -- an alert
+rule, a SaaS notification hook -- rather than agents that stream them. It is
+its own protocol handler (`src/server/webhook/`), not a bolt-on to `/ingest`:
+`/ingest` checks one server-wide credential in middleware before the body is
+read, a product is identified per caller and a signed request needs the body;
+a product's payload shape is its own, so `routing.source_rules` cannot pick its
+topic; and an own listener lets a deployment expose only this port to the
+product's egress.
+
+```mermaid
+flowchart LR
+    P["Product<br/>(alert rule, hook)"] -->|"POST /webhook/{caller}"| L["Listener<br/>shared ingest port, or webhook.bind_address"]
+    L --> LIM["Body limit (webhook.max_body_size)<br/>413 + body_size_rejected"]
+    LIM --> CALLER["Caller lookup<br/>404 unknown_caller"]
+    CALLER --> AUTH["Per-caller auth<br/>hmac: HMAC-SHA256 over ts.body, replay window<br/>header: hashed shared secret"]
+    AUTH -->|401 reason| P
+    AUTH --> READY["Readiness<br/>503 + retry-after"]
+    READY --> SPLIT["body: single | array"]
+    SPLIT --> FILTER["CEL filter<br/>compiled at load, false drops"]
+    FILTER --> STAMP["_source = caller<br/>_timestamp_receiver"]
+    STAMP --> TOPIC["process_to_topic(caller.topic)"]
+    TOPIC --> KAFKA[("Kafka")]
+```
+
+Two authentication modes, chosen per caller:
+
+| Mode | What the product sends | What it proves | Replay |
+|---|---|---|---|
+| `hmac` | `X-Signature: sha256=HMAC(secret, "{ts}.{body}")`, `X-Timestamp: <unix secs>` | The body is unmodified and was signed by the secret holder | Refused outside `tolerance_secs` (default 300) as `stale_signature` |
+| `header` | A fixed header carrying the shared secret | The sender holds the secret | None -- restrict the source with `server.ip_filter` |
+
+`header` exists because some products can only attach static headers to a
+webhook (runZero alert rules are the first caller and the reason); it is the
+weaker mode and opt-in per caller. In both modes the secret is a
+`provider:path[:key]` reference resolved through the same reader as bearer
+tokens, refreshed on an interval, never a literal in the config file.
+
+The path names the caller, so a wrong secret is only tried against one secret
+set and callers never share a credential. Authentication runs before the
+readiness check, so an unauthenticated client learns nothing about the
+pipeline. Failures log at debug and count under
+`dfe_receiver_auth_failures_total{reason}`; a credential spray writes no warn
+line per attempt.
+
+Delivery goes through `process_to_topic`, which validates and back-pressures
+but skips the router's enrichment, so the handler stamps `_source` (the caller
+name, which wins over a sender-supplied value) and `_timestamp_receiver`
+itself. In `body: array` mode every element is checked, filtered and stamped
+before any is delivered, so one element that is not an object refuses the
+whole request as a 400 with nothing on the topic and the sender's retry
+duplicates nothing. An oversize body is a 413 plus `body_size_rejected_total`,
+never a DLQ entry: unauthenticated bytes do not enter Kafka.
+
+`webhook.bind_address` unset merges the routes into the ingest listener after
+its auth middleware and body limit have been applied to the ingest routes, so
+the webhook keeps its own per-caller auth and smaller body limit while sharing
+`server.tls`, `server.ip_filter`, `server.rate_limit` and the concurrency cap.
+Set, the intake runs on its own port through the same hardened accept loops
+and the same rate limit and concurrency cap, under `webhook.tls`.
+
 ## Deployment
 
 ### Kubernetes with KEDA
@@ -758,6 +820,7 @@ See `config.example.yaml` for the full `flow:` block.
 - [x] `_timestamp_receiver` enrichment
 - [x] 9-protocol multi-protocol ingestion (HTTP, gRPC, OTLP, Lumberjack, Splunk HEC, Syslog, Fluent, GELF, Prometheus RW)
 - [x] Flow handler (NetFlow v5/v9/IPFIX + sFlow v5 + NSEL + NAT44, autosense UDP, EXPERIMENTAL)
+- [x] Webhook intake (`POST /webhook/{caller}`, per-caller HMAC or static-header auth, per-caller topic)
 
 ## References
 

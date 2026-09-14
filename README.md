@@ -16,9 +16,9 @@ agent protocols, normalises it to JSON, and routes it to Kafka topics or dfe-loa
 It is built on the [scalo](https://github.com/hyperi-io/scalo-rs) data-plane runtime
 (config cascade, logging, metrics, transport, TieredSink, health probes).
 
-**10 protocol handlers** (HTTP, gRPC, OTLP, Lumberjack/Beats, Splunk HEC,
-Syslog, Fluent Forward, GELF, Prometheus Remote Write, Flow [NetFlow + sFlow
--- **EXPERIMENTAL**]).
+**11 protocol handlers** (HTTP, gRPC, OTLP, Lumberjack/Beats, Splunk HEC,
+Syslog, Fluent Forward, GELF, Prometheus Remote Write, Webhook, Flow [NetFlow
++ sFlow -- **EXPERIMENTAL**]).
 
 **Supported protocols:**
 
@@ -26,6 +26,7 @@ Syslog, Fluent Forward, GELF, Prometheus Remote Write, Flow [NetFlow + sFlow
 |---|---|---|
 | HTTP(S) JSON | configurable | Vector, custom agents |
 | gRPC Vector sink | configurable | Vector |
+| Webhook (`POST /webhook/{caller}`) | shares HTTP, or 8090 | Product alert rules and notification hooks (runZero, ...) |
 | OTLP gRPC | 4317 | OpenTelemetry collectors |
 | OTLP HTTP | 4318 | OpenTelemetry collectors |
 | Lumberjack/Beats | 5044 | Filebeat, Logstash Beats output |
@@ -176,6 +177,54 @@ curl -X POST http://localhost:8080/ingest \
 - `401 Unauthorized` - Authentication failed
 - `503 Service Unavailable` - Downstream unavailable or under pressure
 
+### POST /webhook/{caller}
+
+A generic authenticated intake for products that push events: one route per
+caller declared under `webhook.callers`, each with its own secret, topic and
+body shape. Every accepted record lands on the caller's topic stamped with
+`_source: <caller>` and `_timestamp_receiver`.
+
+```yaml
+webhook:
+  enabled: true
+  callers:
+    - name: runzero                  # POST /webhook/runzero
+      topic: runzero_alerts_land
+      auth:
+        mode: header                 # the product can only set static headers
+        secret_source: "file:/run/secrets/runzero-webhook"
+        header: x-webhook-secret
+    - name: pager
+      topic: pager_land
+      auth:
+        mode: hmac                   # HMAC-SHA256 over "{timestamp}.{body}"
+        secret_source: "vault:kv/data/dfe/webhooks:pager"
+        header: x-signature
+        timestamp_header: x-timestamp
+        tolerance_secs: 300
+      body: array
+      filter: 'severity == "high"'
+```
+
+`hmac` gives integrity and a replay window; `header` is for products that can
+only attach fixed headers and is opt-in per caller. With `webhook.bind_address`
+unset the routes share the HTTP listener without its `server.auth` middleware;
+set it for an own listener. Secrets come from a `provider:path:key` reference,
+never from the config file.
+
+**Response Codes:**
+
+- `202 Accepted` - Records queued (a filtered-out record still answers 202)
+- `400 Bad Request` - Body shape does not match the caller's `body` setting,
+  or an array element is not an object (the whole request is refused and
+  nothing is delivered)
+- `401 Unauthorized` - `{"error": "<reason>"}`: `missing_signature`,
+  `invalid_signature`, `stale_signature`, `missing_auth_header`,
+  `invalid_header_value`, ...
+- `404 Not Found` - No caller by that name
+- `413 Payload Too Large` - Over `webhook.max_body_size`
+- `503 Service Unavailable` - Under pressure, with `retry-after`
+
 ### GET /livez
 
 Kubernetes liveness probe.
@@ -239,7 +288,7 @@ The handlers run in parallel (each opt-in); the table above lists the full set.
 ```mermaid
 flowchart TB
     SRC["Agents / collectors<br/>Vector, Beats, OTel, Splunk, syslog, ..."]
-    SRC --> H["10 protocol handlers<br/>each opt-in, spawned in parallel<br/>normalise to JSON"]
+    SRC --> H["11 protocol handlers<br/>each opt-in, spawned in parallel<br/>normalise to JSON"]
     H -->|"bytes::Bytes (normalised JSON)"| AUTH["Auth middleware<br/>header / bearer / mTLS"]
     AUTH --> VAL["JSON validation<br/>sonic-rs SIMD, optional field checks"]
     VAL --> RT["Router<br/>zero-copy field extract -> topic name"]

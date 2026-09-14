@@ -77,6 +77,9 @@ pub struct Config {
     /// Flow (NetFlow v5/v9 + IPFIX + sFlow v5) receiver configuration.
     pub flow: crate::server::flow::config::FlowConfig,
 
+    /// Generic authenticated webhook intake (`POST /webhook/{caller}`).
+    pub webhook: WebhookConfig,
+
     /// Common raw-payload capture default, inherited by every transport that
     /// supports capture. Per-transport `raw_capture:` blocks override it
     /// field by field. See [`raw_capture`].
@@ -132,6 +135,7 @@ impl Default for Config {
             fluent: FluentConfig::default(),
             gelf: GelfConfig::default(),
             flow: crate::server::flow::config::FlowConfig::default(),
+            webhook: WebhookConfig::default(),
             raw_capture: RawCaptureConfig::default(),
             validation: ValidationConfig::default(),
             routing: RoutingConfig::default(),
@@ -315,6 +319,16 @@ impl Config {
         }
 
         self.validate_auth()?;
+        self.webhook.validate()?;
+        // A caller's topic is a Kafka topic; without brokers every accepted
+        // record would fail at delivery.
+        if self.webhook.enabled && self.kafka.brokers.is_empty() {
+            return Err(Error::Config(
+                "webhook.enabled is true but kafka.brokers is empty -- every webhook \
+                 caller delivers to a Kafka topic"
+                    .into(),
+            ));
+        }
 
         // Validate buffer config
         if self.buffer.pressure_threshold < 0.0 || self.buffer.pressure_threshold > 1.0 {
@@ -639,6 +653,16 @@ impl ApplyFlatEnv for Config {
         }
         if let Some(v) = flat_env::flat_env_parsed::<u32>(prefix, "FLOW_RATE_LIMIT_BURST") {
             self.flow.rate_limit.burst = v;
+        }
+
+        // Webhook intake. The caller table is structured and comes from the
+        // config file; only the two switches an operator flips per deployment
+        // are reachable from the environment.
+        if let Some(v) = flat_env::flat_env_bool(prefix, "WEBHOOK_ENABLED") {
+            self.webhook.enabled = v;
+        }
+        if let Some(v) = flat_env::flat_env_string(prefix, "WEBHOOK_BIND_ADDRESS") {
+            self.webhook.bind_address = Some(v);
         }
 
         // Raw capture -- common block, then one override per capturing
@@ -1324,6 +1348,272 @@ impl Default for GelfConfig {
             tls: TlsConfig::default(),
             raw_capture: RawCaptureConfig::default(),
         }
+    }
+}
+
+/// Generic authenticated webhook intake.
+///
+/// One `POST /webhook/{caller}` route per declared caller. Each caller is a
+/// product that pushes events (an alert rule, a SaaS notification hook) and
+/// carries its own secret, its own topic and its own body shape, so callers
+/// never share a credential and a wrong secret is only ever tried against the
+/// caller the path names.
+///
+/// With `bind_address` unset the routes are served on the main ingest listener
+/// under `server.tls`, `server.ip_filter` and `server.rate_limit`. Set it and
+/// the intake gets its own listener under `webhook.tls`, so a deployment can
+/// expose only this port to a product's egress and keep `/ingest` internal;
+/// `server.ip_filter`, `server.rate_limit` and `server.max_concurrent_requests`
+/// still apply to it.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct WebhookConfig {
+    /// Enable the webhook intake.
+    pub enabled: bool,
+
+    /// Own listener address. Unset shares the main ingest listener.
+    pub bind_address: Option<String>,
+
+    /// Maximum request body size in bytes. Alerts are small; agents that post
+    /// bulk data use `/ingest`, so this is deliberately far below
+    /// `server.max_body_size`.
+    pub max_body_size: usize,
+
+    /// Request timeout in milliseconds (own listener only).
+    pub request_timeout_ms: u64,
+
+    /// TLS for the own listener. Refused when `bind_address` is unset, since
+    /// the shared listener is under `server.tls`.
+    pub tls: TlsConfig,
+
+    /// The callers, one entry per product.
+    pub callers: Vec<WebhookCallerConfig>,
+}
+
+impl Default for WebhookConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind_address: None,
+            max_body_size: 1024 * 1024,
+            request_timeout_ms: 10_000,
+            tls: TlsConfig::default(),
+            callers: Vec::new(),
+        }
+    }
+}
+
+/// One webhook caller: a product identity, its secret, its topic.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct WebhookCallerConfig {
+    /// The path segment (`POST /webhook/{name}`) and the `_source` stamped on
+    /// every record. Lowercase letters, digits, `_` and `-` only.
+    pub name: String,
+
+    /// Kafka topic the caller's records land on, verbatim -- no
+    /// `routing.topic_suffix` is applied.
+    pub topic: String,
+
+    /// How the caller authenticates.
+    pub auth: WebhookAuthConfig,
+
+    /// Whether a body is one record or a JSON array of records.
+    pub body: WebhookBody,
+
+    /// Optional CEL expression over the record; a false result drops it. An
+    /// empty string keeps every record. Compiled once at load.
+    pub filter: String,
+}
+
+impl Default for WebhookCallerConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            topic: String::new(),
+            auth: WebhookAuthConfig::default(),
+            body: WebhookBody::Single,
+            filter: String::new(),
+        }
+    }
+}
+
+/// Per-caller authentication.
+///
+/// `hmac` is the strong mode: the product signs `"{timestamp}.{body}"` with
+/// HMAC-SHA256 and the timestamp must be within `tolerance_secs` of the
+/// receiver's clock, so a captured request cannot be replayed later. `header`
+/// is for products that can only attach static headers to a webhook (runZero
+/// alert rules are one): the named header carries a shared secret compared as
+/// a SHA-256 hash, exactly as bearer tokens are. It has no integrity or replay
+/// protection, which is why it is opt-in per caller rather than the default.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct WebhookAuthConfig {
+    /// `hmac` or `header`.
+    pub mode: WebhookAuthMode,
+
+    /// Where the secret lives: `provider:path[:key]` as for bearer tokens
+    /// (`file:`, `vault:` / `openbao:`, `aws:`). Required. There is no static
+    /// secret field on purpose: a secret in YAML surfaces in the config-schema
+    /// dump and in every `config-check`.
+    pub secret_source: String,
+
+    /// Refresh interval for the secret in seconds.
+    pub refresh_interval_secs: u64,
+
+    /// `hmac`: the header carrying the signature (`sha256=<hex>` or bare
+    /// hex). `header`: the header carrying the shared secret.
+    pub header: String,
+
+    /// `hmac` only: the header carrying the unix-seconds timestamp that was
+    /// signed with the body.
+    pub timestamp_header: String,
+
+    /// `hmac` only: how far the signed timestamp may be from the receiver's
+    /// clock, in seconds, in either direction.
+    pub tolerance_secs: u64,
+}
+
+impl Default for WebhookAuthConfig {
+    fn default() -> Self {
+        Self {
+            mode: WebhookAuthMode::Hmac,
+            secret_source: String::new(),
+            refresh_interval_secs: 300,
+            header: "x-signature".to_string(),
+            timestamp_header: "x-timestamp".to_string(),
+            tolerance_secs: 300,
+        }
+    }
+}
+
+/// The two ways a webhook caller can prove itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum WebhookAuthMode {
+    /// HMAC-SHA256 over `"{timestamp}.{body}"`, with a replay window.
+    Hmac,
+    /// A static header carrying a shared secret.
+    Header,
+}
+
+/// What one POST body holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum WebhookBody {
+    /// One JSON object, one record.
+    Single,
+    /// A JSON array; every element is a record.
+    Array,
+}
+
+impl WebhookConfig {
+    /// Refuse a webhook section that would start and then not do what it says.
+    ///
+    /// Only runs its checks when the intake is enabled -- a disabled block is
+    /// inert, which is the one case where inert is honest.
+    pub fn validate(&self) -> Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.callers.is_empty() {
+            return Err(Error::Config(
+                "webhook.enabled is true but webhook.callers is empty -- the intake \
+                 would answer 404 to everything"
+                    .into(),
+            ));
+        }
+        if self.bind_address.is_none() && self.tls.enabled {
+            return Err(Error::Config(
+                "webhook.tls.enabled is true but webhook.bind_address is unset -- the \
+                 shared ingest listener is under server.tls, so this block would \
+                 configure nothing. Set webhook.bind_address for an own TLS listener"
+                    .into(),
+            ));
+        }
+        if let Some(addr) = &self.bind_address
+            && addr.parse::<std::net::SocketAddr>().is_err()
+        {
+            return Err(Error::Config(format!(
+                "webhook.bind_address '{addr}' is not a socket address"
+            )));
+        }
+        if self.max_body_size == 0 {
+            return Err(Error::Config(
+                "webhook.max_body_size must be greater than zero".into(),
+            ));
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        for caller in &self.callers {
+            let scope = format!("webhook.callers[{}]", caller.name);
+            if caller.name.is_empty() {
+                return Err(Error::Config("webhook.callers[].name is required".into()));
+            }
+            if !caller
+                .name
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+            {
+                return Err(Error::Config(format!(
+                    "{scope}.name must be lowercase letters, digits, '_' or '-' -- it is a \
+                     path segment and the record's _source"
+                )));
+            }
+            if !seen.insert(caller.name.as_str()) {
+                return Err(Error::Config(format!(
+                    "{scope} is declared twice -- one route cannot serve two callers"
+                )));
+            }
+            if caller.topic.is_empty() {
+                return Err(Error::Config(format!("{scope}.topic is required")));
+            }
+            if caller.auth.secret_source.is_empty() {
+                return Err(Error::Config(format!(
+                    "{scope}.auth.secret_source is required -- every caller carries its \
+                     own secret, and there is no static secret field"
+                )));
+            }
+            if caller.auth.header.is_empty() {
+                return Err(Error::Config(format!("{scope}.auth.header is required")));
+            }
+            if http::HeaderName::from_bytes(caller.auth.header.as_bytes()).is_err() {
+                return Err(Error::Config(format!(
+                    "{scope}.auth.header '{}' is not a valid header name",
+                    caller.auth.header
+                )));
+            }
+            if caller.auth.mode == WebhookAuthMode::Hmac {
+                if caller.auth.timestamp_header.is_empty() {
+                    return Err(Error::Config(format!(
+                        "{scope}.auth.timestamp_header is required in hmac mode -- the \
+                         timestamp is what stops a captured request being replayed"
+                    )));
+                }
+                if http::HeaderName::from_bytes(caller.auth.timestamp_header.as_bytes()).is_err() {
+                    return Err(Error::Config(format!(
+                        "{scope}.auth.timestamp_header '{}' is not a valid header name",
+                        caller.auth.timestamp_header
+                    )));
+                }
+                if caller.auth.tolerance_secs == 0 {
+                    return Err(Error::Config(format!(
+                        "{scope}.auth.tolerance_secs must be greater than zero"
+                    )));
+                }
+            }
+            if !caller.filter.trim().is_empty() {
+                let errors = scalo::expression::validate(&caller.filter);
+                if !errors.is_empty() {
+                    return Err(Error::Config(format!(
+                        "{scope}.filter is not a valid CEL expression: {}",
+                        errors.join("; ")
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -2448,6 +2738,217 @@ mod tests {
             config.server.tls.client_auth = "required".to_string();
             assert!(config.validate().is_ok(), "{mode} must be accepted");
         }
+    }
+
+    // -- the webhook caller table --
+    //
+    // Every rule here refuses a config that would start and then do something
+    // other than what it reads as: a caller with no secret, two callers on one
+    // path, a filter that never compiles, a TLS block nothing listens under.
+
+    fn webhook_caller(name: &str) -> WebhookCallerConfig {
+        WebhookCallerConfig {
+            name: name.to_string(),
+            topic: format!("{name}_land"),
+            auth: WebhookAuthConfig {
+                secret_source: "file:/run/secrets/webhook".to_string(),
+                ..WebhookAuthConfig::default()
+            },
+            ..WebhookCallerConfig::default()
+        }
+    }
+
+    fn webhook_base() -> Config {
+        let mut config = auth_base();
+        config.kafka.brokers = vec!["localhost:9092".to_string()];
+        config.webhook.enabled = true;
+        config.webhook.callers = vec![webhook_caller("runzero")];
+        config
+    }
+
+    #[test]
+    fn a_webhook_caller_with_a_secret_and_a_topic_is_accepted() {
+        assert!(webhook_base().validate().is_ok());
+    }
+
+    #[test]
+    fn an_enabled_webhook_without_brokers_is_refused() {
+        let mut config = webhook_base();
+        config.kafka.brokers.clear();
+        let err = config.validate().expect_err("must not start").to_string();
+        assert!(err.contains("kafka.brokers is empty"), "got: {err}");
+    }
+
+    #[test]
+    fn a_disabled_webhook_block_is_not_checked() {
+        let mut config = auth_base();
+        config.webhook.enabled = false;
+        config.webhook.callers = vec![WebhookCallerConfig::default()];
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn an_enabled_webhook_with_no_callers_is_refused() {
+        let mut config = webhook_base();
+        config.webhook.callers.clear();
+        let err = config.validate().expect_err("must not start").to_string();
+        assert!(err.contains("webhook.callers is empty"), "got: {err}");
+    }
+
+    #[test]
+    fn duplicate_webhook_caller_names_are_refused() {
+        let mut config = webhook_base();
+        config.webhook.callers.push(webhook_caller("runzero"));
+        let err = config.validate().expect_err("must not start").to_string();
+        assert!(err.contains("declared twice"), "got: {err}");
+    }
+
+    #[test]
+    fn a_webhook_caller_name_that_is_not_a_path_segment_is_refused() {
+        for bad in ["Run Zero", "runzero/alerts", "RUNZERO", ""] {
+            let mut config = webhook_base();
+            config.webhook.callers[0].name = bad.to_string();
+            assert!(
+                config.validate().is_err(),
+                "caller name {bad:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_webhook_caller_without_a_topic_is_refused() {
+        let mut config = webhook_base();
+        config.webhook.callers[0].topic = String::new();
+        let err = config.validate().expect_err("must not start").to_string();
+        assert!(err.contains("topic is required"), "got: {err}");
+    }
+
+    #[test]
+    fn a_webhook_caller_without_a_secret_source_is_refused() {
+        let mut config = webhook_base();
+        config.webhook.callers[0].auth.secret_source = String::new();
+        let err = config.validate().expect_err("must not start").to_string();
+        assert!(err.contains("secret_source is required"), "got: {err}");
+    }
+
+    #[test]
+    fn an_hmac_caller_without_a_timestamp_header_is_refused() {
+        let mut config = webhook_base();
+        config.webhook.callers[0].auth.timestamp_header = String::new();
+        let err = config.validate().expect_err("must not start").to_string();
+        assert!(err.contains("timestamp_header is required"), "got: {err}");
+    }
+
+    #[test]
+    fn a_header_caller_needs_no_timestamp_header() {
+        let mut config = webhook_base();
+        config.webhook.callers[0].auth.mode = WebhookAuthMode::Header;
+        config.webhook.callers[0].auth.timestamp_header = String::new();
+        config.webhook.callers[0].auth.tolerance_secs = 0;
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn a_webhook_header_that_is_not_a_header_name_is_refused() {
+        let mut config = webhook_base();
+        config.webhook.callers[0].auth.header = "not a header".to_string();
+        let err = config.validate().expect_err("must not start").to_string();
+        assert!(err.contains("not a valid header name"), "got: {err}");
+    }
+
+    #[test]
+    fn a_webhook_filter_that_does_not_compile_is_refused() {
+        let mut config = webhook_base();
+        config.webhook.callers[0].filter = "severity ==".to_string();
+        let err = config.validate().expect_err("must not start").to_string();
+        assert!(err.contains("not a valid CEL expression"), "got: {err}");
+    }
+
+    #[test]
+    fn a_webhook_filter_that_compiles_is_accepted() {
+        let mut config = webhook_base();
+        config.webhook.callers[0].filter = r#"severity == "high""#.to_string();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn webhook_tls_on_the_shared_listener_is_refused() {
+        // The shared listener is under server.tls; a webhook.tls block there
+        // configures nothing and reads as though the intake were encrypted.
+        let mut config = webhook_base();
+        config.webhook.tls.enabled = true;
+        let err = config.validate().expect_err("must not start").to_string();
+        assert!(err.contains("webhook.bind_address is unset"), "got: {err}");
+    }
+
+    #[test]
+    fn webhook_tls_on_an_own_listener_is_accepted() {
+        let mut config = webhook_base();
+        config.webhook.bind_address = Some("0.0.0.0:8090".to_string());
+        config.webhook.tls.enabled = true;
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn a_webhook_bind_address_that_is_not_a_socket_address_is_refused() {
+        let mut config = webhook_base();
+        config.webhook.bind_address = Some("8090".to_string());
+        let err = config.validate().expect_err("must not start").to_string();
+        assert!(err.contains("not a socket address"), "got: {err}");
+    }
+
+    #[test]
+    fn the_webhook_section_parses_from_yaml() {
+        let yaml = r#"
+webhook:
+  enabled: true
+  max_body_size: 65536
+  callers:
+    - name: runzero
+      topic: runzero_alerts_land
+      auth:
+        mode: header
+        secret_source: "file:/run/secrets/runzero-webhook"
+        header: x-webhook-secret
+      body: single
+    - name: pager
+      topic: pager_land
+      auth:
+        mode: hmac
+        secret_source: "vault:kv/data/dfe/webhooks:pager"
+        header: x-signature
+        timestamp_header: x-timestamp
+        tolerance_secs: 120
+      body: array
+      filter: 'severity == "high"'
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert!(config.webhook.enabled);
+        assert!(config.webhook.bind_address.is_none());
+        assert_eq!(config.webhook.max_body_size, 65536);
+        assert_eq!(config.webhook.callers.len(), 2);
+        assert_eq!(config.webhook.callers[0].auth.mode, WebhookAuthMode::Header);
+        assert_eq!(config.webhook.callers[0].body, WebhookBody::Single);
+        assert_eq!(config.webhook.callers[1].auth.mode, WebhookAuthMode::Hmac);
+        assert_eq!(config.webhook.callers[1].auth.tolerance_secs, 120);
+        assert_eq!(config.webhook.callers[1].body, WebhookBody::Array);
+        assert_eq!(config.webhook.callers[1].filter, r#"severity == "high""#);
+    }
+
+    #[test]
+    fn test_env_override_webhook() {
+        with_env(
+            &[
+                ("DFE_RECEIVER_WEBHOOK_ENABLED", "true"),
+                ("DFE_RECEIVER_WEBHOOK_BIND_ADDRESS", "0.0.0.0:8090"),
+            ],
+            || {
+                let mut config = Config::default();
+                config.apply_flat_env(ENV_PREFIX);
+                assert!(config.webhook.enabled);
+                assert_eq!(config.webhook.bind_address.as_deref(), Some("0.0.0.0:8090"));
+            },
+        );
     }
 
     #[test]

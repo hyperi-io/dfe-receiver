@@ -39,6 +39,10 @@ spec:
       targetPort: 9091
       protocol: TCP
       name: prometheus-rw
+    - port: 8090
+      targetPort: 8090
+      protocol: TCP
+      name: webhook
     - port: 514
       targetPort: 514
       protocol: TCP

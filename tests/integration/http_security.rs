@@ -1077,10 +1077,10 @@ async fn test_rate_limit_allows_within_burst() {
             .await
             .expect("Request failed");
 
-        assert_ne!(
-            response.status().as_u16(),
-            429,
-            "Request {i} should not be rate-limited within burst"
+        assert!(
+            response.status().is_success(),
+            "Request {i} should be accepted within burst, got: {}",
+            response.status()
         );
     }
 

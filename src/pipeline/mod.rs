@@ -305,8 +305,9 @@ impl PipelineState {
     ///
     /// A sink outage is shared by every replica, so failing the probe on it
     /// empties the Service of endpoints fleet-wide and turns a degradation
-    /// into an outage. Shedding stays with [`is_ready`], which still answers
-    /// 503 + retry-after per request while the pod remains routable.
+    /// into an outage. Shedding stays with [`is_ready`](Self::is_ready), which
+    /// still answers 503 + retry-after per request while the pod remains
+    /// routable.
     pub fn probe_ready(&self) -> bool {
         if !self.ready.load(Ordering::Relaxed) {
             return false;
@@ -427,17 +428,27 @@ impl PipelineState {
             .with(|c| c.server.auth.include_common_header)
     }
 
-    /// Inject `_timestamp_receiver` into a validated JSON object payload.
-    ///
-    /// Performs byte-level append before the closing `}` to avoid a full
-    /// JSON parse/rewrite on the hot path.
+    /// Inject `_timestamp_receiver` (now, epoch ms) into a validated JSON
+    /// object payload.
     #[inline]
-    fn enrich_payload(payload: Bytes) -> Bytes {
+    #[must_use]
+    pub fn enrich_payload(payload: Bytes) -> Bytes {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
+        Self::enrich_payload_at(payload, now_ms)
+    }
 
+    /// Inject `_timestamp_receiver` with the given epoch-millisecond value.
+    ///
+    /// Performs byte-level append before the closing `}` to avoid a full
+    /// JSON parse/rewrite on the hot path. The key is appended whether or not
+    /// the payload already carries one; a caller that must not produce a
+    /// duplicate key checks first.
+    #[inline]
+    #[must_use]
+    pub fn enrich_payload_at(payload: Bytes, now_ms: u128) -> Bytes {
         let raw = payload.as_ref();
         let Some(insert_pos) = raw.iter().rposition(|&b| b == b'}') else {
             return payload;
@@ -547,6 +558,10 @@ impl PipelineState {
     ///
     /// Skips routing but still applies validation and backpressure.
     /// Used by protocol handlers that handle their own protocol-to-topic mapping.
+    ///
+    /// On the test-only memory transport (`loader.transport: memory`, refused
+    /// at startup) there is no broker and a valid record is accepted and
+    /// dropped, as the routed path does.
     #[inline]
     pub async fn process_to_topic(&self, payload: Bytes, topic: &str) -> Result<()> {
         // Check for backpressure
@@ -567,6 +582,7 @@ impl PipelineState {
         // Validate (acquire and release lock before any await)
         let validation = self.validator.read().validate(&payload);
         match validation {
+            ValidationResult::Valid if self.kafka_sink.is_none() && self.discards() => Ok(()),
             ValidationResult::Valid => self.send_to_kafka(topic, payload).await,
             ValidationResult::Dlq(reason) => {
                 debug!(reason = %reason, "Message validation failed, routing to DLQ");
@@ -588,6 +604,13 @@ impl PipelineState {
         };
 
         sink.send(topic, payload).await
+    }
+
+    /// Whether the destination set holds the memory transport's discard sink.
+    fn discards(&self) -> bool {
+        self.destinations
+            .values()
+            .any(|sink| matches!(sink, DestinationSink::Discard))
     }
 
     /// Deliver one record to every named destination the route chose.

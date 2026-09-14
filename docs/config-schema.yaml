@@ -298,6 +298,25 @@ properties:
         enabled: null
         max_bytes: null
         on_oversize: null
+  webhook:
+    description: Generic authenticated webhook intake (`POST /webhook/{caller}`).
+    $ref: '#/$defs/WebhookConfig'
+    default:
+      enabled: false
+      bind_address: null
+      max_body_size: 1048576
+      request_timeout_ms: 10000
+      tls:
+        enabled: false
+        cert_file: null
+        key_file: null
+        ca_file: null
+        client_auth: none
+        cert_secret: null
+        key_secret: null
+        ca_secret: null
+        refresh_interval_secs: 3600
+      callers: []
   raw_capture:
     description: |-
       Common raw-payload capture default, inherited by every transport that
@@ -1367,6 +1386,175 @@ $defs:
     required:
     - ports
     - topic
+  WebhookConfig:
+    description: |-
+      Generic authenticated webhook intake.
+
+      One `POST /webhook/{caller}` route per declared caller. Each caller is a
+      product that pushes events (an alert rule, a SaaS notification hook) and
+      carries its own secret, its own topic and its own body shape, so callers
+      never share a credential and a wrong secret is only ever tried against the
+      caller the path names.
+
+      With `bind_address` unset the routes are served on the main ingest listener
+      under `server.tls`, `server.ip_filter` and `server.rate_limit`. Set it and
+      the intake gets its own listener under `webhook.tls`, so a deployment can
+      expose only this port to a product's egress and keep `/ingest` internal;
+      `server.ip_filter`, `server.rate_limit` and `server.max_concurrent_requests`
+      still apply to it.
+    type: object
+    properties:
+      enabled:
+        description: Enable the webhook intake.
+        type: boolean
+        default: false
+      bind_address:
+        description: Own listener address. Unset shares the main ingest listener.
+        type:
+        - string
+        - 'null'
+        default: null
+      max_body_size:
+        description: |-
+          Maximum request body size in bytes. Alerts are small; agents that post
+          bulk data use `/ingest`, so this is deliberately far below
+          `server.max_body_size`.
+        type: integer
+        format: uint
+        minimum: 0
+        default: 1048576
+      request_timeout_ms:
+        description: Request timeout in milliseconds (own listener only).
+        type: integer
+        format: uint64
+        minimum: 0
+        default: 10000
+      tls:
+        description: |-
+          TLS for the own listener. Refused when `bind_address` is unset, since
+          the shared listener is under `server.tls`.
+        $ref: '#/$defs/TlsConfig'
+        default:
+          enabled: false
+          cert_file: null
+          key_file: null
+          ca_file: null
+          client_auth: none
+          cert_secret: null
+          key_secret: null
+          ca_secret: null
+          refresh_interval_secs: 3600
+      callers:
+        description: The callers, one entry per product.
+        type: array
+        items:
+          $ref: '#/$defs/WebhookCallerConfig'
+        default: []
+  WebhookCallerConfig:
+    description: 'One webhook caller: a product identity, its secret, its topic.'
+    type: object
+    properties:
+      name:
+        description: |-
+          The path segment (`POST /webhook/{name}`) and the `_source` stamped on
+          every record. Lowercase letters, digits, `_` and `-` only.
+        type: string
+        default: ''
+      topic:
+        description: |-
+          Kafka topic the caller's records land on, verbatim -- no
+          `routing.topic_suffix` is applied.
+        type: string
+        default: ''
+      auth:
+        description: How the caller authenticates.
+        $ref: '#/$defs/WebhookAuthConfig'
+        default:
+          mode: hmac
+          secret_source: ''
+          refresh_interval_secs: 300
+          header: x-signature
+          timestamp_header: x-timestamp
+          tolerance_secs: 300
+      body:
+        description: Whether a body is one record or a JSON array of records.
+        $ref: '#/$defs/WebhookBody'
+        default: single
+      filter:
+        description: |-
+          Optional CEL expression over the record; a false result drops it. An
+          empty string keeps every record. Compiled once at load.
+        type: string
+        default: ''
+  WebhookAuthConfig:
+    description: |-
+      Per-caller authentication.
+
+      `hmac` is the strong mode: the product signs `"{timestamp}.{body}"` with
+      HMAC-SHA256 and the timestamp must be within `tolerance_secs` of the
+      receiver's clock, so a captured request cannot be replayed later. `header`
+      is for products that can only attach static headers to a webhook (runZero
+      alert rules are one): the named header carries a shared secret compared as
+      a SHA-256 hash, exactly as bearer tokens are. It has no integrity or replay
+      protection, which is why it is opt-in per caller rather than the default.
+    type: object
+    properties:
+      mode:
+        description: '`hmac` or `header`.'
+        $ref: '#/$defs/WebhookAuthMode'
+        default: hmac
+      secret_source:
+        description: |-
+          Where the secret lives: `provider:path[:key]` as for bearer tokens
+          (`file:`, `vault:` / `openbao:`, `aws:`). Required. There is no static
+          secret field on purpose: a secret in YAML surfaces in the config-schema
+          dump and in every `config-check`.
+        type: string
+        default: ''
+      refresh_interval_secs:
+        description: Refresh interval for the secret in seconds.
+        type: integer
+        format: uint64
+        minimum: 0
+        default: 300
+      header:
+        description: |-
+          `hmac`: the header carrying the signature (`sha256=<hex>` or bare
+          hex). `header`: the header carrying the shared secret.
+        type: string
+        default: x-signature
+      timestamp_header:
+        description: |-
+          `hmac` only: the header carrying the unix-seconds timestamp that was
+          signed with the body.
+        type: string
+        default: x-timestamp
+      tolerance_secs:
+        description: |-
+          `hmac` only: how far the signed timestamp may be from the receiver's
+          clock, in seconds, in either direction.
+        type: integer
+        format: uint64
+        minimum: 0
+        default: 300
+  WebhookAuthMode:
+    description: The two ways a webhook caller can prove itself.
+    oneOf:
+    - description: HMAC-SHA256 over `"{timestamp}.{body}"`, with a replay window.
+      type: string
+      const: hmac
+    - description: A static header carrying a shared secret.
+      type: string
+      const: header
+  WebhookBody:
+    description: What one POST body holds.
+    oneOf:
+    - description: One JSON object, one record.
+      type: string
+      const: single
+    - description: A JSON array; every element is a record.
+      type: string
+      const: array
   ValidationConfig:
     description: Validation configuration.
     type: object

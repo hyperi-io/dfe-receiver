@@ -245,7 +245,7 @@ pub async fn run_server(
     let ip_filter = IpFilter::from_config(&config.server.ip_filter);
 
     let state = HttpState {
-        pipeline,
+        pipeline: pipeline.clone(),
         metrics: metrics.clone(),
         auth: auth_state.clone(),
         ip_filter: ip_filter.clone(),
@@ -270,14 +270,12 @@ pub async fn run_server(
     // Security configuration
     let max_body_size = config.server.max_body_size;
     let request_timeout = Duration::from_millis(config.server.request_timeout_ms);
-    let max_concurrent = config.server.max_concurrent_requests;
-    let rate_limit_config = &config.server.rate_limit;
 
     info!(
         max_body_size = max_body_size,
         request_timeout_ms = config.server.request_timeout_ms,
-        max_concurrent_requests = max_concurrent,
-        rate_limit_enabled = rate_limit_config.enabled,
+        max_concurrent_requests = config.server.max_concurrent_requests,
+        rate_limit_enabled = config.server.rate_limit.enabled,
         ip_filter_mode = %config.server.ip_filter.mode,
         "Security limits configured"
     );
@@ -320,36 +318,28 @@ pub async fn run_server(
         ))
         .with_state(state);
 
-    // Concurrency limit (0 = unlimited)
-    if max_concurrent > 0 {
-        app = app.layer(GlobalConcurrencyLimitLayer::new(max_concurrent));
-    }
-
-    // Per-IP rate limiting via GCRA (tower-governor).
-    // SmartIpKeyExtractor: checks X-Forwarded-For, X-Real-IP, Forwarded
-    // headers first, then falls back to peer IP.
-    if rate_limit_config.enabled {
-        let governor_conf = GovernorConfigBuilder::default()
-            .per_second(rate_limit_config.requests_per_second)
-            .burst_size(rate_limit_config.burst)
-            .key_extractor(SmartIpKeyExtractor)
-            .finish()
-            .ok_or_else(|| Error::Config("invalid rate_limit configuration".into()))?;
-
-        app = app.layer(GovernorLayer::new(governor_conf));
+    // The webhook routes join here, after the auth middleware and body limit
+    // above have been applied to the ingest routes, so they keep their own
+    // per-caller auth and body limit while sharing everything applied below.
+    if config.webhook.enabled && config.webhook.bind_address.is_none() {
+        let webhook = crate::server::webhook::build_router(
+            &config.webhook,
+            pipeline.clone(),
+            metrics.clone(),
+        )
+        .await?;
+        app = app.merge(webhook);
         info!(
-            rps = rate_limit_config.requests_per_second,
-            burst = rate_limit_config.burst,
-            "Per-IP rate limiting enabled"
+            callers = config.webhook.callers.len(),
+            "Webhook intake sharing the ingest listener"
         );
     }
 
-    // IP filter is checked in the ingest handler via HttpState (not as
-    // middleware) because our hyper serve pattern doesn't use
-    // into_make_service_with_connect_info and ConnectInfo isn't available.
-    // Peer IP is available in the TLS/plain accept loops but not propagated
-    // to axum request extensions. For now, the filter is applied at the
-    // handler level via state — still rejects before pipeline processing.
+    let app = apply_server_limits(app, &config.server)?;
+
+    // The IP filter runs in the accept loops below, before any HTTP work, and
+    // `connection_service` hands each request the peer address the rate
+    // limiter falls back to.
 
     let addr: SocketAddr = addr
         .parse()
@@ -373,12 +363,53 @@ pub async fn run_server(
     }
 }
 
+/// Apply the server-wide admission limits: the global concurrency cap and the
+/// per-IP GCRA rate limit.
+///
+/// Outermost layers, added last so they wrap every route on the router,
+/// including ones merged in after the ingest routes' own middleware. Shared by
+/// the ingest listener and the webhook's own listener so neither bypasses
+/// them.
+pub(crate) fn apply_server_limits(
+    mut app: Router,
+    server: &crate::config::ServerConfig,
+) -> Result<Router> {
+    // Concurrency limit (0 = unlimited)
+    if server.max_concurrent_requests > 0 {
+        app = app.layer(GlobalConcurrencyLimitLayer::new(
+            server.max_concurrent_requests,
+        ));
+    }
+
+    // Per-IP rate limiting via GCRA (tower-governor).
+    // SmartIpKeyExtractor: checks X-Forwarded-For, X-Real-IP, Forwarded
+    // headers first, then falls back to peer IP.
+    let rate_limit_config = &server.rate_limit;
+    if rate_limit_config.enabled {
+        let governor_conf = GovernorConfigBuilder::default()
+            .per_second(rate_limit_config.requests_per_second)
+            .burst_size(rate_limit_config.burst)
+            .key_extractor(SmartIpKeyExtractor)
+            .finish()
+            .ok_or_else(|| Error::Config("invalid rate_limit configuration".into()))?;
+
+        app = app.layer(GovernorLayer::new(governor_conf));
+        info!(
+            rps = rate_limit_config.requests_per_second,
+            burst = rate_limit_config.burst,
+            "Per-IP rate limiting enabled"
+        );
+    }
+
+    Ok(app)
+}
+
 /// Run HTTP server without TLS.
 ///
 /// Uses hyper low-level APIs (instead of `axum::serve`) to gain control over
 /// connection-level timeouts. This protects against slowloris attacks where
 /// `axum::serve` has no native defence.
-async fn run_plain_server(
+pub(crate) async fn run_plain_server(
     listener: TcpListener,
     app: Router,
     ip_filter: IpFilter,
@@ -411,7 +442,7 @@ async fn run_plain_server(
 
                 tokio::spawn(async move {
                     let io = hyper_util::rt::TokioIo::new(stream);
-                    let service = hyper_util::service::TowerToHyperService::new(app);
+                    let service = connection_service(app, peer_addr);
 
                     let builder = hardened_http_builder();
                     let conn = builder.serve_connection_with_upgrades(io, service);
@@ -431,6 +462,32 @@ async fn run_plain_server(
 
     info!("HTTP server stopped");
     Ok(())
+}
+
+/// The router as a hyper service for one connection, with the peer address
+/// on every request so the rate limiter keys on it when no proxy header names
+/// the client.
+fn connection_service(
+    app: Router,
+    peer_addr: SocketAddr,
+) -> hyper_util::service::TowerToHyperService<
+    tower::util::MapRequest<
+        Router,
+        impl FnMut(
+            axum::extract::Request<hyper::body::Incoming>,
+        ) -> axum::extract::Request<hyper::body::Incoming>
+        + Clone,
+    >,
+> {
+    hyper_util::service::TowerToHyperService::new(tower::ServiceExt::map_request(
+        app,
+        move |mut request: axum::extract::Request<hyper::body::Incoming>| {
+            request
+                .extensions_mut()
+                .insert(axum::extract::ConnectInfo(peer_addr));
+            request
+        },
+    ))
 }
 
 /// Run HTTP server with TLS.
@@ -507,7 +564,7 @@ pub(crate) async fn run_tls_server(
                     debug!(peer = %peer_addr, "TLS connection established");
 
                     let io = hyper_util::rt::TokioIo::new(tls_stream);
-                    let service = hyper_util::service::TowerToHyperService::new(app);
+                    let service = connection_service(app, peer_addr);
 
                     let builder = hardened_http_builder();
                     let conn = builder.serve_connection_with_upgrades(io, service);
@@ -681,7 +738,7 @@ fn split_ndjson(body: &Bytes) -> Option<Result<Vec<Bytes>>> {
 ///
 /// `Some(Err(..))` is an array that exceeded [`MAX_BATCH_EVENTS`] and must be
 /// rejected rather than forwarded whole.
-fn split_json_array(body: &Bytes) -> Option<Result<Vec<Bytes>>> {
+pub(crate) fn split_json_array(body: &Bytes) -> Option<Result<Vec<Bytes>>> {
     if *body.iter().find(|b| !b.is_ascii_whitespace())? != b'[' {
         return None;
     }
