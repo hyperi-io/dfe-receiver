@@ -415,6 +415,11 @@ the webhook keeps its own per-caller auth and smaller body limit while sharing
 Set, the intake runs on its own port through the same hardened accept loops
 and the same rate limit and concurrency cap, under `webhook.tls`.
 
+Configuring a caller end to end -- the authentication choice, the secret
+reference, the replay window, the body shape and the filter, with worked
+examples and the statuses a sender sees -- is in
+[WEBHOOK-SETUP.md](WEBHOOK-SETUP.md).
+
 ## Deployment
 
 ### Kubernetes with KEDA
