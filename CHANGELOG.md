@@ -3,6 +3,12 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.15.36](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.35...v1.15.36) (2026-09-15)
+
+### Bug Fixes
+
+* **webhook:** accept signed webhooks on a generic intake ([374561e](https://github.com/hyperi-io/dfe-receiver/commit/374561e34278bdfb9843bb99507e958694c39ac9))
+
 ## [1.15.35](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.34...v1.15.35) (2026-09-12)
 
 ### Bug Fixes
