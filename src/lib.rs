@@ -67,6 +67,7 @@ pub mod error;
 pub mod metrics;
 pub mod pipeline;
 pub mod routing;
+pub mod secrets;
 pub mod server;
 pub mod sink;
 pub mod validation;

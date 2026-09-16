@@ -212,11 +212,16 @@ Supports:
 - Background refresh with configurable interval
 - Token rotation without restart
 
-Secret source format: `provider:path:key`
+Secret source format: `provider:path[:key]`, resolved by
+`scalo::secrets::resolve` -- the receiver has no resolver of its own.
 
 - `file:/etc/secrets/tokens`
 - `vault:secret/data/auth:bearer_tokens`
-- `aws:prod/auth/tokens:bearer`
+- `env:DFE_RECEIVER_BEARER_TOKENS`
+
+AWS Secrets Manager is not compiled in: serving `aws:` means pulling the AWS SDK
+for a path nothing uses, so the spec is refused at startup naming the scalo
+feature instead.
 
 ## Configuration
 

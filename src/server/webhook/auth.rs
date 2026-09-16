@@ -36,7 +36,8 @@ use tracing::{debug, error, info};
 use crate::config::{BearerConfig, WebhookAuthConfig, WebhookAuthMode};
 use crate::error::{Error, Result};
 use crate::metrics::AuthFailureReason;
-use crate::server::auth::{BearerTokenProvider, read_secret_source};
+use crate::secrets;
+use crate::server::auth::BearerTokenProvider;
 
 /// Why a request did not authenticate.
 ///
@@ -205,7 +206,7 @@ impl HmacVerifier {
     }
 
     async fn load(caller: &str, config: &WebhookAuthConfig) -> Result<Self> {
-        let secret = read_secret_source(&config.secret_source).await?;
+        let secret = secrets::read(&config.secret_source).await?;
         Self::new(caller, config, secret.trim().as_bytes())
     }
 
@@ -229,7 +230,7 @@ impl HmacVerifier {
                     debug!(caller, "webhook HMAC secret refresh task stopping");
                     break;
                 };
-                match read_secret_source(&source).await {
+                match secrets::read(&source).await {
                     Ok(secret) if secret.trim().is_empty() => {
                         error!(
                             caller,
