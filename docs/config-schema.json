@@ -792,7 +792,7 @@
           "default": []
         },
         "secret_source": {
-          "description": "Secret source for dynamic token loading.\nFormat: \"provider:path:key\" (e.g., \"vault:secret/auth:bearer_tokens\")",
+          "description": "Secret source for dynamic token loading.\nFormat: `provider:path[:key]` (e.g. \"vault:secret/auth:bearer_tokens\").",
           "type": [
             "string",
             "null"
@@ -1735,7 +1735,7 @@
           "default": "hmac"
         },
         "secret_source": {
-          "description": "Where the secret lives: `provider:path[:key]` as for bearer tokens\n(`file:`, `vault:` / `openbao:`, `aws:`). Required. There is no static\nsecret field on purpose: a secret in YAML surfaces in the config-schema\ndump and in every `config-check`.",
+          "description": "Where the secret lives: `provider:path[:key]` as for bearer tokens\n(`file:`, `vault:` / `bao:` / `openbao:`, `env:`). Required. There is no\nstatic secret field on purpose: a secret in YAML surfaces in the\nconfig-schema dump and in every `config-check`.",
           "type": "string",
           "default": ""
         },

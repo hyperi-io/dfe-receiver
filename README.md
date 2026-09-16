@@ -137,11 +137,15 @@ server:
       refresh_interval_secs: 300
 ```
 
-Supported secret sources:
+Supported secret sources, read through scalo's credential resolver:
 
 - `file:/path/to/tokens` - Local file (K8s secrets)
-- `vault:secret/path:key` - OpenBao/Vault
-- `aws:secret-name:key` - AWS Secrets Manager
+- `vault:secret/path:key` - OpenBao/Vault, also spelled `bao:` or `openbao:`
+- `env:VAR_NAME` - Environment variable
+
+A `vault:` reference names the field to read, so the `:key` is not optional
+there. AWS Secrets Manager is not built in: an `aws:` reference is refused at
+startup naming the scalo feature it would need.
 
 #### mTLS Authentication
 

@@ -518,7 +518,7 @@ impl ApplyFlatEnv for Config {
         // Bearer tokens arrive as a mounted Secret in the pod environment, so
         // this is the route the chart takes -- the `auth` secret group in
         // deployment.rs declares exactly this name. Split on comma and newline,
-        // matching how BearerTokenProvider::load_from_secret parses a secret
+        // matching how BearerTokenProvider::load_tokens parses a secret
         // payload, and read through the sensitive helper so no token reaches a
         // log line.
         if let Some(v) = flat_env::flat_env_string_sensitive(prefix, "BEARER_TOKENS") {
@@ -912,7 +912,7 @@ pub struct BearerConfig {
     pub tokens: Vec<String>,
 
     /// Secret source for dynamic token loading.
-    /// Format: "provider:path:key" (e.g., "vault:secret/auth:bearer_tokens")
+    /// Format: `provider:path[:key]` (e.g. "vault:secret/auth:bearer_tokens").
     pub secret_source: Option<String>,
 
     /// Token refresh interval in seconds (for secret-sourced tokens).
@@ -1454,9 +1454,9 @@ pub struct WebhookAuthConfig {
     pub mode: WebhookAuthMode,
 
     /// Where the secret lives: `provider:path[:key]` as for bearer tokens
-    /// (`file:`, `vault:` / `openbao:`, `aws:`). Required. There is no static
-    /// secret field on purpose: a secret in YAML surfaces in the config-schema
-    /// dump and in every `config-check`.
+    /// (`file:`, `vault:` / `bao:` / `openbao:`, `env:`). Required. There is no
+    /// static secret field on purpose: a secret in YAML surfaces in the
+    /// config-schema dump and in every `config-check`.
     pub secret_source: String,
 
     /// Refresh interval for the secret in seconds.
@@ -3119,7 +3119,7 @@ webhook:
     #[test]
     fn bearer_tokens_from_the_environment_split_on_newlines_too() {
         // A K8s Secret holding one token per line is as likely as a CSV, and
-        // BearerTokenProvider::load_from_secret accepts both.
+        // BearerTokenProvider::load_tokens accepts both.
         with_env(
             &[("DFE_RECEIVER_BEARER_TOKENS", "alpha\n beta \n\ngamma")],
             || {

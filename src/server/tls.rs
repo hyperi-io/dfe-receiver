@@ -9,7 +9,9 @@
 //! TLS configuration for HTTP and gRPC servers.
 //!
 //! Supports TLS termination and mTLS client certificate validation.
-//! Certificates can be loaded from files or secret managers (Vault, AWS, files).
+//! Certificates come from local files, or from any `provider:path[:key]` spec
+//! [`crate::secrets`] reads -- an OpenBao field (`vault:`) or a mounted
+//! Kubernetes Secret (`file:`).
 
 use std::fs::File;
 use std::io::{BufReader, Cursor};
@@ -27,6 +29,7 @@ use scalo::logger::security::{self, SecurityOutcome};
 
 use crate::config::TlsConfig;
 use crate::error::{Error, Result};
+use crate::secrets;
 
 /// Load certificates from a PEM file.
 fn load_certs_from_file(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
@@ -104,57 +107,6 @@ fn build_root_store(ca_certs: Vec<CertificateDer<'static>>, source: &str) -> Res
     }
 
     Ok(root_store)
-}
-
-/// Load a secret from the secret manager.
-///
-/// Format: "provider:path:key" (e.g., "vault:secret/tls:cert")
-async fn load_from_secret(source: &str) -> Result<Vec<u8>> {
-    let parts: Vec<&str> = source.splitn(3, ':').collect();
-    if parts.len() < 2 {
-        return Err(Error::Config(format!(
-            "Invalid secret source format: {source}. Expected 'provider:path' or 'provider:path:key'"
-        )));
-    }
-
-    let provider_name = parts[0];
-    let path = parts[1];
-    let key = parts.get(2).copied();
-
-    use scalo::secrets::{SecretSource, SecretsConfig, SecretsManager};
-
-    let secret_source = match provider_name {
-        "file" => SecretSource::File {
-            path: path.to_string(),
-        },
-        "vault" | "openbao" => SecretSource::OpenBao {
-            path: path.to_string(),
-            key: key.unwrap_or("value").to_string(),
-        },
-        "aws" => SecretSource::Aws {
-            secret_id: path.to_string(),
-            key: key.map(String::from),
-        },
-        _ => {
-            return Err(Error::Config(format!(
-                "Unknown secret provider: {provider_name}. Supported: file, vault, openbao, aws"
-            )));
-        }
-    };
-
-    let config = SecretsConfig {
-        sources: [("tls_secret".into(), secret_source)].into_iter().collect(),
-        ..Default::default()
-    };
-    let secrets = SecretsManager::new(config)?;
-
-    let secret_value = if provider_name == "file" {
-        secrets.get_file(path).await?
-    } else {
-        secrets.get("tls_secret").await?
-    };
-
-    Ok(secret_value.as_bytes().to_vec())
 }
 
 /// Client authentication mode.
@@ -268,7 +220,7 @@ pub async fn build_tls_acceptor_async(config: &TlsConfig) -> Result<Option<TlsAc
     // Load certificate (secret takes precedence over file)
     let certs = if let Some(ref secret) = config.cert_secret {
         info!(source = %secret, "Loading TLS certificate from secret");
-        let pem_data = load_from_secret(secret).await?;
+        let pem_data = secrets::read_bytes(secret).await?;
         load_certs_from_bytes(&pem_data, secret)?
     } else if let Some(ref path) = config.cert_file {
         debug!(path = %path, "Loading TLS certificate from file");
@@ -282,7 +234,7 @@ pub async fn build_tls_acceptor_async(config: &TlsConfig) -> Result<Option<TlsAc
     // Load private key (secret takes precedence over file)
     let key = if let Some(ref secret) = config.key_secret {
         info!(source = %secret, "Loading TLS private key from secret");
-        let pem_data = load_from_secret(secret).await?;
+        let pem_data = secrets::read_bytes(secret).await?;
         load_private_key_from_bytes(&pem_data, secret)?
     } else if let Some(ref path) = config.key_file {
         debug!(path = %path, "Loading TLS private key from file");
@@ -304,7 +256,7 @@ pub async fn build_tls_acceptor_async(config: &TlsConfig) -> Result<Option<TlsAc
             // Load CA certificate (secret takes precedence over file)
             let root_store = if let Some(ref secret) = config.ca_secret {
                 info!(source = %secret, "Loading CA certificate from secret");
-                let pem_data = load_from_secret(secret).await?;
+                let pem_data = secrets::read_bytes(secret).await?;
                 load_ca_certs_from_bytes(&pem_data, secret)?
             } else if let Some(ref path) = config.ca_file {
                 debug!(path = %path, "Loading CA certificate from file");
@@ -352,7 +304,7 @@ pub async fn build_grpc_tls_config(
     // Load certificate (secret takes precedence over file)
     let cert_pem = if let Some(ref secret) = config.cert_secret {
         info!(source = %secret, "Loading gRPC TLS certificate from secret");
-        load_from_secret(secret).await?
+        secrets::read_bytes(secret).await?
     } else if let Some(ref path) = config.cert_file {
         debug!(path = %path, "Loading gRPC TLS certificate from file");
         std::fs::read(path)
@@ -366,7 +318,7 @@ pub async fn build_grpc_tls_config(
     // Load private key (secret takes precedence over file)
     let key_pem = if let Some(ref secret) = config.key_secret {
         info!(source = %secret, "Loading gRPC TLS private key from secret");
-        load_from_secret(secret).await?
+        secrets::read_bytes(secret).await?
     } else if let Some(ref path) = config.key_file {
         debug!(path = %path, "Loading gRPC TLS private key from file");
         std::fs::read(path)
@@ -385,7 +337,7 @@ pub async fn build_grpc_tls_config(
     if client_auth != ClientAuth::None {
         let ca_pem = if let Some(ref secret) = config.ca_secret {
             info!(source = %secret, "Loading gRPC CA certificate from secret");
-            load_from_secret(secret).await?
+            secrets::read_bytes(secret).await?
         } else if let Some(ref path) = config.ca_file {
             debug!(path = %path, "Loading gRPC CA certificate from file");
             std::fs::read(path)

@@ -8,20 +8,25 @@
 
 //! Integration tests for secret loading from external secret sources.
 //!
-//! The `file:` provider is exercised directly. The `vault:` provider runs
-//! against an OpenBao container in dev mode (skipped locally without Docker,
-//! required in CI), for both the bearer-token path and the webhook caller
-//! secrets that share `read_secret_source` with it.
+//! Every `provider:path[:key]` spec resolves through `scalo::secrets::resolve`,
+//! reached via `dfe_receiver::secrets`. The `file:` provider is exercised
+//! directly, for bearer tokens and for TLS certificate material. The `vault:`
+//! provider runs against an OpenBao container in dev mode (skipped locally
+//! without Docker, required in CI), for both the bearer-token path and the
+//! webhook caller secrets that share the resolver with it.
 
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
 
 use std::io::Write;
+use std::path::Path;
+use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::http::HeaderMap;
-use dfe_receiver::config::{BearerConfig, WebhookAuthConfig, WebhookAuthMode};
+use dfe_receiver::config::{BearerConfig, TlsConfig, WebhookAuthConfig, WebhookAuthMode};
 use dfe_receiver::server::auth::BearerTokenProvider;
+use dfe_receiver::server::tls::build_tls_acceptor_async;
 use dfe_receiver::server::webhook::auth::{AuthFailure, CallerAuth};
 use tempfile::NamedTempFile;
 
@@ -83,8 +88,12 @@ async fn test_bearer_tokens_newline_and_comma_separated() {
     }
 }
 
+/// A zero-byte token file is a mount or rotation failure, not an empty token
+/// set, so the resolver refuses it and startup fails with the path named. The
+/// old behaviour -- zero tokens and a clean start -- is a listener that rejects
+/// every request while reading as healthy.
 #[tokio::test]
-async fn test_bearer_tokens_empty_file_no_tokens() {
+async fn test_bearer_tokens_empty_file_is_an_error() {
     let file = NamedTempFile::new().unwrap();
     let source = format!("file:{}", file.path().display());
     let config = BearerConfig {
@@ -92,11 +101,16 @@ async fn test_bearer_tokens_empty_file_no_tokens() {
         secret_source: Some(source),
         refresh_interval_secs: 0,
     };
-    let provider = BearerTokenProvider::from_config(&config).await.unwrap();
 
-    // Empty file → 0 tokens loaded; provider is still usable
-    assert_eq!(provider.token_count(), 0);
-    assert!(!provider.is_valid("anything"));
+    let err = BearerTokenProvider::from_config(&config)
+        .await
+        .err()
+        .expect("an empty token file must not start a zero-token provider")
+        .to_string();
+    assert!(
+        err.contains(&file.path().display().to_string()),
+        "the refusal must name the file: {err}"
+    );
 }
 
 #[tokio::test]
@@ -138,16 +152,26 @@ async fn test_bearer_tokens_missing_file_falls_back_to_static() {
     assert!(provider.is_valid("static-fallback"));
 }
 
+/// A value with no `provider:` prefix must be refused, not used.
+///
+/// scalo's resolver returns a spec it does not recognise as a literal, so
+/// without the receiver's prefix check the field's own contents would become
+/// the accepted token.
 #[tokio::test]
-async fn test_bearer_tokens_invalid_source_format_rejected() {
+async fn test_bearer_tokens_source_with_no_provider_is_not_used_as_a_token() {
     let config = BearerConfig {
         tokens: vec!["static".to_string()],
         secret_source: Some("invalid_no_colon".to_string()),
         refresh_interval_secs: 0,
     };
-    // Malformed source: graceful fall-through to static tokens
     let provider = BearerTokenProvider::from_config(&config).await.unwrap();
-    assert!(provider.is_valid("static"));
+
+    assert!(provider.is_valid("static"), "the static token must survive");
+    assert!(
+        !provider.is_valid("invalid_no_colon"),
+        "the spec itself must not become an accepted token"
+    );
+    assert_eq!(provider.token_count(), 1);
 }
 
 #[tokio::test]
@@ -158,8 +182,155 @@ async fn test_bearer_tokens_unknown_provider_rejected() {
         refresh_interval_secs: 0,
     };
     let provider = BearerTokenProvider::from_config(&config).await.unwrap();
-    // Unknown provider triggers warning and keeps static tokens
+
     assert!(provider.is_valid("fallback"));
+    assert!(
+        !provider.is_valid("nonexistent_provider:some_path"),
+        "an unknown provider must not fall through as a literal token"
+    );
+}
+
+/// The receiver does not build scalo's `secrets-aws`, so an `aws:` spec is
+/// refused when the provider is built -- at startup, with the feature named --
+/// rather than at the first request that needs a token.
+#[tokio::test]
+async fn test_aws_source_is_refused_at_startup_naming_the_feature() {
+    let config = BearerConfig {
+        tokens: vec![],
+        secret_source: Some("aws:prod/auth/tokens:bearer".to_string()),
+        refresh_interval_secs: 0,
+    };
+
+    let err = BearerTokenProvider::from_config(&config)
+        .await
+        .err()
+        .expect("an aws: spec cannot be served")
+        .to_string();
+    assert!(
+        err.contains("secrets-aws"),
+        "the refusal must name the scalo feature: {err}"
+    );
+    assert!(
+        !err.contains("provider not configured"),
+        "the spec must be refused by name, not as an unconfigured provider: {err}"
+    );
+}
+
+/// A `vault:` spec names the field of the secret to read. The resolver this
+/// replaced defaulted a missing key to `value`, which is a guess at which field
+/// the operator meant.
+#[tokio::test]
+async fn test_keyless_vault_source_is_refused() {
+    let config = BearerConfig {
+        tokens: vec![],
+        secret_source: Some("vault:secret/data/auth".to_string()),
+        refresh_interval_secs: 0,
+    };
+
+    let err = BearerTokenProvider::from_config(&config)
+        .await
+        .err()
+        .expect("a vault spec with no key names no field")
+        .to_string();
+    assert!(
+        err.contains("invalid credential spec"),
+        "the refusal must come from the resolver's spec check: {err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// TLS certificate material through the same resolver
+// ---------------------------------------------------------------------------
+
+/// Write a throwaway self-signed cert and key into `dir`, or `None` when the
+/// host has no openssl.
+fn self_signed_pair(dir: &Path) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    let cert = dir.join("server.crt");
+    let key = dir.join("server.key");
+
+    let output = Command::new("openssl")
+        .args([
+            "req",
+            "-newkey",
+            "ec",
+            "-pkeyopt",
+            "ec_paramgen_curve:P-384",
+            "-nodes",
+            "-x509",
+            "-keyout",
+        ])
+        .arg(&key)
+        .arg("-out")
+        .arg(&cert)
+        .args(["-days", "1", "-subj", "/CN=localhost/O=Test/C=AU"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        eprintln!(
+            "Skipping: openssl could not generate a test certificate: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return None;
+    }
+    Some((cert, key))
+}
+
+/// TLS certificate material loads from `file:` specs.
+///
+/// The TLS path used to build its own `SecretsManager` with the disk cache left
+/// on and every read registered under the fixed name `tls_secret`, so the cert
+/// and the key could be answered from one another's cache entry, and it never
+/// set an OpenBao connection, so a `vault:` spec could not load at all. It now
+/// goes through the same resolver as every other secret.
+#[tokio::test]
+async fn test_tls_material_loads_from_file_specs() {
+    // Both ring and aws-lc-rs reach the test binary, so rustls refuses to pick
+    // a provider for itself. Same install the vector integration test does.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let dir = tempfile::tempdir().unwrap();
+    let Some((cert, key)) = self_signed_pair(dir.path()) else {
+        return;
+    };
+
+    let config = TlsConfig {
+        enabled: true,
+        cert_secret: Some(format!("file:{}", cert.display())),
+        key_secret: Some(format!("file:{}", key.display())),
+        client_auth: "none".to_string(),
+        ..TlsConfig::default()
+    };
+
+    let acceptor = build_tls_acceptor_async(&config)
+        .await
+        .expect("cert and key resolve through the file provider");
+    assert!(
+        acceptor.is_some(),
+        "an enabled TLS config must produce an acceptor"
+    );
+}
+
+/// A `file:` spec naming a path that is not there must name the path, not fail
+/// somewhere inside the PEM parser.
+#[tokio::test]
+async fn test_tls_material_from_a_missing_file_names_the_path() {
+    let config = TlsConfig {
+        enabled: true,
+        cert_secret: Some("file:/nonexistent/dfe-receiver-test/server.crt".to_string()),
+        key_file: Some("/nonexistent/dfe-receiver-test/server.key".to_string()),
+        client_auth: "none".to_string(),
+        ..TlsConfig::default()
+    };
+
+    let err = build_tls_acceptor_async(&config)
+        .await
+        .err()
+        .expect("a missing cert file cannot load")
+        .to_string();
+    assert!(
+        err.contains("/nonexistent/dfe-receiver-test/server.crt"),
+        "the error must name the path: {err}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -275,6 +446,54 @@ async fn test_bearer_tokens_loaded_from_vault_container() {
     assert!(provider.is_valid("vault-token-1"));
     assert!(provider.is_valid("vault-token-2"));
     assert!(!provider.is_valid("not-in-vault"));
+}
+
+/// TLS certificate material loads from `vault:` references, the certificate and
+/// the key held as two fields of one secret.
+///
+/// This is what the deleted TLS loader could not do. It built its
+/// `SecretsManager` from a default `SecretsConfig`, which carries no OpenBao
+/// connection, so a `vault:` TLS reference was refused before an address was
+/// read. It also registered every read under the single name `tls_secret` with
+/// the disk cache left on, so the key could be answered from the certificate's
+/// cache entry.
+#[tokio::test]
+async fn test_tls_material_loads_from_vault_container() {
+    skip_if_no_docker!();
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let dir = tempfile::tempdir().unwrap();
+    let Some((cert, key)) = self_signed_pair(dir.path()) else {
+        return;
+    };
+    let cert_pem = std::fs::read_to_string(&cert).unwrap();
+    let key_pem = std::fs::read_to_string(&key).unwrap();
+
+    let Some(bao) = OpenBao::with_secret(
+        test_name!(),
+        serde_json::json!({ "cert": cert_pem, "key": key_pem }),
+    )
+    .await
+    else {
+        return;
+    };
+
+    let config = TlsConfig {
+        enabled: true,
+        cert_secret: Some(bao.source("cert")),
+        key_secret: Some(bao.source("key")),
+        client_auth: "none".to_string(),
+        ..TlsConfig::default()
+    };
+
+    let acceptor = bao
+        .with_env(async { build_tls_acceptor_async(&config).await })
+        .await
+        .expect("the certificate and the key both resolve from OpenBao");
+    assert!(
+        acceptor.is_some(),
+        "an enabled TLS config must produce an acceptor"
+    );
 }
 
 /// A `header`-mode webhook caller's secret loads from a `vault:` reference and
@@ -503,8 +722,8 @@ async fn test_bearer_tokens_reload_after_file_update() {
     std::fs::write(&file_path, "rotated-token\n").unwrap();
 
     // Re-load via a fresh provider (equivalent to what the background
-    // refresh task does internally — calls load_from_secret which
-    // re-reads the file via the SecretsManager)
+    // refresh task does internally -- calls load_tokens, which re-reads the
+    // file through the resolver)
     let provider2 = BearerTokenProvider::from_config(&config).await.unwrap();
     assert!(
         !provider2.is_valid("initial-token"),
