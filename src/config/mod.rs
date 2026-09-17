@@ -117,7 +117,7 @@ pub struct Config {
     #[serde(skip)]
     pub config_path: Option<String>,
 
-    /// Debug file sink — writes all processed messages to a file.
+    /// Debug file sink -- writes all processed messages to a file.
     pub file_sink: FileSinkConfig,
 }
 
@@ -153,7 +153,7 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Load configuration with cascade: CLI → ENV → .env → file → defaults
+    /// Load configuration with cascade: CLI -> ENV -> .env -> file -> defaults
     ///
     /// Priority (highest to lowest):
     /// 1. CLI arguments (handled by caller, merged after)
@@ -179,11 +179,11 @@ impl Config {
         // Get the global config and unmarshal to our struct
         let cfg = config::get();
 
-        // Unmarshal config — warn and fall back to defaults on failure
+        // Unmarshal config -- warn and fall back to defaults on failure
         let mut config: Config = match cfg.unmarshal() {
             Ok(c) => c,
             Err(e) => {
-                tracing::warn!(error = %e, "config unmarshal failed, using defaults — check YAML syntax");
+                tracing::warn!(error = %e, "config unmarshal failed, using defaults -- check YAML syntax");
                 Config::default()
             }
         };
@@ -330,6 +330,18 @@ impl Config {
             ));
         }
 
+        // A rate of zero has no interval between replenishments, so the limiter
+        // has nothing to build a quota from and the derivation would divide by
+        // it. An operator who wants no requests through disables the listener.
+        if self.server.rate_limit.enabled && self.server.rate_limit.requests_per_second == 0 {
+            return Err(Error::Config(
+                "server.rate_limit.requests_per_second is 0 -- the limiter replenishes one \
+                 request every 1/requests_per_second of a second, which zero does not \
+                 describe. Set a rate, or server.rate_limit.enabled: false"
+                    .into(),
+            ));
+        }
+
         // Validate buffer config
         if self.buffer.pressure_threshold < 0.0 || self.buffer.pressure_threshold > 1.0 {
             return Err(Error::Config(
@@ -352,9 +364,9 @@ impl Config {
 
     /// Refuse an auth mode the listener that carries it does not enforce.
     ///
-    /// Every listener owns an `auth:` block of the same shape, but they do not
-    /// all read the same amount of it, and a mode a listener ignores is not a
-    /// weaker door -- it is an open one that reads as shut. Each rule below
+    /// The listeners below own an `auth:` block of the same shape, but they do
+    /// not all read the same amount of it, and a mode a listener ignores is not
+    /// a weaker door -- it is an open one that reads as shut. Each rule below
     /// names the code that does or does not run.
     fn validate_auth(&self) -> Result<()> {
         // Always-on HTTP listener.
@@ -717,7 +729,7 @@ fn apply_raw_capture_env(cfg: &mut RawCaptureConfig, prefix: &str, key: &str) {
 
 impl Normalize for Config {
     fn normalize(&mut self) {
-        // SASL credentials present → enable SASL (regardless of how they arrived)
+        // SASL credentials present -> enable SASL (regardless of how they arrived)
         if let Some(ref mut sasl) = self.kafka.sasl
             && (!sasl.username.is_empty() || !sasl.mechanism.is_empty())
         {
@@ -743,10 +755,11 @@ pub struct ServerConfig {
     /// Protects against connection exhaustion and memory pressure.
     pub max_concurrent_requests: usize,
 
-    /// Per-IP rate limiting configuration.
+    /// Per-IP rate limiting for every HTTP listener.
     pub rate_limit: RateLimitConfig,
 
-    /// IP filter (allowlist/denylist) configuration.
+    /// IP filter (allowlist/denylist) for every listener the receiver owns an
+    /// accept loop for.
     pub ip_filter: IpFilterConfig,
 
     /// TLS configuration.
@@ -772,6 +785,15 @@ impl Default for ServerConfig {
 }
 
 /// Per-IP rate limiting configuration using GCRA (token bucket variant).
+///
+/// Applies to `/ingest`, the webhook intake, Splunk HEC, Prometheus remote
+/// write and OTLP HTTP. Each listener keeps its own budget, so the figures
+/// below are per source IP per listener, not a receiver-wide total.
+///
+/// It cannot apply to the raw TCP and UDP listeners (syslog, Lumberjack, Fluent
+/// Forward, GELF) or to the gRPC ports: there is no HTTP request there to count
+/// and tonic owns its own accept loop. Flow has its own per-source packet limit
+/// under `flow.rate_limit`.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct RateLimitConfig {
@@ -779,6 +801,10 @@ pub struct RateLimitConfig {
     pub enabled: bool,
 
     /// Maximum sustained requests per second per source IP.
+    ///
+    /// A rate, not an interval: the limiter replenishes one request of the
+    /// quota every `1/requests_per_second` of a second. At 100 that is one
+    /// every 10ms. Must be at least 1 while `enabled` is true.
     pub requests_per_second: u64,
 
     /// Burst capacity above the sustained rate.
@@ -796,6 +822,23 @@ impl Default for RateLimitConfig {
 }
 
 /// IP filter (allowlist / denylist) configuration.
+///
+/// Enforced in the accept loop, before the TLS handshake and before any
+/// protocol work: `/ingest`, the webhook intake, Splunk HEC, Prometheus remote
+/// write, OTLP HTTP, syslog (UDP per datagram, TCP and TLS per connection),
+/// Lumberjack, Fluent Forward and GELF.
+///
+/// It does not reach the gRPC ports (`grpc`, and OTLP on 4317): tonic owns
+/// those accept loops, so authenticate them with `auth.mode: bearer`, or
+/// `mtls` with `tls.client_auth: required`. Flow has its own optional
+/// `flow.ip_filter` per listener.
+///
+/// UPGRADE: this list used to be `/ingest` and the webhook intake alone. One
+/// filter now governs every listener, so an allowlist written for the `/ingest`
+/// senders also decides which sources syslog, Lumberjack, Fluent Forward, GELF,
+/// Splunk HEC, Prometheus remote write and OTLP HTTP are accepted from. Widen
+/// `cidrs` to cover every sender, or those events are dropped in the accept
+/// loop.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct IpFilterConfig {
@@ -1278,6 +1321,10 @@ impl Default for PrometheusRwConfig {
 ///
 /// Accepts data from Fluentd and Fluent Bit agents over the Forward
 /// protocol (msgpack over TCP) on the standard port 24224.
+///
+/// There is no `auth` block: the Forward frames this handler reads carry no
+/// credential. Close the port at the handshake with `tls.client_auth:
+/// required`, or restrict the senders with a `server.ip_filter` allowlist.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct FluentConfig {
@@ -1317,6 +1364,10 @@ impl Default for FluentConfig {
 ///
 /// Accepts GELF messages over TCP (null-byte delimited JSON)
 /// on the standard port 12201.
+///
+/// There is no `auth` block: GELF has no in-protocol authentication. Close the
+/// port at the handshake with `tls.client_auth: required`, or restrict the
+/// senders with a `server.ip_filter` allowlist.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct GelfConfig {
@@ -1649,9 +1700,9 @@ pub struct SourceRule {
 
     /// Match mode: "key_present", "key_value_set", "key_value_use".
     ///
-    /// - `key_present`: if field exists → `_source = source`
-    /// - `key_value_set`: if field value == `match_value` → `_source = source`
-    /// - `key_value_use`: if field exists → `_source = <field value>`
+    /// - `key_present`: if field exists -> `_source = source`
+    /// - `key_value_set`: if field value == `match_value` -> `_source = source`
+    /// - `key_value_use`: if field exists -> `_source = <field value>`
     pub mode: String,
 
     /// Value to match against (for `key_value_set` mode only).
@@ -2709,6 +2760,31 @@ mod tests {
     }
 
     #[test]
+    fn a_rate_limit_of_zero_requests_per_second_is_refused() {
+        // The limiter is configured by the interval between replenishments,
+        // which is 1/rate: zero has no such interval and the derivation would
+        // divide by it.
+        let mut config = auth_base();
+        config.server.rate_limit.enabled = true;
+        config.server.rate_limit.requests_per_second = 0;
+
+        let err = config.validate().expect_err("must not start");
+        assert!(
+            err.to_string()
+                .contains("server.rate_limit.requests_per_second"),
+            "the error must name the field, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_rate_limit_of_zero_is_inert_while_the_limiter_is_off() {
+        let mut config = auth_base();
+        config.server.rate_limit.enabled = false;
+        config.server.rate_limit.requests_per_second = 0;
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
     fn a_misspelled_auth_mode_is_refused() {
         // AuthMode::from_str maps anything unrecognised to None, so this was a
         // wide-open listener that read as bearer-authenticated.
@@ -3396,7 +3472,7 @@ kafka:
     #[test]
     fn test_kafka_yaml_other_override_loses_stats_default() {
         // When user provides librdkafka_overrides in YAML, serde replaces
-        // the entire map — the default stats.interval.ms=0 is NOT merged.
+        // the entire map -- the default stats.interval.ms=0 is NOT merged.
         // This is acceptable: users who set overrides are advanced and can
         // add statistics.interval.ms themselves if needed.
         let yaml = r#"
@@ -3413,7 +3489,7 @@ kafka:
                 .librdkafka_overrides
                 .get("statistics.interval.ms"),
             None,
-            "serde replaces default map — only user-specified keys present"
+            "serde replaces default map -- only user-specified keys present"
         );
     }
 

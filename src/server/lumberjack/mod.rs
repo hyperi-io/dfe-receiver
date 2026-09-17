@@ -33,6 +33,7 @@ use crate::config::LumberjackConfig;
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
+use crate::server::ip_filter::IpFilter;
 use crate::server::traits::ProtocolHandler;
 use codec::{Frame, decompress_and_parse, encode_ack, read_frame};
 
@@ -216,6 +217,10 @@ impl ProtocolHandler for LumberjackHandler {
             .await
             .map_err(|e| Error::Server(format!("failed to bind Lumberjack listener: {e}")))?;
 
+        // A Lumberjack frame carries no credential, so the IP filter and the
+        // TLS handshake are the whole admission surface on this port.
+        let ip_filter = IpFilter::from_config(&self.pipeline.config().server.ip_filter);
+
         // Build TLS acceptor if enabled
         let tls_acceptor = if self.config.tls.enabled {
             let acceptor = super::tls::build_tls_acceptor_async(&self.config.tls).await?;
@@ -240,6 +245,12 @@ impl ProtocolHandler for LumberjackHandler {
                             continue;
                         }
                     };
+
+                    // Reject before the TLS handshake and before any frame is read.
+                    if !ip_filter.admits(peer_addr) {
+                        drop(stream);
+                        continue;
+                    }
 
                     let pipeline = self.pipeline.clone();
                     let metrics = self.metrics.clone();

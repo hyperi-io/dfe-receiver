@@ -1,6 +1,6 @@
 // Project:   dfe-receiver
 // File:      tests/integration.rs
-// Purpose:   Single-binary integration test — all protocol + security tests as submodules
+// Purpose:   Single-binary integration test -- all protocol + security tests as submodules
 // Language:  Rust
 //
 // License:   BUSL-1.1
@@ -38,6 +38,8 @@ mod http_ingest;
 mod http_security;
 #[path = "integration/kafka_sink.rs"]
 mod kafka_sink;
+#[path = "integration/listener_admission.rs"]
+mod listener_admission;
 #[path = "integration/lumberjack.rs"]
 mod lumberjack;
 #[path = "integration/minio_spool.rs"]

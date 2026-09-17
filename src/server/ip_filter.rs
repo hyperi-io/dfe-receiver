@@ -11,12 +11,12 @@
 //! Supports allowlist (only listed CIDRs pass) and denylist (listed CIDRs
 //! blocked) modes. Uses a prefix trie for O(prefix-length) lookup per request.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use ipnet::IpNet;
 use ipnet_trie::IpnetTrie;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::config::IpFilterConfig;
 
@@ -74,6 +74,20 @@ impl IpFilter {
         Self {
             inner: Arc::new(inner),
         }
+    }
+
+    /// Whether a freshly accepted connection from `peer` may proceed.
+    ///
+    /// Every accept loop calls this before any protocol work -- before the TLS
+    /// handshake on a TLS listener -- so a barred peer costs one trie lookup
+    /// and the connection is dropped by the caller returning to the loop.
+    #[must_use]
+    pub fn admits(&self, peer: SocketAddr) -> bool {
+        if self.is_allowed(peer.ip()) {
+            return true;
+        }
+        debug!(peer = %peer, "connection rejected by IP filter");
+        false
     }
 
     /// Check whether a given IP is allowed through.
@@ -154,5 +168,13 @@ mod tests {
     fn test_unknown_mode_disables() {
         let filter = make_filter("foobar", &["10.0.0.0/8"]);
         assert!(filter.is_allowed("1.2.3.4".parse().unwrap()));
+    }
+
+    #[test]
+    fn admits_ignores_the_peer_port() {
+        // Accept loops hand over the whole peer address; only the IP is keyed.
+        let filter = make_filter("allowlist", &["10.0.0.0/8"]);
+        assert!(filter.admits("10.0.0.1:54321".parse().unwrap()));
+        assert!(!filter.admits("8.8.8.8:443".parse().unwrap()));
     }
 }

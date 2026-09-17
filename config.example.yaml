@@ -11,13 +11,43 @@ server:
   request_timeout_ms: 30000
   max_concurrent_requests: 10000  # max in-flight requests; 0 = unlimited
 
-  # Per-IP rate limiting (GCRA algorithm via tower-governor)
+  # Per-IP rate limiting (GCRA algorithm via tower-governor).
+  #
+  # Applies to every HTTP listener: /ingest, the webhook intake, splunk_hec,
+  # prometheus_rw and the OTLP HTTP endpoint. Each keeps its OWN budget, so the
+  # figures below are per source IP PER LISTENER, not a receiver-wide total -- a
+  # client saturating HEC does not spend the OTLP allowance for the same IP. Over
+  # the rate the listener answers 429 and the others keep serving.
+  #
+  # It cannot apply to the raw TCP/UDP listeners (syslog, lumberjack, fluent,
+  # gelf): there is no HTTP request there to count. Nor to the gRPC ports, where
+  # tonic owns the accept loop. flow.rate_limit below is the per-source packet
+  # limit for flow.
+  #
+  # requests_per_second is a RATE, not an interval: the limiter replenishes one
+  # request of the quota every 1/requests_per_second of a second. At 100 that is
+  # one every 10ms. It must be at least 1 while enabled is true.
   rate_limit:
     enabled: false           # opt-in; enable for internet-facing deployments
-    requests_per_second: 100 # sustained rate per source IP
+    requests_per_second: 100 # sustained rate per source IP, per listener
     burst: 500               # burst capacity above sustained rate
 
-  # IP filter (allowlist or denylist by CIDR)
+  # IP filter (allowlist or denylist by CIDR).
+  #
+  # Runs in the accept loop, before the TLS handshake and before any protocol
+  # work, on every listener the receiver owns an accept loop for: /ingest, the
+  # webhook intake, splunk_hec, prometheus_rw, OTLP HTTP, lumberjack, fluent,
+  # gelf, and syslog (per connection on TCP and TLS, per datagram on UDP).
+  #
+  # It does NOT reach the gRPC ports (grpc, and OTLP on 4317): tonic owns those
+  # accept loops, so close them with auth.mode: bearer, or mtls with
+  # tls.client_auth: required. flow has its own optional flow.ip_filter.
+  #
+  # UPGRADE: that list used to be /ingest and the webhook intake alone. ONE
+  # filter now governs every listener, so an allowlist written for the /ingest
+  # senders also decides which sources syslog, lumberjack, fluent, gelf,
+  # splunk_hec, prometheus_rw and OTLP HTTP are accepted from. Widen cidrs to
+  # cover every sender, or those events are dropped in the accept loop.
   ip_filter:
     mode: "disabled"         # disabled, allowlist, denylist
     cidrs: []                # e.g., ["10.0.0.0/8", "172.16.0.0/12"]
@@ -66,6 +96,10 @@ grpc:
     # key_secret: "vault:secret/tls:key"
     # refresh_interval_secs: 3600       # Hot-reload interval (1 hour)
 
+  # server.ip_filter and server.rate_limit do NOT reach this port: tonic owns
+  # the accept loop, so there is nowhere to reject a connection before it is
+  # served. Close it with auth below, or at the network edge.
+  #
   # gRPC auth. none, bearer, or mtls -- and mtls only alongside tls.enabled:
   # true and tls.client_auth: required, since it is the handshake that does the
   # work. `header` and `both` are refused: the interceptor reads the
@@ -83,7 +117,7 @@ lumberjack:
   enabled: false
   bind_address: "0.0.0.0:5044"
 
-  # TLS (recommended — Beats clients typically expect TLS)
+  # TLS (recommended -- Beats clients typically expect TLS)
   tls:
     enabled: false
     cert_file: "/etc/ssl/beats-receiver.crt"
@@ -99,6 +133,7 @@ lumberjack:
   # mode there is refused at startup rather than accepted and ignored.
   # Authenticate Beats clients at the handshake instead: tls.enabled: true with
   # tls.client_auth: required and the CA the client certs are issued from.
+  # server.ip_filter also gates this accept loop, per connection.
 
 # Splunk HEC (HTTP Event Collector) protocol
 splunk_hec:
@@ -118,7 +153,7 @@ splunk_hec:
     # key_secret: "vault:secret/tls:key"
     # refresh_interval_secs: 3600
 
-  # Auth — supports both "Authorization: Splunk <token>" and "Authorization: Bearer <token>"
+  # Auth -- supports both "Authorization: Splunk <token>" and "Authorization: Bearer <token>"
   auth:
     mode: "none"  # none, bearer
     # bearer:
@@ -150,7 +185,8 @@ syslog:
   # refused at startup rather than accepted and ignored. Authenticate senders at
   # the handshake instead, on the TLS listener above (RFC 5425, port 6514):
   # tls.enabled: true with tls.client_auth: required. UDP and plain TCP syslog
-  # cannot be authenticated at all -- restrict them with server.ip_filter or at
+  # cannot be authenticated at all -- restrict them with server.ip_filter, which
+  # gates the TCP and TLS accept loops per connection and UDP per datagram, or at
   # the network edge.
 
 # Prometheus Remote Write receiver (v1)
@@ -234,6 +270,12 @@ webhook:
   #     body: single
 
 # Fluent Forward protocol (Fluentd/Fluent Bit, msgpack over TCP)
+#
+# NO application auth on this listener, and no `auth` block to put one in: the
+# Forward frames this handler reads carry no credential, and the shared_key
+# HELO/PING/PONG handshake is not implemented. Close the port at the TLS
+# handshake (tls.client_auth: required, with the CA its certificates are issued
+# from), or restrict the senders with a server.ip_filter allowlist.
 fluent:
   enabled: false
   bind_address: "0.0.0.0:24224"
@@ -250,6 +292,11 @@ fluent:
     # refresh_interval_secs: 3600
 
 # GELF (Graylog Extended Log Format, null-delimited JSON over TCP)
+#
+# NO application auth on this listener, and no `auth` block to put one in: GELF
+# has no in-protocol authentication at all. Close the port at the TLS handshake
+# (tls.client_auth: required, with the CA its certificates are issued from), or
+# restrict the senders with a server.ip_filter allowlist.
 gelf:
   enabled: false
   bind_address: "0.0.0.0:12201"
@@ -342,9 +389,9 @@ validation:
 routing:
   # Source rules (first match wins). Only evaluated when include_common_header is true.
   # Modes:
-  #   key_present:   if field exists → _source = <source>
-  #   key_value_set: if field == match_value → _source = <source>
-  #   key_value_use: if field exists → _source = <field value>
+  #   key_present:   if field exists -> _source = <source>
+  #   key_value_set: if field == match_value -> _source = <source>
+  #   key_value_use: if field exists -> _source = <field value>
   source_rules:
     - field: "_source"
       mode: "key_value_use"       # use the value of _source as the source

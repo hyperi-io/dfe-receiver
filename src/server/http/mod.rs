@@ -60,8 +60,11 @@ const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Defends against slowloris attacks where clients send headers very slowly.
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Idle connection timeout — close connections with no active streams.
+/// Idle connection timeout -- close connections with no active streams.
 const CONNECTION_IDLE_TIMEOUT: Duration = Duration::from_mins(1);
+
+/// Nanoseconds in a second, the numerator of the rate limiter's period.
+const NANOS_PER_SECOND: u64 = 1_000_000_000;
 
 /// Most events one batched POST may carry.
 ///
@@ -367,9 +370,16 @@ pub async fn run_server(
 /// per-IP GCRA rate limit.
 ///
 /// Outermost layers, added last so they wrap every route on the router,
-/// including ones merged in after the ingest routes' own middleware. Shared by
-/// the ingest listener and the webhook's own listener so neither bypasses
-/// them.
+/// including ones merged in after the ingest routes' own middleware. Every HTTP
+/// listener calls this -- ingest, the webhook's own listener, Splunk HEC,
+/// Prometheus remote write and OTLP HTTP -- so none of them bypasses a limit
+/// `server.*` reads as covering the whole ingest surface.
+///
+/// Each call builds its own governor, so the per-IP budget is per listener: a
+/// client saturating HEC does not consume the OTLP budget for the same IP.
+///
+/// `requests_per_second` is a rate, and the governor is configured by the
+/// interval between replenishments -- see [`replenish_period`].
 pub(crate) fn apply_server_limits(
     mut app: Router,
     server: &crate::config::ServerConfig,
@@ -386,8 +396,15 @@ pub(crate) fn apply_server_limits(
     // headers first, then falls back to peer IP.
     let rate_limit_config = &server.rate_limit;
     if rate_limit_config.enabled {
+        let period = replenish_period(rate_limit_config.requests_per_second).ok_or_else(|| {
+            Error::Config(format!(
+                "server.rate_limit.requests_per_second is {}, which has no replenish \
+                 period -- it must be between 1 and {NANOS_PER_SECOND}",
+                rate_limit_config.requests_per_second
+            ))
+        })?;
         let governor_conf = GovernorConfigBuilder::default()
-            .per_second(rate_limit_config.requests_per_second)
+            .period(period)
             .burst_size(rate_limit_config.burst)
             .key_extractor(SmartIpKeyExtractor)
             .finish()
@@ -397,6 +414,7 @@ pub(crate) fn apply_server_limits(
         info!(
             rps = rate_limit_config.requests_per_second,
             burst = rate_limit_config.burst,
+            period_ms = period.as_secs_f64() * 1000.0,
             "Per-IP rate limiting enabled"
         );
     }
@@ -404,11 +422,31 @@ pub(crate) fn apply_server_limits(
     Ok(app)
 }
 
+/// The interval after which the governor replenishes one request of the quota.
+///
+/// `GovernorConfigBuilder` is configured by that interval, not by a rate:
+/// `per_second(n)` sets the period to n SECONDS, which is one request every n
+/// seconds. A sustained rate of n requests per second is its reciprocal, so the
+/// period is derived here rather than handed to a setter that reads the rate as
+/// an interval.
+///
+/// `None` for a rate with no usable period: zero has none, and a rate finer than
+/// one request per nanosecond rounds down to none.
+fn replenish_period(requests_per_second: u64) -> Option<Duration> {
+    let nanos = NANOS_PER_SECOND.checked_div(requests_per_second)?;
+    (nanos > 0).then(|| Duration::from_nanos(nanos))
+}
+
 /// Run HTTP server without TLS.
 ///
 /// Uses hyper low-level APIs (instead of `axum::serve`) to gain control over
 /// connection-level timeouts. This protects against slowloris attacks where
 /// `axum::serve` has no native defence.
+///
+/// Every plaintext HTTP listener runs here rather than on `axum::serve`, so
+/// each gets the accept-loop IP filter, the hardened header-read timeout, and
+/// the peer address the rate limiter keys on when no proxy header names the
+/// client.
 pub(crate) async fn run_plain_server(
     listener: TcpListener,
     app: Router,
@@ -430,9 +468,8 @@ pub(crate) async fn run_plain_server(
                     }
                 };
 
-                // IP filter at connection level — reject before any HTTP work
-                if !ip_filter.is_allowed(peer_addr.ip()) {
-                    debug!(peer = %peer_addr, "connection rejected by IP filter");
+                // IP filter at connection level -- reject before any HTTP work
+                if !ip_filter.admits(peer_addr) {
                     drop(stream);
                     continue;
                 }
@@ -517,9 +554,8 @@ pub(crate) async fn run_tls_server(
                     }
                 };
 
-                // IP filter at connection level — reject before TLS handshake
-                if !ip_filter.is_allowed(peer_addr.ip()) {
-                    debug!(peer = %peer_addr, "connection rejected by IP filter");
+                // IP filter at connection level -- reject before TLS handshake
+                if !ip_filter.admits(peer_addr) {
                     drop(stream);
                     continue;
                 }
@@ -603,7 +639,7 @@ async fn ingest_handler(
     if !state.pipeline.is_ready() {
         debug!(
             transport = "http",
-            "Request rejected — pipeline not ready (backpressure)"
+            "Request rejected -- pipeline not ready (backpressure)"
         );
         state.metrics.inc_requests_total("http");
         state.metrics.inc_requests_error("http");
@@ -956,5 +992,33 @@ mod tests {
         let auth = AuthState::new(test_auth_config());
         let auth2 = auth.clone();
         assert_eq!(auth.config.mode, auth2.config.mode);
+    }
+
+    #[test]
+    fn the_replenish_period_is_the_reciprocal_of_the_rate() {
+        // The trap this guards: the builder's per_second(n) sets the period to
+        // n SECONDS, so a rate handed straight to it delivers one request every
+        // n seconds -- n squared times tighter than asked. At the documented
+        // default of 100 the period is 10ms, not 100s.
+        assert_eq!(replenish_period(100), Some(Duration::from_millis(10)));
+        assert_eq!(replenish_period(4), Some(Duration::from_millis(250)));
+        assert_eq!(replenish_period(1000), Some(Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn a_rate_of_one_is_the_one_value_a_period_and_a_rate_agree_on() {
+        // The single rate where the two readings coincide, so a test set here
+        // cannot tell them apart.
+        assert_eq!(replenish_period(1), Some(Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn a_rate_with_no_usable_period_is_refused_rather_than_dividing_by_zero() {
+        assert_eq!(replenish_period(0), None);
+        assert_eq!(replenish_period(NANOS_PER_SECOND + 1), None);
+        assert_eq!(
+            replenish_period(NANOS_PER_SECOND),
+            Some(Duration::from_nanos(1))
+        );
     }
 }

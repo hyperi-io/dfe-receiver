@@ -30,6 +30,7 @@ use crate::config::{GelfConfig, RawCapture};
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
+use crate::server::ip_filter::IpFilter;
 use crate::server::traits::ProtocolHandler;
 use convert::gelf_to_json;
 
@@ -40,7 +41,7 @@ const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 // Null-byte framing codec
 // ---------------------------------------------------------------------------
 
-/// GELF TCP framing decoder — splits on null bytes (`\0`).
+/// GELF TCP framing decoder -- splits on null bytes (`\0`).
 pub struct GelfFrameDecoder {
     max_length: usize,
 }
@@ -166,6 +167,7 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
 // TCP listener
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn run_tcp(
     bind_addr: SocketAddr,
     pipeline: Arc<PipelineState>,
@@ -174,6 +176,7 @@ async fn run_tcp(
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
     max_message_size: usize,
     raw_capture: RawCapture,
+    ip_filter: IpFilter,
 ) -> Result<()> {
     let listener = TcpListener::bind(bind_addr)
         .await
@@ -196,6 +199,12 @@ async fn run_tcp(
                         continue;
                     }
                 };
+
+                // Reject before the TLS handshake and before any framing.
+                if !ip_filter.admits(peer_addr) {
+                    drop(stream);
+                    continue;
+                }
 
                 let pipeline = pipeline.clone();
                 let metrics = metrics.clone();
@@ -294,6 +303,10 @@ impl ProtocolHandler for GelfHandler {
             None
         };
 
+        // GELF carries no credential, so the IP filter and the TLS handshake
+        // are the whole admission surface on this port.
+        let ip_filter = IpFilter::from_config(&self.pipeline.config().server.ip_filter);
+
         let pipeline = self.pipeline.clone();
         let metrics = self.metrics.clone();
         let tcp_shutdown = shutdown.clone();
@@ -308,6 +321,7 @@ impl ProtocolHandler for GelfHandler {
                 tls_acceptor,
                 max_msg,
                 raw_capture,
+                ip_filter,
             )
             .await
             {
