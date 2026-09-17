@@ -9,9 +9,9 @@
 //! Splunk HEC protocol handler.
 //!
 //! Implements a Splunk HEC-compatible HTTP server that accepts events via:
-//! - `POST /services/collector/event` — JSON events with metadata
-//! - `POST /services/collector/raw` — Raw text events
-//! - `GET  /services/collector/health` — Health check
+//! - `POST /services/collector/event` -- JSON events with metadata
+//! - `POST /services/collector/raw` -- Raw text events
+//! - `GET  /services/collector/health` -- Health check
 //!
 //! Supports `Authorization: Splunk <token>` and `Authorization: Bearer <token>`.
 
@@ -204,6 +204,10 @@ async fn run_hec_server(
     // Create auth state (reuse HTTP handler's bearer token loading)
     let auth_state = create_auth_state(&config.auth).await?;
 
+    // `server.ip_filter` and `server.rate_limit` govern the ingest surface, not
+    // one port of it.
+    let server = pipeline.config().server;
+
     let state = HecState {
         pipeline,
         metrics: metrics.clone(),
@@ -222,7 +226,7 @@ async fn run_hec_server(
         .route("/services/collector/raw/1.0", post(raw_handler))
         .route("/services/collector/health", get(health_handler))
         .route("/services/collector/health/1.0", get(health_handler))
-        // Auth middleware — validates Splunk/Bearer tokens via existing auth system
+        // Auth middleware -- validates Splunk/Bearer tokens via existing auth system
         .layer(axum::middleware::from_fn_with_state(
             auth_state,
             crate::server::auth::token_auth_middleware,
@@ -233,6 +237,8 @@ async fn run_hec_server(
             request_timeout,
         ))
         .with_state(state);
+
+    let app = crate::server::http::apply_server_limits(app, &server)?;
 
     let addr: SocketAddr = config
         .bind_address
@@ -258,7 +264,7 @@ async fn run_hec_server(
         build_tls_acceptor(&config.tls)?
     };
 
-    let ip_filter = crate::server::ip_filter::IpFilter::disabled();
+    let ip_filter = crate::server::ip_filter::IpFilter::from_config(&server.ip_filter);
 
     if let Some(ref provider) = tls_provider {
         let acceptor_handle = provider.acceptor_handle();
@@ -286,10 +292,9 @@ async fn run_hec_server(
         .await
     } else {
         info!(addr = %addr, tls = false, "Splunk HEC server listening");
-        axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown.cancelled_owned())
-            .await
-            .map_err(|e| Error::Server(format!("HEC server error: {e}")))?;
+        // The shared accept loop, not `axum::serve`: it runs the IP filter and
+        // puts the peer address on each request for the rate limiter.
+        crate::server::http::run_plain_server(listener, app, ip_filter, shutdown).await?;
         info!("Splunk HEC server stopped");
         Ok(())
     }
@@ -299,7 +304,7 @@ async fn run_hec_server(
 // Route handlers
 // ---------------------------------------------------------------------------
 
-/// `POST /services/collector/event` — JSON events with metadata.
+/// `POST /services/collector/event` -- JSON events with metadata.
 #[inline]
 async fn event_handler(
     State(state): State<HecState>,
@@ -320,7 +325,7 @@ async fn event_handler(
     if body.is_empty() {
         debug!(
             transport = "splunk_hec",
-            "HEC event request rejected — empty body"
+            "HEC event request rejected -- empty body"
         );
         state.metrics.inc_requests_error("splunk_hec");
         return Err(HecError::no_data());
@@ -378,7 +383,7 @@ async fn event_handler(
                 Err(HecError::internal(&e.to_string()))
             };
         }
-        // Partial success — report success to client (events are fire-and-forget)
+        // Partial success -- report success to client (events are fire-and-forget)
     }
 
     debug!(
@@ -391,7 +396,7 @@ async fn event_handler(
     Ok(Json(HecResponse::success()))
 }
 
-/// `POST /services/collector/raw` — Raw text events.
+/// `POST /services/collector/raw` -- Raw text events.
 #[inline]
 async fn raw_handler(
     State(state): State<HecState>,
@@ -414,7 +419,7 @@ async fn raw_handler(
     if body.is_empty() {
         debug!(
             transport = "splunk_hec_raw",
-            "HEC raw request rejected — empty body"
+            "HEC raw request rejected -- empty body"
         );
         state.metrics.inc_requests_error("splunk_hec");
         return Err(HecError::no_data());
@@ -487,7 +492,7 @@ async fn raw_handler(
     Ok(Json(HecResponse::success()))
 }
 
-/// `GET /services/collector/health` — Health check.
+/// `GET /services/collector/health` -- Health check.
 async fn health_handler(State(state): State<HecState>) -> (StatusCode, Json<HecResponse>) {
     if state.pipeline.is_ready() {
         (

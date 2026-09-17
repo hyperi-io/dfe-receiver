@@ -60,7 +60,7 @@ const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Defends against slowloris attacks where clients send headers very slowly.
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Idle connection timeout — close connections with no active streams.
+/// Idle connection timeout -- close connections with no active streams.
 const CONNECTION_IDLE_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// Most events one batched POST may carry.
@@ -367,9 +367,13 @@ pub async fn run_server(
 /// per-IP GCRA rate limit.
 ///
 /// Outermost layers, added last so they wrap every route on the router,
-/// including ones merged in after the ingest routes' own middleware. Shared by
-/// the ingest listener and the webhook's own listener so neither bypasses
-/// them.
+/// including ones merged in after the ingest routes' own middleware. Every HTTP
+/// listener calls this -- ingest, the webhook's own listener, Splunk HEC,
+/// Prometheus remote write and OTLP HTTP -- so none of them bypasses a limit
+/// `server.*` reads as covering the whole ingest surface.
+///
+/// Each call builds its own governor, so the per-IP budget is per listener: a
+/// client saturating HEC does not consume the OTLP budget for the same IP.
 pub(crate) fn apply_server_limits(
     mut app: Router,
     server: &crate::config::ServerConfig,
@@ -409,6 +413,11 @@ pub(crate) fn apply_server_limits(
 /// Uses hyper low-level APIs (instead of `axum::serve`) to gain control over
 /// connection-level timeouts. This protects against slowloris attacks where
 /// `axum::serve` has no native defence.
+///
+/// Every plaintext HTTP listener runs here rather than on `axum::serve`, so
+/// each gets the accept-loop IP filter, the hardened header-read timeout, and
+/// the peer address the rate limiter keys on when no proxy header names the
+/// client.
 pub(crate) async fn run_plain_server(
     listener: TcpListener,
     app: Router,
@@ -430,9 +439,8 @@ pub(crate) async fn run_plain_server(
                     }
                 };
 
-                // IP filter at connection level — reject before any HTTP work
-                if !ip_filter.is_allowed(peer_addr.ip()) {
-                    debug!(peer = %peer_addr, "connection rejected by IP filter");
+                // IP filter at connection level -- reject before any HTTP work
+                if !ip_filter.admits(peer_addr) {
                     drop(stream);
                     continue;
                 }
@@ -517,9 +525,8 @@ pub(crate) async fn run_tls_server(
                     }
                 };
 
-                // IP filter at connection level — reject before TLS handshake
-                if !ip_filter.is_allowed(peer_addr.ip()) {
-                    debug!(peer = %peer_addr, "connection rejected by IP filter");
+                // IP filter at connection level -- reject before TLS handshake
+                if !ip_filter.admits(peer_addr) {
                     drop(stream);
                     continue;
                 }
@@ -603,7 +610,7 @@ async fn ingest_handler(
     if !state.pipeline.is_ready() {
         debug!(
             transport = "http",
-            "Request rejected — pipeline not ready (backpressure)"
+            "Request rejected -- pipeline not ready (backpressure)"
         );
         state.metrics.inc_requests_total("http");
         state.metrics.inc_requests_error("http");

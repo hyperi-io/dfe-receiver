@@ -117,7 +117,7 @@ pub struct Config {
     #[serde(skip)]
     pub config_path: Option<String>,
 
-    /// Debug file sink — writes all processed messages to a file.
+    /// Debug file sink -- writes all processed messages to a file.
     pub file_sink: FileSinkConfig,
 }
 
@@ -153,7 +153,7 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Load configuration with cascade: CLI → ENV → .env → file → defaults
+    /// Load configuration with cascade: CLI -> ENV -> .env -> file -> defaults
     ///
     /// Priority (highest to lowest):
     /// 1. CLI arguments (handled by caller, merged after)
@@ -179,11 +179,11 @@ impl Config {
         // Get the global config and unmarshal to our struct
         let cfg = config::get();
 
-        // Unmarshal config — warn and fall back to defaults on failure
+        // Unmarshal config -- warn and fall back to defaults on failure
         let mut config: Config = match cfg.unmarshal() {
             Ok(c) => c,
             Err(e) => {
-                tracing::warn!(error = %e, "config unmarshal failed, using defaults — check YAML syntax");
+                tracing::warn!(error = %e, "config unmarshal failed, using defaults -- check YAML syntax");
                 Config::default()
             }
         };
@@ -350,9 +350,10 @@ impl Config {
         Ok(())
     }
 
-    /// Refuse an auth mode the listener that carries it does not enforce.
+    /// Refuse an auth mode the listener that carries it does not enforce, and a
+    /// listener with nothing to identify a client at all.
     ///
-    /// Every listener owns an `auth:` block of the same shape, but they do not
+    /// Most listeners own an `auth:` block of the same shape, but they do not
     /// all read the same amount of it, and a mode a listener ignores is not a
     /// weaker door -- it is an open one that reads as shut. Each rule below
     /// names the code that does or does not run.
@@ -397,6 +398,15 @@ impl Config {
         }
         if self.syslog.enabled {
             no_application_auth("syslog", &self.syslog.auth)?;
+        }
+
+        // Neither block has an auth field to refuse a mode in, so the rule is
+        // about the listener itself rather than about what was written.
+        if self.fluent.enabled {
+            a_door_exists("fluent", &self.fluent.tls, &self.server.ip_filter)?;
+        }
+        if self.gelf.enabled {
+            a_door_exists("gelf", &self.gelf.tls, &self.server.ip_filter)?;
         }
 
         Ok(())
@@ -489,6 +499,29 @@ fn no_application_auth(scope: &str, auth: &AuthConfig) -> Result<()> {
          auth -- the wire protocol carries no credential and nothing reads this \
          field. Authenticate clients at the handshake instead, with \
          {scope}.tls.enabled: true and {scope}.tls.client_auth: required"
+    )))
+}
+
+/// Refuse a listener that would accept anything able to reach the port.
+///
+/// Fluent Forward and GELF carry no credential on the wire and have no `auth`
+/// block to read one from, so a client is identified at the TLS handshake or
+/// not at all. Either door closes the port: a required client certificate, or a
+/// `server.ip_filter` allowlist that names the senders. A denylist is not a
+/// door -- it bars named sources and admits every other one.
+fn a_door_exists(scope: &str, tls: &TlsConfig, ip_filter: &IpFilterConfig) -> Result<()> {
+    if tls.enabled && tls.client_auth.eq_ignore_ascii_case("required") {
+        return Ok(());
+    }
+    if ip_filter.mode.eq_ignore_ascii_case("allowlist") && !ip_filter.cidrs.is_empty() {
+        return Ok(());
+    }
+    Err(Error::Config(format!(
+        "{scope}.enabled is true but nothing identifies a client on that port -- the \
+         {scope} wire protocol carries no credential and there is no {scope}.auth to \
+         put one in. Set {scope}.tls.enabled: true with {scope}.tls.client_auth: \
+         required and the CA the client certificates are issued from, or restrict the \
+         senders with server.ip_filter.mode: allowlist and the CIDRs they connect from"
     )))
 }
 
@@ -717,7 +750,7 @@ fn apply_raw_capture_env(cfg: &mut RawCaptureConfig, prefix: &str, key: &str) {
 
 impl Normalize for Config {
     fn normalize(&mut self) {
-        // SASL credentials present → enable SASL (regardless of how they arrived)
+        // SASL credentials present -> enable SASL (regardless of how they arrived)
         if let Some(ref mut sasl) = self.kafka.sasl
             && (!sasl.username.is_empty() || !sasl.mechanism.is_empty())
         {
@@ -743,10 +776,11 @@ pub struct ServerConfig {
     /// Protects against connection exhaustion and memory pressure.
     pub max_concurrent_requests: usize,
 
-    /// Per-IP rate limiting configuration.
+    /// Per-IP rate limiting for every HTTP listener.
     pub rate_limit: RateLimitConfig,
 
-    /// IP filter (allowlist/denylist) configuration.
+    /// IP filter (allowlist/denylist) for every listener the receiver owns an
+    /// accept loop for.
     pub ip_filter: IpFilterConfig,
 
     /// TLS configuration.
@@ -772,6 +806,15 @@ impl Default for ServerConfig {
 }
 
 /// Per-IP rate limiting configuration using GCRA (token bucket variant).
+///
+/// Applies to `/ingest`, the webhook intake, Splunk HEC, Prometheus remote
+/// write and OTLP HTTP. Each listener keeps its own budget, so the figures
+/// below are per source IP per listener, not a receiver-wide total.
+///
+/// It cannot apply to the raw TCP and UDP listeners (syslog, Lumberjack, Fluent
+/// Forward, GELF) or to the gRPC ports: there is no HTTP request there to count
+/// and tonic owns its own accept loop. Flow has its own per-source packet limit
+/// under `flow.rate_limit`.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct RateLimitConfig {
@@ -796,6 +839,16 @@ impl Default for RateLimitConfig {
 }
 
 /// IP filter (allowlist / denylist) configuration.
+///
+/// Enforced in the accept loop, before the TLS handshake and before any
+/// protocol work: `/ingest`, the webhook intake, Splunk HEC, Prometheus remote
+/// write, OTLP HTTP, syslog (UDP per datagram, TCP and TLS per connection),
+/// Lumberjack, Fluent Forward and GELF.
+///
+/// It does not reach the gRPC ports (`grpc`, and OTLP on 4317): tonic owns
+/// those accept loops, so authenticate them with `auth.mode: bearer`, or
+/// `mtls` with `tls.client_auth: required`. Flow has its own optional
+/// `flow.ip_filter` per listener.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct IpFilterConfig {
@@ -1278,6 +1331,11 @@ impl Default for PrometheusRwConfig {
 ///
 /// Accepts data from Fluentd and Fluent Bit agents over the Forward
 /// protocol (msgpack over TCP) on the standard port 24224.
+///
+/// There is no `auth` block: the Forward frames this handler reads carry no
+/// credential. A client is identified by `tls.client_auth: required` or by a
+/// `server.ip_filter` allowlist, and an enabled listener with neither is
+/// refused at startup.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct FluentConfig {
@@ -1317,6 +1375,10 @@ impl Default for FluentConfig {
 ///
 /// Accepts GELF messages over TCP (null-byte delimited JSON)
 /// on the standard port 12201.
+///
+/// There is no `auth` block: GELF has no in-protocol authentication. A client
+/// is identified by `tls.client_auth: required` or by a `server.ip_filter`
+/// allowlist, and an enabled listener with neither is refused at startup.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct GelfConfig {
@@ -1649,9 +1711,9 @@ pub struct SourceRule {
 
     /// Match mode: "key_present", "key_value_set", "key_value_use".
     ///
-    /// - `key_present`: if field exists → `_source = source`
-    /// - `key_value_set`: if field value == `match_value` → `_source = source`
-    /// - `key_value_use`: if field exists → `_source = <field value>`
+    /// - `key_present`: if field exists -> `_source = source`
+    /// - `key_value_set`: if field value == `match_value` -> `_source = source`
+    /// - `key_value_use`: if field exists -> `_source = <field value>`
     pub mode: String,
 
     /// Value to match against (for `key_value_set` mode only).
@@ -2709,6 +2771,93 @@ mod tests {
     }
 
     #[test]
+    fn an_enabled_fluent_listener_with_no_door_is_refused() {
+        // Forward frames carry no credential and there is no fluent.auth, so
+        // this listener admitted anything that could reach 24224.
+        let mut config = auth_base();
+        config.fluent.enabled = true;
+
+        let err = config.validate().expect_err("must not start");
+        assert!(
+            err.to_string().contains("nothing identifies a client"),
+            "the error must say what is missing, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("fluent.tls.client_auth"),
+            "the error must name the field that closes it, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("server.ip_filter.mode: allowlist"),
+            "the error must name the other way in, got: {err}"
+        );
+    }
+
+    #[test]
+    fn an_enabled_gelf_listener_with_no_door_is_refused() {
+        let mut config = auth_base();
+        config.gelf.enabled = true;
+
+        let err = config.validate().expect_err("must not start");
+        assert!(
+            err.to_string().contains("gelf.tls.client_auth"),
+            "the error must name the field that closes it, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_required_client_certificate_is_a_door() {
+        for scope in ["fluent", "gelf"] {
+            let mut config = auth_base();
+            let tls = TlsConfig {
+                enabled: true,
+                client_auth: "required".to_string(),
+                ..TlsConfig::default()
+            };
+            if scope == "fluent" {
+                config.fluent.enabled = true;
+                config.fluent.tls = tls;
+            } else {
+                config.gelf.enabled = true;
+                config.gelf.tls = tls;
+            }
+            assert!(config.validate().is_ok(), "{scope} must be accepted");
+        }
+    }
+
+    #[test]
+    fn an_ip_allowlist_is_a_door_and_a_denylist_is_not() {
+        // The allowlist is a control here because the accept loops apply it; a
+        // denylist admits every source it does not name.
+        let mut allowed = auth_base();
+        allowed.fluent.enabled = true;
+        allowed.server.ip_filter.mode = "allowlist".to_string();
+        allowed.server.ip_filter.cidrs = vec!["10.0.0.0/8".to_string()];
+        assert!(allowed.validate().is_ok());
+
+        let mut empty = auth_base();
+        empty.fluent.enabled = true;
+        empty.server.ip_filter.mode = "allowlist".to_string();
+        assert!(
+            empty.validate().is_err(),
+            "an empty allowlist filters nothing"
+        );
+
+        let mut denied = auth_base();
+        denied.fluent.enabled = true;
+        denied.server.ip_filter.mode = "denylist".to_string();
+        denied.server.ip_filter.cidrs = vec!["10.0.0.0/8".to_string()];
+        assert!(denied.validate().is_err(), "a denylist is not an allowlist");
+    }
+
+    #[test]
+    fn a_disabled_fluent_or_gelf_listener_does_not_block_startup() {
+        let mut config = auth_base();
+        config.fluent.enabled = false;
+        config.gelf.enabled = false;
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
     fn a_misspelled_auth_mode_is_refused() {
         // AuthMode::from_str maps anything unrecognised to None, so this was a
         // wide-open listener that read as bearer-authenticated.
@@ -3396,7 +3545,7 @@ kafka:
     #[test]
     fn test_kafka_yaml_other_override_loses_stats_default() {
         // When user provides librdkafka_overrides in YAML, serde replaces
-        // the entire map — the default stats.interval.ms=0 is NOT merged.
+        // the entire map -- the default stats.interval.ms=0 is NOT merged.
         // This is acceptable: users who set overrides are advanced and can
         // add statistics.interval.ms themselves if needed.
         let yaml = r#"
@@ -3413,7 +3562,7 @@ kafka:
                 .librdkafka_overrides
                 .get("statistics.interval.ms"),
             None,
-            "serde replaces default map — only user-specified keys present"
+            "serde replaces default map -- only user-specified keys present"
         );
     }
 

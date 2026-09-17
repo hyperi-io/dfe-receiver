@@ -16,11 +16,11 @@ HyperI internal -> see infrastructure standards, PB scale patterns
 |---|---|---|
 | Request body size limit | 10 MiB (HTTP/HEC/RW), per-protocol | `server.max_body_size` |
 | Request timeout (408) | 30s, HTTP/HEC/RW | `server.request_timeout_ms` |
-| Slowloris protection | 5s header_read_timeout, all paths (hyper) | `HEADER_READ_TIMEOUT` |
+| Slowloris protection | 5s header_read_timeout, every HTTP listener (hyper) | `HEADER_READ_TIMEOUT` |
 | Connection idle timeout | 60s, HTTP/1 keepalive + HTTP/2 | `CONNECTION_IDLE_TIMEOUT` |
-| Concurrency limit | 10,000 in-flight requests default | `server.max_concurrent_requests` |
-| Per-IP rate limiting | GCRA via tower-governor, opt-in | `server.rate_limit.*` |
-| IP filter (allowlist/denylist) | CIDR trie, connection-level reject | `server.ip_filter.*` |
+| Concurrency limit | 10,000 in-flight requests default, per HTTP listener | `server.max_concurrent_requests` |
+| Per-IP rate limiting | GCRA via tower-governor, opt-in, per HTTP listener | `server.rate_limit.*` |
+| IP filter (allowlist/denylist) | CIDR trie, connection-level reject, every accept loop | `server.ip_filter.*` |
 | 503 backpressure | HTTP + gRPC ingest shed load when pipeline not ready | `Retry-After: 5` |
 | TLS termination | Per-protocol, hot-reloadable | `*.tls.enabled` |
 | TLS handshake timeout | 10s hard-coded, all TCP handlers | `TLS_HANDSHAKE_TIMEOUT` |
@@ -44,6 +44,33 @@ HyperI internal -> see infrastructure standards, PB scale patterns
 ## Part 1: Application-Level Hardening (Complete)
 
 All planned application-level hardening is implemented. No remaining items.
+
+### Which listener gets which control
+
+`server.ip_filter` runs in the accept loop, so it reaches anything the receiver
+accepts itself. `server.rate_limit` is a tower layer over an HTTP request, so it
+reaches HTTP only. Each HTTP listener builds its own governor: the configured
+rate is per source IP PER LISTENER, not a receiver-wide total.
+
+| Listener | `server.ip_filter` | `server.rate_limit` | Client authentication |
+|---|---|---|---|
+| HTTP `/ingest` | yes | yes | `server.auth` |
+| Webhook (own or shared listener) | yes | yes | per-caller secret |
+| Splunk HEC (TLS and plaintext) | yes | yes | `splunk_hec.auth` |
+| Prometheus remote write | yes | yes | `prometheus_rw.auth` |
+| OTLP HTTP (4318) | yes | yes | `otlp.auth` |
+| OTLP gRPC (4317) | no -- tonic owns the accept loop | no -- no HTTP layer there | `otlp.auth`, bearer or mTLS |
+| gRPC / Vector | no -- tonic owns the accept loop | no -- no HTTP layer there | `grpc.auth`, bearer or mTLS |
+| Syslog UDP / TCP / TLS | yes (per datagram on UDP) | no -- no HTTP request to count | TLS listener only, `client_auth: required` |
+| Lumberjack / Beats | yes | no -- no HTTP request to count | `lumberjack.tls.client_auth: required` |
+| Fluent Forward | yes | no -- no HTTP request to count | `fluent.tls.client_auth: required`, or an IP allowlist |
+| GELF | yes | no -- no HTTP request to count | `gelf.tls.client_auth: required`, or an IP allowlist |
+| Flow (NetFlow / sFlow) | own `flow.ip_filter` | own `flow.rate_limit` | none -- UDP, restrict by source |
+
+Fluent Forward and GELF have no `auth` block: neither wire protocol carries a
+credential. An enabled listener with neither a required client certificate nor a
+`server.ip_filter` allowlist is refused at startup, because it would accept
+anything that could reach the port.
 
 ---
 
@@ -72,13 +99,13 @@ The two NGINX ingress controllers are often confused:
 
 [Envoy Gateway](https://gateway.envoyproxy.io/) is the CNCF reference
 implementation of the Kubernetes Gateway API, built on Envoy Proxy.
-Reached v1.2 (stable) — production-ready for all use cases described here.
+Reached v1.2 (stable) -- production-ready for all use cases described here.
 Cost: **$0** (open source, Apache 2.0).
 
 **Future path:** If service mesh features are ever needed (mTLS between
 services, traffic shifting, canary deployments), Istio ambient mesh
 (sidecar-less, GA since Istio 1.22) uses Envoy as its data plane. The
-Envoy Gateway investment carries over — same proxy, same config patterns,
+Envoy Gateway investment carries over -- same proxy, same config patterns,
 same operational knowledge.
 
 **Security features via CRDs:**

@@ -425,7 +425,7 @@ properties:
     minimum: 0
     default: 0
   file_sink:
-    description: Debug file sink — writes all processed messages to a file.
+    description: Debug file sink -- writes all processed messages to a file.
     $ref: '#/$defs/FileSinkConfig'
     default:
       enabled: false
@@ -460,14 +460,16 @@ $defs:
         minimum: 0
         default: 10000
       rate_limit:
-        description: Per-IP rate limiting configuration.
+        description: Per-IP rate limiting for every HTTP listener.
         $ref: '#/$defs/RateLimitConfig'
         default:
           enabled: false
           requests_per_second: 100
           burst: 500
       ip_filter:
-        description: IP filter (allowlist/denylist) configuration.
+        description: |-
+          IP filter (allowlist/denylist) for every listener the receiver owns an
+          accept loop for.
         $ref: '#/$defs/IpFilterConfig'
         default:
           mode: disabled
@@ -499,7 +501,17 @@ $defs:
           header_name: ''
           header_values: []
   RateLimitConfig:
-    description: Per-IP rate limiting configuration using GCRA (token bucket variant).
+    description: |-
+      Per-IP rate limiting configuration using GCRA (token bucket variant).
+
+      Applies to `/ingest`, the webhook intake, Splunk HEC, Prometheus remote
+      write and OTLP HTTP. Each listener keeps its own budget, so the figures
+      below are per source IP per listener, not a receiver-wide total.
+
+      It cannot apply to the raw TCP and UDP listeners (syslog, Lumberjack, Fluent
+      Forward, GELF) or to the gRPC ports: there is no HTTP request there to count
+      and tonic owns its own accept loop. Flow has its own per-source packet limit
+      under `flow.rate_limit`.
     type: object
     properties:
       enabled:
@@ -519,7 +531,18 @@ $defs:
         minimum: 0
         default: 500
   IpFilterConfig:
-    description: IP filter (allowlist / denylist) configuration.
+    description: |-
+      IP filter (allowlist / denylist) configuration.
+
+      Enforced in the accept loop, before the TLS handshake and before any
+      protocol work: `/ingest`, the webhook intake, Splunk HEC, Prometheus remote
+      write, OTLP HTTP, syslog (UDP per datagram, TCP and TLS per connection),
+      Lumberjack, Fluent Forward and GELF.
+
+      It does not reach the gRPC ports (`grpc`, and OTLP on 4317): tonic owns
+      those accept loops, so authenticate them with `auth.mode: bearer`, or
+      `mtls` with `tls.client_auth: required`. Flow has its own optional
+      `flow.ip_filter` per listener.
     type: object
     properties:
       mode:
@@ -1071,6 +1094,11 @@ $defs:
 
       Accepts data from Fluentd and Fluent Bit agents over the Forward
       protocol (msgpack over TCP) on the standard port 24224.
+
+      There is no `auth` block: the Forward frames this handler reads carry no
+      credential. A client is identified by `tls.client_auth: required` or by a
+      `server.ip_filter` allowlist, and an enabled listener with neither is
+      refused at startup.
     type: object
     properties:
       enabled:
@@ -1118,6 +1146,10 @@ $defs:
 
       Accepts GELF messages over TCP (null-byte delimited JSON)
       on the standard port 12201.
+
+      There is no `auth` block: GELF has no in-protocol authentication. A client
+      is identified by `tls.client_auth: required` or by a `server.ip_filter`
+      allowlist, and an enabled listener with neither is refused at startup.
     type: object
     properties:
       enabled:
@@ -1627,9 +1659,9 @@ $defs:
         description: |-
           Match mode: "key_present", "key_value_set", "key_value_use".
 
-          - `key_present`: if field exists → `_source = source`
-          - `key_value_set`: if field value == `match_value` → `_source = source`
-          - `key_value_use`: if field exists → `_source = <field value>`
+          - `key_present`: if field exists -> `_source = source`
+          - `key_value_set`: if field value == `match_value` -> `_source = source`
+          - `key_value_use`: if field exists -> `_source = <field value>`
         type: string
       match_value:
         description: Value to match against (for `key_value_set` mode only).

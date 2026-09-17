@@ -30,6 +30,7 @@ use crate::config::{FluentConfig, RawCapture};
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
+use crate::server::ip_filter::IpFilter;
 use crate::server::traits::ProtocolHandler;
 use convert::{extract_chunk_id, fluent_to_json};
 
@@ -152,6 +153,7 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
 // TCP listener
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn run_tcp(
     bind_addr: SocketAddr,
     pipeline: Arc<PipelineState>,
@@ -160,6 +162,7 @@ async fn run_tcp(
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
     max_buffer_size: usize,
     raw_capture: RawCapture,
+    ip_filter: IpFilter,
 ) -> Result<()> {
     let listener = TcpListener::bind(bind_addr)
         .await
@@ -182,6 +185,12 @@ async fn run_tcp(
                         continue;
                     }
                 };
+
+                // Reject before the TLS handshake and before any msgpack is read.
+                if !ip_filter.admits(peer_addr) {
+                    drop(stream);
+                    continue;
+                }
 
                 let pipeline = pipeline.clone();
                 let metrics = metrics.clone();
@@ -278,6 +287,10 @@ impl ProtocolHandler for FluentHandler {
             None
         };
 
+        // Forward carries no credential, so the IP filter and the TLS
+        // handshake are the whole admission surface on this port.
+        let ip_filter = IpFilter::from_config(&self.pipeline.config().server.ip_filter);
+
         let pipeline = self.pipeline.clone();
         let metrics = self.metrics.clone();
         let tcp_shutdown = shutdown.clone();
@@ -293,6 +306,7 @@ impl ProtocolHandler for FluentHandler {
                 tls_acceptor,
                 max_buffer_size,
                 raw_capture,
+                ip_filter,
             )
             .await
             {

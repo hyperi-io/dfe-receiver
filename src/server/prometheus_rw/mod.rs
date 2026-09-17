@@ -11,7 +11,7 @@
 //! Accepts `POST /api/v1/write` with Snappy-compressed protobuf payload
 //! per the [Remote Write specification](https://prometheus.io/docs/specs/prw/remote_write_spec/).
 //!
-//! Wire format: HTTP POST → Snappy block decompress → protobuf decode → JSON → pipeline.
+//! Wire format: HTTP POST -> Snappy block decompress -> protobuf decode -> JSON -> pipeline.
 
 pub mod convert;
 
@@ -128,6 +128,10 @@ async fn run_prometheus_rw_server(
         );
     }
 
+    // `server.ip_filter` and `server.rate_limit` govern the ingest surface, not
+    // one port of it.
+    let server = pipeline.config().server;
+
     let state = RwState {
         pipeline,
         metrics: metrics.clone(),
@@ -150,6 +154,8 @@ async fn run_prometheus_rw_server(
             request_timeout,
         ))
         .with_state(state);
+
+    let app = crate::server::http::apply_server_limits(app, &server)?;
 
     let addr: SocketAddr = config
         .bind_address
@@ -175,7 +181,7 @@ async fn run_prometheus_rw_server(
         build_tls_acceptor(&config.tls)?
     };
 
-    let ip_filter = crate::server::ip_filter::IpFilter::disabled();
+    let ip_filter = crate::server::ip_filter::IpFilter::from_config(&server.ip_filter);
 
     if let Some(ref provider) = tls_provider {
         let acceptor_handle = provider.acceptor_handle();
@@ -203,10 +209,9 @@ async fn run_prometheus_rw_server(
         .await
     } else {
         info!(addr = %addr, tls = false, "Prometheus Remote Write server listening");
-        axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown.cancelled_owned())
-            .await
-            .map_err(|e| Error::Server(format!("Prometheus RW server error: {e}")))?;
+        // The shared accept loop, not `axum::serve`: it runs the IP filter and
+        // puts the peer address on each request for the rate limiter.
+        crate::server::http::run_plain_server(listener, app, ip_filter, shutdown).await?;
         info!("Prometheus Remote Write server stopped");
         Ok(())
     }
@@ -216,7 +221,7 @@ async fn run_prometheus_rw_server(
 // Route handler
 // ---------------------------------------------------------------------------
 
-/// `POST /api/v1/write` — Prometheus Remote Write v1.
+/// `POST /api/v1/write` -- Prometheus Remote Write v1.
 ///
 /// Expects Snappy-compressed protobuf `WriteRequest` in the body.
 /// Returns 204 No Content on success.
@@ -412,7 +417,7 @@ mod tests {
         let garbage = vec![0xff; 10];
         let _ = snap::raw::decompress_len(&garbage); // may or may not error, must not panic
 
-        // Empty input returns Ok(0) — treated as empty decompressed output,
+        // Empty input returns Ok(0) -- treated as empty decompressed output,
         // which is safely below any size limit.
         if let Ok(n) = snap::raw::decompress_len(&[]) {
             assert_eq!(n, 0, "empty input should decompress to 0 bytes");

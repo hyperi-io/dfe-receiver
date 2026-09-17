@@ -388,6 +388,11 @@ async fn run_http_server(
 
     let mode = OtlpMode::from_str(&config.mode);
 
+    // `server.ip_filter` and `server.rate_limit` govern the ingest surface, not
+    // one port of it. The gRPC endpoint on 4317 gets neither: tonic owns its
+    // accept loop, so there is no place to run either control there.
+    let server = pipeline.config().server;
+
     let state = OtlpHttpState {
         pipeline,
         metrics: metrics.clone(),
@@ -484,6 +489,8 @@ async fn run_http_server(
         ))
         .with_state(state);
 
+    let app = crate::server::http::apply_server_limits(app, &server)?;
+
     let listener = TcpListener::bind(addr)
         .await
         .map_err(|e| Error::Server(format!("failed to bind OTLP HTTP: {e}")))?;
@@ -503,7 +510,7 @@ async fn run_http_server(
         build_tls_acceptor(&config.tls)?
     };
 
-    let ip_filter = crate::server::ip_filter::IpFilter::disabled();
+    let ip_filter = crate::server::ip_filter::IpFilter::from_config(&server.ip_filter);
 
     let acceptor_handle = if let Some(ref provider) = tls_provider {
         Some(provider.acceptor_handle())
@@ -517,10 +524,9 @@ async fn run_http_server(
             .await?;
     } else {
         info!(addr = %addr, mode = ?mode, tls = false, "OTLP HTTP server listening");
-        axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown.cancelled_owned())
-            .await
-            .map_err(|e| Error::Server(format!("OTLP HTTP server error: {e}")))?;
+        // The shared accept loop, not `axum::serve`: it runs the IP filter and
+        // puts the peer address on each request for the rate limiter.
+        crate::server::http::run_plain_server(listener, app, ip_filter, shutdown).await?;
     }
 
     info!("OTLP HTTP server stopped");
@@ -542,7 +548,7 @@ fn decode_otlp_request<T: prost::Message + Default>(
         .unwrap_or("application/x-protobuf");
 
     if content_type.contains("json") {
-        // OTLP/JSON not yet supported — requires serde derives on prost types
+        // OTLP/JSON not yet supported -- requires serde derives on prost types
         Err(Error::Validation(
             "OTLP/JSON content-type not yet supported; use application/x-protobuf".into(),
         ))
@@ -557,7 +563,7 @@ fn decode_otlp_request<T: prost::Message + Default>(
 // ProtocolHandler implementation
 // ---------------------------------------------------------------------------
 
-/// OTLP protocol handler — runs gRPC (4317) and HTTP (4318) servers.
+/// OTLP protocol handler -- runs gRPC (4317) and HTTP (4318) servers.
 pub struct OtlpHandler {
     config: OtlpConfig,
     /// Raw capture already resolved against the common `raw_capture` block.

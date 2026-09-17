@@ -35,6 +35,7 @@ use crate::config::{RawCapture, SyslogConfig};
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
+use crate::server::ip_filter::IpFilter;
 use crate::server::traits::ProtocolHandler;
 use convert::syslog_to_json;
 use framing::SyslogFrameDecoder;
@@ -56,6 +57,7 @@ async fn run_udp(
     metrics: Arc<Metrics>,
     shutdown: CancellationToken,
     raw_capture: RawCapture,
+    ip_filter: IpFilter,
 ) -> Result<()> {
     let socket = UdpSocket::bind(bind_addr)
         .await
@@ -81,6 +83,12 @@ async fn run_udp(
                         continue;
                     }
                 };
+
+                // UDP has no connection to reject, so the filter runs per
+                // datagram -- before the payload is read.
+                if !ip_filter.admits(peer_addr) {
+                    continue;
+                }
 
                 metrics.inc_requests_total("syslog");
                 metrics.add_bytes_received("syslog", len as u64);
@@ -192,6 +200,7 @@ async fn run_tcp(
     max_message_size: usize,
     raw_capture: RawCapture,
     label: &str,
+    ip_filter: IpFilter,
 ) -> Result<()> {
     let listener = TcpListener::bind(bind_addr)
         .await
@@ -214,6 +223,12 @@ async fn run_tcp(
                         continue;
                     }
                 };
+
+                // Reject before the TLS handshake and before any framing.
+                if !ip_filter.admits(peer_addr) {
+                    drop(stream);
+                    continue;
+                }
 
                 let pipeline = pipeline.clone();
                 let metrics = metrics.clone();
@@ -314,14 +329,27 @@ impl ProtocolHandler for SyslogHandler {
         let max_msg = self.config.max_message_size;
         let raw_capture = self.raw_capture;
 
+        // A syslog line carries no credential, and UDP and plain TCP have no
+        // handshake either, so the IP filter is the only admission control on
+        // two of these three listeners.
+        let ip_filter = IpFilter::from_config(&self.pipeline.config().server.ip_filter);
+
         // Spawn UDP listener
         let udp_handle = {
             let pipeline = self.pipeline.clone();
             let metrics = self.metrics.clone();
             let udp_shutdown = shutdown.clone();
+            let ip_filter = ip_filter.clone();
             tokio::spawn(async move {
-                if let Err(e) =
-                    run_udp(udp_addr, pipeline, metrics, udp_shutdown, raw_capture).await
+                if let Err(e) = run_udp(
+                    udp_addr,
+                    pipeline,
+                    metrics,
+                    udp_shutdown,
+                    raw_capture,
+                    ip_filter,
+                )
+                .await
                 {
                     error!(error = %e, "Syslog UDP listener failed");
                 }
@@ -333,6 +361,7 @@ impl ProtocolHandler for SyslogHandler {
             let pipeline = self.pipeline.clone();
             let metrics = self.metrics.clone();
             let tcp_shutdown = shutdown.clone();
+            let ip_filter = ip_filter.clone();
             tokio::spawn(async move {
                 if let Err(e) = run_tcp(
                     tcp_addr,
@@ -343,6 +372,7 @@ impl ProtocolHandler for SyslogHandler {
                     max_msg,
                     raw_capture,
                     "TCP",
+                    ip_filter,
                 )
                 .await
                 {
@@ -375,6 +405,7 @@ impl ProtocolHandler for SyslogHandler {
                         max_msg,
                         raw_capture,
                         "TLS",
+                        ip_filter,
                     )
                     .await
                     {
