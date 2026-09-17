@@ -145,7 +145,7 @@ impl std::fmt::Debug for Metrics {
 impl Metrics {
     /// Create a new metrics collector with scaling pressure engine.
     ///
-    /// No MetricsManager — use for tests or standalone contexts.
+    /// No MetricsManager -- use for tests or standalone contexts.
     pub fn with_scaling(scaling: Arc<ScalingPressure>) -> Self {
         Self {
             requests_total: AtomicU64::new(0),
@@ -190,7 +190,7 @@ impl Metrics {
     ///
     /// Creates a `MetricsManager` with namespace `dfe`, registers
     /// all metric groups, and calls `ServiceMetrics::register()` for platform metrics.
-    /// Returns both the `Metrics` and the `MetricsManager` — caller must use the
+    /// Returns both the `Metrics` and the `MetricsManager` -- caller must use the
     /// returned manager for `start_server()`. Creating a second `MetricsManager`
     /// will panic (global Prometheus recorder can only be installed once).
     pub fn with_dfe_metrics(scaling: Arc<ScalingPressure>) -> (Self, MetricsManager) {
@@ -775,6 +775,14 @@ fn describe_receiver_metrics() {
         "Total bytes sent to Kafka"
     );
     metrics::describe_counter!("receiver_kafka_send_errors_total", "Kafka send errors");
+    metrics::describe_counter!(
+        "receiver_kafka_delivered_total",
+        "Records a broker acknowledged, from librdkafka delivery reports"
+    );
+    metrics::describe_counter!(
+        "receiver_kafka_delivery_failures_total",
+        "Records no broker took after the sender was answered, by librdkafka error code"
+    );
 
     // EPS
     metrics::describe_gauge!(

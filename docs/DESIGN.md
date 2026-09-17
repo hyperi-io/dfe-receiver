@@ -472,11 +472,18 @@ readinessProbe:
 
 ### Kafka Metrics
 
+Enqueue and delivery are separate counts. librdkafka takes a record into its
+own queue first and a broker answers for it later, so a record can be enqueued
+and never delivered -- the delivery counters are the ones that say a broker
+holds it.
+
 | Metric | Type | Description |
 |--------|------|-------------|
-| `receiver_kafka_sends_total` | Counter | Messages sent to Kafka |
-| `receiver_kafka_bytes_sent_total` | Counter | Bytes sent to Kafka |
-| `receiver_kafka_send_errors_total` | Counter | Kafka send failures |
+| `receiver_kafka_sends_total` | Counter | Messages librdkafka queued |
+| `receiver_kafka_bytes_sent_total` | Counter | Bytes queued to Kafka |
+| `receiver_kafka_send_errors_total` | Counter | Messages librdkafka refused to queue |
+| `receiver_kafka_delivered_total` | Counter | Messages a broker acknowledged |
+| `receiver_kafka_delivery_failures_total` | Counter | Messages no broker took, by `reason` (librdkafka error code) |
 | `records_dlq_total` | Counter | Messages sent to DLQ (scalo emits this one) |
 
 ### Scaling Metrics

@@ -358,7 +358,7 @@ impl PipelineState {
         // Check for backpressure
         if self.should_apply_backpressure() {
             if scalo::logger::log_state_change(&PRESSURE_LOGGED, true) {
-                warn!("Memory pressure HIGH — backpressure active");
+                warn!("Memory pressure HIGH -- backpressure active");
             }
             return Err(Error::Buffer("server under memory pressure".into()));
         }
@@ -377,7 +377,7 @@ impl PipelineState {
     ///
     /// Amortises overhead: single backpressure check, single memory tracking
     /// update, and per-message process_inner() calls. Each message is processed
-    /// independently — a failure in one does not stop the rest.
+    /// independently -- a failure in one does not stop the rest.
     ///
     /// Returns the count of successfully processed messages and the first error
     /// (if any). Callers can use the success count for metrics.
@@ -389,7 +389,7 @@ impl PipelineState {
         // Single backpressure check for the entire batch
         if self.should_apply_backpressure() {
             if scalo::logger::log_state_change(&PRESSURE_LOGGED, true) {
-                warn!("Memory pressure HIGH — backpressure active (batch)");
+                warn!("Memory pressure HIGH -- backpressure active (batch)");
             }
             return (
                 0,
@@ -567,7 +567,7 @@ impl PipelineState {
         // Check for backpressure
         if self.should_apply_backpressure() {
             if scalo::logger::log_state_change(&PRESSURE_LOGGED, true) {
-                warn!("Memory pressure HIGH — backpressure active");
+                warn!("Memory pressure HIGH -- backpressure active");
             }
             return Err(Error::Buffer("server under memory pressure".into()));
         }
@@ -615,10 +615,16 @@ impl PipelineState {
 
     /// Deliver one record to every named destination the route chose.
     ///
-    /// Delivered only when every destination has accepted: the first failure
-    /// propagates, and the ingest handler turns it into backpressure on the
-    /// sender, which re-sends the record. A destination that already accepted
-    /// sees it twice -- at-least-once, duplicates never loss.
+    /// The first failure propagates, and the ingest handler turns it into
+    /// backpressure on the sender, which re-sends the record. A destination
+    /// that already accepted sees it twice -- at-least-once, duplicates never
+    /// loss.
+    ///
+    /// On the bus, accepted means librdkafka queued the record, not that a
+    /// broker holds it: the verdict arrives later on a delivery report, and a
+    /// record refused then is lost with the sender already answered. That
+    /// failure shows up as `receiver_kafka_delivery_failures_total` and an
+    /// unhealthy sink, never as an error on the request.
     #[inline]
     async fn send_to_destinations(
         &self,
@@ -711,7 +717,7 @@ impl PipelineState {
 
         metrics.set_batch_queue_size(total_queue);
 
-        // EPS gauge — events per second from the rate window
+        // EPS gauge -- events per second from the rate window
         metrics::gauge!("receiver_events_per_second").set(metrics.request_rate());
 
         // Sync all metrics into the scaling pressure engine. This is the SHARED
@@ -750,7 +756,7 @@ impl PipelineState {
     ///
     /// Called by the config change subscriber when `SharedConfig` is updated
     /// externally (e.g., by `ConfigReloader`). Does NOT update `SharedConfig`
-    /// itself — that's already been done by the caller.
+    /// itself -- that's already been done by the caller.
     ///
     /// Routing rules rebuild in place, so a rule pointed at a different
     /// destination takes effect live. The destination SINKS do not: they are
@@ -1074,7 +1080,7 @@ mod tests {
         let state = test_state().await;
 
         // Invalid JSON with dlq_on_invalid=true attempts DLQ routing, but no Kafka/DLQ
-        // sink is configured in test state — expect config error from the fallback path
+        // sink is configured in test state -- expect config error from the fallback path
         let result = state.process(Bytes::from("not json")).await;
         assert!(
             result.is_err(),
@@ -1360,7 +1366,7 @@ mod tests {
         new_config.routing.default_source = "updated".to_string();
         state.reload_config(new_config).unwrap();
 
-        // Process a message after reload — should still work
+        // Process a message after reload -- should still work
         let result = state.process(Bytes::from(r#"{"b": 2}"#)).await;
         assert!(result.is_ok());
 
@@ -1400,7 +1406,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pipeline_batch_with_invalid_items() {
-        // Batch with mixed valid/invalid — valid ones should still dispatch.
+        // Batch with mixed valid/invalid -- valid ones should still dispatch.
         // process_batch returns (success_count, first_error). Invalid JSON
         // with no DLQ sink triggers an error.
         let state = test_state().await;
@@ -1453,7 +1459,7 @@ mod tests {
     #[tokio::test]
     async fn test_enrich_payload_preserves_existing_timestamp_field() {
         // If the payload already has a _timestamp_receiver field, enrichment
-        // injects a new one (implementation currently prepends) — verify
+        // injects a new one (implementation currently prepends) -- verify
         // the result is still valid JSON
         let payload = Bytes::from(r#"{"_timestamp_receiver":"old","key":"val"}"#);
         let enriched = PipelineState::enrich_payload(payload);
@@ -1465,7 +1471,7 @@ mod tests {
     #[tokio::test]
     async fn test_enrich_payload_array_root_not_supported() {
         // Top-level arrays are not valid for enrichment (expects object).
-        // Verify it doesn't panic — either passes through or returns as-is.
+        // Verify it doesn't panic -- either passes through or returns as-is.
         let payload = Bytes::from("[1,2,3]");
         let enriched = PipelineState::enrich_payload(payload.clone());
         // Should not panic; result is implementation-defined for non-object roots

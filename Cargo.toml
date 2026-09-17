@@ -64,6 +64,13 @@ scalo = { version = ">=2.12.3, <3", features = [
 # (scalo-rs#6). Same version range as scalo so cargo unifies to one schemars.
 schemars = { version = ">=1.2.1, <2", default-features = false, features = ["std", "derive", "preserve_order"] }
 
+# librdkafka, for the Kafka sink's own producer. The delivery callback lives on
+# the context handed to librdkafka at creation, and scalo's producer context has
+# no delivery body (scalo-rs#26), so a broker-side refusal is invisible through
+# `scalo::transport::kafka::KafkaProducer`. Same version range and the same
+# `dynamic-linking` build as scalo so cargo resolves one librdkafka.
+rdkafka = { version = ">=0.39, <0.40", features = ["dynamic-linking"] }
+
 # Prometheus metrics (direct dep for counter!/gauge! macros with labels)
 metrics = "0.24"
 
@@ -184,7 +191,7 @@ testcontainers-modules = { version = "0.15", features = ["kafka", "hashicorp_vau
 pcap-file = ">=2.0, <3"
 sha2 = ">=0.10, <0.12"
 
-# Contract artefact e2e (tests/e2e/contract_artefacts.rs) — pulls in
+# Contract artefact e2e (tests/e2e/contract_artefacts.rs) -- pulls in
 # probe/skip/cluster helpers from scalo's test_support module.
 # transport-grpc-vector-compat is test-only: it gives VectorCompatClient, the
 # same PushEvents client dfe-fetcher and Vector use, so the gRPC ingest path can
