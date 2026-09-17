@@ -23,6 +23,10 @@ server:
   # gelf): there is no HTTP request there to count. Nor to the gRPC ports, where
   # tonic owns the accept loop. flow.rate_limit below is the per-source packet
   # limit for flow.
+  #
+  # requests_per_second is a RATE, not an interval: the limiter replenishes one
+  # request of the quota every 1/requests_per_second of a second. At 100 that is
+  # one every 10ms. It must be at least 1 while enabled is true.
   rate_limit:
     enabled: false           # opt-in; enable for internet-facing deployments
     requests_per_second: 100 # sustained rate per source IP, per listener
@@ -38,6 +42,12 @@ server:
   # It does NOT reach the gRPC ports (grpc, and OTLP on 4317): tonic owns those
   # accept loops, so close them with auth.mode: bearer, or mtls with
   # tls.client_auth: required. flow has its own optional flow.ip_filter.
+  #
+  # UPGRADE: that list used to be /ingest and the webhook intake alone. ONE
+  # filter now governs every listener, so an allowlist written for the /ingest
+  # senders also decides which sources syslog, lumberjack, fluent, gelf,
+  # splunk_hec, prometheus_rw and OTLP HTTP are accepted from. Widen cidrs to
+  # cover every sender, or those events are dropped in the accept loop.
   ip_filter:
     mode: "disabled"         # disabled, allowlist, denylist
     cidrs: []                # e.g., ["10.0.0.0/8", "172.16.0.0/12"]
@@ -263,10 +273,9 @@ webhook:
 #
 # NO application auth on this listener, and no `auth` block to put one in: the
 # Forward frames this handler reads carry no credential, and the shared_key
-# HELO/PING/PONG handshake is not implemented. A client is identified at the TLS
+# HELO/PING/PONG handshake is not implemented. Close the port at the TLS
 # handshake (tls.client_auth: required, with the CA its certificates are issued
-# from) or by a server.ip_filter allowlist naming the senders. An enabled
-# listener with neither is refused at startup rather than left open.
+# from), or restrict the senders with a server.ip_filter allowlist.
 fluent:
   enabled: false
   bind_address: "0.0.0.0:24224"
@@ -285,10 +294,9 @@ fluent:
 # GELF (Graylog Extended Log Format, null-delimited JSON over TCP)
 #
 # NO application auth on this listener, and no `auth` block to put one in: GELF
-# has no in-protocol authentication at all. A client is identified at the TLS
-# handshake (tls.client_auth: required, with the CA its certificates are issued
-# from) or by a server.ip_filter allowlist naming the senders. An enabled
-# listener with neither is refused at startup rather than left open.
+# has no in-protocol authentication at all. Close the port at the TLS handshake
+# (tls.client_auth: required, with the CA its certificates are issued from), or
+# restrict the senders with a server.ip_filter allowlist.
 gelf:
   enabled: false
   bind_address: "0.0.0.0:12201"

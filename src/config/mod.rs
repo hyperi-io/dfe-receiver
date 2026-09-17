@@ -330,6 +330,18 @@ impl Config {
             ));
         }
 
+        // A rate of zero has no interval between replenishments, so the limiter
+        // has nothing to build a quota from and the derivation would divide by
+        // it. An operator who wants no requests through disables the listener.
+        if self.server.rate_limit.enabled && self.server.rate_limit.requests_per_second == 0 {
+            return Err(Error::Config(
+                "server.rate_limit.requests_per_second is 0 -- the limiter replenishes one \
+                 request every 1/requests_per_second of a second, which zero does not \
+                 describe. Set a rate, or server.rate_limit.enabled: false"
+                    .into(),
+            ));
+        }
+
         // Validate buffer config
         if self.buffer.pressure_threshold < 0.0 || self.buffer.pressure_threshold > 1.0 {
             return Err(Error::Config(
@@ -350,12 +362,11 @@ impl Config {
         Ok(())
     }
 
-    /// Refuse an auth mode the listener that carries it does not enforce, and a
-    /// listener with nothing to identify a client at all.
+    /// Refuse an auth mode the listener that carries it does not enforce.
     ///
-    /// Most listeners own an `auth:` block of the same shape, but they do not
-    /// all read the same amount of it, and a mode a listener ignores is not a
-    /// weaker door -- it is an open one that reads as shut. Each rule below
+    /// The listeners below own an `auth:` block of the same shape, but they do
+    /// not all read the same amount of it, and a mode a listener ignores is not
+    /// a weaker door -- it is an open one that reads as shut. Each rule below
     /// names the code that does or does not run.
     fn validate_auth(&self) -> Result<()> {
         // Always-on HTTP listener.
@@ -398,15 +409,6 @@ impl Config {
         }
         if self.syslog.enabled {
             no_application_auth("syslog", &self.syslog.auth)?;
-        }
-
-        // Neither block has an auth field to refuse a mode in, so the rule is
-        // about the listener itself rather than about what was written.
-        if self.fluent.enabled {
-            a_door_exists("fluent", &self.fluent.tls, &self.server.ip_filter)?;
-        }
-        if self.gelf.enabled {
-            a_door_exists("gelf", &self.gelf.tls, &self.server.ip_filter)?;
         }
 
         Ok(())
@@ -499,29 +501,6 @@ fn no_application_auth(scope: &str, auth: &AuthConfig) -> Result<()> {
          auth -- the wire protocol carries no credential and nothing reads this \
          field. Authenticate clients at the handshake instead, with \
          {scope}.tls.enabled: true and {scope}.tls.client_auth: required"
-    )))
-}
-
-/// Refuse a listener that would accept anything able to reach the port.
-///
-/// Fluent Forward and GELF carry no credential on the wire and have no `auth`
-/// block to read one from, so a client is identified at the TLS handshake or
-/// not at all. Either door closes the port: a required client certificate, or a
-/// `server.ip_filter` allowlist that names the senders. A denylist is not a
-/// door -- it bars named sources and admits every other one.
-fn a_door_exists(scope: &str, tls: &TlsConfig, ip_filter: &IpFilterConfig) -> Result<()> {
-    if tls.enabled && tls.client_auth.eq_ignore_ascii_case("required") {
-        return Ok(());
-    }
-    if ip_filter.mode.eq_ignore_ascii_case("allowlist") && !ip_filter.cidrs.is_empty() {
-        return Ok(());
-    }
-    Err(Error::Config(format!(
-        "{scope}.enabled is true but nothing identifies a client on that port -- the \
-         {scope} wire protocol carries no credential and there is no {scope}.auth to \
-         put one in. Set {scope}.tls.enabled: true with {scope}.tls.client_auth: \
-         required and the CA the client certificates are issued from, or restrict the \
-         senders with server.ip_filter.mode: allowlist and the CIDRs they connect from"
     )))
 }
 
@@ -822,6 +801,10 @@ pub struct RateLimitConfig {
     pub enabled: bool,
 
     /// Maximum sustained requests per second per source IP.
+    ///
+    /// A rate, not an interval: the limiter replenishes one request of the
+    /// quota every `1/requests_per_second` of a second. At 100 that is one
+    /// every 10ms. Must be at least 1 while `enabled` is true.
     pub requests_per_second: u64,
 
     /// Burst capacity above the sustained rate.
@@ -849,6 +832,13 @@ impl Default for RateLimitConfig {
 /// those accept loops, so authenticate them with `auth.mode: bearer`, or
 /// `mtls` with `tls.client_auth: required`. Flow has its own optional
 /// `flow.ip_filter` per listener.
+///
+/// UPGRADE: this list used to be `/ingest` and the webhook intake alone. One
+/// filter now governs every listener, so an allowlist written for the `/ingest`
+/// senders also decides which sources syslog, Lumberjack, Fluent Forward, GELF,
+/// Splunk HEC, Prometheus remote write and OTLP HTTP are accepted from. Widen
+/// `cidrs` to cover every sender, or those events are dropped in the accept
+/// loop.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct IpFilterConfig {
@@ -1333,9 +1323,8 @@ impl Default for PrometheusRwConfig {
 /// protocol (msgpack over TCP) on the standard port 24224.
 ///
 /// There is no `auth` block: the Forward frames this handler reads carry no
-/// credential. A client is identified by `tls.client_auth: required` or by a
-/// `server.ip_filter` allowlist, and an enabled listener with neither is
-/// refused at startup.
+/// credential. Close the port at the handshake with `tls.client_auth:
+/// required`, or restrict the senders with a `server.ip_filter` allowlist.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct FluentConfig {
@@ -1376,9 +1365,9 @@ impl Default for FluentConfig {
 /// Accepts GELF messages over TCP (null-byte delimited JSON)
 /// on the standard port 12201.
 ///
-/// There is no `auth` block: GELF has no in-protocol authentication. A client
-/// is identified by `tls.client_auth: required` or by a `server.ip_filter`
-/// allowlist, and an enabled listener with neither is refused at startup.
+/// There is no `auth` block: GELF has no in-protocol authentication. Close the
+/// port at the handshake with `tls.client_auth: required`, or restrict the
+/// senders with a `server.ip_filter` allowlist.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct GelfConfig {
@@ -2771,89 +2760,27 @@ mod tests {
     }
 
     #[test]
-    fn an_enabled_fluent_listener_with_no_door_is_refused() {
-        // Forward frames carry no credential and there is no fluent.auth, so
-        // this listener admitted anything that could reach 24224.
+    fn a_rate_limit_of_zero_requests_per_second_is_refused() {
+        // The limiter is configured by the interval between replenishments,
+        // which is 1/rate: zero has no such interval and the derivation would
+        // divide by it.
         let mut config = auth_base();
-        config.fluent.enabled = true;
+        config.server.rate_limit.enabled = true;
+        config.server.rate_limit.requests_per_second = 0;
 
         let err = config.validate().expect_err("must not start");
         assert!(
-            err.to_string().contains("nothing identifies a client"),
-            "the error must say what is missing, got: {err}"
-        );
-        assert!(
-            err.to_string().contains("fluent.tls.client_auth"),
-            "the error must name the field that closes it, got: {err}"
-        );
-        assert!(
-            err.to_string().contains("server.ip_filter.mode: allowlist"),
-            "the error must name the other way in, got: {err}"
+            err.to_string()
+                .contains("server.rate_limit.requests_per_second"),
+            "the error must name the field, got: {err}"
         );
     }
 
     #[test]
-    fn an_enabled_gelf_listener_with_no_door_is_refused() {
+    fn a_rate_limit_of_zero_is_inert_while_the_limiter_is_off() {
         let mut config = auth_base();
-        config.gelf.enabled = true;
-
-        let err = config.validate().expect_err("must not start");
-        assert!(
-            err.to_string().contains("gelf.tls.client_auth"),
-            "the error must name the field that closes it, got: {err}"
-        );
-    }
-
-    #[test]
-    fn a_required_client_certificate_is_a_door() {
-        for scope in ["fluent", "gelf"] {
-            let mut config = auth_base();
-            let tls = TlsConfig {
-                enabled: true,
-                client_auth: "required".to_string(),
-                ..TlsConfig::default()
-            };
-            if scope == "fluent" {
-                config.fluent.enabled = true;
-                config.fluent.tls = tls;
-            } else {
-                config.gelf.enabled = true;
-                config.gelf.tls = tls;
-            }
-            assert!(config.validate().is_ok(), "{scope} must be accepted");
-        }
-    }
-
-    #[test]
-    fn an_ip_allowlist_is_a_door_and_a_denylist_is_not() {
-        // The allowlist is a control here because the accept loops apply it; a
-        // denylist admits every source it does not name.
-        let mut allowed = auth_base();
-        allowed.fluent.enabled = true;
-        allowed.server.ip_filter.mode = "allowlist".to_string();
-        allowed.server.ip_filter.cidrs = vec!["10.0.0.0/8".to_string()];
-        assert!(allowed.validate().is_ok());
-
-        let mut empty = auth_base();
-        empty.fluent.enabled = true;
-        empty.server.ip_filter.mode = "allowlist".to_string();
-        assert!(
-            empty.validate().is_err(),
-            "an empty allowlist filters nothing"
-        );
-
-        let mut denied = auth_base();
-        denied.fluent.enabled = true;
-        denied.server.ip_filter.mode = "denylist".to_string();
-        denied.server.ip_filter.cidrs = vec!["10.0.0.0/8".to_string()];
-        assert!(denied.validate().is_err(), "a denylist is not an allowlist");
-    }
-
-    #[test]
-    fn a_disabled_fluent_or_gelf_listener_does_not_block_startup() {
-        let mut config = auth_base();
-        config.fluent.enabled = false;
-        config.gelf.enabled = false;
+        config.server.rate_limit.enabled = false;
+        config.server.rate_limit.requests_per_second = 0;
         assert!(config.validate().is_ok());
     }
 

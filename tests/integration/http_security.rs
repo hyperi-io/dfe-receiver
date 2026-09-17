@@ -939,7 +939,7 @@ async fn test_bearer_auth_file_refresh() {
     // Wait for refresh (1s interval + generous buffer for CI/slow machines)
     tokio::time::sleep(Duration::from_secs(5)).await;
 
-    // Fresh client — old keep-alive connections may have been closed by
+    // Fresh client -- old keep-alive connections may have been closed by
     // server-side header_read_timeout (5s) during the sleep above.
     let client = reqwest::Client::new();
 
@@ -1141,6 +1141,76 @@ async fn test_rate_limit_rejects_over_burst() {
     shutdown.cancel();
 }
 
+/// `requests_per_second` is a rate, and the quota comes back at that rate.
+///
+/// The governor is configured by the interval between replenishments, so
+/// handing it the rate reads 5 as "one request every five seconds" instead of
+/// "five requests a second" -- a limiter 25x tighter than the field says, and
+/// 10,000x at the documented default of 100. A burst of one makes the quota one
+/// request, and the pause after it is what separates the two readings: a fifth
+/// of a second buys the next request back, five seconds is what the misreading
+/// would demand.
+#[tokio::test]
+async fn test_rate_limit_replenishes_at_the_configured_rate() {
+    let port = random_port();
+    let mut config = test_config(port, 10_000, 30_000, "none");
+    config.server.rate_limit.enabled = true;
+    config.server.rate_limit.requests_per_second = 5;
+    config.server.rate_limit.burst = 1;
+
+    let (url, shutdown) = start_test_server(config).await;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+
+    let first = post_ingest(&client, &url, 0).await;
+    assert!(
+        (200..300).contains(&first),
+        "the burst is one request, so the first must be served, got: {first}"
+    );
+    assert_eq!(
+        post_ingest(&client, &url, 1).await,
+        429,
+        "the burst is spent, so the next request in the same instant is over the rate"
+    );
+
+    // One second is five replenishment periods at this rate, and a fifth of the
+    // five seconds the misreading would wait.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let third = post_ingest(&client, &url, 2).await;
+    assert!(
+        (200..300).contains(&third),
+        "5 per second replenishes a request every 200ms, so a second later the \
+         quota is back, got: {third}"
+    );
+    assert_eq!(
+        post_ingest(&client, &url, 3).await,
+        429,
+        "the replenished quota is one request, not an unlimited window"
+    );
+
+    shutdown.cancel();
+}
+
+/// One `/ingest` POST keyed to a fixed apparent source IP.
+///
+/// `SmartIpKeyExtractor` prefers `x-forwarded-for`, so the header puts every
+/// request in the same bucket however the test client actually connects.
+async fn post_ingest(client: &reqwest::Client, url: &str, seq: u32) -> u16 {
+    client
+        .post(format!("{url}/ingest"))
+        .header("content-type", "application/json")
+        .header("x-forwarded-for", "192.0.2.20")
+        .body(format!(r#"{{"seq":{seq}}}"#))
+        .send()
+        .await
+        .expect("Request failed")
+        .status()
+        .as_u16()
+}
+
 /// Test that rate limiting disabled allows all requests.
 #[tokio::test]
 async fn test_rate_limit_disabled_allows_all() {
@@ -1154,7 +1224,7 @@ async fn test_rate_limit_disabled_allows_all() {
         .build()
         .unwrap();
 
-    // Send 50 requests rapidly — none should be 429
+    // Send 50 requests rapidly -- none should be 429
     for i in 0..50 {
         let response = client
             .post(format!("{url}/ingest"))
@@ -1195,7 +1265,7 @@ async fn test_ip_denylist_rejects() {
         .build()
         .unwrap();
 
-    // Request from localhost (127.0.0.1) — in denylist, should be rejected
+    // Request from localhost (127.0.0.1) -- in denylist, should be rejected
     // The server drops the TCP connection at accept level, so reqwest
     // should get a connection error (reset/closed/refused).
     let response = client
@@ -1228,7 +1298,7 @@ async fn test_ip_allowlist_rejects_non_matching() {
         .build()
         .unwrap();
 
-    // Request from localhost (127.0.0.1) — not in 10.0.0.0/8 allowlist
+    // Request from localhost (127.0.0.1) -- not in 10.0.0.0/8 allowlist
     let response = client
         .post(format!("http://127.0.0.1:{port}/ingest"))
         .header("content-type", "application/json")
@@ -1236,7 +1306,7 @@ async fn test_ip_allowlist_rejects_non_matching() {
         .send()
         .await;
 
-    // Should fail — connection dropped by IP filter at accept level
+    // Should fail -- connection dropped by IP filter at accept level
     assert!(
         response.is_err(),
         "Expected connection error when IP not in allowlist, but got response: {:?}",
@@ -1268,7 +1338,7 @@ async fn test_ip_allowlist_accepts_matching() {
         .await
         .expect("Request should succeed when IP is in allowlist");
 
-    // Connection accepted — should get a normal response
+    // Connection accepted -- should get a normal response
     assert!(
         response.status().is_success(),
         "Expected success when IP is allowed, got: {}",
@@ -1425,7 +1495,7 @@ async fn test_slowloris_protection() {
     for &byte in partial_headers {
         let write_result = stream.write_all(&[byte]).await;
         if write_result.is_err() {
-            // Server already closed connection — slowloris protection worked
+            // Server already closed connection -- slowloris protection worked
             shutdown.cancel();
             return;
         }
@@ -1433,10 +1503,10 @@ async fn test_slowloris_protection() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
-    // Now wait — the server should close the connection within the
+    // Now wait -- the server should close the connection within the
     // header_read_timeout (5s) + some buffer
     let timeout_result = tokio::time::timeout(Duration::from_secs(8), async {
-        // Try to keep writing — will fail when server closes connection
+        // Try to keep writing -- will fail when server closes connection
         loop {
             tokio::time::sleep(Duration::from_millis(500)).await;
             if stream.write_all(b"x").await.is_err() {
@@ -1448,7 +1518,7 @@ async fn test_slowloris_protection() {
 
     match timeout_result {
         Ok(true) => {
-            // Connection closed by server — slowloris protection working
+            // Connection closed by server -- slowloris protection working
         }
         Ok(false) => {
             panic!("Unexpected false return from write loop");

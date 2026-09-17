@@ -52,6 +52,10 @@ accepts itself. `server.rate_limit` is a tower layer over an HTTP request, so it
 reaches HTTP only. Each HTTP listener builds its own governor: the configured
 rate is per source IP PER LISTENER, not a receiver-wide total.
 
+`server.rate_limit.requests_per_second` is a rate: the limiter replenishes one
+request of the quota every `1/requests_per_second` of a second, with
+`server.rate_limit.burst` on top of it.
+
 | Listener | `server.ip_filter` | `server.rate_limit` | Client authentication |
 |---|---|---|---|
 | HTTP `/ingest` | yes | yes | `server.auth` |
@@ -59,18 +63,32 @@ rate is per source IP PER LISTENER, not a receiver-wide total.
 | Splunk HEC (TLS and plaintext) | yes | yes | `splunk_hec.auth` |
 | Prometheus remote write | yes | yes | `prometheus_rw.auth` |
 | OTLP HTTP (4318) | yes | yes | `otlp.auth` |
-| OTLP gRPC (4317) | no -- tonic owns the accept loop | no -- no HTTP layer there | `otlp.auth`, bearer or mTLS |
-| gRPC / Vector | no -- tonic owns the accept loop | no -- no HTTP layer there | `grpc.auth`, bearer or mTLS |
+| OTLP gRPC (4317) | no -- tonic runs the accept loop | no -- no HTTP layer there | `otlp.auth`, bearer or mTLS |
+| gRPC / Vector | no -- tonic runs the accept loop | no -- no HTTP layer there | `grpc.auth`, bearer or mTLS |
 | Syslog UDP / TCP / TLS | yes (per datagram on UDP) | no -- no HTTP request to count | TLS listener only, `client_auth: required` |
 | Lumberjack / Beats | yes | no -- no HTTP request to count | `lumberjack.tls.client_auth: required` |
-| Fluent Forward | yes | no -- no HTTP request to count | `fluent.tls.client_auth: required`, or an IP allowlist |
-| GELF | yes | no -- no HTTP request to count | `gelf.tls.client_auth: required`, or an IP allowlist |
+| Fluent Forward | yes | no -- no HTTP request to count | none -- the Forward frames carry no credential |
+| GELF | yes | no -- no HTTP request to count | none -- GELF has no in-protocol authentication |
 | Flow (NetFlow / sFlow) | own `flow.ip_filter` | own `flow.rate_limit` | none -- UDP, restrict by source |
 
-Fluent Forward and GELF have no `auth` block: neither wire protocol carries a
-credential. An enabled listener with neither a required client certificate nor a
-`server.ip_filter` allowlist is refused at startup, because it would accept
-anything that could reach the port.
+An IP allowlist is network admission, not authentication: it says where a client
+may connect from, not who the client is, which is why it is not in the last
+column. Fluent Forward and GELF have nothing in that column at all, so close
+those ports with `tls.client_auth: required`, an allowlist, or both -- an
+allowlist alone admits anything inside the range.
+
+### Upgrade note: one IP filter, every listener
+
+`server.ip_filter` used to reach `/ingest` and the webhook intake and nothing
+else. It now runs in every accept loop the receiver owns, so a single allowlist
+governs all of them.
+
+A deployment that set an allowlist for its `/ingest` senders and receives syslog,
+Beats, Fluent Forward, GELF, HEC, remote write or OTLP HTTP from a different
+range starts DROPPING those events in the accept loop. The drop is a `debug!`
+line and nothing else. Before upgrading, widen `server.ip_filter.cidrs` to cover
+every sender on every enabled listener, or set `mode: disabled` and restrict at
+the network edge.
 
 ---
 

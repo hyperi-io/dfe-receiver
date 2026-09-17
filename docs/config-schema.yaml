@@ -519,7 +519,12 @@ $defs:
         type: boolean
         default: false
       requests_per_second:
-        description: Maximum sustained requests per second per source IP.
+        description: |-
+          Maximum sustained requests per second per source IP.
+
+          A rate, not an interval: the limiter replenishes one request of the
+          quota every `1/requests_per_second` of a second. At 100 that is one
+          every 10ms. Must be at least 1 while `enabled` is true.
         type: integer
         format: uint64
         minimum: 0
@@ -543,6 +548,13 @@ $defs:
       those accept loops, so authenticate them with `auth.mode: bearer`, or
       `mtls` with `tls.client_auth: required`. Flow has its own optional
       `flow.ip_filter` per listener.
+
+      UPGRADE: this list used to be `/ingest` and the webhook intake alone. One
+      filter now governs every listener, so an allowlist written for the `/ingest`
+      senders also decides which sources syslog, Lumberjack, Fluent Forward, GELF,
+      Splunk HEC, Prometheus remote write and OTLP HTTP are accepted from. Widen
+      `cidrs` to cover every sender, or those events are dropped in the accept
+      loop.
     type: object
     properties:
       mode:
@@ -1096,9 +1108,8 @@ $defs:
       protocol (msgpack over TCP) on the standard port 24224.
 
       There is no `auth` block: the Forward frames this handler reads carry no
-      credential. A client is identified by `tls.client_auth: required` or by a
-      `server.ip_filter` allowlist, and an enabled listener with neither is
-      refused at startup.
+      credential. Close the port at the handshake with `tls.client_auth:
+      required`, or restrict the senders with a `server.ip_filter` allowlist.
     type: object
     properties:
       enabled:
@@ -1147,9 +1158,9 @@ $defs:
       Accepts GELF messages over TCP (null-byte delimited JSON)
       on the standard port 12201.
 
-      There is no `auth` block: GELF has no in-protocol authentication. A client
-      is identified by `tls.client_auth: required` or by a `server.ip_filter`
-      allowlist, and an enabled listener with neither is refused at startup.
+      There is no `auth` block: GELF has no in-protocol authentication. Close the
+      port at the handshake with `tls.client_auth: required`, or restrict the
+      senders with a `server.ip_filter` allowlist.
     type: object
     properties:
       enabled:
