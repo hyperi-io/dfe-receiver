@@ -232,15 +232,23 @@ impl ServiceApp for App {
         let pipeline_for_ready = orchestrator.state();
         runtime.set_readiness_check(move || pipeline_for_ready.probe_ready());
 
-        // Run main server (blocks until shutdown)
-        if let Err(e) = server.run(shutdown_token.clone()).await {
-            error!(error = %e, "Server error");
+        // Start the background tasks before the listeners accept a byte: the
+        // drains and the metrics feed run for the whole serving window.
+        if let Err(e) = orchestrator.start() {
+            error!(error = %e, "Pipeline start error");
             return Err(CliError::Service(e.to_string()));
         }
 
-        // Run pipeline orchestrator
-        if let Err(e) = orchestrator.run().await {
-            error!(error = %e, "Pipeline error");
+        // Run main server (blocks until shutdown)
+        let serve_outcome = server.run(shutdown_token.clone()).await;
+
+        // Flush even when the server failed: an early return drops queued records.
+        if let Err(e) = orchestrator.shutdown().await {
+            error!(error = %e, "Pipeline shutdown error");
+        }
+
+        if let Err(e) = serve_outcome {
+            error!(error = %e, "Server error");
             return Err(CliError::Service(e.to_string()));
         }
 

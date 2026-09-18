@@ -104,8 +104,8 @@ impl<S: ReceiverSink + 'static> SinkBackend<S> {
     pub fn start_drain_task(self: Arc<Self>, shutdown: CancellationToken) {
         match self.as_ref() {
             SinkBackend::InMemory(_) => {
-                // InMemoryBuffer needs its own drain loop. We spawn a task
-                // that periodically calls flush (which triggers try_drain).
+                // InMemoryBuffer needs its own drain loop: the tick moves the
+                // queue, and only shutdown flushes the primary as well.
                 let backend = Arc::clone(&self);
                 tokio::spawn(async move {
                     let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
@@ -120,7 +120,7 @@ impl<S: ReceiverSink + 'static> SinkBackend<S> {
                             }
                             _ = interval.tick() => {
                                 if let SinkBackend::InMemory(buf) = backend.as_ref() {
-                                    let _ = buf.flush().await;
+                                    buf.drain_queued().await;
                                 }
                             }
                         }
