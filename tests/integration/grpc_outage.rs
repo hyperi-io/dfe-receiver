@@ -72,8 +72,11 @@ async fn start_receiver(loader_endpoint: &str) -> (String, CancellationToken) {
             .await
             .expect("orchestrator init");
         let pipeline = orchestrator.state();
+        orchestrator.start().expect("orchestrator start");
+        let drain_shutdown = shutdown.clone();
         tokio::spawn(async move {
-            let _ = orchestrator.run().await;
+            drain_shutdown.cancelled().await;
+            let _ = orchestrator.shutdown().await;
         });
 
         let bind_addr = config.server.bind_address.clone();

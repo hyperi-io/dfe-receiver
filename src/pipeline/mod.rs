@@ -878,8 +878,13 @@ impl Orchestrator {
         self.shared_config.clone()
     }
 
-    /// Run the orchestrator (background tasks).
-    pub async fn run(&self) -> Result<()> {
+    /// Start the background tasks.
+    ///
+    /// Call before the listeners start accepting. The default `InMemoryBuffer`
+    /// only moves queued records when its drain task drains it, and the KEDA
+    /// scaling gauge only updates from the metrics feed, so both have to run
+    /// for the whole serving window.
+    pub fn start(&self) -> Result<()> {
         info!("Pipeline orchestrator running");
 
         // Start drain tasks for tiered sinks
@@ -909,9 +914,11 @@ impl Orchestrator {
             }
         });
 
-        // Wait for shutdown
-        self.shutdown.cancelled().await;
+        Ok(())
+    }
 
+    /// Flush every sink once the listeners have stopped.
+    pub async fn shutdown(&self) -> Result<()> {
         info!("Pipeline orchestrator shutting down");
 
         // Flush all sinks
