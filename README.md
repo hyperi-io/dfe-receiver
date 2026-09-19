@@ -42,7 +42,7 @@ Syslog, Fluent Forward, GELF, Prometheus Remote Write, Webhook, Flow [NetFlow
 - Normalises all protocol data to JSON
 - Validates JSON format and optional required fields
 - Routes to Kafka topics based on configurable field extraction rules
-- Buffers in-memory with backpressure via CircuitBreaker (no disk spillover by design)
+- Buffers in-memory with backpressure via CircuitBreaker by default; disk spillover is opt-in (`buffer.spillover.enabled`)
 - Supports header auth, bearer tokens, and mTLS authentication
 
 ## Quick Start
@@ -289,20 +289,24 @@ Key metrics:
 ## Architecture
 
 Every protocol handler normalises to JSON, then all share one core pipeline.
-The handlers run in parallel (each opt-in); the table above lists the full set.
+The handlers run in parallel; HTTP always runs because the probes ride its
+listener, and the other ten are opt-in. The table above lists the full set.
 
 ```mermaid
 flowchart TB
     SRC["Agents / collectors<br/>Vector, Beats, OTel, Splunk, syslog, ..."]
-    SRC --> H["11 protocol handlers<br/>each opt-in, spawned in parallel<br/>normalise to JSON"]
+    SRC --> H["11 protocol handlers<br/>HTTP always on, ten opt-in<br/>spawned in parallel, normalise to JSON"]
     H -->|"bytes::Bytes (normalised JSON)"| AUTH["Auth middleware<br/>header / bearer / mTLS"]
     AUTH --> VAL["JSON validation<br/>sonic-rs SIMD, optional field checks"]
     VAL --> RT["Router<br/>zero-copy field extract -> topic name"]
-    RT --> TS["TieredSink (scalo)<br/>in-memory buffer + CircuitBreaker<br/>no disk spillover by design"]
+    RT --> TS["SinkBackend<br/>in-memory buffer + CircuitBreaker (default)<br/>or scalo TieredSink + disk spool (opt-in)"]
     TS --> KAFKA[("Kafka topics<br/>librdkafka, batched / LZ4")]
     TS --> GRPC["Push listeners<br/>dfe-loader, transforms, archiver"]
     RT -. unmatched .-> DEF["main_land topic"]
 ```
+
+Design rationale and the invariants are in
+[docs/architecture.md](docs/architecture.md).
 
 ## Development
 
@@ -313,9 +317,9 @@ cargo nextest run
 # Run with debug logging
 RUST_LOG=debug cargo run -- --config config.yaml
 
-# Run integration tests (requires Kafka)
+# Run the Kafka e2e tests (requires Docker; they are #[ignore] by default)
 docker compose -f docker-compose.test.yaml up -d
-cargo test --test integration_kafka -- --ignored
+cargo nextest run --test e2e --run-ignored all
 docker compose -f docker-compose.test.yaml down -v
 ```
 
@@ -369,3 +373,74 @@ This project is licensed under the Business Source License 1.1 (BUSL-1.1). See [
 Copyright (c) 2026 HYPERI PTY LIMITED
 
 For commercial licensing options, see [COMMERCIAL.md](https://github.com/hyperi-io/dfe-receiver/blob/main/COMMERCIAL.md).
+
+## Context
+
+### What this is
+
+The suite's one external door: eleven wire protocols terminated, every payload
+normalised to JSON, stamped, routed to Kafka or straight to dfe-loader over
+gRPC. It and dfe-ui are the only components reading untrusted input, so an
+advisory here outranks the same one in dfe-loader -- reachability first, per
+dfe-infra's `docs/INGEST-EDGE.md`. It is NOT a transform stage (that is
+dfe-loader), and `chart/` here is NOT what deploys it.
+
+### Where things live
+
+| Path | What is in it |
+|---|---|
+| `src/main.rs` | CLI, config load, the `--emit-*` generators, the startup order #132 is about |
+| `src/server/` | One directory per handler, plus `traits.rs` (the `ProtocolHandler` boundary), auth, TLS, IP filter. `mod.rs:93` registers them |
+| `src/pipeline/`, `routing/`, `validation/` | The shared core path every handler feeds |
+| `src/buffer/` | `SinkBackend`: in-memory default, or scalo `TieredSink` with a disk spool |
+| `src/sink/` | `kafka/`, `grpc/`, `file/`. Kafka owns its producer so delivery reports are visible |
+| `src/config/mod.rs`, `src/deployment.rs` | `Config::validate()`, and the contract plus its drift guards |
+| `chart/`, `proto/` | Generated or vendored. Do not hand-edit |
+| `tests/` | Targets `smoke`, `integration`, `e2e`. `common/mod.rs` is the container harness |
+| `docs/architecture.md` | Why it is shaped this way, and the invariants |
+
+### Commands that prove a change
+
+```bash
+hyperi-ci check                                 # the gate
+cargo nextest run                               # unit + integration, incl. the drift guards
+cargo nextest run --test e2e --run-ignored all  # adds the 8 Kafka e2e tests (needs Docker)
+```
+
+`protoc`, `cmake` and a C toolchain must be present or the build dies inside a
+dependency's build script, naming nothing useful. Three ways green lies: the
+default run skips eight `#[ignore]` Kafka tests; container tests skip silently
+when Docker is down locally and only panic under `$CI`; and `features: default`
+is `otlp` alone, with hyperi-ci adding `--features jemalloc`, so a local build is
+not the shipped one.
+
+### What tends to bite
+
+| Don't | Do | Why |
+|---|---|---|
+| Read `Cargo.toml` for the version | Read `VERSION` | semantic-release writes only `CHANGELOG.md` and `VERSION`. `Cargo.toml` sits at `1.15.10` while `VERSION` is `1.15.36` |
+| `cargo test --test integration_kafka` | `--test e2e --run-ignored all` | No such target. This README and `tests/e2e/kafka.rs` both carried it |
+| Trust green after Docker was down | Check the skip count, or set `CI=1` | A bad third-party URL shipped this way -- skipped locally, never re-checked |
+| Hand-edit `chart/` or `Dockerfile` | `--emit-helm` / `--emit-dockerfile` | Generated from `src/deployment.rs`, with tests asserting they match |
+| Bump scalo and stop | Bump, regenerate, commit the diff | The generator is in scalo, so the drift guard fails by design |
+| Change `Config::validate()` alone | Update dfe-engine's mirror | It hand-copies this validation, nothing compares them, and they have drifted |
+| Read 202 as delivered | Compare `kafka_sends_total` with `kafka_delivered_total` | 202 is answered at enqueue. Pre-#110 a broker refusal was silent loss |
+| Hunt for `receiver_scaling_pressure` | Read #132 | The orchestrator starts at SIGTERM, so the loop setting it never runs while serving |
+| Enable `buffer.spillover` for a safe shutdown | Read #130 | On the tiered path `flush` never reaches the inner sink |
+| Set `VAULT_*` on the test OpenBao | Set `BAO_*` | `VAULT_` is ignored, a random root token is minted, everything 403s silently |
+
+### Where this sits
+
+Inbound: **scalo-rs** (crate `scalo`) by `cargo-dep` -- a runtime range plus a
+dev-dependency range for test support, which move together, and a
+`generated-file` lockstep edge through the `Dockerfile`.
+
+Outbound: **dfe-infra** by `image-pin` lockstep -- its
+`helm/charts/dfe-receiver/Chart.yaml` pins the image built here and is what
+actually deploys the receiver. **dfe-engine** by `mirrored-logic` -- it
+reimplements `Config::validate()` by hand, so only a human closes that edge.
+
+```bash
+python3 /projects/dfe-infra/scripts/dfe-stack suite --consumer dfe-receiver
+python3 /projects/dfe-infra/scripts/dfe-stack suite --producer dfe-receiver
+```
