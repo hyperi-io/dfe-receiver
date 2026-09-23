@@ -476,7 +476,7 @@ buffer:
   memory_limit: 0  # 0 = auto-detect (67% available)
   pressure_threshold: 0.8
   spillover:
-    enabled: false  # opt-in disk spillover via rustlib TieredSink
+    enabled: false  # opt-in disk spillover via scalo TieredSink
     path: /var/spool/dfe-receiver
     max_usage_percent: 0.8  # pause spool writes when disk exceeds 80%
     poll_interval_secs: 5
@@ -494,9 +494,9 @@ metrics:
 # extra fields):
 #   1. dfe-receiver's own legacy weighted ScalingPressure (`weight_*` /
 #      `saturation_*` / `memory_gate_threshold` -- emits `dfe_scaling_pressure`).
-#   2. rustlib's ScalingPressureConfig (worker-pool feedback -- reads `enabled`
+#   2. scalo's ScalingPressureConfig (worker-pool feedback -- reads `enabled`
 #      / `memory_gate_threshold`).
-#   3. rustlib's horizontal scaling-pressure ENGINE (`transport` / `params` /
+#   3. scalo's horizontal scaling-pressure ENGINE (`transport` / `params` /
 #      `pressures` -- emits `dfe_receiver_scaling_pressure{name="default"}` and
 #      `dfe_receiver_transport_inbound_pressure_ratio`). Requires the
 #      `expression` cargo feature (enabled in Cargo.toml).
@@ -520,7 +520,7 @@ scaling:
     # NO lag_target: a push originator has no inbound Kafka lag, so the lag term
     # contributes 0 (never mis-scales). Outbound Kafka produce-queue depth is
     # pushed but is downstream-bound and NOT in the smart-default max.
-  # pressures: []  # empty => rustlib's context-aware smart default
+  # pressures: []  # empty => scalo's context-aware smart default
 
   # Legacy weighted ScalingPressure (dfe_scaling_pressure gauge) -- retained.
   memory_gate_threshold: 0.8
