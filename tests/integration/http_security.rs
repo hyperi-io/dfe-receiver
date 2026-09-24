@@ -98,6 +98,8 @@ async fn start_test_server_with_pipeline(
         metrics,
     );
     let bound = handler.bound_addr();
+    // The one listener this server runs, as Server::run would declare it.
+    pipeline.watch_listeners(handler.listeners());
     let server_shutdown = shutdown.clone();
     let mut server = tokio::spawn(async move { handler.start(server_shutdown).await });
     let addr = crate::common::bound_addr("HTTP", &bound, &mut server).await;

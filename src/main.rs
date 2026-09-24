@@ -221,7 +221,7 @@ impl ServiceApp for App {
                     Server::with_flow_metrics(orchestrator.state(), metrics.clone(), flow_metrics)
                 }
                 Err(e) => {
-                    error!(error = %e, "FlowMetrics::register failed; flow handler will be disabled");
+                    error!(error = %e, "FlowMetrics::register failed; the flow handler cannot start");
                     Server::new(orchestrator.state(), metrics.clone())
                 }
             }

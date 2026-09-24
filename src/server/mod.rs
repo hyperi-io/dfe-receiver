@@ -9,7 +9,8 @@
 //! Protocol handler orchestration.
 //!
 //! Manages pluggable protocol handlers (HTTP, gRPC/Vector, OTLP, etc.).
-//! All enabled handlers are spawned in parallel and monitored for health.
+//! All enabled handlers are spawned in parallel, and readiness waits on every
+//! listener they bind.
 
 pub mod auth;
 pub mod flow;
@@ -34,12 +35,13 @@ pub mod webhook;
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
 use crate::server::flow::FlowHandler;
+use crate::server::flow::handler::render_bind_summary;
 use crate::server::flow::metrics::FlowMetrics;
 use crate::server::fluent::FluentHandler;
 use crate::server::gelf::GelfHandler;
@@ -51,17 +53,47 @@ use crate::server::otlp::OtlpHandler;
 use crate::server::prometheus_rw::PrometheusRwHandler;
 use crate::server::splunk_hec::SplunkHecHandler;
 use crate::server::syslog::SyslogHandler;
-use crate::server::traits::ProtocolHandler;
+use crate::server::traits::{BoundAddr, ProtocolHandler};
 use crate::server::webhook::WebhookHandler;
 
 /// Main server that manages protocol handlers.
 pub struct Server {
     state: Arc<PipelineState>,
     metrics: Arc<Metrics>,
-    /// Pre-registered FlowMetrics handles. `None` skips the flow handler
-    /// even if `config.flow.enabled` is true; this is the legacy
-    /// `Server::new` path used by tests that don't bring up a global recorder.
+    /// Pre-registered FlowMetrics handles. With `None` and `config.flow`
+    /// enabled, the flow handler fails to start and holds readiness down.
     flow_metrics: Option<FlowMetrics>,
+}
+
+/// An enabled handler that could not be built.
+///
+/// It stands in for the missing handler, so the orchestrator reports the
+/// failure as it reports a bind failure, and its listener never binds, so
+/// readiness stays down.
+struct UnbuiltHandler {
+    name: &'static str,
+    bind_address: String,
+    reason: String,
+    listener: BoundAddr,
+}
+
+#[async_trait::async_trait]
+impl ProtocolHandler for UnbuiltHandler {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn bind_address(&self) -> &str {
+        &self.bind_address
+    }
+
+    fn listeners(&self) -> Vec<BoundAddr> {
+        vec![self.listener.clone()]
+    }
+
+    async fn start(&self, _shutdown: CancellationToken) -> Result<()> {
+        Err(Error::Server(format!("not built: {}", self.reason)))
+    }
 }
 
 impl Server {
@@ -193,26 +225,27 @@ impl Server {
         // Flow (NetFlow + sFlow) handler -- enabled in unified or split mode.
         // Requires FlowMetrics to be pre-registered via Server::with_flow_metrics.
         if config.flow.enabled || config.flow.split.is_some() {
-            match self.flow_metrics.clone() {
-                Some(flow_metrics) => {
-                    match FlowHandler::new(
-                        config.flow.clone(),
-                        config.raw_capture_for(&config.flow.raw_capture),
-                        flow_metrics,
-                        self.state.clone(),
-                    ) {
-                        Ok(handler) => handlers.push(Box::new(handler)),
-                        Err(e) => {
-                            error!(error = %e, "Flow handler config invalid; skipping");
-                        }
-                    }
-                }
-                None => {
-                    warn!(
-                        "Flow handler enabled but no FlowMetrics registered; skipping. \
-                         Use Server::with_flow_metrics to enable flow."
-                    );
-                }
+            let built = match self.flow_metrics.clone() {
+                Some(flow_metrics) => FlowHandler::new(
+                    config.flow.clone(),
+                    config.raw_capture_for(&config.flow.raw_capture),
+                    flow_metrics,
+                    self.state.clone(),
+                ),
+                None => Err(Error::Config(
+                    "flow is enabled but the server has no FlowMetrics \
+                     (build it with Server::with_flow_metrics)"
+                        .into(),
+                )),
+            };
+            match built {
+                Ok(handler) => handlers.push(Box::new(handler)),
+                Err(e) => handlers.push(Box::new(UnbuiltHandler {
+                    name: "flow",
+                    bind_address: render_bind_summary(&config.flow),
+                    reason: e.to_string(),
+                    listener: BoundAddr::default(),
+                })),
             }
         }
 

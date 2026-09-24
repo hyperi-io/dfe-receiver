@@ -34,7 +34,7 @@ HyperI internal -> see infrastructure standards, PB scale patterns
 | Middleware ordering | Concurrency -> Timeout -> BodyLimit -> Auth -> Handler | Correct for DoS |
 | Frame size validation | GELF 1MB, Syslog 64KB, Fluent 32MB | Per-protocol limits |
 | Zip-bomb rejection | Lumberjack nested compression rejected | Hard-coded |
-| Health/readiness (K8s) | `/livez`, `/readyz`, 503 on drain | All HTTP handlers |
+| Health/readiness (K8s) | `/livez`, `/readyz`: 503 until every enabled listener serves, once one stops (drain included), and under memory pressure | Metrics port and the HTTP ingest port |
 | Graceful shutdown | CancellationToken + in-flight drain | All handlers |
 | Log spam prevention | Sampled (1/100) + debounced (5s) logging | Per-protocol |
 | `#![forbid(unsafe_code)]` | Entire crate | Cargo.toml lints |

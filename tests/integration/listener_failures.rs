@@ -24,7 +24,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
-use dfe_receiver::config::{Config, SharedConfig};
+use dfe_receiver::config::{Config, SharedConfig, SpilloverConfig};
 use dfe_receiver::metrics::Metrics;
 use dfe_receiver::pipeline::PipelineState;
 use dfe_receiver::server::Server;
@@ -382,6 +382,26 @@ async fn readiness_waits_for_every_enabled_listener() {
     server.await.expect("server task");
 }
 
+/// Run `server` for two seconds and assert the pod never reports ready.
+///
+/// The positive control is `readiness_waits_for_every_enabled_listener`: the
+/// same server path reports ready within [`READY_DEADLINE`] when every
+/// listener comes up.
+async fn assert_never_ready(server: Server, pipeline: &PipelineState, missing: &str) {
+    let shutdown = CancellationToken::new();
+    let task = run(server, &shutdown);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        assert!(
+            !pipeline.probe_ready(),
+            "the pod reported ready with {missing}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    shutdown.cancel();
+    task.await.expect("server task");
+}
+
 /// A listener that cannot bind keeps the pod not ready, while HTTP serves.
 #[tokio::test]
 async fn a_listener_that_cannot_bind_keeps_the_pod_not_ready() {
@@ -391,20 +411,117 @@ async fn a_listener_that_cannot_bind_keeps_the_pod_not_ready() {
     config.fluent.bind_address = held.addr().to_string();
     let pipeline = pipeline_for(&config).await;
 
-    let shutdown = CancellationToken::new();
-    let server = run(Server::new(pipeline.clone(), metrics()), &shutdown);
+    let server = Server::new(pipeline.clone(), metrics());
+    assert_never_ready(server, &pipeline, "Fluent Forward unable to bind").await;
+}
 
-    // The positive control is the test above: the same server path reports
-    // ready within READY_DEADLINE when every port is free.
-    let deadline = Instant::now() + Duration::from_secs(2);
+/// A flow handler whose config it refuses keeps the pod not ready.
+#[tokio::test]
+async fn a_flow_handler_that_cannot_build_keeps_the_pod_not_ready() {
+    // Unified and split at once, which FlowHandler::new refuses.
+    let mut config = split_flow_config(0, 0);
+    config.flow.enabled = true;
+    let pipeline = pipeline_for(&config).await;
+
+    let server = Server::with_flow_metrics(pipeline.clone(), metrics(), flow_metrics_for_test());
+    assert_never_ready(server, &pipeline, "the flow handler unable to build").await;
+}
+
+/// Flow enabled on a server built without flow metrics keeps the pod not ready.
+#[tokio::test]
+async fn flow_enabled_without_flow_metrics_keeps_the_pod_not_ready() {
+    let mut config = flow_config();
+    config.flow.enabled = true;
+    config.flow.ports = vec![0];
+    let pipeline = pipeline_for(&config).await;
+
+    let server = Server::new(pipeline.clone(), metrics());
+    assert_never_ready(server, &pipeline, "the flow handler never built").await;
+}
+
+// ---------------------------------------------------------------------------
+// The ingest port's /readyz
+// ---------------------------------------------------------------------------
+
+/// The first status the ingest port's `/readyz` answers.
+///
+/// # Panics
+///
+/// When nothing answers within [`READY_DEADLINE`].
+async fn first_readyz(http: SocketAddr) -> u16 {
+    let url = format!("http://{http}/readyz");
+    let deadline = Instant::now() + READY_DEADLINE;
     while Instant::now() < deadline {
-        assert!(
-            !pipeline.probe_ready(),
-            "the pod reported ready with its Fluent Forward listener unable to bind"
-        );
+        if let Some(status) = probe(&url).await {
+            return status;
+        }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    panic!("nothing answered {url} within {READY_DEADLINE:?}");
+}
 
+/// A destination outage is shared by every replica, so the ingest port's
+/// `/readyz` must not fail on it while every listener serves.
+#[tokio::test]
+async fn the_ingest_readyz_passes_with_an_unhealthy_sink() {
+    let spool = tempfile::tempdir().expect("spool dir");
+    let destination = ClosedPort::loopback().expect("hold the destination's port");
+    let http = ClosedPort::loopback()
+        .expect("reserve the HTTP port")
+        .release();
+
+    let mut config = base_config();
+    config.server.bind_address = http.to_string();
+    config.loader.transport = "grpc".to_string();
+    config.loader.grpc_endpoint = Some(format!("http://{}", destination.addr()));
+    // A usage ceiling no real filesystem is under reports the spool full, so the
+    // destination's sink reads unhealthy on the first disk poll.
+    config.buffer.spillover = SpilloverConfig {
+        enabled: true,
+        path: spool.path().to_path_buf(),
+        max_usage_percent: 0.000_001,
+        poll_interval_secs: 1,
+    };
+    let pipeline = pipeline_for(&config).await;
+
+    let shutdown = CancellationToken::new();
+    let server = run(Server::new(pipeline.clone(), metrics()), &shutdown);
+    assert!(
+        eventually(|| pipeline.probe_ready() && !pipeline.is_ready()).await,
+        "the test needs every listener serving and the sink unhealthy"
+    );
+
+    assert_eq!(
+        first_readyz(http).await,
+        200,
+        "the ingest /readyz failed on a sink outage every replica shares"
+    );
+    shutdown.cancel();
+    server.await.expect("server task");
+}
+
+/// The ingest port's `/readyz` fails while an enabled listener is missing,
+/// matching the kubelet probe.
+#[tokio::test]
+async fn the_ingest_readyz_fails_while_a_listener_is_missing() {
+    let held = ClosedPort::loopback().expect("hold a TCP port");
+    let http = ClosedPort::loopback()
+        .expect("reserve the HTTP port")
+        .release();
+
+    let mut config = base_config();
+    config.server.bind_address = http.to_string();
+    config.fluent.enabled = true;
+    config.fluent.bind_address = held.addr().to_string();
+    let pipeline = pipeline_for(&config).await;
+
+    let shutdown = CancellationToken::new();
+    let server = run(Server::new(pipeline, metrics()), &shutdown);
+    assert_eq!(
+        first_readyz(http).await,
+        503,
+        "the ingest /readyz passed with Fluent Forward unable to bind"
+    );
     shutdown.cancel();
     server.await.expect("server task");
 }

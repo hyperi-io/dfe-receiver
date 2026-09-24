@@ -827,9 +827,9 @@ async fn liveness_handler() -> &'static str {
     "OK"
 }
 
-/// Readiness probe handler.
+/// Readiness probe handler: the same answer as the kubelet's `/readyz` on the metrics port.
 async fn readiness_handler(State(state): State<HttpState>) -> StatusCode {
-    if state.pipeline.is_ready() {
+    if state.pipeline.probe_ready() {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE

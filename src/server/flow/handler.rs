@@ -290,7 +290,7 @@ impl FlowHandler {
 }
 
 /// Render the `bind_address()` summary string from a `FlowConfig`.
-fn render_bind_summary(cfg: &FlowConfig) -> String {
+pub(crate) fn render_bind_summary(cfg: &FlowConfig) -> String {
     if let Some(split) = &cfg.split {
         let mut parts: Vec<String> = Vec::new();
         for p in &split.netflow.ports {
