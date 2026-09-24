@@ -39,7 +39,23 @@ RUN chmod +x /usr/local/bin/dfe-receiver
 RUN if id ubuntu >/dev/null 2>&1; then userdel -r ubuntu; fi && useradd --create-home --uid 1000 appuser
 USER appuser
 
-EXPOSE 9090 8080 6000 4317 4318 5044 8088 9091 8090 514 6514 24224 12201 2055 4739 6343
+EXPOSE 9090 8080
+# Conditional listeners, not EXPOSEd -- publish explicitly when enabled:
+#   6000/tcp grpc -- when config.grpc.enabled is "true"
+#   4317/tcp otlp-grpc -- when config.otlp.enabled is "true"
+#   4318/tcp otlp-http -- when config.otlp.enabled is "true"
+#   5044/tcp beats -- when config.lumberjack.enabled is "true"
+#   8088/tcp hec -- when config.splunk_hec.enabled is "true"
+#   9091/tcp prometheus-rw -- when config.prometheus_rw.enabled is "true"
+#   8090/tcp webhook -- when config.webhook.enabled is "true"
+#   514/tcp syslog -- when config.syslog.enabled is "true"
+#   514/udp syslog-udp -- when config.syslog.enabled is "true"
+#   6514/tcp syslog-tls -- when config.syslog.enabled is "true"
+#   24224/tcp fluent -- when config.fluent.enabled is "true"
+#   12201/tcp gelf -- when config.gelf.enabled is "true"
+#   2055/udp netflow -- when config.flow.enabled is "true"
+#   4739/udp netflow-ipfix -- when config.flow.enabled is "true"
+#   6343/udp sflow -- when config.flow.enabled is "true"
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD curl -sf http://localhost:9090/livez > /dev/null || exit 1

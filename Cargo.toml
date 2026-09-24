@@ -22,7 +22,7 @@ doctest = false
 
 [dependencies]
 # scalo shared library (crates.io)
-scalo = { version = ">=2.12.3, <3", features = [
+scalo = { version = ">=2.12.7, <3", features = [
     "config",
     "config-reload",
     "config-schema",
@@ -196,7 +196,7 @@ sha2 = ">=0.10, <0.12"
 # transport-grpc-vector-compat is test-only: it gives VectorCompatClient, the
 # same PushEvents client dfe-fetcher and Vector use, so the gRPC ingest path can
 # be driven in-process. Dev-dep features do not reach a release build.
-scalo = { version = ">=2.12.3, <3", features = [
+scalo = { version = ">=2.12.7, <3", features = [
     "deployment-test-support",
     "transport-grpc-vector-compat",
 ] }

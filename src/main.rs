@@ -255,6 +255,14 @@ impl ServiceApp for App {
         config.scaling.components()
     }
 
+    fn register_metrics(&self, manager: &scalo::metrics::MetricsManager) {
+        // `metrics-manifest` and `generate-artefacts` read the registry without
+        // starting the service, so the catalogue is empty until the receiver's
+        // own metrics are built against their manager.
+        let scaling = Arc::new(Config::default().scaling.build_pressure());
+        let _ = Metrics::register_on(scaling, manager);
+    }
+
     fn deployment_contract(&self) -> Option<scalo::deployment::DeploymentContract> {
         Some(crate::deployment::contract())
     }
@@ -316,4 +324,27 @@ fn reload_config_from_path(
         ..Config::default()
     };
     reload_config(&placeholder).map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `metrics-manifest` builds a manager, calls `register_metrics` and prints
+    /// the registry, so an app that leaves the no-op default in place emits an
+    /// empty catalogue.
+    #[test]
+    fn register_metrics_fills_the_manifest() {
+        let manager = scalo::metrics::MetricsManager::with_config(
+            scalo::metrics::MetricsConfig::offline("dfe-receiver"),
+        );
+        let app = App::parse_from(["dfe-receiver"]);
+
+        app.register_metrics(&manager);
+
+        assert!(
+            !manager.registry().manifest().metrics.is_empty(),
+            "register_metrics must put the receiver's metric groups in the manifest"
+        );
+    }
 }
