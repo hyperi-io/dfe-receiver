@@ -54,6 +54,12 @@ pub enum Error {
     #[error("transport error: {0}")]
     Transport(String),
 
+    /// The record itself can never be delivered, proven from the record alone
+    /// (over the destination's size ceiling). A destination refusal the record
+    /// does not prove -- one that may apply to every record -- is `Transport`.
+    #[error("record rejected by destination: {0}")]
+    Rejected(String),
+
     /// Buffer/memory error.
     #[error("buffer error: {0}")]
     Buffer(String),
@@ -142,6 +148,10 @@ mod tests {
             (Error::Auth("a".into()), "authentication failed: a"),
             (Error::Server("s".into()), "server error: s"),
             (Error::Transport("tp".into()), "transport error: tp"),
+            (
+                Error::Rejected("rj".into()),
+                "record rejected by destination: rj",
+            ),
             (Error::Buffer("b".into()), "buffer error: b"),
             (Error::Shutdown, "shutdown requested"),
         ];

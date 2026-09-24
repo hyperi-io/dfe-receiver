@@ -29,7 +29,9 @@ use scalo::logger::security;
 
 use rustc_hash::FxHashMap;
 
-use crate::buffer::{InMemoryBuffer, MemoryGuard, MemoryGuardConfig, MemoryPressure, SinkBackend};
+use crate::buffer::{
+    InMemoryBuffer, MemoryGuard, MemoryGuardConfig, MemoryPressure, Rejects, SinkBackend,
+};
 use crate::config::{Config, SharedConfig};
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
@@ -139,6 +141,25 @@ impl PipelineState {
         governor: Option<&scalo::SelfRegulationGovernor>,
         runtime_memory_guard: Option<Arc<MemoryGuard>>,
     ) -> Result<Self> {
+        Self::build(
+            shared_config,
+            shutdown,
+            governor,
+            runtime_memory_guard,
+            None,
+        )
+        .await
+    }
+
+    /// [`with_governor`](Self::with_governor), counting dead-lettered records
+    /// on `metrics` when it is `Some`.
+    async fn build(
+        shared_config: SharedConfig,
+        shutdown: CancellationToken,
+        governor: Option<&scalo::SelfRegulationGovernor>,
+        runtime_memory_guard: Option<Arc<MemoryGuard>>,
+        metrics: Option<Arc<Metrics>>,
+    ) -> Result<Self> {
         let config = shared_config.get();
         let validator = Validator::new(config.validation.clone());
         // The built-in `loader` is compiled into a declared destination here, so
@@ -173,10 +194,38 @@ impl PipelineState {
             }
         };
 
+        // DLQ (unified scalo module - cascade: Kafka primary, file fallback)
+        let dlq = if config.routing.dlq.enabled {
+            let dlq_config = config.routing.dlq.to_scalo_config();
+            let kafka_config = config.kafka.to_scalo_kafka_config();
+            match Dlq::spawn(
+                &dlq_config,
+                "receiver",
+                Some(&kafka_config),
+                shutdown.clone(),
+            ) {
+                Ok(d) => {
+                    info!(mode = ?dlq_config.mode, "DLQ enabled");
+                    Some(Arc::new(d))
+                }
+                Err(e) => {
+                    warn!(error = %e, "Failed to create DLQ, disabled");
+                    None
+                }
+            }
+        } else {
+            debug!("DLQ disabled by config");
+            None
+        };
+        // Records a destination refuses for good go to the same DLQ.
+        let rejects = Rejects::new(dlq.clone(), metrics);
+
         // Initialise Kafka sink with buffer wrapper if brokers configured
         let kafka_sink = if !config.kafka.brokers.is_empty() {
             let primary = KafkaSink::new(&config.kafka)?;
-            Some(Arc::new(build_sink_backend(primary, &config.buffer).await?))
+            Some(Arc::new(
+                build_sink_backend(primary, &config.buffer, rejects.clone()).await?,
+            ))
         } else {
             None
         };
@@ -197,7 +246,7 @@ impl PipelineState {
                             .then_some(config.loader.timeout_ms);
                         let primary = GrpcSink::new(&grpc.endpoint, deadline).await?;
                         DestinationSink::Grpc(Arc::new(
-                            build_sink_backend(primary, &config.buffer).await?,
+                            build_sink_backend(primary, &config.buffer, rejects.clone()).await?,
                         ))
                     }
                     (None, Some(bus)) => DestinationSink::Bus {
@@ -226,30 +275,6 @@ impl PipelineState {
                 }
             }
         } else {
-            None
-        };
-
-        // DLQ (unified scalo module - cascade: Kafka primary, file fallback)
-        let dlq = if config.routing.dlq.enabled {
-            let dlq_config = config.routing.dlq.to_scalo_config();
-            let kafka_config = config.kafka.to_scalo_kafka_config();
-            match Dlq::spawn(
-                &dlq_config,
-                "receiver",
-                Some(&kafka_config),
-                shutdown.clone(),
-            ) {
-                Ok(d) => {
-                    info!(mode = ?dlq_config.mode, "DLQ enabled");
-                    Some(Arc::new(d))
-                }
-                Err(e) => {
-                    warn!(error = %e, "Failed to create DLQ, disabled");
-                    None
-                }
-            }
-        } else {
-            debug!("DLQ disabled by config");
             None
         };
 
@@ -790,13 +815,15 @@ fn spillover_config(
 /// Build the appropriate `SinkBackend` based on spillover configuration.
 ///
 /// When `spillover.enabled` is true, wraps the primary sink in scalo's `TieredSink`
-/// with disk spillover. Otherwise, uses the default in-memory buffer.
+/// with disk spillover. Otherwise, uses the default in-memory buffer. Either way
+/// a record the primary refuses for good goes to `rejects`, never the buffer.
 async fn build_sink_backend<S: crate::sink::Sink + 'static>(
     primary: S,
     buffer_config: &crate::config::BufferConfig,
+    rejects: Rejects,
 ) -> Result<SinkBackend<S>> {
     if buffer_config.spillover.enabled {
-        let adapter = crate::buffer::adapter::ScaloSinkAdapter::new(Arc::new(primary));
+        let adapter = crate::buffer::adapter::ScaloSinkAdapter::new(Arc::new(primary), rejects);
         let spillover = &buffer_config.spillover;
 
         let tiered = scalo::tiered_sink::TieredSink::new(adapter, spillover_config(spillover))
@@ -811,10 +838,9 @@ async fn build_sink_backend<S: crate::sink::Sink + 'static>(
 
         Ok(SinkBackend::Tiered(tiered))
     } else {
-        Ok(SinkBackend::InMemory(InMemoryBuffer::new(
-            primary,
-            buffer_config,
-        )))
+        Ok(SinkBackend::InMemory(
+            InMemoryBuffer::new(primary, buffer_config).with_rejects(rejects),
+        ))
     }
 }
 
@@ -852,11 +878,12 @@ impl Orchestrator {
         runtime_memory_guard: Option<Arc<MemoryGuard>>,
     ) -> Result<Self> {
         let shared_config = SharedConfig::new(config);
-        let state = PipelineState::with_governor(
+        let state = PipelineState::build(
             shared_config.clone(),
             shutdown.clone(),
             governor,
             runtime_memory_guard,
+            Some(Arc::clone(&metrics)),
         )
         .await?;
 
