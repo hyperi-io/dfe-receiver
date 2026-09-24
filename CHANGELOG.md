@@ -3,6 +3,14 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.15.40](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.39...v1.15.40) (2026-09-24)
+
+### Bug Fixes
+
+* rebuild on scalo 2.12.10 ([8c0851a](https://github.com/hyperi-io/dfe-receiver/commit/8c0851a70ad6f589b318a56d6b334ba3331683bc))
+* **server:** surface listener bind failures and gate readiness on every listener ([#149](https://github.com/hyperi-io/dfe-receiver/issues/149)) ([a1f9eb4](https://github.com/hyperi-io/dfe-receiver/commit/a1f9eb4ca09d4e4a74b397253d3b71321d8248f6))
+* **tests:** stop racing for listener ports ([#148](https://github.com/hyperi-io/dfe-receiver/issues/148)) ([a4f73ff](https://github.com/hyperi-io/dfe-receiver/commit/a4f73ff352b2c7063cfef8c7eb617fb674ec49ef))
+
 ## [1.15.39](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.38...v1.15.39) (2026-09-24)
 
 ### Bug Fixes
