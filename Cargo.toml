@@ -187,7 +187,7 @@ dotenvy = "0.15.7"
 rdkafka = { version = "0.39", features = ["cmake-build", "ssl", "sasl"] }
 temp-env = { version = "0.3.6", features = ["async_closure"] }
 testcontainers = "0.27"
-testcontainers-modules = { version = "0.15", features = ["kafka", "hashicorp_vault", "minio"] }
+testcontainers-modules = { version = "0.15", features = ["kafka", "hashicorp_vault"] }
 pcap-file = ">=2.0, <3"
 sha2 = ">=0.11.0, <0.12"
 

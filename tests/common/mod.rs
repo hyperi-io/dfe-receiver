@@ -258,44 +258,6 @@ pub async fn kafka_consume_one(
 }
 
 // ---------------------------------------------------------------------------
-// MinIO / S3 (for disk spillover / archival tests)
-// ---------------------------------------------------------------------------
-
-/// S3-compatible storage connection config.
-pub struct S3TestConfig {
-    pub endpoint: String,
-    pub access_key: String,
-    pub secret_key: String,
-    pub region: String,
-}
-
-impl S3TestConfig {
-    /// Detect S3/MinIO availability from env vars or docker MinIO on localhost:9000.
-    pub fn detect() -> Option<Self> {
-        load_dotenv();
-        // Env var set for remote S3
-        if let Ok(endpoint) = env::var("S3_ENDPOINT") {
-            return Some(Self {
-                endpoint,
-                access_key: env::var("S3_ACCESS_KEY").unwrap_or_default(),
-                secret_key: env::var("S3_SECRET_KEY").unwrap_or_default(),
-                region: env::var("S3_REGION").unwrap_or_else(|_| "us-east-1".into()),
-            });
-        }
-        // Fallback: try docker MinIO on localhost:9000
-        if tcp_reachable("localhost:9000", std::time::Duration::from_secs(2)) {
-            return Some(Self {
-                endpoint: "http://localhost:9000".into(),
-                access_key: "minioadmin".into(),
-                secret_key: "minioadmin".into(),
-                region: "us-east-1".into(),
-            });
-        }
-        None
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Vault / OpenBao (for bearer-token / secret tests)
 // ---------------------------------------------------------------------------
 
@@ -337,20 +299,6 @@ fn tcp_reachable(addr: &str, timeout: std::time::Duration) -> bool {
         .and_then(|mut addrs| addrs.next())
         .map(|a| std::net::TcpStream::connect_timeout(&a, timeout).is_ok())
         .unwrap_or(false)
-}
-
-/// Skip test if S3/MinIO is not available.
-#[macro_export]
-macro_rules! skip_if_no_s3 {
-    () => {
-        match $crate::common::S3TestConfig::detect() {
-            Some(cfg) => cfg,
-            None => {
-                eprintln!("Skipping: no S3/MinIO available (set S3_ENDPOINT or run MinIO on localhost:9000)");
-                return;
-            }
-        }
-    };
 }
 
 /// Skip test if Vault is not available.
@@ -418,21 +366,13 @@ macro_rules! skip_if_no_docker {
 // =============================================================================
 //
 // Pinned HERE rather than left to testcontainers-modules' defaults, which lag
-// badly: Kafka 3.8.0, MinIO from February 2025. A tag baked into a dependency's
+// badly: testcontainers-modules 0.15 defaults Kafka to 3.8.0. A tag baked into a dependency's
 // source is invisible to dependency review -- Renovate reads Cargo.toml,
 // correctly reports the crate current, and never sees the image. Hoisting the
 // tags out is what puts them back under review, hence the annotations.
 
 /// renovate: datasource=docker depName=apache/kafka-native
 const KAFKA_TAG: &str = "4.3.1";
-
-/// Docker Hub no longer serves `minio/minio` -- a pull is refused with "pull
-/// access denied ... repository does not exist" -- so the image is addressed at
-/// quay.io, which carries the same tags.
-///
-/// renovate: datasource=docker depName=quay.io/minio/minio
-const MINIO_IMAGE: &str = "quay.io/minio/minio";
-const MINIO_TAG: &str = "RELEASE.2025-09-07T16-13-09Z";
 
 /// OpenBao, not hashicorp/vault. The estate runs OpenBao and so does the
 /// sibling fetcher's harness; testing the secrets path against the product we
@@ -677,48 +617,6 @@ pub async fn start_vault_container(
 
     let url = format!("http://127.0.0.1:{port}");
     Ok((node, url, "root".to_string()))
-}
-
-/// Start a MinIO container and return (handle, endpoint, access_key, secret_key).
-pub async fn start_minio_container(
-    test: &str,
-) -> Result<
-    (
-        testcontainers::ContainerAsync<testcontainers_modules::minio::MinIO>,
-        String,
-        String,
-        String,
-    ),
-    String,
-> {
-    use testcontainers::ImageExt;
-    use testcontainers::runners::AsyncRunner;
-    use testcontainers_modules::minio::MinIO;
-
-    let name = container_name(Some(test), "minio");
-    reap_stale(&name);
-    let node = MinIO::default()
-        .with_name(MINIO_IMAGE)
-        .with_tag(MINIO_TAG)
-        .with_container_name(&name)
-        .with_labels(test_labels("minio"))
-        .start()
-        .await
-        .map_err(|e| format!("failed to start MinIO container: {e}"))?;
-
-    let port = node
-        .get_host_port_ipv4(9000)
-        .await
-        .map_err(|e| format!("failed to get MinIO port: {e}"))?;
-
-    let endpoint = format!("http://127.0.0.1:{port}");
-    // MinIO's default credentials are minioadmin/minioadmin
-    Ok((
-        node,
-        endpoint,
-        "minioadmin".to_string(),
-        "minioadmin".to_string(),
-    ))
 }
 
 /// Build a test Kafka config from a bootstrap address (no SASL/TLS).

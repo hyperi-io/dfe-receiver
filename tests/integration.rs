@@ -44,8 +44,6 @@ mod kafka_sink;
 mod listener_admission;
 #[path = "integration/lumberjack.rs"]
 mod lumberjack;
-#[path = "integration/minio_spool.rs"]
-mod minio_spool;
 #[path = "integration/named_destinations.rs"]
 mod named_destinations;
 #[path = "integration/otlp.rs"]

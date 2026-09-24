@@ -36,8 +36,8 @@ fn per_test_container_name_includes_the_test() {
 /// The binary-scoped form, for a container started once for a whole test binary.
 #[test]
 fn binary_scoped_container_name_omits_the_test() {
-    let name = container_name(None, "minio");
-    assert_eq!(name, "dfe-receiver-test-integration-minio");
+    let name = container_name(None, "openbao");
+    assert_eq!(name, "dfe-receiver-test-integration-openbao");
 }
 
 /// Two tests asking for the same service must get DIFFERENT names.
@@ -105,7 +105,7 @@ fn names_share_one_greppable_prefix() {
     for name in [
         container_name(None, "kafka"),
         container_name(None, "openbao"),
-        container_name(Some("some_test"), "minio"),
+        container_name(Some("some_test"), "kafka"),
     ] {
         assert!(
             name.starts_with("dfe-receiver-test-integration-"),
@@ -129,15 +129,15 @@ fn suite_label_identifies_this_repo() {
 /// never wired to a container is decoration, so this asks Docker what actually
 /// got created, and then that it was removed.
 ///
-/// Uses MinIO rather than Kafka: it is the quickest of the three to come up, and
-/// `start_minio_container` always starts one, so there is no live-service path
+/// Uses OpenBao rather than Kafka: it comes up faster, and
+/// `start_vault_container` always starts one, so there is no live-service path
 /// that could turn this into a silent skip.
 #[tokio::test]
 async fn a_started_container_carries_the_name_and_label_then_goes_away() {
     skip_if_no_docker!();
 
     const TEST: &str = "container-hygiene-inspects-a-real-one";
-    let expected = container_name(Some(TEST), "minio");
+    let expected = container_name(Some(TEST), "openbao");
 
     let inspect = |field: &str| {
         std::process::Command::new("docker")
@@ -149,9 +149,9 @@ async fn a_started_container_carries_the_name_and_label_then_goes_away() {
     };
 
     {
-        let (_container, _endpoint, _access, _secret) = crate::common::start_minio_container(TEST)
+        let (_container, _url, _token) = crate::common::start_vault_container(TEST)
             .await
-            .expect("MinIO container must start once Docker is up");
+            .expect("OpenBao container must start once Docker is up");
 
         let name =
             inspect("{{.Name}}").expect("docker must know the container by its expected name");
