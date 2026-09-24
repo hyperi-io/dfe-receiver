@@ -409,7 +409,7 @@
         "dlq": {
           "enabled": true,
           "mode": "cascade",
-          "topic": "dlq_land",
+          "topic": "dfe_receiver_dlq",
           "topic_suffix": ".dlq",
           "file_enabled": true,
           "file_path": "/var/spool/dfe/dlq",
@@ -1860,7 +1860,7 @@
           "default": {
             "enabled": true,
             "mode": "cascade",
-            "topic": "dlq_land",
+            "topic": "dfe_receiver_dlq",
             "topic_suffix": ".dlq",
             "file_enabled": true,
             "file_path": "/var/spool/dfe/dlq",
@@ -1920,7 +1920,7 @@
         "topic": {
           "description": "DLQ topic name: when non-empty, every Kafka DLQ write routes here\n(routing=common). Empty selects per-destination `{dest}{topic_suffix}`\nrouting -- reachable via config file only (flat-env drops empty values).",
           "type": "string",
-          "default": "dlq_land"
+          "default": "dfe_receiver_dlq"
         },
         "topic_suffix": {
           "description": "Topic suffix for per-table routing.",

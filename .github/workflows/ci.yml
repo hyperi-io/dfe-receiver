@@ -32,6 +32,16 @@ on:
         required: false
         default: "auto"
         description: "from-head version: auto | patch | minor | X.Y.Z (exact)."
+      skip-optimize:
+        type: string
+        required: false
+        default: ""
+        description: "'true' to skip the optimisation stage for this run (Rust: no PGO, no BOLT). Empty = optimisation on."
+      release-unoptimized:
+        type: string
+        required: false
+        default: ""
+        description: "'true' to consent, for this run only, to shipping a skipped-optimisation build under a release tag."
 
 permissions:
   contents: write
@@ -47,4 +57,6 @@ jobs:
       tag: ${{ inputs.tag || '' }}
       from-head: ${{ inputs.from-head || '' }}
       bump: ${{ inputs.bump || 'auto' }}
+      skip-optimize: ${{ inputs.skip-optimize || '' }}
+      release-unoptimized: ${{ inputs.release-unoptimized || '' }}
     secrets: inherit
