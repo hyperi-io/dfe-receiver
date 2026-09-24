@@ -246,10 +246,7 @@ curl http://localhost:8080/livez
 
 ### GET /readyz
 
-Kubernetes readiness probe. Returns 503 while the receiver is starting,
-draining or under memory pressure. A destination outage does not fail it: every
-replica shares the outage, so failing the probe would empty the Service, and
-ingest refuses per request with 503 instead.
+Kubernetes readiness probe. Returns 503 until every enabled listener has bound, again once any of them stops or fails (draining included), and under memory pressure. A listener that cannot bind holds it at 503 while the process stays up and logs `Protocol handler failed`. A destination outage does not fail it: every replica shares the outage, so failing the probe would empty the Service, and ingest refuses per request with 503 instead. The metrics port's `/readyz`, which the chart probes, gives the same answer.
 
 ```bash
 curl http://localhost:8080/readyz
@@ -399,7 +396,7 @@ dfe-loader), and `chart/` here is NOT what deploys it.
 | Path | What is in it |
 |---|---|
 | `src/main.rs` | CLI, config load, the `--emit-*` generators, the startup order #132 is about |
-| `src/server/` | One directory per handler, plus `traits.rs` (the `ProtocolHandler` boundary), auth, TLS, IP filter. `mod.rs:93` registers them |
+| `src/server/` | One directory per handler, plus `traits.rs` (the `ProtocolHandler` boundary), auth, TLS, IP filter. `mod.rs:125` registers them |
 | `src/pipeline/`, `routing/`, `validation/` | The shared core path every handler feeds |
 | `src/buffer/` | `SinkBackend`: in-memory default, or scalo `TieredSink` with a disk spool |
 | `src/sink/` | `kafka/`, `grpc/`, `file/`. Kafka owns its producer so delivery reports are visible |

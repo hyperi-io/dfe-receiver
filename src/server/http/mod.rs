@@ -131,6 +131,10 @@ impl ProtocolHandler for HttpHandler {
         &self.bind_address
     }
 
+    fn listeners(&self) -> Vec<BoundAddr> {
+        vec![self.bound.clone()]
+    }
+
     async fn start(&self, shutdown: CancellationToken) -> Result<()> {
         serve(
             &self.bind_address,
@@ -371,7 +375,7 @@ async fn serve(
     let listener = TcpListener::bind(addr)
         .await
         .map_err(|e| Error::Server(format!("failed to bind: {e}")))?;
-    bound.publish(&listener.local_addr());
+    let _serving = bound.publish(&listener.local_addr());
 
     if let Some(ref provider) = tls_provider {
         let acceptor_handle = provider.acceptor_handle();
@@ -823,9 +827,9 @@ async fn liveness_handler() -> &'static str {
     "OK"
 }
 
-/// Readiness probe handler.
+/// Readiness probe handler: the same answer as the kubelet's `/readyz` on the metrics port.
 async fn readiness_handler(State(state): State<HttpState>) -> StatusCode {
-    if state.pipeline.is_ready() {
+    if state.pipeline.probe_ready() {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE

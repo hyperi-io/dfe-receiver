@@ -89,6 +89,10 @@ impl ProtocolHandler for SplunkHecHandler {
         &self.config.bind_address
     }
 
+    fn listeners(&self) -> Vec<BoundAddr> {
+        vec![self.bound.clone()]
+    }
+
     async fn start(&self, shutdown: CancellationToken) -> Result<()> {
         run_hec_server(
             &self.config,
@@ -258,7 +262,6 @@ async fn run_hec_server(
     let listener = TcpListener::bind(addr)
         .await
         .map_err(|e| Error::Server(format!("HEC failed to bind: {e}")))?;
-    bound.publish(&listener.local_addr());
 
     // TLS setup (same pattern as HTTP handler)
     let tls_provider = if config.tls.enabled && uses_secrets(&config.tls) {
@@ -276,6 +279,9 @@ async fn run_hec_server(
     };
 
     let ip_filter = crate::server::ip_filter::IpFilter::from_config(&server.ip_filter);
+
+    // Published once TLS is ready, so a failed TLS setup never reads as serving.
+    let _serving = bound.publish(&listener.local_addr());
 
     if let Some(ref provider) = tls_provider {
         let acceptor_handle = provider.acceptor_handle();

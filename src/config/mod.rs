@@ -320,6 +320,10 @@ impl Config {
 
         self.validate_auth()?;
         self.webhook.validate()?;
+        // The flow handler refuses this block at build, so it has to fail startup here.
+        self.flow
+            .validate()
+            .map_err(|e| Error::Config(format!("flow: {e}")))?;
         // A caller's topic is a Kafka topic; without brokers every accepted
         // record would fail at delivery.
         if self.webhook.enabled && self.kafka.brokers.is_empty() {
@@ -2545,6 +2549,49 @@ mod tests {
         let mut config = Config::default();
         // Default destination is kafka, so we need brokers
         config.kafka.brokers = vec!["localhost:9092".to_string()];
+        assert!(config.validate().is_ok());
+    }
+
+    /// A config that passes every rule outside the flow block.
+    fn flow_base() -> Config {
+        let mut config = Config::default();
+        config.destinations.default = "loader".into();
+        config.loader.transport = "grpc".to_string();
+        config
+    }
+
+    #[test]
+    fn an_invalid_flow_block_fails_startup() {
+        // Unified and split at once: the flow handler refuses this at build, and
+        // the pod used to start and report ready without it.
+        let mut config = flow_base();
+        config.flow = serde_yaml_ng::from_str(
+            "enabled: true\nsplit:\n  netflow:\n    ports: [2055]\n    topic: n\n  \
+             sflow:\n    ports: [6343]\n    topic: s\n",
+        )
+        .expect("flow yaml");
+
+        let err = config.validate().expect_err("must not start");
+        assert!(err.to_string().contains("flow"), "{err}");
+    }
+
+    #[test]
+    fn overlapping_split_flow_ports_fail_startup() {
+        let mut config = flow_base();
+        config.flow = serde_yaml_ng::from_str(
+            "split:\n  netflow:\n    ports: [2055, 6343]\n    topic: n\n  \
+             sflow:\n    ports: [6343]\n    topic: s\n",
+        )
+        .expect("flow yaml");
+
+        let err = config.validate().expect_err("must not start");
+        assert!(err.to_string().contains("overlap"), "{err}");
+    }
+
+    #[test]
+    fn a_valid_flow_block_starts() {
+        let mut config = flow_base();
+        config.flow.enabled = true;
         assert!(config.validate().is_ok());
     }
 

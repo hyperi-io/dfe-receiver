@@ -207,6 +207,10 @@ impl ProtocolHandler for GrpcVectorHandler {
         &self.config.grpc.bind_address
     }
 
+    fn listeners(&self) -> Vec<BoundAddr> {
+        vec![self.bound.clone()]
+    }
+
     async fn start(&self, shutdown: CancellationToken) -> Result<()> {
         // Create auth state for gRPC if auth is configured.
         //
@@ -299,11 +303,11 @@ async fn serve(
     };
 
     // Bound here rather than inside tonic, which keeps the address it took to itself.
-    // tonic's own bind also sets TCP_NODELAY, which a hand-bound stream must be given.
+    // serve_with_incoming_shutdown drops the builder's TCP settings, so they go on the TcpIncoming.
     let incoming = TcpIncoming::bind(addr)
         .map_err(|e| Error::Server(format!("gRPC server error: {e}")))?
         .with_nodelay(Some(true));
-    bound.publish(&incoming.local_addr());
+    let _serving = bound.publish(&incoming.local_addr());
 
     info!(addr = %addr, "gRPC server listening");
 

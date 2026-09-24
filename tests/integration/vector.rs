@@ -216,49 +216,6 @@ fn validate_vector_config(vector_bin: &Path, config_path: &Path) {
     );
 }
 
-/// Generate a self-signed TLS certificate using openssl (ECDSA P-384).
-/// Returns (cert_path, key_path) within the given directory.
-fn generate_self_signed_cert(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
-    let cert_path = dir.join("server.crt");
-    let key_path = dir.join("server.key");
-
-    let output = Command::new("openssl")
-        .args([
-            "req",
-            "-newkey",
-            "ec",
-            "-pkeyopt",
-            "ec_paramgen_curve:P-384",
-            "-nodes",
-            "-x509",
-            "-keyout",
-        ])
-        .arg(&key_path)
-        .arg("-out")
-        .arg(&cert_path)
-        .args([
-            "-days",
-            "1",
-            "-subj",
-            "/CN=localhost/O=Test/C=AU",
-            "-addext",
-            "subjectAltName=DNS:localhost,IP:127.0.0.1",
-        ])
-        .output()
-        .expect("Failed to run openssl");
-
-    assert!(
-        output.status.success(),
-        "openssl cert generation failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    assert!(cert_path.exists(), "Certificate file not created");
-    assert!(key_path.exists(), "Key file not created");
-
-    (cert_path, key_path)
-}
-
 /// Assert no ERROR lines appear in Vector's stderr output.
 fn assert_no_vector_errors(stderr: &str) {
     let error_lines: Vec<&str> = stderr.lines().filter(|l| l.contains("ERROR")).collect();
@@ -363,7 +320,7 @@ async fn test_vector_https_sink() {
     let tmp_dir = tempfile::tempdir().expect("Failed to create temp dir");
 
     // Generate self-signed TLS cert
-    let (cert_path, key_path) = generate_self_signed_cert(tmp_dir.path());
+    let (cert_path, key_path) = crate::common::self_signed_cert(tmp_dir.path());
 
     // Configure receiver with TLS
     let mut config = test_config();
@@ -529,7 +486,7 @@ async fn test_vector_grpc_tls_sink() {
     }
 
     let tmp_dir = tempfile::tempdir().expect("Failed to create temp dir");
-    let (cert_path, key_path) = generate_self_signed_cert(tmp_dir.path());
+    let (cert_path, key_path) = crate::common::self_signed_cert(tmp_dir.path());
 
     let mut config = test_config();
     config.grpc.enabled = true;

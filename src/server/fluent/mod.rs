@@ -168,7 +168,7 @@ async fn run_tcp(
     let listener = TcpListener::bind(bind_addr)
         .await
         .map_err(|e| Error::Server(format!("failed to bind Fluent Forward listener: {e}")))?;
-    bound.publish(&listener.local_addr());
+    let _serving = bound.publish(&listener.local_addr());
 
     let tls_enabled = tls_acceptor.is_some();
     info!(addr = %bind_addr, tls = tls_enabled, "Fluent Forward listener started");
@@ -283,6 +283,10 @@ impl ProtocolHandler for FluentHandler {
         &self.config.bind_address
     }
 
+    fn listeners(&self) -> Vec<BoundAddr> {
+        vec![self.bound.clone()]
+    }
+
     async fn start(&self, shutdown: CancellationToken) -> Result<()> {
         let addr: SocketAddr = self
             .config
@@ -301,33 +305,18 @@ impl ProtocolHandler for FluentHandler {
         // handshake are the whole admission surface on this port.
         let ip_filter = IpFilter::from_config(&self.pipeline.config().server.ip_filter);
 
-        let pipeline = self.pipeline.clone();
-        let metrics = self.metrics.clone();
-        let tcp_shutdown = shutdown.clone();
-        let max_buffer_size = self.config.max_message_size;
-        let raw_capture = self.raw_capture;
-        let bound = self.bound.clone();
-
-        let tcp_handle = tokio::spawn(async move {
-            if let Err(e) = run_tcp(
-                addr,
-                pipeline,
-                metrics,
-                tcp_shutdown,
-                tls_acceptor,
-                max_buffer_size,
-                raw_capture,
-                ip_filter,
-                bound,
-            )
-            .await
-            {
-                error!(error = %e, "Fluent Forward listener failed");
-            }
-        });
-
-        shutdown.cancelled().await;
-        let _ = tcp_handle.await;
+        run_tcp(
+            addr,
+            self.pipeline.clone(),
+            self.metrics.clone(),
+            shutdown,
+            tls_acceptor,
+            self.config.max_message_size,
+            self.raw_capture,
+            ip_filter,
+            self.bound.clone(),
+        )
+        .await?;
 
         info!("Fluent Forward server stopped");
         Ok(())

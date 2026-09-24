@@ -119,7 +119,7 @@ impl UdpFlowListener {
         let std_sock: std::net::UdpSocket = socket.into();
         let udp = UdpSocket::from_std(std_sock)
             .map_err(|e| Error::Server(format!("flow UdpSocket::from_std failed: {e}")))?;
-        self.bound.publish(&udp.local_addr());
+        let _serving = self.bound.publish(&udp.local_addr());
 
         tracing::info!(addr = %self.bind_addr, "flow listener started");
 

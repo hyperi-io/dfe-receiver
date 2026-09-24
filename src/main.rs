@@ -103,6 +103,9 @@ impl ServiceApp for App {
     ) -> Result<(), CliError> {
         info!(version = env!("CARGO_PKG_VERSION"), "Starting dfe-receiver");
 
+        // scalo's /readyz passes with no check set, so it fails until the pipeline's check lands.
+        runtime.set_readiness_check(|| false);
+
         // Log resolved config at debug level (sensitive fields already redacted by SensitiveString)
         debug!(
             bind_address = %config.server.bind_address,
@@ -218,7 +221,7 @@ impl ServiceApp for App {
                     Server::with_flow_metrics(orchestrator.state(), metrics.clone(), flow_metrics)
                 }
                 Err(e) => {
-                    error!(error = %e, "FlowMetrics::register failed; flow handler will be disabled");
+                    error!(error = %e, "FlowMetrics::register failed; the flow handler cannot start");
                     Server::new(orchestrator.state(), metrics.clone())
                 }
             }

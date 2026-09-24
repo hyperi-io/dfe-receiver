@@ -141,6 +141,79 @@ impl ClosedPort {
     }
 }
 
+/// A loopback UDP port held bound, so no other socket can bind it.
+///
+/// The UDP counterpart of [`ClosedPort`]: a TCP socket does not reserve the UDP
+/// port of the same number.
+pub struct HeldUdpPort {
+    _socket: std::net::UdpSocket,
+    addr: std::net::SocketAddr,
+}
+
+impl HeldUdpPort {
+    /// Hold a free loopback UDP port.
+    ///
+    /// # Errors
+    ///
+    /// When the socket cannot be bound.
+    pub fn loopback() -> std::io::Result<Self> {
+        // Bound without SO_REUSEPORT, so even a listener that sets it cannot share the port.
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0")?;
+        let addr = socket.local_addr()?;
+        Ok(Self {
+            _socket: socket,
+            addr,
+        })
+    }
+
+    /// The address held.
+    pub fn addr(&self) -> std::net::SocketAddr {
+        self.addr
+    }
+}
+
+/// Write a throwaway self-signed ECDSA P-384 certificate and key into `dir`,
+/// valid for `localhost` and `127.0.0.1`.
+///
+/// # Panics
+///
+/// When openssl cannot run or cannot generate the pair: a TLS test that skips
+/// itself reports green while testing nothing.
+pub fn self_signed_cert(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let cert = dir.join("server.crt");
+    let key = dir.join("server.key");
+    let output = std::process::Command::new("openssl")
+        .args([
+            "req",
+            "-newkey",
+            "ec",
+            "-pkeyopt",
+            "ec_paramgen_curve:P-384",
+            "-nodes",
+            "-x509",
+            "-keyout",
+        ])
+        .arg(&key)
+        .arg("-out")
+        .arg(&cert)
+        .args([
+            "-days",
+            "1",
+            "-subj",
+            "/CN=localhost/O=Test/C=AU",
+            "-addext",
+            "subjectAltName=DNS:localhost,IP:127.0.0.1",
+        ])
+        .output()
+        .unwrap_or_else(|e| panic!("openssl could not run: {e}"));
+    assert!(
+        output.status.success(),
+        "openssl could not generate a test certificate: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    (cert, key)
+}
+
 // ---------------------------------------------------------------------------
 // Kafka
 // ---------------------------------------------------------------------------

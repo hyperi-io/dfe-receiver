@@ -180,15 +180,11 @@ async fn test_grpc_sink_recovers_after_server_restart() {
         .send("topic", Bytes::from(r#"{"phase":"during"}"#))
         .await;
 
-    // Restart server on same port
+    // Restart server on same port. A failed rebind leaves recovery untested, so it fails the test.
     let config = GrpcConfig::server(&format!("127.0.0.1:{port}"));
-    let Ok(server2) = GrpcTransport::new(&config).await else {
-        // Port may still be in TIME_WAIT; skip the restart-recovery check
-        // rather than failing. The first two phases validate the happy path
-        // and failure handling, which is the test's core purpose.
-        eprintln!("port {port} still in TIME_WAIT, skipping restart phase");
-        return;
-    };
+    let server2 = GrpcTransport::new(&config)
+        .await
+        .unwrap_or_else(|e| panic!("could not rebind 127.0.0.1:{port} for the restart phase: {e}"));
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Sink should recover (tonic auto-reconnects)
@@ -205,22 +201,24 @@ async fn test_grpc_sink_recovers_after_server_restart() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
-    if recovered {
-        // Verify the "after" message landed
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        while tokio::time::Instant::now() < deadline {
-            if let Ok(batch) = server2.recv(10).await
-                && batch
-                    .records
-                    .iter()
-                    .any(|m| String::from_utf8_lossy(&m.payload).contains("after"))
-            {
-                return;
-            }
+    assert!(
+        recovered,
+        "the sink did not recover within 5 sends of the server coming back on 127.0.0.1:{port}"
+    );
+
+    // Verify the "after" message landed
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(batch) = server2.recv(10).await
+            && batch
+                .records
+                .iter()
+                .any(|m| String::from_utf8_lossy(&m.payload).contains("after"))
+        {
+            return;
         }
-        panic!("post-restart message never arrived");
     }
-    // Lazy reconnection timing is client-dependent; not strictly a failure.
+    panic!("post-restart message never arrived");
 }
 
 #[tokio::test]

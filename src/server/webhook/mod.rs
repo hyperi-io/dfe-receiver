@@ -100,6 +100,10 @@ impl ProtocolHandler for WebhookHandler {
         self.config.webhook.bind_address.as_deref().unwrap_or("")
     }
 
+    fn listeners(&self) -> Vec<BoundAddr> {
+        vec![self.bound.clone()]
+    }
+
     async fn start(&self, shutdown: CancellationToken) -> Result<()> {
         run_webhook_server(
             &self.config,
@@ -296,7 +300,6 @@ async fn run_webhook_server(
     let listener = TcpListener::bind(addr)
         .await
         .map_err(|e| Error::Server(format!("webhook failed to bind: {e}")))?;
-    bound.publish(&listener.local_addr());
 
     let ip_filter = IpFilter::from_config(&config.server.ip_filter);
 
@@ -312,6 +315,9 @@ async fn run_webhook_server(
     } else {
         build_tls_acceptor(&webhook.tls)?
     };
+
+    // Published once TLS is ready, so a failed TLS setup never reads as serving.
+    let _serving = bound.publish(&listener.local_addr());
 
     if let Some(ref provider) = tls_provider {
         info!(addr = %addr, tls = true, hot_reload = true, "webhook server listening");

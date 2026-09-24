@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use crate::config::RawCapture;
 use crate::error::{Error, Result};
@@ -41,7 +41,7 @@ use crate::server::flow::rate_limit::PerSourceRateLimiter;
 use crate::server::ip_filter::IpFilter;
 use crate::server::netflow::decoder::NetflowDecoder;
 use crate::server::sflow::decoder::SflowDecoder;
-use crate::server::traits::{BoundAddr, ProtocolHandler};
+use crate::server::traits::{BoundAddr, Listeners, ProtocolHandler};
 
 /// `ProtocolHandler` for the flow subsystem (NetFlow v5/v9, IPFIX, sFlow v5).
 pub struct FlowHandler {
@@ -130,14 +130,15 @@ impl FlowHandler {
         }
     }
 
-    /// Spawn the unified-mode listeners: one `UdpFlowListener` per port, each
-    /// carrying both decoders (gated by `netflow.enabled` / `sflow.enabled`).
-    /// Returns `(JoinHandles, RateLimiters)` -- the rate limiters are exposed so
-    /// the caller can spawn periodic LRU eviction tasks against them.
+    /// Spawn the unified-mode listeners into `listeners`: one `UdpFlowListener`
+    /// per port, each carrying both decoders (gated by `netflow.enabled` /
+    /// `sflow.enabled`). Returns the rate limiters so the caller can spawn
+    /// periodic LRU eviction tasks against them.
     fn build_unified_listeners(
         &self,
+        listeners: &mut Listeners,
         shutdown: &CancellationToken,
-    ) -> (Vec<JoinHandle<()>>, Vec<Arc<PerSourceRateLimiter>>) {
+    ) -> Vec<Arc<PerSourceRateLimiter>> {
         let ip_filter = Arc::new(match &self.cfg.ip_filter {
             Some(f) => IpFilter::from_config(f),
             None => IpFilter::disabled(),
@@ -151,7 +152,6 @@ impl FlowHandler {
         };
         let listener_cfg = self.unified_listener_cfg();
 
-        let mut handles = Vec::with_capacity(self.cfg.ports.len());
         for (port, bound) in self.cfg.ports.iter().zip(&self.bound) {
             let bind_addr = SocketAddr::new(self.cfg.bind_address, *port);
             let netflow = if self.cfg.netflow.enabled {
@@ -181,32 +181,29 @@ impl FlowHandler {
                 rate_limiter.clone(),
             )
             .publishing_to(bound.clone());
-            let l_shutdown = shutdown.clone();
-            handles.push(tokio::spawn(async move {
-                if let Err(e) = listener.run(l_shutdown).await {
-                    error!(error = %e, addr = %bind_addr, "flow listener (unified) exited with error");
-                }
-            }));
+            listeners.spawn(
+                format!("flow {bind_addr}/udp"),
+                listener.run(shutdown.clone()),
+            );
         }
-        let rls = rate_limiter.into_iter().collect();
-        (handles, rls)
+        rate_limiter.into_iter().collect()
     }
 
-    /// Spawn split-mode listeners. NetFlow-only listeners on `split.netflow.ports`
-    /// and sFlow-only listeners on `split.sflow.ports`. Each sub-config has its
-    /// own ip_filter + rate_limit instance. Returns `(JoinHandles, RateLimiters)`
-    /// -- the rate limiters are exposed so the caller can spawn periodic LRU
-    /// eviction tasks against them.
+    /// Spawn split-mode listeners into `listeners`. NetFlow-only listeners on
+    /// `split.netflow.ports` and sFlow-only listeners on `split.sflow.ports`.
+    /// Each sub-config has its own ip_filter + rate_limit instance. Returns the
+    /// rate limiters so the caller can spawn periodic LRU eviction tasks
+    /// against them.
     fn build_split_listeners(
         &self,
+        listeners: &mut Listeners,
         shutdown: &CancellationToken,
-    ) -> (Vec<JoinHandle<()>>, Vec<Arc<PerSourceRateLimiter>>) {
+    ) -> Vec<Arc<PerSourceRateLimiter>> {
         let split = match self.cfg.split.as_ref() {
             Some(s) => s,
-            None => return (Vec::new(), Vec::new()),
+            None => return Vec::new(),
         };
 
-        let mut handles = Vec::new();
         let mut rate_limiters: Vec<Arc<PerSourceRateLimiter>> = Vec::new();
 
         // NetFlow side
@@ -243,12 +240,10 @@ impl FlowHandler {
                     rate_limiter.clone(),
                 )
                 .publishing_to(bound.clone());
-                let l_shutdown = shutdown.clone();
-                handles.push(tokio::spawn(async move {
-                    if let Err(e) = listener.run(l_shutdown).await {
-                        error!(error = %e, addr = %bind_addr, "flow listener (split/netflow) exited with error");
-                    }
-                }));
+                listeners.spawn(
+                    format!("flow NetFlow {bind_addr}/udp"),
+                    listener.run(shutdown.clone()),
+                );
             }
         }
 
@@ -283,21 +278,19 @@ impl FlowHandler {
                     rate_limiter.clone(),
                 )
                 .publishing_to(bound.clone());
-                let l_shutdown = shutdown.clone();
-                handles.push(tokio::spawn(async move {
-                    if let Err(e) = listener.run(l_shutdown).await {
-                        error!(error = %e, addr = %bind_addr, "flow listener (split/sflow) exited with error");
-                    }
-                }));
+                listeners.spawn(
+                    format!("flow sFlow {bind_addr}/udp"),
+                    listener.run(shutdown.clone()),
+                );
             }
         }
 
-        (handles, rate_limiters)
+        rate_limiters
     }
 }
 
 /// Render the `bind_address()` summary string from a `FlowConfig`.
-fn render_bind_summary(cfg: &FlowConfig) -> String {
+pub(crate) fn render_bind_summary(cfg: &FlowConfig) -> String {
     if let Some(split) = &cfg.split {
         let mut parts: Vec<String> = Vec::new();
         for p in &split.netflow.ports {
@@ -326,6 +319,23 @@ impl ProtocolHandler for FlowHandler {
         &self.bind_address_summary
     }
 
+    fn listeners(&self) -> Vec<BoundAddr> {
+        if self.is_disabled() {
+            return Vec::new();
+        }
+        let Some(split) = &self.cfg.split else {
+            return self.bound.clone();
+        };
+        // Cells run NetFlow ports then sFlow ports, and a disabled side never binds.
+        let netflow = self.bound.iter().take(split.netflow.ports.len());
+        let sflow = self.bound.iter().skip(split.netflow.ports.len());
+        netflow
+            .filter(|_| split.netflow.enabled)
+            .chain(sflow.filter(|_| split.sflow.enabled))
+            .cloned()
+            .collect()
+    }
+
     async fn start(&self, shutdown: CancellationToken) -> Result<()> {
         if self.is_disabled() {
             info!("flow handler disabled (no unified or split config); skipping");
@@ -346,15 +356,19 @@ impl ProtocolHandler for FlowHandler {
                 .set(&[("handler", "flow")], 1.0);
         }
 
-        let (handles, rate_limiters) = if self.cfg.split.is_some() {
-            self.build_split_listeners(&shutdown)
+        let mut listeners = Listeners::default();
+        let rate_limiters = if self.cfg.split.is_some() {
+            self.build_split_listeners(&mut listeners, &shutdown)
         } else {
-            self.build_unified_listeners(&shutdown)
+            self.build_unified_listeners(&mut listeners, &shutdown)
         };
+
+        // Helper tasks stop with the listeners, whether shutdown or a failed listener ends them.
+        let helpers = shutdown.child_token();
 
         // Spawn the /proc/net/udp poller on Linux for the union of bind ports.
         let kd_metrics = Arc::new(self.metrics.clone());
-        let kd_shutdown = shutdown.clone();
+        let kd_shutdown = helpers.clone();
         let ports = self.union_ports();
         let kd_handle = tokio::spawn(async move {
             kernel_drops::poll_kernel_drops(ports, kd_metrics, kd_shutdown).await;
@@ -366,7 +380,7 @@ impl ProtocolHandler for FlowHandler {
         // mode has up to two -- netflow and sflow).
         let mut evict_handles: Vec<JoinHandle<()>> = Vec::with_capacity(rate_limiters.len());
         for rl in rate_limiters {
-            let token = shutdown.clone();
+            let token = helpers.clone();
             evict_handles.push(tokio::spawn(async move {
                 let mut tick = tokio::time::interval(std::time::Duration::from_mins(1));
                 loop {
@@ -379,17 +393,16 @@ impl ProtocolHandler for FlowHandler {
             }));
         }
 
-        // Await shutdown -- the listeners exit themselves on the same token.
-        shutdown.cancelled().await;
+        let outcome = listeners.run(&shutdown).await;
 
-        for h in handles {
-            let _ = h.await;
+        helpers.cancel();
+        for h in evict_handles.into_iter().chain(std::iter::once(kd_handle)) {
+            if let Err(e) = h.await {
+                warn!(error = %e, "flow helper task ended abnormally");
+            }
         }
-        for h in evict_handles {
-            let _ = h.await;
-        }
-        let _ = kd_handle.await;
 
+        outcome?;
         info!("flow handler stopped");
         Ok(())
     }

@@ -38,63 +38,12 @@ use std::time::Duration;
 use dfe_receiver::config::{Config, SharedConfig, SourceRule};
 use dfe_receiver::pipeline::PipelineState;
 use dfe_receiver::server::flow::handler::FlowHandler;
-use dfe_receiver::server::flow::metrics::{
-    FlowCounter, FlowHistogram, FlowLabelledCounter, FlowLabelledGauge, FlowMetrics,
-};
+use dfe_receiver::server::flow::metrics::mock::flow_metrics_for_test;
 use dfe_receiver::server::traits::ProtocolHandler;
 use tokio_util::sync::CancellationToken;
 
 use crate::common::{kafka_backend, kafka_consume_next, kafka_consumer};
 use crate::test_name;
-
-// ---------------------------------------------------------------------------
-// No-op FlowMetrics for integration tests.
-//
-// The crate's own `metrics::mock::flow_metrics_for_test` is `#[cfg(test)]`-gated
-// inside the crate, so it isn't visible to integration tests. We build a tiny
-// inline no-op implementation -- the test asserts on Kafka envelope content,
-// not on metric counters.
-// ---------------------------------------------------------------------------
-
-struct NoopCounter;
-impl FlowCounter for NoopCounter {
-    fn inc(&self) {}
-    fn add(&self, _n: u64) {}
-}
-
-struct NoopLabelledCounter;
-impl FlowLabelledCounter for NoopLabelledCounter {
-    fn inc(&self, _labels: &[(&'static str, &str)]) {}
-}
-
-struct NoopHistogram;
-impl FlowHistogram for NoopHistogram {
-    fn observe(&self, _value: f64) {}
-}
-
-struct NoopLabelledGauge;
-impl FlowLabelledGauge for NoopLabelledGauge {
-    fn set(&self, _labels: &[(&'static str, &str)], _value: f64) {}
-}
-
-fn noop_flow_metrics() -> FlowMetrics {
-    FlowMetrics {
-        recv_total: Arc::new(NoopCounter),
-        recv_bytes_total: Arc::new(NoopCounter),
-        decode_err_total: Arc::new(NoopLabelledCounter),
-        drops_total: Arc::new(NoopLabelledCounter),
-        invalid_packet_total: Arc::new(NoopLabelledCounter),
-        rate_limited_total: Arc::new(NoopLabelledCounter),
-        records_emitted_total: Arc::new(NoopLabelledCounter),
-        records_per_packet: Arc::new(NoopHistogram),
-        template_cache_size: Arc::new(NoopLabelledGauge),
-        template_evicted_total: Arc::new(NoopCounter),
-        kernel_drops_total: Arc::new(NoopCounter),
-        send_duration_seconds: Arc::new(NoopHistogram),
-        unknown_version_total: Arc::new(NoopCounter),
-        handler_experimental: Arc::new(NoopLabelledGauge),
-    }
-}
 
 /// Build a valid NetFlow v5 datagram with one flow record (72 bytes total).
 /// Mirrors `src/server/netflow/tests/decode_v5.rs::build_v5_packet_with_one_flow`.
@@ -205,7 +154,7 @@ async fn netflow_v5_end_to_end_to_kafka() {
     let handler = FlowHandler::new(
         config.flow.clone(),
         config.raw_capture_for(&config.flow.raw_capture),
-        noop_flow_metrics(),
+        flow_metrics_for_test(),
         pipeline,
     )
     .expect("flow handler new");
@@ -417,7 +366,7 @@ async fn netflow_v9_end_to_end_to_kafka() {
     let handler = FlowHandler::new(
         config.flow.clone(),
         config.raw_capture_for(&config.flow.raw_capture),
-        noop_flow_metrics(),
+        flow_metrics_for_test(),
         pipeline,
     )
     .expect("flow handler new");
@@ -497,7 +446,7 @@ async fn netflow_nsel_end_to_end_to_kafka() {
     let handler = FlowHandler::new(
         config.flow.clone(),
         config.raw_capture_for(&config.flow.raw_capture),
-        noop_flow_metrics(),
+        flow_metrics_for_test(),
         pipeline,
     )
     .expect("flow handler new");

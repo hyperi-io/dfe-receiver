@@ -19,8 +19,6 @@
 #![allow(clippy::expect_used)]
 
 use std::io::Write;
-use std::path::Path;
-use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::http::HeaderMap;
@@ -242,39 +240,6 @@ async fn test_keyless_vault_source_is_refused() {
 // TLS certificate material through the same resolver
 // ---------------------------------------------------------------------------
 
-/// Write a throwaway self-signed cert and key into `dir`, or `None` when the
-/// host has no openssl.
-fn self_signed_pair(dir: &Path) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
-    let cert = dir.join("server.crt");
-    let key = dir.join("server.key");
-
-    let output = Command::new("openssl")
-        .args([
-            "req",
-            "-newkey",
-            "ec",
-            "-pkeyopt",
-            "ec_paramgen_curve:P-384",
-            "-nodes",
-            "-x509",
-            "-keyout",
-        ])
-        .arg(&key)
-        .arg("-out")
-        .arg(&cert)
-        .args(["-days", "1", "-subj", "/CN=localhost/O=Test/C=AU"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        eprintln!(
-            "Skipping: openssl could not generate a test certificate: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        return None;
-    }
-    Some((cert, key))
-}
-
 /// TLS certificate material loads from `file:` specs.
 ///
 /// The TLS path used to build its own `SecretsManager` with the disk cache left
@@ -289,9 +254,7 @@ async fn test_tls_material_loads_from_file_specs() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let dir = tempfile::tempdir().unwrap();
-    let Some((cert, key)) = self_signed_pair(dir.path()) else {
-        return;
-    };
+    let (cert, key) = crate::common::self_signed_cert(dir.path());
 
     let config = TlsConfig {
         enabled: true,
@@ -463,9 +426,7 @@ async fn test_tls_material_loads_from_vault_container() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let dir = tempfile::tempdir().unwrap();
-    let Some((cert, key)) = self_signed_pair(dir.path()) else {
-        return;
-    };
+    let (cert, key) = crate::common::self_signed_cert(dir.path());
     let cert_pem = std::fs::read_to_string(&cert).unwrap();
     let key_pem = std::fs::read_to_string(&key).unwrap();
 
