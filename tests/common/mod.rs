@@ -172,11 +172,13 @@ impl HeldUdpPort {
     }
 }
 
-/// Write a throwaway self-signed certificate and key for `localhost` into `dir`.
+/// Write a throwaway self-signed ECDSA P-384 certificate and key into `dir`,
+/// valid for `localhost` and `127.0.0.1`.
 ///
 /// # Panics
 ///
-/// When openssl cannot run or cannot generate the pair.
+/// When openssl cannot run or cannot generate the pair: a TLS test that skips
+/// itself reports green while testing nothing.
 pub fn self_signed_cert(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
     let cert = dir.join("server.crt");
     let key = dir.join("server.key");
@@ -194,7 +196,14 @@ pub fn self_signed_cert(dir: &std::path::Path) -> (std::path::PathBuf, std::path
         .arg(&key)
         .arg("-out")
         .arg(&cert)
-        .args(["-days", "1", "-subj", "/CN=localhost/O=Test/C=AU"])
+        .args([
+            "-days",
+            "1",
+            "-subj",
+            "/CN=localhost/O=Test/C=AU",
+            "-addext",
+            "subjectAltName=DNS:localhost,IP:127.0.0.1",
+        ])
         .output()
         .unwrap_or_else(|e| panic!("openssl could not run: {e}"));
     assert!(

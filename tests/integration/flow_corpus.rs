@@ -40,60 +40,12 @@ use std::path::{Path, PathBuf};
 
 use dfe_receiver::server::flow::decoder::FlowDecoder;
 use dfe_receiver::server::flow::dispatch::{ProtocolKind, dispatch_protocol_kind};
-use dfe_receiver::server::flow::metrics::{
-    FlowCounter, FlowHistogram, FlowLabelledCounter, FlowLabelledGauge, FlowMetrics,
-};
+use dfe_receiver::server::flow::metrics::mock::flow_metrics_for_test;
 use dfe_receiver::server::netflow::decoder::NetflowDecoder;
 use dfe_receiver::server::sflow::decoder::SflowDecoder;
 use pcap_file::pcap::PcapReader;
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
-use std::sync::Arc;
-
-// ---------------------------------------------------------------------------
-// No-op FlowMetrics. NetflowDecoder requires a FlowMetrics; the corpus test
-// asserts on decoded record counts, not metric counters.
-// ---------------------------------------------------------------------------
-
-struct NoopCounter;
-impl FlowCounter for NoopCounter {
-    fn inc(&self) {}
-    fn add(&self, _n: u64) {}
-}
-
-struct NoopLabelledCounter;
-impl FlowLabelledCounter for NoopLabelledCounter {
-    fn inc(&self, _labels: &[(&'static str, &str)]) {}
-}
-
-struct NoopHistogram;
-impl FlowHistogram for NoopHistogram {
-    fn observe(&self, _value: f64) {}
-}
-
-struct NoopLabelledGauge;
-impl FlowLabelledGauge for NoopLabelledGauge {
-    fn set(&self, _labels: &[(&'static str, &str)], _value: f64) {}
-}
-
-fn noop_flow_metrics() -> FlowMetrics {
-    FlowMetrics {
-        recv_total: Arc::new(NoopCounter),
-        recv_bytes_total: Arc::new(NoopCounter),
-        decode_err_total: Arc::new(NoopLabelledCounter),
-        drops_total: Arc::new(NoopLabelledCounter),
-        invalid_packet_total: Arc::new(NoopLabelledCounter),
-        rate_limited_total: Arc::new(NoopLabelledCounter),
-        records_emitted_total: Arc::new(NoopLabelledCounter),
-        records_per_packet: Arc::new(NoopHistogram),
-        template_cache_size: Arc::new(NoopLabelledGauge),
-        template_evicted_total: Arc::new(NoopCounter),
-        kernel_drops_total: Arc::new(NoopCounter),
-        send_duration_seconds: Arc::new(NoopHistogram),
-        unknown_version_total: Arc::new(NoopCounter),
-        handler_experimental: Arc::new(NoopLabelledGauge),
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Fixture discovery and extraction
@@ -229,7 +181,7 @@ fn corpus_sha256_matches_manifest() {
 fn corpus_decodes_real_world_datagrams() {
     let dir = fixtures_dir();
     let exporter = synthetic_exporter();
-    let mut netflow_dec = NetflowDecoder::new(1000, 10_000, noop_flow_metrics());
+    let mut netflow_dec = NetflowDecoder::new(1000, 10_000, flow_metrics_for_test());
     let mut sflow_dec = SflowDecoder::new();
 
     // BTreeMap so summary output is deterministic
