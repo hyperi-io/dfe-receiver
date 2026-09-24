@@ -271,7 +271,7 @@ impl Sink for KafkaSink {
     /// Queue a record for delivery.
     ///
     /// Returns once librdkafka has taken the record into its own queue, which
-    /// is not delivery: [`DeliveryObserver`] reports what a broker made of it
+    /// is not delivery: `DeliveryObserver` reports what a broker made of it
     /// later.
     async fn send(&self, topic: &str, payload: Bytes) -> Result<()> {
         let start = Instant::now();
