@@ -226,17 +226,17 @@ Fix the worst offenders identified in the audit:
 
 | File | Line | Current | Fix |
 |------|------|---------|-----|
-| `src/transform/coerce.rs` | 103 | `warn!` per row with coercion failure | Sampled (1 in 1000) + metric + log total on batch completion |
-| `src/clickhouse/inserter.rs` | 338,358 | `warn!` per retry attempt | State-transition (log first failure, log recovery) |
-| `src/pipeline/orchestrator.rs` | 783,786 | `warn!` per DLQ channel full | Debounced (5s) |
+| `dfe-loader/src/transform/coerce.rs` | 103 | `warn!` per row with coercion failure | Sampled (1 in 1000) + metric + log total on batch completion |
+| `dfe-loader/src/clickhouse/inserter.rs` | 338,358 | `warn!` per retry attempt | State-transition (log first failure, log recovery) |
+| `dfe-loader/src/pipeline/orchestrator.rs` | 783,786 | `warn!` per DLQ channel full | Debounced (5s) |
 
 #### dfe-fetcher
 
 | File | Line | Current | Fix |
 |------|------|---------|-----|
-| `src/extractor/container/mod.rs` | 152 | `warn!` per container stderr line | Sampled (1 in 100) + count |
-| `src/scheduler/mod.rs` | 118 | `warn!` while source not ready in busy-wait | Debounced (10s) |
-| `src/output.rs` | 143 | `error!` per transport send failure | Sampled (1 in 1000) + metric |
+| `dfe-fetcher/crates/fetcher/src/extractor/container/mod.rs` | 152 | `warn!` per container stderr line | Sampled (1 in 100) + count |
+| `dfe-fetcher/crates/fetcher/src/scheduler/mod.rs` | 118 | `warn!` while source not ready in busy-wait | Debounced (10s) |
+| `dfe-fetcher/crates/fetcher/src/output.rs` | 143 | `error!` per transport send failure | Sampled (1 in 1000) + metric |
 
 #### dfe-archiver
 

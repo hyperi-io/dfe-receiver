@@ -388,7 +388,7 @@ The suite's one external door: eleven wire protocols terminated, every payload
 normalised to JSON, stamped, routed to Kafka or straight to dfe-loader over
 gRPC. It and dfe-ui are the only components reading untrusted input, so an
 advisory here outranks the same one in dfe-loader -- reachability first, per
-dfe-infra's `docs/INGEST-EDGE.md`. It is NOT a transform stage (that is
+`dfe-infra/docs/THREAT-MODEL.md`. It is NOT a transform stage (that is
 dfe-loader), and `chart/` here is NOT what deploys it.
 
 ### Where things live

@@ -86,7 +86,7 @@ DOWNLOAD_URL="https://artifacts.elastic.co/downloads/beats/filebeat/${TARBALL_NA
 
 curl -fSL --progress-bar -o "${CACHE_DIR}/${TARBALL_NAME}" "$DOWNLOAD_URL"
 
-# Extract — tarball contains filebeat-{version}-linux-{arch}/ with filebeat binary at root
+# Extract -- tarball contains filebeat-{version}-linux-{arch}/ with filebeat binary at root
 echo "Extracting..." >&2
 tar xzf "${CACHE_DIR}/${TARBALL_NAME}" -C "${CACHE_DIR}"
 

@@ -19,7 +19,7 @@
 // The test constant sits with the test it names rather than at module scope.
 #![allow(clippy::items_after_statements)]
 
-use crate::common::{TEST_SUITE_LABEL, container_name};
+use crate::common::{OPENBAO_TAG, TEST_SUITE_LABEL, claim_container_name, container_name};
 use crate::{skip_if_no_docker, test_name};
 
 /// A per-test instance carries the test name between the suite and the service,
@@ -186,4 +186,111 @@ async fn a_started_container_carries_the_name_and_label_then_goes_away() {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     panic!("{expected} still exists after the holder was dropped -- the suite leaks containers");
+}
+
+/// Removes the named containers when the test ends, however it ends.
+struct Remove(Vec<String>);
+
+impl Drop for Remove {
+    fn drop(&mut self) {
+        for name in &self.0 {
+            let _ = std::process::Command::new("docker")
+                .args(["rm", "--force", "--volumes", name])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+    }
+}
+
+/// Create, without starting, a container holding `name`, labelled with
+/// `owner` as its owner pid when one is given.
+fn hold_name(name: &str, owner: Option<u32>) {
+    let mut args = vec![
+        "create".to_string(),
+        "--name".to_string(),
+        name.to_string(),
+        "--label".to_string(),
+        format!("{}={}", TEST_SUITE_LABEL.0, TEST_SUITE_LABEL.1),
+    ];
+    if let Some(pid) = owner {
+        args.push("--label".to_string());
+        args.push(format!("io.hyperi.test.owner-pid={pid}"));
+    }
+    args.push(format!("openbao/openbao:{OPENBAO_TAG}"));
+    let status = std::process::Command::new("docker")
+        .args(&args)
+        .stdout(std::process::Stdio::null())
+        .status()
+        .expect("docker create must run");
+    assert!(status.success(), "docker create {name} failed");
+}
+
+fn exists(name: &str) -> bool {
+    std::process::Command::new("docker")
+        .args(["inspect", "--type", "container", name])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// A container a concurrent run on this host still owns is left alone, and this
+/// run takes a name of its own instead of killing the other run's container.
+#[test]
+fn a_name_a_live_run_holds_is_left_and_a_distinct_one_taken() {
+    skip_if_no_docker!();
+    let name = container_name(Some(test_name!()), "probe");
+    let own = format!("{name}-{}", std::process::id());
+    let _cleanup = Remove(vec![name.clone(), own.clone()]);
+
+    let mut other_run = std::process::Command::new("sleep")
+        .arg("60")
+        .spawn()
+        .expect("spawn a stand-in for the other run");
+    hold_name(&name, Some(other_run.id()));
+
+    let claimed = claim_container_name(&name);
+    let still_held = exists(&name);
+    let _ = other_run.kill();
+    let _ = other_run.wait();
+
+    assert!(still_held, "the live run's container was removed");
+    assert_eq!(
+        claimed, own,
+        "this run must not reuse a name a live run holds"
+    );
+}
+
+/// A container whose owner process has exited is a leak, and is removed so the
+/// name it holds is free again.
+#[test]
+fn a_name_an_exited_run_left_is_reclaimed() {
+    skip_if_no_docker!();
+    let name = container_name(Some(test_name!()), "probe");
+    let _cleanup = Remove(vec![name.clone()]);
+
+    let mut exited = std::process::Command::new("true")
+        .spawn()
+        .expect("spawn a process that exits");
+    let pid = exited.id();
+    exited.wait().expect("the process exits");
+    hold_name(&name, Some(pid));
+
+    assert_eq!(claim_container_name(&name), name);
+    assert!(!exists(&name), "the leaked container was not removed");
+}
+
+/// A container with no owner label cannot be attributed, so it is left alone.
+#[test]
+fn a_name_held_with_no_owner_label_is_left() {
+    skip_if_no_docker!();
+    let name = container_name(Some(test_name!()), "probe");
+    let own = format!("{name}-{}", std::process::id());
+    let _cleanup = Remove(vec![name.clone(), own.clone()]);
+
+    hold_name(&name, None);
+
+    assert_eq!(claim_container_name(&name), own);
+    assert!(exists(&name), "an unattributed container was removed");
 }

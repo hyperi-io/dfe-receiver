@@ -49,7 +49,6 @@ build:
     targets:
       - x86_64-unknown-linux-gnu
       - aarch64-unknown-linux-gnu
-publish:
+release:
   enabled: true
-  target: both
   binaries: both

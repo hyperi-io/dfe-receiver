@@ -550,7 +550,7 @@ const KAFKA_TAG: &str = "4.3.1";
 /// exercises is identical across both.
 ///
 /// renovate: datasource=docker depName=openbao/openbao
-const OPENBAO_TAG: &str = "2.6.1";
+pub const OPENBAO_TAG: &str = "2.6.1";
 
 // =============================================================================
 // Container naming and cleanup
@@ -579,9 +579,10 @@ const OPENBAO_TAG: &str = "2.6.1";
 // testcontainers-rs 0.27 has no resource reaper (no Ryuk), so the second case
 // is the one that leaves crap behind. A deterministic name would then make it
 // WORSE than a random one -- the leaked container holds the name and every
-// later run fails with "name already in use". `reap_stale` closes that: remove
-// any container already holding the name before starting, so a leak costs the
-// next run nothing and self-heals.
+// later run fails with "name already in use". `claim_container_name` closes
+// that: a container holding the name whose owner process has exited is removed,
+// so a leak costs the next run nothing and self-heals. One whose owner is still
+// alive belongs to a concurrent run on the same host and is left alone.
 //
 // The label goes on as well, so a sweep can find these regardless of name:
 //   docker rm -f $(docker ps -aq --filter label=io.hyperi.test.suite=dfe-receiver-integration)
@@ -672,33 +673,80 @@ macro_rules! test_name {
     }};
 }
 
-/// Remove a DEAD container holding `name`, so a leak from a killed run cannot
-/// block this one.
-///
-/// Never touches a RUNNING container. Two concurrent runs of this suite on one
-/// machine share these names, and force-removing a live one would sabotage the
-/// other run -- a confusing mid-test failure in a process that did nothing
-/// wrong. Leaving it means the start below fails with "name is already in use",
-/// which says what actually happened.
-///
-/// Best-effort otherwise: no Docker, nothing to remove, or an already-gone
-/// container are all fine. A failure here must not fail the test -- the start
-/// that follows reports the real problem.
-pub fn reap_stale(name: &str) {
-    let running = std::process::Command::new("docker")
-        .args(["ps", "--quiet", "--filter", &format!("name=^{name}$")])
-        .output();
-    // Non-empty stdout means a container by this name is up. Leave it alone.
-    if let Ok(out) = &running
-        && !out.stdout.is_empty()
-    {
-        return;
-    }
-    let _ = std::process::Command::new("docker")
-        .args(["rm", "--force", "--volumes", name])
+/// Who holds a container name, as far as its owner-pid label can say.
+#[derive(Debug, PartialEq, Eq)]
+enum NameHolder {
+    /// No container holds the name.
+    Free,
+    /// The owning test process has exited, so the container is a leak.
+    Leaked,
+    /// The owner is alive, or the container carries no owner to check.
+    Held,
+}
+
+/// Whether process `pid` is alive on this host. `ps` failing to run counts as
+/// alive, so a container is never removed on a guess.
+fn process_alive(pid: u32) -> bool {
+    std::process::Command::new("ps")
+        .args(["-p", &pid.to_string()])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status();
+        .status()
+        .map_or(true, |s| s.success())
+}
+
+/// Classify the container holding `name` by its `io.hyperi.test.owner-pid` label.
+fn name_holder(name: &str) -> NameHolder {
+    let Ok(out) = std::process::Command::new("docker")
+        .args([
+            "inspect",
+            "--type",
+            "container",
+            "--format",
+            r#"{{index .Config.Labels "io.hyperi.test.owner-pid"}}"#,
+            name,
+        ])
+        .output()
+    else {
+        return NameHolder::Free;
+    };
+    // Read as "no such container"; the start that follows reports any other Docker fault.
+    if !out.status.success() {
+        return NameHolder::Free;
+    }
+    let owner = String::from_utf8_lossy(&out.stdout).trim().parse::<u32>();
+    match owner {
+        // This process has not created it yet, so its pid was reused from a dead run.
+        Ok(pid) if pid == std::process::id() => NameHolder::Leaked,
+        Ok(pid) if !process_alive(pid) => NameHolder::Leaked,
+        Ok(_) | Err(_) => NameHolder::Held,
+    }
+}
+
+/// The name to start a container under: `name`, or `name-<pid>` when a live
+/// run on this host already holds it.
+///
+/// A holder is removed only when its owner-pid label names an exited process,
+/// so a concurrent run's container, or one with no owner label, is never
+/// touched. The owner check reads this host's process table, which the
+/// `127.0.0.1` bootstrap addresses below already assume is the Docker host.
+pub fn claim_container_name(name: &str) -> String {
+    let own = format!("{name}-{}", std::process::id());
+    for candidate in [name, own.as_str()] {
+        match name_holder(candidate) {
+            NameHolder::Free => return candidate.to_string(),
+            NameHolder::Leaked => {
+                let _ = std::process::Command::new("docker")
+                    .args(["rm", "--force", "--volumes", candidate])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+                return candidate.to_string();
+            }
+            NameHolder::Held => {}
+        }
+    }
+    own
 }
 
 /// Start a Kafka container and return (container_handle, bootstrap_address).
@@ -724,8 +772,7 @@ pub async fn start_kafka_container(
     use testcontainers::runners::AsyncRunner;
     use testcontainers_modules::kafka::apache;
 
-    let name = container_name(Some(test), "kafka");
-    reap_stale(&name);
+    let name = claim_container_name(&container_name(Some(test), "kafka"));
     let node = apache::Kafka::default()
         .with_tag(KAFKA_TAG)
         .with_container_name(&name)
@@ -766,8 +813,7 @@ pub async fn start_vault_container(
     use testcontainers::runners::AsyncRunner;
     use testcontainers::{GenericImage, ImageExt};
 
-    let name = container_name(Some(test), "openbao");
-    reap_stale(&name);
+    let name = claim_container_name(&container_name(Some(test), "openbao"));
     let node = GenericImage::new("openbao/openbao", OPENBAO_TAG)
         .with_exposed_port(8200u16.tcp())
         .with_wait_for(WaitFor::message_on_stdout("OpenBao server started"))
