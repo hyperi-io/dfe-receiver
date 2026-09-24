@@ -351,7 +351,7 @@ properties:
         file_enabled: true
         file_path: /var/spool/dfe/dlq
         kafka_enabled: true
-        send_timeout_ms: null
+        kafka_send_timeout_ms: null
   destinations:
     description: Destination configuration.
     $ref: '#/$defs/DestinationsConfig'
@@ -1660,7 +1660,7 @@ $defs:
           file_enabled: true
           file_path: /var/spool/dfe/dlq
           kafka_enabled: true
-          send_timeout_ms: null
+          kafka_send_timeout_ms: null
   SourceRule:
     description: Rule for determining `_source` value from JSON payload.
     type: object
@@ -1727,7 +1727,7 @@ $defs:
         description: Kafka backend settings.
         type: boolean
         default: true
-      send_timeout_ms:
+      kafka_send_timeout_ms:
         description: |-
           How long a DLQ flush or shutdown waits for Kafka to ack queued entries,
           in milliseconds: scalo's `KafkaDlqConfig::send_timeout_ms`. Unset keeps

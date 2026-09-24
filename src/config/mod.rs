@@ -1808,7 +1808,7 @@ pub struct DlqConfig {
     /// How long a DLQ flush or shutdown waits for Kafka to ack queued entries,
     /// in milliseconds: scalo's `KafkaDlqConfig::send_timeout_ms`. Unset keeps
     /// scalo's default.
-    pub send_timeout_ms: Option<u64>,
+    pub kafka_send_timeout_ms: Option<u64>,
 }
 
 impl Default for DlqConfig {
@@ -1821,7 +1821,7 @@ impl Default for DlqConfig {
             file_enabled: true,
             file_path: "/var/spool/dfe/dlq".to_string(),
             kafka_enabled: true,
-            send_timeout_ms: None,
+            kafka_send_timeout_ms: None,
         }
     }
 }
@@ -1863,7 +1863,7 @@ impl DlqConfig {
                     scalo::dlq::DlqRouting::Common
                 },
                 send_timeout_ms: self
-                    .send_timeout_ms
+                    .kafka_send_timeout_ms
                     .unwrap_or(kafka_defaults.send_timeout_ms),
                 ..kafka_defaults
             },
@@ -3341,15 +3341,15 @@ webhook:
     }
 
     #[test]
-    fn dlq_send_timeout_reaches_the_scalo_kafka_backend() {
+    fn dlq_kafka_send_timeout_reaches_the_scalo_kafka_backend() {
         let config: Config =
-            serde_yaml_ng::from_str("routing:\n  dlq:\n    send_timeout_ms: 250\n").unwrap();
+            serde_yaml_ng::from_str("routing:\n  dlq:\n    kafka_send_timeout_ms: 250\n").unwrap();
         let rc = config.routing.dlq.to_scalo_config();
         assert_eq!(rc.kafka.send_timeout_ms, 250);
     }
 
     #[test]
-    fn an_unset_dlq_send_timeout_keeps_the_scalo_default() {
+    fn an_unset_dlq_kafka_send_timeout_keeps_the_scalo_default() {
         let rc = DlqConfig::default().to_scalo_config();
         assert_eq!(
             rc.kafka.send_timeout_ms,
