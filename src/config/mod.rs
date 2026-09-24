@@ -2589,6 +2589,17 @@ mod tests {
     }
 
     #[test]
+    fn flow_enabled_with_no_ports_fails_startup() {
+        // DFE_RECEIVER_FLOW_PORTS drops every entry that is not a port, so a typo lands here too.
+        let mut config = flow_base();
+        config.flow.enabled = true;
+        config.flow.ports = Vec::new();
+
+        let err = config.validate().expect_err("must not start");
+        assert!(err.to_string().contains("flow.ports"), "{err}");
+    }
+
+    #[test]
     fn a_valid_flow_block_starts() {
         let mut config = flow_base();
         config.flow.enabled = true;
