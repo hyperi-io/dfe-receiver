@@ -11,8 +11,10 @@
 //! Provides in-memory batching with disk spillover when under pressure.
 
 pub mod adapter;
+pub mod rejects;
 pub mod tiered;
 
+pub use rejects::Rejects;
 pub use tiered::{InMemoryBuffer, InMemoryBufferStats};
 // Re-export CircuitState from scalo for convenience
 pub use scalo::tiered_sink::CircuitState;

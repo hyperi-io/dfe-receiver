@@ -26,8 +26,9 @@ use parking_lot::Mutex;
 use scalo::tiered_sink::{CircuitBreaker, CircuitState};
 use tracing::{debug, warn};
 
+use crate::buffer::Rejects;
 use crate::config::{BufferConfig, QueueBound};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::sink::Sink;
 
 /// Messages taken per drain cycle.
@@ -107,6 +108,8 @@ pub struct InMemoryBuffer<S: Sink> {
     bound: QueueBound,
     /// Circuit breaker from scalo with half-open state support.
     circuit: CircuitBreaker,
+    /// Where records the primary refuses for good go instead of the queue.
+    rejects: Rejects,
     /// Messages queued during outage.
     queued_count: AtomicU64,
     /// Messages drained after recovery.
@@ -114,7 +117,7 @@ pub struct InMemoryBuffer<S: Sink> {
 }
 
 impl<S: Sink + Send + Sync + 'static> InMemoryBuffer<S> {
-    /// Create a new tiered sink.
+    /// Create a new tiered sink that drops what the primary refuses for good.
     pub fn new(primary: S, config: &BufferConfig) -> Self {
         let bound = config.queue_bound();
         debug!(?bound, "In-memory buffer bound");
@@ -124,9 +127,17 @@ impl<S: Sink + Send + Sync + 'static> InMemoryBuffer<S> {
             bound,
             // Use scalo CircuitBreaker with proper half-open state
             circuit: CircuitBreaker::new(5, Duration::from_secs(30)),
+            rejects: Rejects::default(),
             queued_count: AtomicU64::new(0),
             drained_count: AtomicU64::new(0),
         }
+    }
+
+    /// Send records the primary refuses for good to `rejects`.
+    #[must_use]
+    pub fn with_rejects(mut self, rejects: Rejects) -> Self {
+        self.rejects = rejects;
+        self
     }
 
     /// Check if we should attempt the hot path.
@@ -156,6 +167,9 @@ impl<S: Sink + Send + Sync + 'static> InMemoryBuffer<S> {
     }
 
     /// Try to drain queued messages.
+    ///
+    /// Returns how many left the queue, delivered or refused for good: a batch
+    /// of refusals is progress, and `drain_until_idle` stops on zero.
     async fn try_drain(&self) -> usize {
         // Only drain when circuit allows traffic
         if !self.should_use_hot_path().await {
@@ -173,6 +187,7 @@ impl<S: Sink + Send + Sync + 'static> InMemoryBuffer<S> {
 
         let count = messages.len();
         let mut drained = 0;
+        let mut rejected = 0;
         let mut pending = messages.into_iter();
         let mut failed = None;
 
@@ -181,6 +196,13 @@ impl<S: Sink + Send + Sync + 'static> InMemoryBuffer<S> {
                 Ok(()) => {
                     drained += 1;
                     self.circuit.record_success().await;
+                }
+                // Requeued, a record refused for good would hold up every record behind it.
+                Err(Error::Rejected(reason)) => {
+                    rejected += 1;
+                    self.rejects
+                        .dispose(&msg.topic, &msg.payload, &reason)
+                        .await;
                 }
                 Err(e) => {
                     self.circuit.record_failure().await;
@@ -199,17 +221,18 @@ impl<S: Sink + Send + Sync + 'static> InMemoryBuffer<S> {
             self.spill_queue.lock().push_front_all(restore.into_iter());
         }
 
-        if drained > 0 {
+        if drained > 0 || rejected > 0 {
             self.drained_count
                 .fetch_add(drained as u64, Ordering::Relaxed);
             debug!(
                 drained = drained,
-                remaining = count - drained,
+                rejected = rejected,
+                remaining = count - drained - rejected,
                 "Drained queued messages"
             );
         }
 
-        drained
+        drained + rejected
     }
 
     /// Get statistics.
@@ -285,7 +308,7 @@ impl<S: Sink + Send + Sync + 'static> Sink for InMemoryBuffer<S> {
         // Fast path: if circuit is open, queue immediately
         if !self.should_use_hot_path().await {
             if !self.queue_message(topic.to_string(), payload) {
-                return Err(crate::error::Error::Transport(
+                return Err(Error::Transport(
                     "in-memory queue full, backpressure".into(),
                 ));
             }
@@ -298,11 +321,16 @@ impl<S: Sink + Send + Sync + 'static> Sink for InMemoryBuffer<S> {
                 self.circuit.record_success().await;
                 Ok(())
             }
+            // Queued, a record refused for good would hold up every record behind it.
+            Err(Error::Rejected(reason)) => {
+                self.rejects.dispose(topic, &payload, &reason).await;
+                Ok(())
+            }
             Err(e) => {
                 self.circuit.record_failure().await;
                 debug!(error = %e, topic = topic, "Primary send failed, queuing");
                 if !self.queue_message(topic.to_string(), payload) {
-                    return Err(crate::error::Error::Transport(
+                    return Err(Error::Transport(
                         "in-memory queue full, backpressure".into(),
                     ));
                 }
@@ -335,7 +363,6 @@ impl<S: Sink + Send + Sync + 'static> Sink for InMemoryBuffer<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::Error;
     use std::sync::atomic::{AtomicBool, AtomicUsize};
 
     /// Test sink that can be configured to fail.
@@ -605,6 +632,137 @@ mod tests {
 
         buffer.flush().await.unwrap();
         assert_eq!(buffer.primary.flushes.load(Ordering::Relaxed), 1);
+    }
+
+    /// Sink that is down until `up` is set, then refuses a `bad` payload for
+    /// good, fails `flaky` once as a transient error, and takes the rest.
+    struct RefusingSink {
+        up: AtomicBool,
+        flaky: Mutex<Option<Bytes>>,
+        taken: Mutex<Vec<Bytes>>,
+    }
+
+    impl RefusingSink {
+        fn down() -> Self {
+            Self {
+                up: AtomicBool::new(false),
+                flaky: Mutex::new(None),
+                taken: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Sink for RefusingSink {
+        async fn send(&self, _topic: &str, payload: Bytes) -> Result<()> {
+            if !self.up.load(Ordering::Relaxed) {
+                return Err(Error::Transport("destination down".into()));
+            }
+            if payload.as_ref() == b"bad" {
+                return Err(Error::Rejected("destination refused the record".into()));
+            }
+            let mut flaky = self.flaky.lock();
+            if flaky.as_ref() == Some(&payload) {
+                *flaky = None;
+                return Err(Error::Transport("transient failure".into()));
+            }
+            drop(flaky);
+            self.taken.lock().push(payload);
+            Ok(())
+        }
+
+        async fn flush(&self) -> Result<()> {
+            Ok(())
+        }
+
+        fn is_healthy(&self) -> bool {
+            self.up.load(Ordering::Relaxed)
+        }
+    }
+
+    /// Queue `payloads` against a destination that is down, then bring it up
+    /// and close the circuit the outage opened.
+    async fn queued_behind_an_outage(payloads: &[&'static str]) -> InMemoryBuffer<RefusingSink> {
+        let buffer = InMemoryBuffer::new(RefusingSink::down(), &test_config());
+        for payload in payloads {
+            buffer
+                .send("t", Bytes::from_static(payload.as_bytes()))
+                .await
+                .unwrap();
+        }
+        assert_eq!(buffer.stats().await.queue_size, payloads.len());
+        buffer.primary.up.store(true, Ordering::Relaxed);
+        buffer.circuit.reset().await;
+        buffer
+    }
+
+    /// A whole drain batch of refusals is still progress, so the flush carries
+    /// on to the records behind it.
+    #[tokio::test]
+    async fn a_batch_of_rejected_records_does_not_stop_the_flush() {
+        let mut payloads = vec!["bad"; DRAIN_BATCH];
+        payloads.push("good");
+        let buffer = queued_behind_an_outage(&payloads).await;
+
+        buffer.flush().await.unwrap();
+
+        assert_eq!(
+            buffer.stats().await.queue_size,
+            0,
+            "the flush stopped at a batch of refused records"
+        );
+        assert_eq!(*buffer.primary.taken.lock(), [Bytes::from_static(b"good")]);
+    }
+
+    /// A record the destination refuses for good leaves the queue, so the
+    /// records behind it still drain, in order.
+    #[tokio::test]
+    async fn a_rejected_record_does_not_hold_up_the_records_behind_it() {
+        let buffer = queued_behind_an_outage(&["bad", "good-1", "good-2"]).await;
+
+        assert_eq!(buffer.try_drain().await, 3);
+        assert_eq!(
+            buffer.stats().await.queue_size,
+            0,
+            "the rejected record is still at the head of the queue"
+        );
+        assert_eq!(
+            *buffer.primary.taken.lock(),
+            [Bytes::from_static(b"good-1"), Bytes::from_static(b"good-2")]
+        );
+        assert_eq!(buffer.stats().await.drained_total, 2);
+    }
+
+    /// A transient failure mid-drain keeps the failed record and everything
+    /// behind it, and they go out in their original order on the next drain.
+    #[tokio::test]
+    async fn a_transient_failure_keeps_drain_order() {
+        let buffer = queued_behind_an_outage(&["one", "two", "three"]).await;
+        *buffer.primary.flaky.lock() = Some(Bytes::from_static(b"two"));
+
+        assert_eq!(buffer.try_drain().await, 1);
+        assert_eq!(buffer.stats().await.queue_size, 2);
+        assert_eq!(buffer.try_drain().await, 2);
+        assert_eq!(
+            *buffer.primary.taken.lock(),
+            [
+                Bytes::from_static(b"one"),
+                Bytes::from_static(b"two"),
+                Bytes::from_static(b"three"),
+            ]
+        );
+    }
+
+    /// A record refused on the direct path never enters the queue.
+    #[tokio::test]
+    async fn a_record_rejected_on_the_direct_path_is_not_queued() {
+        let buffer = InMemoryBuffer::new(RefusingSink::down(), &test_config());
+        buffer.primary.up.store(true, Ordering::Relaxed);
+
+        buffer.send("t", Bytes::from_static(b"bad")).await.unwrap();
+
+        assert_eq!(buffer.stats().await.queue_size, 0);
+        assert!(buffer.primary.taken.lock().is_empty());
     }
 
     #[tokio::test]

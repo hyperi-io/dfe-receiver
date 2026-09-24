@@ -753,6 +753,10 @@ fn describe_receiver_metrics() {
         "receiver_messages_drained_total",
         "Messages drained from spool"
     );
+    metrics::describe_counter!(
+        "receiver_records_rejected_total",
+        "Records a destination refused for good, by outcome (dead_lettered or dropped)"
+    );
 
     // Request latency
     metrics::describe_histogram!(

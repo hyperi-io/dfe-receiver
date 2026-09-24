@@ -54,6 +54,10 @@ pub enum Error {
     #[error("transport error: {0}")]
     Transport(String),
 
+    /// The destination refused this record and refuses it on every retry.
+    #[error("record rejected by destination: {0}")]
+    Rejected(String),
+
     /// Buffer/memory error.
     #[error("buffer error: {0}")]
     Buffer(String),
@@ -142,6 +146,10 @@ mod tests {
             (Error::Auth("a".into()), "authentication failed: a"),
             (Error::Server("s".into()), "server error: s"),
             (Error::Transport("tp".into()), "transport error: tp"),
+            (
+                Error::Rejected("rj".into()),
+                "record rejected by destination: rj",
+            ),
             (Error::Buffer("b".into()), "buffer error: b"),
             (Error::Shutdown, "shutdown requested"),
         ];
