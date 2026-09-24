@@ -1,4 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["github>hyperi-io/renovate-config"]
+  "description": "Extends the org preset like every other DFE consumer. Local-only: ignoreDeps holds cel <0.14 on scalo's line until scalo moves first, because the webhook filter holds a program scalo compiled and cel::Program must be one type across that boundary.",
+  "extends": ["github>hyperi-io/renovate-config"],
+  "ignoreDeps": ["cel"]
 }
