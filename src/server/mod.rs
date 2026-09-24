@@ -299,6 +299,7 @@ impl Server {
 
         // Wait for all handlers to finish
         for (name, handle) in join_handles {
+            // Dev and test builds only: release sets panic = "abort", so a handler panic ends the process.
             if let Err(e) = handle.await {
                 error!(handler = name, error = %e, "Protocol handler panicked");
             }
