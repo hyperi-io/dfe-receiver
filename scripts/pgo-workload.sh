@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Project:   dfe-receiver
 # File:      scripts/pgo-workload.sh
-# Purpose:   PGO workload orchestrator — spins up Kafka + receiver, drives load
+# Purpose:   PGO workload orchestrator -- spins up Kafka + receiver, drives load
 # Language:  Bash
 #
 # License:   BUSL-1.1
@@ -51,7 +51,7 @@ DURATION="${PGO_WORKLOAD_DURATION_SECS:-300}"
 KAFKA_IMAGE="${PGO_WORKLOAD_KAFKA_IMAGE:-docker.redpanda.com/redpandadata/redpanda:v26.1.9}"
 KEEP="${PGO_WORKLOAD_KEEP:-0}"
 
-# Floor of 60s — shorter workloads produce bad PGO profiles
+# Floor of 60s -- shorter workloads produce bad PGO profiles
 if [[ "$DURATION" -lt 60 ]]; then
     echo "error: PGO_WORKLOAD_DURATION_SECS must be >= 60 (got $DURATION)" >&2
     echo "  short workloads produce NEGATIVE PGO gains by biasing the" >&2
@@ -99,7 +99,7 @@ CONFIG_DIR=""
 cleanup() {
     local rc=$?
     if [[ "$KEEP" == "1" ]]; then
-        echo "PGO_WORKLOAD_KEEP=1 — skipping cleanup" >&2
+        echo "PGO_WORKLOAD_KEEP=1 -- skipping cleanup" >&2
         echo "  receiver PID: $RECEIVER_PID" >&2
         echo "  kafka CID:    $KAFKA_CID" >&2
         echo "  config dir:   $CONFIG_DIR" >&2
@@ -213,7 +213,7 @@ splunk_hec:
 
 syslog:
   enabled: true
-  # Unprivileged ports — port 514 requires root / CAP_NET_BIND_SERVICE
+  # Unprivileged ports -- port 514 requires root / CAP_NET_BIND_SERVICE
   # which we don't have in a typical local/CI workload context.
   udp_bind_address: "127.0.0.1:5514"
   tcp_bind_address: "127.0.0.1:5515"

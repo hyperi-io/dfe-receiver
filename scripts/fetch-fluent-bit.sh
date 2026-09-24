@@ -86,7 +86,7 @@ fi
 rm -rf "${CACHE_DIR:?}/bin"
 
 # Fluent Bit distributes via .deb packages on packages.fluentbit.io.
-# Use noble (24.04 LTS) as the base codename — binary is portable across
+# Use noble (24.04 LTS) as the base codename -- binary is portable across
 # Ubuntu versions since it bundles its own libs under /opt/fluent-bit/.
 DEB_CODENAME="noble"
 DEB_ARCH="$(deb_arch)"
