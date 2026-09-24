@@ -46,7 +46,7 @@
   - kind: ingest
     name: webhook
     description: 'Generic authenticated webhook intake: POST /webhook/{caller}, per-caller HMAC or static-header auth, per-caller topic.'
-    maturity: beta
+    maturity: stable
 - kind: sink
   name: destinations
   description: 'The named destination set: a match rule sends accepted events to one destination or fans them out to several.'

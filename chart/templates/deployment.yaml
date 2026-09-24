@@ -5,7 +5,7 @@ metadata:
   labels:
     {{- include "dfe-receiver.labels" . | nindent 4 }}
 spec:
-  {{- if not (or .Values.keda.enabled .Values.autoscaling.enabled) }}
+  {{- if not (or (and .Values.keda.enabled .Values.keda.cpu.enabled) (and .Values.autoscaling.enabled (not .Values.keda.enabled))) }}
   replicas: {{ .Values.replicaCount }}
   {{- end }}
   selector:
@@ -51,48 +51,81 @@ spec:
             - name: http
               containerPort: 8080
               protocol: TCP
+            {{- if eq (toString ((.Values.config).grpc).enabled) "true" }}
             - name: grpc
               containerPort: 6000
               protocol: TCP
+            {{- end }}
+            {{- if eq (toString ((.Values.config).otlp).enabled) "true" }}
             - name: otlp-grpc
               containerPort: 4317
               protocol: TCP
+            {{- end }}
+            {{- if eq (toString ((.Values.config).otlp).enabled) "true" }}
             - name: otlp-http
               containerPort: 4318
               protocol: TCP
+            {{- end }}
+            {{- if eq (toString ((.Values.config).lumberjack).enabled) "true" }}
             - name: beats
               containerPort: 5044
               protocol: TCP
+            {{- end }}
+            {{- if eq (toString ((.Values.config).splunk_hec).enabled) "true" }}
             - name: hec
               containerPort: 8088
               protocol: TCP
+            {{- end }}
+            {{- if eq (toString ((.Values.config).prometheus_rw).enabled) "true" }}
             - name: prometheus-rw
               containerPort: 9091
               protocol: TCP
+            {{- end }}
+            {{- if eq (toString ((.Values.config).webhook).enabled) "true" }}
             - name: webhook
               containerPort: 8090
               protocol: TCP
+            {{- end }}
+            {{- if eq (toString ((.Values.config).syslog).enabled) "true" }}
             - name: syslog
               containerPort: 514
               protocol: TCP
+            {{- end }}
+            {{- if eq (toString ((.Values.config).syslog).enabled) "true" }}
+            - name: syslog-udp
+              containerPort: 514
+              protocol: UDP
+            {{- end }}
+            {{- if eq (toString ((.Values.config).syslog).enabled) "true" }}
             - name: syslog-tls
               containerPort: 6514
               protocol: TCP
+            {{- end }}
+            {{- if eq (toString ((.Values.config).fluent).enabled) "true" }}
             - name: fluent
               containerPort: 24224
               protocol: TCP
+            {{- end }}
+            {{- if eq (toString ((.Values.config).gelf).enabled) "true" }}
             - name: gelf
               containerPort: 12201
               protocol: TCP
+            {{- end }}
+            {{- if eq (toString ((.Values.config).flow).enabled) "true" }}
             - name: netflow
               containerPort: 2055
               protocol: UDP
+            {{- end }}
+            {{- if eq (toString ((.Values.config).flow).enabled) "true" }}
             - name: netflow-ipfix
               containerPort: 4739
               protocol: UDP
+            {{- end }}
+            {{- if eq (toString ((.Values.config).flow).enabled) "true" }}
             - name: sflow
               containerPort: 6343
               protocol: UDP
+            {{- end }}
           env:
             - name: OTEL_SERVICE_NAME
               value: "dfe-receiver"

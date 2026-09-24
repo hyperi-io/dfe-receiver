@@ -12,8 +12,9 @@
 //! to produce Dockerfile, Helm chart, and Docker Compose fragments.
 
 use scalo::deployment::{
-    DeploymentContract, HealthContract, ImageProfile, KedaConfig, KedaContract, NativeDepsContract,
-    OciLabels, PortContract, SecretEnvContract, SecretGroupContract, base_image_from_cascade,
+    DeploymentContract, HealthContract, ImageProfile, KafkaLagTrigger, KedaConfig, KedaContract,
+    NativeDepsContract, OciLabels, PortContract, SecretEnvContract, SecretGroupContract,
+    base_image_from_cascade,
 };
 
 /// Build the deployment contract for dfe-receiver.
@@ -65,83 +66,58 @@ pub fn contract() -> DeploymentContract {
         metric_prefix: "receiver".into(),
         config_mount_path: "/etc/dfe-receiver/config.yaml".into(),
         image_registry: "ghcr.io/hyperi-io".into(),
+        // Every listener but HTTP binds only while its section's `enabled` switch is on.
         extra_ports: vec![
-            PortContract {
-                name: "http".into(),
-                port: 8080,
-                protocol: "TCP".into(),
-            },
-            PortContract {
-                name: "grpc".into(),
-                port: 6000,
-                protocol: "TCP".into(),
-            },
-            PortContract {
-                name: "otlp-grpc".into(),
-                port: 4317,
-                protocol: "TCP".into(),
-            },
-            PortContract {
-                name: "otlp-http".into(),
-                port: 4318,
-                protocol: "TCP".into(),
-            },
-            PortContract {
-                name: "beats".into(),
-                port: 5044,
-                protocol: "TCP".into(),
-            },
-            PortContract {
-                name: "hec".into(),
-                port: 8088,
-                protocol: "TCP".into(),
-            },
-            PortContract {
-                name: "prometheus-rw".into(),
-                port: 9091,
-                protocol: "TCP".into(),
-            },
-            PortContract {
-                name: "webhook".into(),
-                port: 8090,
-                protocol: "TCP".into(),
-            },
-            PortContract {
-                name: "syslog".into(),
-                port: 514,
-                protocol: "TCP".into(),
-            },
-            PortContract {
-                name: "syslog-tls".into(),
-                port: 6514,
-                protocol: "TCP".into(),
-            },
-            PortContract {
-                name: "fluent".into(),
-                port: 24224,
-                protocol: "TCP".into(),
-            },
-            PortContract {
-                name: "gelf".into(),
-                port: 12201,
-                protocol: "TCP".into(),
-            },
-            PortContract {
-                name: "netflow".into(),
-                port: 2055,
-                protocol: "UDP".into(),
-            },
-            PortContract {
-                name: "netflow-ipfix".into(),
-                port: 4739,
-                protocol: "UDP".into(),
-            },
-            PortContract {
-                name: "sflow".into(),
-                port: 6343,
-                protocol: "UDP".into(),
-            },
+            PortContract::tcp("http", 8080).bound_from("server.bind_address"),
+            PortContract::tcp("grpc", 6000)
+                .when_equals("config.grpc.enabled", "true")
+                .bound_from("grpc.bind_address"),
+            PortContract::tcp("otlp-grpc", 4317)
+                .when_equals("config.otlp.enabled", "true")
+                .bound_from("otlp.grpc_bind_address"),
+            PortContract::tcp("otlp-http", 4318)
+                .when_equals("config.otlp.enabled", "true")
+                .bound_from("otlp.http_bind_address"),
+            PortContract::tcp("beats", 5044)
+                .when_equals("config.lumberjack.enabled", "true")
+                .bound_from("lumberjack.bind_address"),
+            PortContract::tcp("hec", 8088)
+                .when_equals("config.splunk_hec.enabled", "true")
+                .bound_from("splunk_hec.bind_address"),
+            PortContract::tcp("prometheus-rw", 9091)
+                .when_equals("config.prometheus_rw.enabled", "true")
+                .bound_from("prometheus_rw.bind_address"),
+            PortContract::tcp("webhook", 8090)
+                .when_equals("config.webhook.enabled", "true")
+                .bound_from("webhook.bind_address"),
+            PortContract::tcp("syslog", 514)
+                .when_equals("config.syslog.enabled", "true")
+                .bound_from("syslog.tcp_bind_address"),
+            PortContract::udp("syslog-udp", 514)
+                .when_equals("config.syslog.enabled", "true")
+                .bound_from("syslog.udp_bind_address"),
+            // Binds only when syslog.tls.enabled is also on; one gate path cannot say both.
+            PortContract::tcp("syslog-tls", 6514)
+                .when_equals("config.syslog.enabled", "true")
+                .bound_from("syslog.tls_bind_address"),
+            PortContract::tcp("fluent", 24224)
+                .when_equals("config.fluent.enabled", "true")
+                .bound_from("fluent.bind_address"),
+            PortContract::tcp("gelf", 12201)
+                .when_equals("config.gelf.enabled", "true")
+                .bound_from("gelf.bind_address"),
+            // Unified flow mode only: split mode binds its own operator-chosen ports.
+            PortContract::udp("netflow", 2055)
+                .when_equals("config.flow.enabled", "true")
+                .bound_from("flow.bind_address"),
+            PortContract::udp("netflow-ipfix", 4739)
+                .when_equals("config.flow.enabled", "true")
+                .bound_from("flow.bind_address"),
+            PortContract::udp("sflow", 6343)
+                .when_equals("config.flow.enabled", "true")
+                .bound_from("flow.bind_address"),
         ],
+        unbound_listen_paths: vec![],
         entrypoint_args: vec!["--config".into(), "/etc/dfe-receiver/config.yaml".into()],
         secrets: vec![
             SecretGroupContract {
@@ -280,24 +256,19 @@ pub fn contract() -> DeploymentContract {
             licenses: "BUSL-1.1".into(),
             ..OciLabels::default()
         },
-        // KedaContract is #[non_exhaustive] (scalo): construct via
-        // KedaConfig + From rather than a struct literal so future contract
-        // fields stay non-breaking. The scaling_pressure_* trigger comes from
-        // KedaConfig defaults (enabled=false, threshold=70) -- OFF: the
-        // serverAddress is cluster-specific and must be set in values.yaml
-        // before enabling, no runtime change here. The receiver pushes the
-        // engine signals; an operator opts in per cluster.
-        keda: Some(KedaContract::from_config(&KedaConfig {
-            min_replicas: 1,
-            max_replicas: 10,
-            polling_interval: 15,
-            cooldown_period: 120,
-            kafka_lag_threshold: 10_000,
-            activation_lag_threshold: 0,
-            cpu_enabled: true,
-            cpu_threshold: 80,
-            ..Default::default()
-        })),
+        keda: Some(
+            KedaContract::from_config(&KedaConfig {
+                min_replicas: 1,
+                max_replicas: 10,
+                polling_interval: 15,
+                cooldown_period: 120,
+                cpu_enabled: true,
+                cpu_threshold: 80,
+                ..Default::default()
+            })
+            // The receiver consumes no topic, so consumer lag says nothing about its load.
+            .with_kafka_trigger(KafkaLagTrigger::disabled()),
+        ),
         // Reflectable config (scalo-rs#6): the derived JSON Schema of the full
         // Config (all ingest protocols + destinations, secret fields marked
         // x-dfe-secret) plus a capability catalog of the ingest protocols the
@@ -333,9 +304,7 @@ fn capabilities() -> Vec<scalo::deployment::Capability> {
                 ingest("fluent", "Fluent Forward protocol."),
                 ingest("gelf", "Graylog Extended Log Format."),
                 ingest("flow", "NetFlow v5/v9 + IPFIX + sFlow v5."),
-                Capability::new("ingest", "webhook")
-                    .description("Generic authenticated webhook intake: POST /webhook/{caller}, per-caller HMAC or static-header auth, per-caller topic.".to_string())
-                    .maturity("beta"),
+                ingest("webhook", "Generic authenticated webhook intake: POST /webhook/{caller}, per-caller HMAC or static-header auth, per-caller topic."),
             ]),
         Capability::sink("destinations")
             .description("The named destination set: a match rule sends accepted events to one destination or fans them out to several.")
@@ -423,7 +392,7 @@ mod tests {
     #[test]
     fn test_contract_ports() {
         let c = contract();
-        assert_eq!(c.extra_ports.len(), 15);
+        assert_eq!(c.extra_ports.len(), 16);
         let port_names: Vec<&str> = c.extra_ports.iter().map(|p| p.name.as_str()).collect();
         assert!(port_names.contains(&"http"));
         assert!(port_names.contains(&"grpc"));
@@ -434,12 +403,102 @@ mod tests {
         assert!(port_names.contains(&"prometheus-rw"));
         assert!(port_names.contains(&"webhook"));
         assert!(port_names.contains(&"syslog"));
+        assert!(port_names.contains(&"syslog-udp"));
         assert!(port_names.contains(&"syslog-tls"));
         assert!(port_names.contains(&"fluent"));
         assert!(port_names.contains(&"gelf"));
         assert!(port_names.contains(&"netflow"));
         assert!(port_names.contains(&"netflow-ipfix"));
         assert!(port_names.contains(&"sflow"));
+
+        let udp: Vec<&str> = c
+            .extra_ports
+            .iter()
+            .filter(|p| p.protocol == "UDP")
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(udp, ["syslog-udp", "netflow", "netflow-ipfix", "sflow"]);
+    }
+
+    /// `generate-artefacts` and `generate_chart` write nothing for a contract
+    /// that fails these checks.
+    #[test]
+    fn test_contract_passes_the_generate_artefacts_checks() {
+        let c = contract();
+        c.validate()
+            .expect("every generator must accept the contract");
+        scalo::deployment::assert_listeners_declared(&c);
+        let unresolved = c.unresolved_values_paths();
+        assert!(
+            unresolved.is_empty(),
+            "the chart reads values default_config never sets: {unresolved:?}"
+        );
+    }
+
+    /// Each port follows the switch of the section it serves: off in the
+    /// published default, on once the binary itself reads that switch as on.
+    #[test]
+    fn test_every_gated_port_follows_its_own_section_switch() {
+        let c = contract();
+        let published = c.default_config.clone().expect("default_config present");
+        for port in &c.extra_ports {
+            let section = port
+                .bound_from
+                .as_deref()
+                .and_then(|path| path.split('.').next())
+                .expect("every port names the listener it serves");
+            let Some(gate) = port.when.as_ref() else {
+                assert_eq!(
+                    section, "server",
+                    "{} is published unconditionally",
+                    port.name
+                );
+                continue;
+            };
+            assert_eq!(
+                gate.path(),
+                format!("config.{section}.enabled"),
+                "{} is gated on another section's switch",
+                port.name
+            );
+            assert_eq!(
+                gate.holds_in(&published),
+                Some(false),
+                "{} is published by the default install",
+                port.name
+            );
+
+            let mut on = published.clone();
+            on[section]["enabled"] = serde_json::json!(true);
+            assert_eq!(
+                gate.holds_in(&on),
+                Some(true),
+                "{} stays unpublished with its switch on",
+                port.name
+            );
+            let read: Config =
+                serde_json::from_value(on).expect("published default deserialises into Config");
+            let read = serde_json::to_value(&read).expect("config serialises");
+            assert_eq!(
+                read[section]["enabled"],
+                serde_json::json!(true),
+                "the binary does not read {section}.enabled, so {} gates on nothing",
+                port.name
+            );
+        }
+    }
+
+    /// KEDA stays on with CPU as its only trigger: the receiver consumes no
+    /// topic, so a consumer-lag trigger has nothing to read.
+    #[test]
+    fn test_keda_has_no_kafka_lag_trigger() {
+        let c = contract();
+        let keda = c.keda.as_ref().expect("keda contract");
+        assert!(keda.enabled);
+        assert!(keda.cpu_enabled);
+        assert_eq!(keda.cpu_threshold, 80);
+        assert!(!keda.kafka_trigger.enabled, "a raw-lag trigger is declared");
+        assert!(keda.min_replicas >= 1, "CPU alone cannot scale from zero");
     }
 
     #[test]

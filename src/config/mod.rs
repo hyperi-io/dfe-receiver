@@ -2117,6 +2117,8 @@ impl Default for KafkaConfig {
         overrides.insert("statistics.interval.ms".to_string(), "5000".to_string());
 
         Self {
+            // Empty on purpose: a bus destination with no brokers refuses to
+            // boot in `validate` rather than dial a guessed localhost.
             brokers: vec![],
             client_id: "dfe-receiver".to_string(),
             sasl: None,

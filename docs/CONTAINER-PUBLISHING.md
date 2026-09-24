@@ -76,7 +76,7 @@ RUN useradd --create-home --uid 1000 appuser && \
 
 USER appuser
 
-EXPOSE 8080 6000 9090
+EXPOSE 9090 8080
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD curl -sf http://localhost:9090/metrics > /dev/null || exit 1
@@ -107,7 +107,7 @@ RUN useradd --create-home --uid 1000 appuser && \
 
 USER appuser
 
-EXPOSE 8080 6000 9090
+EXPOSE 9090 8080
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD curl -sf http://localhost:9090/metrics > /dev/null || exit 1

@@ -429,34 +429,33 @@ examples and the statuses a sender sees -- is in
 
 ### Kubernetes with KEDA
 
+The chart in this repo scales on CPU alone: 80% utilisation, 1 to 10 replicas,
+set under `keda.*` in `chart/values.yaml`. The suite's shared chart library adds
+the ScalingPressure trigger on top. The receiver never scales on raw Kafka
+consumer lag.
+
 ```yaml
-apiVersion: keda.sh/v1alpha1
-kind: ScaledObject
-metadata:
-  name: dfe-receiver
-spec:
-  scaleTargetRef:
-    name: dfe-receiver
-  minReplicaCount: 2
-  maxReplicaCount: 100
-  triggers:
-    - type: prometheus
-      metadata:
-        query: dfe_receiver_scaling_metric
-        threshold: "0.7"
+triggers:
+  - type: cpu
+    metricType: Utilization
+    metadata:
+      value: "80"
 ```
 
 ### Health Probes
+
+Probes hit the metrics listener (9090, port name `metrics`), not the ingest
+port, so a saturated intake does not fail its own liveness check.
 
 ```yaml
 livenessProbe:
   httpGet:
     path: /livez
-    port: 8080
+    port: metrics
 readinessProbe:
   httpGet:
     path: /readyz
-    port: 8080
+    port: metrics
 ```
 
 ## Metrics

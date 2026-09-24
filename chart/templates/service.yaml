@@ -15,61 +15,95 @@ spec:
       targetPort: 8080
       protocol: TCP
       name: http
+    {{- if eq (toString ((.Values.config).grpc).enabled) "true" }}
     - port: 6000
       targetPort: 6000
       protocol: TCP
       name: grpc
+    {{- end }}
+    {{- if eq (toString ((.Values.config).otlp).enabled) "true" }}
     - port: 4317
       targetPort: 4317
       protocol: TCP
       name: otlp-grpc
+    {{- end }}
+    {{- if eq (toString ((.Values.config).otlp).enabled) "true" }}
     - port: 4318
       targetPort: 4318
       protocol: TCP
       name: otlp-http
+    {{- end }}
+    {{- if eq (toString ((.Values.config).lumberjack).enabled) "true" }}
     - port: 5044
       targetPort: 5044
       protocol: TCP
       name: beats
+    {{- end }}
+    {{- if eq (toString ((.Values.config).splunk_hec).enabled) "true" }}
     - port: 8088
       targetPort: 8088
       protocol: TCP
       name: hec
+    {{- end }}
+    {{- if eq (toString ((.Values.config).prometheus_rw).enabled) "true" }}
     - port: 9091
       targetPort: 9091
       protocol: TCP
       name: prometheus-rw
+    {{- end }}
+    {{- if eq (toString ((.Values.config).webhook).enabled) "true" }}
     - port: 8090
       targetPort: 8090
       protocol: TCP
       name: webhook
+    {{- end }}
+    {{- if eq (toString ((.Values.config).syslog).enabled) "true" }}
     - port: 514
       targetPort: 514
       protocol: TCP
       name: syslog
+    {{- end }}
+    {{- if eq (toString ((.Values.config).syslog).enabled) "true" }}
+    - port: 514
+      targetPort: 514
+      protocol: UDP
+      name: syslog-udp
+    {{- end }}
+    {{- if eq (toString ((.Values.config).syslog).enabled) "true" }}
     - port: 6514
       targetPort: 6514
       protocol: TCP
       name: syslog-tls
+    {{- end }}
+    {{- if eq (toString ((.Values.config).fluent).enabled) "true" }}
     - port: 24224
       targetPort: 24224
       protocol: TCP
       name: fluent
+    {{- end }}
+    {{- if eq (toString ((.Values.config).gelf).enabled) "true" }}
     - port: 12201
       targetPort: 12201
       protocol: TCP
       name: gelf
+    {{- end }}
+    {{- if eq (toString ((.Values.config).flow).enabled) "true" }}
     - port: 2055
       targetPort: 2055
       protocol: UDP
       name: netflow
+    {{- end }}
+    {{- if eq (toString ((.Values.config).flow).enabled) "true" }}
     - port: 4739
       targetPort: 4739
       protocol: UDP
       name: netflow-ipfix
+    {{- end }}
+    {{- if eq (toString ((.Values.config).flow).enabled) "true" }}
     - port: 6343
       targetPort: 6343
       protocol: UDP
       name: sflow
+    {{- end }}
   selector:
     {{- include "dfe-receiver.selectorLabels" . | nindent 4 }}
