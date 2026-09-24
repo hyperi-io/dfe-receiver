@@ -47,6 +47,7 @@ use dfe_receiver::server::netflow::decoder::NetflowDecoder;
 use dfe_receiver::server::sflow::decoder::SflowDecoder;
 use pcap_file::pcap::PcapReader;
 use sha2::{Digest, Sha256};
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
@@ -206,7 +207,13 @@ fn corpus_sha256_matches_manifest() {
         let path = dir.join(filename);
         let bytes = std::fs::read(&path)
             .unwrap_or_else(|e| panic!("manifest lists {filename} but cannot read: {e}"));
-        let actual_hash = format!("{:x}", Sha256::digest(&bytes));
+        let actual_hash =
+            Sha256::digest(&bytes)
+                .iter()
+                .fold(String::with_capacity(64), |mut hex, byte| {
+                    write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
+                    hex
+                });
         assert_eq!(
             &actual_hash, expected_hash,
             "SHA256 mismatch for {filename}"

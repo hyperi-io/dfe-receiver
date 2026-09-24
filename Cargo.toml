@@ -22,7 +22,7 @@ doctest = false
 
 [dependencies]
 # scalo shared library (crates.io)
-scalo = { version = ">=2.12.7, <3", features = [
+scalo = { version = ">=2.12.8, <3", features = [
     "config",
     "config-reload",
     "config-schema",
@@ -62,7 +62,7 @@ scalo = { version = ">=2.12.7, <3", features = [
 
 # JSON Schema derivation for the reflectable config-schema capability
 # (scalo-rs#6). Same version range as scalo so cargo unifies to one schemars.
-schemars = { version = ">=1.2.1, <2", default-features = false, features = ["std", "derive", "preserve_order"] }
+schemars = { version = ">=1.2.2, <2", default-features = false, features = ["std", "derive", "preserve_order"] }
 
 # librdkafka, for the Kafka sink's own producer. The delivery callback lives on
 # the context handed to librdkafka at creation, and scalo's producer context has
@@ -72,52 +72,52 @@ schemars = { version = ">=1.2.1, <2", default-features = false, features = ["std
 rdkafka = { version = ">=0.39, <0.40", features = ["dynamic-linking"] }
 
 # Prometheus metrics (direct dep for counter!/gauge! macros with labels)
-metrics = "0.24"
+metrics = "0.24.6"
 
 # Async runtime
-tokio = { version = "1", features = ["full"] }
-tokio-util = { version = "0.7", features = ["rt", "codec"] }
-tokio-stream = "0.1"
-futures-core = "0.3"
+tokio = { version = "1.53.1", features = ["full"] }
+tokio-util = { version = "0.7.19", features = ["rt", "codec"] }
+tokio-stream = "0.1.19"
+futures-core = "0.3.34"
 
 # JSON (SIMD-accelerated)
-sonic-rs = "0.5"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+sonic-rs = "0.5.10"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 serde_yaml_ng = "0.10"
 
 # HTTP server
-axum = "0.8"
-bytes = "1"
-tower = "0.5"
-tower-http = { version = "0.7", features = ["timeout", "compression-zstd", "limit"] }
-http = "1"
-hyper = { version = "1", features = ["server", "http1", "http2"] }
-hyper-util = { version = "0.1", features = ["tokio", "server", "server-auto", "service"] }
+axum = "0.8.9"
+bytes = "1.12.1"
+tower = "0.5.3"
+tower-http = { version = "0.7.1", features = ["timeout", "compression-zstd", "limit"] }
+http = "1.5.0"
+hyper = { version = "1.11.1", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1.20", features = ["tokio", "server", "server-auto", "service"] }
 
 # gRPC server
-tonic = { version = "0.14", features = ["tls-ring"] }
-tonic-prost = "0.14"
-prost = "0.14"
-prost-types = "0.14"
+tonic = { version = "0.14.6", features = ["tls-ring"] }
+tonic-prost = "0.14.6"
+prost = "0.14.4"
+prost-types = "0.14.4"
 
 
 # TLS
-rustls = "0.23"
+rustls = "0.23.45"
 # PEM parsing via rustls-pki-types PemObject (rustls-pemfile is unmaintained,
 # RUSTSEC-2025-0134). Mirrors scalo src/tls.rs. `std` enables the reader/file iters.
-rustls-pki-types = { version = ">=1.14, <2", features = ["std"] }
-tokio-rustls = "0.26"
+rustls-pki-types = { version = ">=1.15.1, <2", features = ["std"] }
+tokio-rustls = "0.26.5"
 
 # Rate limiting
 tower_governor = { version = "0.8", features = ["axum"] }
 
 # IP filtering (CIDR allowlist/denylist)
-ipnet = "2"
-ipnet-trie = "0.3"
+ipnet = "2.12.2"
+ipnet-trie = "0.3.1"
 
 # Crypto (bearer token hashing for constant-time comparison, webhook HMAC)
-ring = "0.17"
+ring = "0.17.14"
 
 # CEL programs for the webhook per-caller filter. scalo compiles them
 # (`scalo::expression::compile`) but does not re-export the `Program` type, so
@@ -126,77 +126,77 @@ ring = "0.17"
 cel = { version = ">=0.13, <0.14", features = ["json"] }
 
 # Performance
-rustc-hash = "2"
+rustc-hash = "2.1.3"
 compact_str = "0.10"
-parking_lot = "0.12"
+parking_lot = "0.12.5"
 
 # Error handling
-thiserror = "2"
-anyhow = "1"
+thiserror = "2.0.20"
+anyhow = "1.0.104"
 
 # CLI
-clap = { version = "4", features = ["derive", "env"] }
+clap = { version = "4.6.7", features = ["derive", "env"] }
 
 # Logging
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["json", "env-filter"] }
 
 # Syslog parsing (RFC 5424 + RFC 3164)
 syslog_loose = "0.23"
 
 # MessagePack (Fluent Forward protocol)
-rmpv = "1.3"
+rmpv = "1.3.1"
 
 # Compression
-flate2 = "1"
-snap = "1.1"
+flate2 = "1.1.10"
+snap = "1.1.2"
 
 # Encoding
-base64 = "0.23"
+base64 = "0.23.1"
 
 # Utilities
-chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1", features = ["v4"] }
-async-trait = "0.1"
+chrono = { version = "0.4.45", features = ["serde"] }
+uuid = { version = "1.26.1", features = ["v4"] }
+async-trait = "0.1.92"
 
 # Flow handlers (NetFlow, sFlow, IPFIX parsing)
-netgauze-flow-pkt = { version = ">=0.12, <0.13", features = ["serde", "codec"] }
+netgauze-flow-pkt = { version = ">=0.13.0, <0.14", features = ["serde", "codec"] }
 nom = ">=8.0, <9"
-socket2 = ">=0.6.3, <0.7"
-dashmap = ">=6.1, <7"
+socket2 = ">=0.6.5, <0.7"
+dashmap = ">=6.2.1, <7"
 
 # Optional allocator. DFE policy is jemalloc only.
 tikv-jemallocator = { version = "0.7", optional = true }
 
 # Optional pgo-driver dependencies (feature-gated)
-reqwest = { version = "0.13", features = ["json"], optional = true }
+reqwest = { version = "0.13.5", features = ["json"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-nix = { version = ">=0.31, <0.32", features = ["socket", "uio"] }
+nix = { version = ">=0.31.3, <0.32", features = ["socket", "uio"] }
 
 [build-dependencies]
-tonic-prost-build = "0.14"
+tonic-prost-build = "0.14.6"
 
 [dev-dependencies]
-criterion = { version = "0.8", features = ["html_reports"] }
-tempfile = "3"
-proptest = "1"
-tokio-test = "0.4"
-reqwest = { version = "0.13", features = ["json"] }
-dotenvy = "0.15"
+criterion = { version = "0.8.2", features = ["html_reports"] }
+tempfile = "3.27.0"
+proptest = "1.11.0"
+tokio-test = "0.4.5"
+reqwest = { version = "0.13.5", features = ["json"] }
+dotenvy = "0.15.7"
 rdkafka = { version = "0.39", features = ["cmake-build", "ssl", "sasl"] }
-temp-env = { version = "0.3", features = ["async_closure"] }
+temp-env = { version = "0.3.6", features = ["async_closure"] }
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["kafka", "hashicorp_vault", "minio"] }
 pcap-file = ">=2.0, <3"
-sha2 = ">=0.10, <0.12"
+sha2 = ">=0.11.0, <0.12"
 
 # Contract artefact e2e (tests/e2e/contract_artefacts.rs) -- pulls in
 # probe/skip/cluster helpers from scalo's test_support module.
 # transport-grpc-vector-compat is test-only: it gives VectorCompatClient, the
 # same PushEvents client dfe-fetcher and Vector use, so the gRPC ingest path can
 # be driven in-process. Dev-dep features do not reach a release build.
-scalo = { version = ">=2.12.7, <3", features = [
+scalo = { version = ">=2.12.8, <3", features = [
     "deployment-test-support",
     "transport-grpc-vector-compat",
 ] }
