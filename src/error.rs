@@ -55,8 +55,9 @@ pub enum Error {
     Transport(String),
 
     /// The record itself can never be delivered, proven from the record alone
-    /// (over the destination's size ceiling). A destination refusal the record
-    /// does not prove -- one that may apply to every record -- is `Transport`.
+    /// (over the destination's size ceiling, or routed to a DLQ by a transport
+    /// filter). A destination refusal the record does not prove -- one that may
+    /// apply to every record -- is `Transport`.
     #[error("record rejected by destination: {0}")]
     Rejected(String),
 

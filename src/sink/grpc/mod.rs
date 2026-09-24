@@ -72,16 +72,16 @@ impl GrpcSink {
 /// The receiver's verdict on one Push result.
 ///
 /// scalo's `Fatal` carries no gRPC status, so a refusal of this one record
-/// cannot be told from a destination refusing every record. Both stay
-/// transient: queued, retried in order, never dropped.
+/// cannot be told from a destination refusing every record: it stays
+/// transient, queued and retried in order. `FilteredDlq` is scalo's verdict on
+/// the record itself, which a retry would only repeat, so it is rejected.
 pub(crate) fn push_outcome(result: SendResult) -> Result<()> {
     match result {
         SendResult::Ok => Ok(()),
         SendResult::Backpressured => Err(Error::Transport("gRPC loader backpressured".into())),
         SendResult::Fatal(e) => Err(Error::Transport(format!("gRPC loader send failed: {e}"))),
-        // A filtered record must not be silently dropped.
-        SendResult::FilteredDlq => Err(Error::Transport(
-            "gRPC transport filtered the record for a dead-letter queue".into(),
+        SendResult::FilteredDlq => Err(Error::Rejected(
+            "gRPC transport routed the record to a dead-letter queue".into(),
         )),
     }
 }
@@ -156,8 +156,8 @@ mod tests {
         assert_eq!(config.send_timeout_ms, default);
     }
 
-    /// Only the record itself can prove a refusal permanent, so every failed
-    /// Push stays transient.
+    /// Only the record itself can prove a refusal permanent: a destination's
+    /// refusal stays transient, and scalo's per-record `FilteredDlq` is rejected.
     #[test]
     fn a_destination_refusal_stays_transient() {
         use scalo::transport::TransportError;
@@ -173,7 +173,7 @@ mod tests {
         ));
         assert!(matches!(
             push_outcome(SendResult::FilteredDlq),
-            Err(Error::Transport(_))
+            Err(Error::Rejected(_))
         ));
     }
 
