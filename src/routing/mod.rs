@@ -1028,7 +1028,7 @@ mod tests {
         );
 
         match router.route_dlq("test error") {
-            RouteResult::Dlq(topic) => assert_eq!(topic, "dlq_land"),
+            RouteResult::Dlq(topic) => assert_eq!(topic, "dfe_receiver_dlq"),
             RouteResult::Send { .. } => panic!("expected DLQ route"),
         }
     }

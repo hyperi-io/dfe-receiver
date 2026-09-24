@@ -402,7 +402,7 @@ routing:
   #   auth: "logs_auth"
   dlq:
     enabled: true
-    topic: "dlq_land"
+    topic: "dfe_receiver_dlq"
 
 # The named destination set. `kafka` (the bus, under the topic the record's
 # source resolves to) and `loader` (per the loader block below) are always

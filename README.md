@@ -262,7 +262,7 @@ routing:
       topic: "logs_auth"
   dlq:
     enabled: true
-    topic: "dlq_land"
+    topic: "dfe_receiver_dlq"
 ```
 
 Given `{"event": {"category": "auth"}}`, routes to `logs_auth_land`.

@@ -1807,7 +1807,7 @@ impl Default for DlqConfig {
         Self {
             enabled: true,
             mode: "cascade".to_string(),
-            topic: "dlq_land".to_string(),
+            topic: "dfe_receiver_dlq".to_string(),
             topic_suffix: ".dlq".to_string(),
             file_enabled: true,
             file_path: "/var/spool/dfe/dlq".to_string(),

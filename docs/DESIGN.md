@@ -266,7 +266,7 @@ routing:
   #   auth: "logs_auth"
   dlq:
     enabled: true
-    topic: "dlq_land"
+    topic: "dfe_receiver_dlq"
 
 kafka:
   brokers: ["kafka.example.com:9094"]
