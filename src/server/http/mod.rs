@@ -45,7 +45,7 @@ use tracing::{debug, error, info, warn};
 use scalo::logger::security::{self, SecurityOutcome};
 
 use crate::config::{AuthConfig, SharedConfig};
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, unavailable_response};
 use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
 use crate::server::auth::{AuthState, BearerTokenProvider, token_auth_middleware};
@@ -669,12 +669,7 @@ async fn ingest_handler(
         state.metrics.inc_requests_total("http");
         state.metrics.inc_requests_error("http");
         state.metrics.record_backpressure();
-        return Ok((
-            StatusCode::SERVICE_UNAVAILABLE,
-            [("retry-after", "5")],
-            "server is overloaded",
-        )
-            .into_response());
+        return Ok(unavailable_response("server is overloaded"));
     }
 
     let body_len = body.len();
@@ -699,11 +694,12 @@ async fn ingest_handler(
         _ => 1,
     };
     // A batch fails as a whole, so without the count a partial failure and a
-    // total one look the same.
+    // total one look the same. A retryable failure is the answer over an
+    // earlier refusal, so the sender resends rather than dropping the batch.
     let (accepted, result) = match batch {
         Some(Ok(payloads)) => {
-            let (accepted, first_err) = state.pipeline.process_batch(&payloads).await;
-            (accepted, first_err.map_or(Ok(()), Err))
+            let outcome = state.pipeline.process_batch(&payloads).await;
+            (outcome.accepted, outcome.into_error().map_or(Ok(()), Err))
         }
         Some(Err(oversize)) => (0, Err(oversize)),
         None => {

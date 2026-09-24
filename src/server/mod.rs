@@ -17,6 +17,7 @@ pub mod flow;
 pub mod fluent;
 pub mod gelf;
 pub mod grpc;
+mod hold;
 pub mod http;
 pub mod ip_filter;
 pub mod lumberjack;

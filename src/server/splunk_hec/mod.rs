@@ -36,9 +36,9 @@ use tower_http::timeout::TimeoutLayer;
 use tracing::{debug, info};
 
 use crate::config::{RawCapture, SplunkHecConfig};
-use crate::error::{Error, Result};
+use crate::error::{Error, RETRY_AFTER_SECS, Result};
 use crate::metrics::Metrics;
-use crate::pipeline::PipelineState;
+use crate::pipeline::{BatchOutcome, PipelineState};
 use crate::server::http::create_auth_state;
 use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
 use crate::server::traits::{BoundAddr, ProtocolHandler};
@@ -173,6 +173,8 @@ impl HecError {
         }
     }
 
+    /// Splunk's own answer when it cannot take every event: 503, code 9. HEC
+    /// senders retry a 503 and honour `Retry-After`.
     fn server_busy() -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
@@ -186,8 +188,40 @@ impl HecError {
 
 impl IntoResponse for HecError {
     fn into_response(self) -> Response {
+        if self.status == StatusCode::SERVICE_UNAVAILABLE {
+            let retry_after = axum::http::HeaderValue::from(RETRY_AFTER_SECS);
+            return (
+                self.status,
+                [(axum::http::header::RETRY_AFTER, retry_after)],
+                Json(self.response),
+            )
+                .into_response();
+        }
         (self.status, Json(self.response)).into_response()
     }
+}
+
+/// The HEC answer to a batch: busy if any event could not be taken, so the
+/// sender resends the request; invalid data if any was refused for good.
+fn batch_answer(
+    state: &HecState,
+    transport: &str,
+    events: usize,
+    outcome: BatchOutcome,
+) -> std::result::Result<Json<HecResponse>, HecError> {
+    if let Some(e) = outcome.unavailable {
+        debug!(transport, events, accepted = outcome.accepted, error = %e, "HEC request not fully taken; answering busy");
+        state.metrics.inc_requests_error("splunk_hec");
+        state.metrics.record_backpressure();
+        return Err(HecError::server_busy());
+    }
+    if let Some(e) = outcome.first_rejection {
+        debug!(transport, events, rejected = outcome.rejected, error = %e, "HEC request carried events refused for good");
+        state.metrics.inc_requests_error("splunk_hec");
+        return Err(HecError::invalid_data(&e.to_string()));
+    }
+    state.metrics.inc_requests_success("splunk_hec");
+    Ok(Json(HecResponse::success()))
 }
 
 // ---------------------------------------------------------------------------
@@ -381,36 +415,14 @@ async fn event_handler(
     }
 
     let start = std::time::Instant::now();
-    let (success, first_err) = state.pipeline.process_batch(&payloads).await;
-
-    if let Some(ref e) = first_err {
-        let failed = event_count - success;
-        debug!(
-            transport = "splunk_hec",
-            success = success,
-            failed = failed,
-            error = %e,
-            "HEC batch partially failed"
-        );
-        if success == 0 {
-            state.metrics.inc_requests_error("splunk_hec");
-            return if e.to_string().contains("pressure") {
-                Err(HecError::server_busy())
-            } else {
-                Err(HecError::internal(&e.to_string()))
-            };
-        }
-        // Partial success -- report success to client (events are fire-and-forget)
-    }
-
+    let outcome = state.pipeline.process_batch(&payloads).await;
     debug!(
         transport = "splunk_hec",
         events = event_count,
         duration_us = start.elapsed().as_micros(),
         "HEC event request completed"
     );
-    state.metrics.inc_requests_success("splunk_hec");
-    Ok(Json(HecResponse::success()))
+    batch_answer(&state, "splunk_hec", event_count, outcome)
 }
 
 /// `POST /services/collector/raw` -- Raw text events.
@@ -477,27 +489,7 @@ async fn raw_handler(
     let line_count = payloads.len();
 
     let start = std::time::Instant::now();
-    let (success, first_err) = state.pipeline.process_batch(&payloads).await;
-
-    if let Some(ref e) = first_err {
-        let failed = line_count - success;
-        debug!(
-            transport = "splunk_hec_raw",
-            success = success,
-            failed = failed,
-            error = %e,
-            "HEC raw batch partially failed"
-        );
-        if success == 0 {
-            state.metrics.inc_requests_error("splunk_hec");
-            return if e.to_string().contains("pressure") {
-                Err(HecError::server_busy())
-            } else {
-                Err(HecError::internal(&e.to_string()))
-            };
-        }
-    }
-
+    let outcome = state.pipeline.process_batch(&payloads).await;
     debug!(
         transport = "splunk_hec_raw",
         lines = line_count,
@@ -505,8 +497,7 @@ async fn raw_handler(
         duration_us = start.elapsed().as_micros(),
         "HEC raw request completed"
     );
-    state.metrics.inc_requests_success("splunk_hec");
-    Ok(Json(HecResponse::success()))
+    batch_answer(&state, "splunk_hec_raw", line_count, outcome)
 }
 
 /// `GET /services/collector/health` -- Health check.

@@ -35,10 +35,10 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::config::{PrometheusRwConfig, RawCapture};
-use crate::error::{Error, Result};
+use crate::error::{Error, RETRY_AFTER_SECS, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
 use crate::server::http::create_auth_state;
@@ -293,17 +293,19 @@ async fn write_handler(
         RwError::internal(&e.to_string())
     })?;
 
-    // Batch-process all events through the pipeline
-    let (success, first_err) = state.pipeline.process_batch(&events).await;
-    if let Some(ref e) = first_err
-        && success == 0
-    {
+    // Remote Write senders MUST retry a 5xx and MUST NOT retry a 4xx other
+    // than 429, so a sample the pipeline could not take answers 503 and one it
+    // refused for good answers 400.
+    let outcome = state.pipeline.process_batch(&events).await;
+    if let Some(e) = outcome.unavailable {
+        debug!(samples = events.len(), accepted = outcome.accepted, error = %e, "Remote Write request not fully taken");
         state.metrics.inc_requests_error("prometheus_rw");
-        return if e.to_string().contains("pressure") {
-            Err(RwError::service_unavailable("backpressure"))
-        } else {
-            Err(RwError::internal(&e.to_string()))
-        };
+        state.metrics.record_backpressure();
+        return Err(RwError::service_unavailable("server is overloaded"));
+    }
+    if let Some(e) = outcome.first_rejection {
+        state.metrics.inc_requests_error("prometheus_rw");
+        return Err(RwError::bad_request(&e.to_string()));
     }
 
     state.metrics.inc_requests_success("prometheus_rw");
@@ -348,6 +350,15 @@ impl RwError {
 
 impl IntoResponse for RwError {
     fn into_response(self) -> Response {
+        if self.status == StatusCode::SERVICE_UNAVAILABLE {
+            let retry_after = axum::http::HeaderValue::from(RETRY_AFTER_SECS);
+            return (
+                self.status,
+                [(axum::http::header::RETRY_AFTER, retry_after)],
+                self.message,
+            )
+                .into_response();
+        }
         (self.status, self.message).into_response()
     }
 }

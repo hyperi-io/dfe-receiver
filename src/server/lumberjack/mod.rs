@@ -31,7 +31,7 @@ static LUMBERJACK_ERRORS: AtomicU64 = AtomicU64::new(0);
 
 use crate::config::LumberjackConfig;
 use crate::error::{Error, Result};
-use crate::metrics::Metrics;
+use crate::metrics::{DropReason, Metrics};
 use crate::pipeline::PipelineState;
 use crate::server::ip_filter::IpFilter;
 use crate::server::traits::{BoundAddr, ProtocolHandler};
@@ -44,10 +44,63 @@ const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 // Per-connection handler
 // ---------------------------------------------------------------------------
 
+/// Offer one event to the pipeline. False when the pipeline could not take it
+/// and the client must send it again.
+///
+/// An event refused for good counts as settled: Lumberjack has no refusal,
+/// and a resend would be refused again.
+async fn take_event(
+    pipeline: &PipelineState,
+    metrics: &Metrics,
+    peer_addr: SocketAddr,
+    sequence: u32,
+    payload: bytes::Bytes,
+) -> bool {
+    metrics.inc_requests_total("lumberjack");
+    metrics.add_bytes_received("lumberjack", payload.len() as u64);
+
+    let Err(e) = pipeline.process(payload).await else {
+        metrics.inc_requests_success("lumberjack");
+        return true;
+    };
+    if scalo::logger::log_sampled(&LUMBERJACK_ERRORS, 100) {
+        let total = LUMBERJACK_ERRORS.load(Ordering::Relaxed);
+        warn!(peer = %peer_addr, seq = sequence, error = %e, total_errors = total, "Lumberjack event error (1 in 100)");
+    }
+    metrics.inc_requests_error("lumberjack");
+    if e.is_retryable() {
+        metrics.record_backpressure();
+        return false;
+    }
+    metrics.add_records_dropped("lumberjack", DropReason::Rejected, 1);
+    true
+}
+
+/// Acknowledge every event up to `sequence`, then close: the client resends
+/// the rest of its window on a new connection.
+///
+/// The go-lumber client that Beats uses reads a partial ACK as progress and a
+/// closed connection as an error, on which Beats re-queues the window's
+/// unacknowledged events.
+async fn ack_and_close<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    sequence: u32,
+    peer_addr: SocketAddr,
+) {
+    if sequence > 0
+        && let Err(e) = writer.write_all(&encode_ack(sequence)).await
+    {
+        debug!(peer = %peer_addr, error = %e, "Failed to send partial ACK");
+    }
+    debug!(peer = %peer_addr, acked = sequence, "Lumberjack event not taken; closing so the client resends");
+}
+
 /// Handle a single Lumberjack v2 client connection.
 ///
 /// Reads frames in a loop, processes JSON payloads through the pipeline,
-/// and sends ACKs after completing each window.
+/// and sends ACKs after completing each window. An event the pipeline cannot
+/// take ends the connection after a partial ACK for the events before it, so
+/// the client resends it and nothing behind it is acknowledged.
 async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin>(
     stream: S,
     pipeline: Arc<PipelineState>,
@@ -59,6 +112,8 @@ async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin>(
     let mut window_size: u32 = 0;
     let mut events_in_window: u32 = 0;
     let mut last_sequence: u32 = 0;
+    // The last sequence in the current window the pipeline settled.
+    let mut settled: u32 = 0;
 
     loop {
         let frame = tokio::select! {
@@ -85,6 +140,7 @@ async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin>(
             Frame::Window { size } => {
                 window_size = size;
                 events_in_window = 0;
+                settled = 0;
                 debug!(peer = %peer_addr, window_size, "Lumberjack window started");
             }
 
@@ -92,18 +148,11 @@ async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin>(
                 last_sequence = sequence;
                 events_in_window += 1;
 
-                metrics.inc_requests_total("lumberjack");
-                metrics.add_bytes_received("lumberjack", payload.len() as u64);
-
-                if let Err(e) = pipeline.process(payload).await {
-                    if scalo::logger::log_sampled(&LUMBERJACK_ERRORS, 100) {
-                        let total = LUMBERJACK_ERRORS.load(Ordering::Relaxed);
-                        warn!(peer = %peer_addr, seq = sequence, error = %e, total_errors = total, "Lumberjack event error (1 in 100)");
-                    }
-                    metrics.inc_requests_error("lumberjack");
-                } else {
-                    metrics.inc_requests_success("lumberjack");
+                if !take_event(&pipeline, &metrics, peer_addr, sequence, payload).await {
+                    ack_and_close(reader.get_mut(), settled, peer_addr).await;
+                    return;
                 }
+                settled = sequence;
 
                 // ACK after window is complete
                 if window_size > 0 && events_in_window >= window_size {
@@ -131,23 +180,18 @@ async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin>(
                         Frame::Window { size } => {
                             window_size = size;
                             events_in_window = 0;
+                            settled = 0;
                         }
                         Frame::JsonData { sequence, payload } => {
                             last_sequence = sequence;
                             events_in_window += 1;
 
-                            metrics.inc_requests_total("lumberjack");
-                            metrics.add_bytes_received("lumberjack", payload.len() as u64);
-
-                            if let Err(e) = pipeline.process(payload).await {
-                                if scalo::logger::log_sampled(&LUMBERJACK_ERRORS, 100) {
-                                    let total = LUMBERJACK_ERRORS.load(Ordering::Relaxed);
-                                    warn!(peer = %peer_addr, seq = sequence, error = %e, total_errors = total, "Lumberjack event error (1 in 100)");
-                                }
-                                metrics.inc_requests_error("lumberjack");
-                            } else {
-                                metrics.inc_requests_success("lumberjack");
+                            if !take_event(&pipeline, &metrics, peer_addr, sequence, payload).await
+                            {
+                                ack_and_close(reader.get_mut(), settled, peer_addr).await;
+                                return;
                             }
+                            settled = sequence;
                         }
                         Frame::Compressed { .. } => {
                             warn!(peer = %peer_addr, "Nested compressed frame rejected");

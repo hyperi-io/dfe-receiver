@@ -115,17 +115,19 @@ On the shared listener the caller's secret is the only credential needed --
 
 | Status | Meaning | `error` field |
 |---|---|---|
-| 202 | Accepted, including a record the filter dropped | -- |
-| 400 | The body shape is wrong for the declared `body` | `body_not_an_array`, `record_not_an_object` |
+| 202 | Every record accepted, including a record the filter dropped | -- |
+| 400 | The body shape is wrong for the declared `body`, or validation refused a record for good | `body_not_an_array`, `record_not_an_object`, or the validation reason |
 | 401 | Authentication failed | `missing_signature`, `invalid_signature`, `stale_signature`, `missing_auth_header`, `invalid_header_value` |
 | 404 | No caller of that name is declared | `unknown_caller` |
 | 413 | Over `webhook.max_body_size`; counted, never sent to the DLQ | -- |
 | 429 | `server.rate_limit` exhausted; carries `retry-after` | -- |
-| 503 | The pipeline is under memory pressure; carries `retry-after` | -- |
+| 503 | A record could not be taken -- memory pressure, a full hold, the bus down; carries `retry-after` | -- |
 
 A 401 is the sender's problem and a 503 is ours, so treat them differently when
 configuring the product's retry behaviour: 503 and 429 should be retried, and a
-401 should page whoever rotated the secret.
+401 should page whoever rotated the secret. A 503 can follow records of the
+same request that were taken, so a retry delivers those twice -- never zero
+times.
 
 ## Proving it works
 

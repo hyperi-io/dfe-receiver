@@ -77,6 +77,47 @@ pub enum Error {
 /// Result type alias for dfe-receiver operations.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Seconds a sender told to retry is asked to wait first.
+pub const RETRY_AFTER_SECS: u64 = 5;
+
+impl Error {
+    /// Whether the same record, sent again, could be taken.
+    ///
+    /// False only where the record itself is the cause: malformed, refused by
+    /// a destination for its content or size, or sent without valid
+    /// credentials. Everything else is the receiver or what sits behind it,
+    /// so the sender keeps the record and retries rather than losing it.
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Error::Validation(_) | Error::Routing(_) | Error::Rejected(_) | Error::Auth(_) => false,
+            Error::Config(_)
+            | Error::Kafka(_)
+            | Error::Io(_)
+            | Error::Tls(_)
+            | Error::Server(_)
+            | Error::Transport(_)
+            | Error::Buffer(_)
+            | Error::Shutdown
+            | Error::Secrets(_) => true,
+        }
+    }
+}
+
+/// A 503 with `Retry-After`, the answer every HTTP listener gives when it
+/// could not take a record right now.
+pub fn unavailable_response(message: &'static str) -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(
+            axum::http::header::RETRY_AFTER,
+            axum::http::HeaderValue::from(RETRY_AFTER_SECS),
+        )],
+        message,
+    )
+        .into_response()
+}
+
 impl From<String> for Error {
     fn from(s: String) -> Self {
         Error::Config(s)
@@ -102,32 +143,47 @@ impl From<serde_json::Error> for Error {
 }
 
 /// Convert errors to HTTP responses for axum handlers.
+///
+/// A retryable error is a 503 with `Retry-After`, never a 500: most senders
+/// treat a 500 as final, and a record they drop is lost.
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
             Error::Validation(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             Error::Auth(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),
             Error::Routing(_) => (StatusCode::BAD_REQUEST, "routing error".to_string()),
-            Error::Kafka(_) | Error::Transport(_) => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "service unavailable".to_string(),
-            ),
+            Error::Rejected(_) => (StatusCode::BAD_REQUEST, "record rejected".to_string()),
             Error::Buffer(_) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "service under pressure".to_string(),
             ),
             Error::Shutdown => (StatusCode::SERVICE_UNAVAILABLE, "shutting down".to_string()),
-            _ => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal error".to_string(),
+            Error::Kafka(_)
+            | Error::Transport(_)
+            | Error::Config(_)
+            | Error::Io(_)
+            | Error::Tls(_)
+            | Error::Server(_)
+            | Error::Secrets(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "service unavailable".to_string(),
             ),
         };
 
-        let body = serde_json::json!({
+        let body = axum::Json(serde_json::json!({
             "error": message,
-        });
+        }));
 
-        (status, axum::Json(body)).into_response()
+        if status == StatusCode::SERVICE_UNAVAILABLE {
+            let retry_after = axum::http::HeaderValue::from(RETRY_AFTER_SECS);
+            return (
+                status,
+                [(axum::http::header::RETRY_AFTER, retry_after)],
+                body,
+            )
+                .into_response();
+        }
+        (status, body).into_response()
     }
 }
 
@@ -290,13 +346,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_response_config_returns_500_without_detail() {
+    async fn test_response_config_returns_503_without_detail() {
         // Config errors are internal — should never expose config contents
         let (status, body) = response_status_and_body(Error::Config(
             "failed to parse DATABASE_URL=postgres://secret:pass@host/db".into(),
         ))
         .await;
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert!(
             !body.contains("DATABASE_URL"),
             "env var name leaked: {body}"
@@ -306,26 +362,94 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_response_tls_returns_500_without_detail() {
+    async fn test_response_tls_returns_503_without_detail() {
         // TLS errors should NOT leak cert paths or key details
         let (status, body) = response_status_and_body(Error::Tls(
             "/etc/secrets/private-key.pem: permission denied".into(),
         ))
         .await;
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert!(!body.contains("private-key.pem"), "key path leaked: {body}");
         assert!(!body.contains("/etc/secrets"));
     }
 
     #[tokio::test]
-    async fn test_response_io_returns_500_without_path() {
+    async fn test_response_io_returns_503_without_path() {
         let io_err = std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "/var/secret/config.yaml: not found",
         );
         let err: Error = io_err.into();
         let (status, body) = response_status_and_body(err).await;
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert!(!body.contains("/var/secret"));
+    }
+
+    /// One of every variant, for tests that must cover the whole enum.
+    fn every_variant() -> Vec<Error> {
+        vec![
+            Error::Config("c".into()),
+            Error::Validation("v".into()),
+            Error::Routing("r".into()),
+            Error::Kafka("k".into()),
+            Error::Io(std::io::Error::other("io")),
+            Error::Tls("t".into()),
+            Error::Auth("a".into()),
+            Error::Server("s".into()),
+            Error::Transport("tp".into()),
+            Error::Rejected("rj".into()),
+            Error::Buffer("b".into()),
+            Error::Shutdown,
+            Error::Secrets(scalo::SecretsError::NotFound("s".into())),
+        ]
+    }
+
+    /// Only a record's own fault is final; a sender keeps anything else and
+    /// retries it.
+    #[test]
+    fn only_a_fault_of_the_record_itself_is_not_retryable() {
+        for err in every_variant() {
+            let record_at_fault = matches!(
+                err,
+                Error::Validation(_) | Error::Routing(_) | Error::Rejected(_) | Error::Auth(_)
+            );
+            assert_eq!(err.is_retryable(), !record_at_fault, "{err}");
+        }
+    }
+
+    /// The HTTP answer and the classification agree: every retryable error is
+    /// a 503 carrying `Retry-After`, and no final one is.
+    #[tokio::test]
+    async fn every_retryable_error_answers_503_with_retry_after() {
+        for err in every_variant() {
+            let retryable = err.is_retryable();
+            let label = err.to_string();
+            let response = err.into_response();
+            assert_eq!(
+                response.status() == StatusCode::SERVICE_UNAVAILABLE,
+                retryable,
+                "{label} answered {}",
+                response.status()
+            );
+            let retry_after = response
+                .headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .map(|v| v.to_str().unwrap().to_string());
+            let expected = retryable.then(|| RETRY_AFTER_SECS.to_string());
+            assert_eq!(retry_after, expected, "{label}");
+        }
+    }
+
+    #[test]
+    fn the_unavailable_response_carries_retry_after() {
+        let response = unavailable_response("busy");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .unwrap(),
+            &RETRY_AFTER_SECS.to_string()
+        );
     }
 }

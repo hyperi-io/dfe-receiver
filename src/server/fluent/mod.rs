@@ -28,8 +28,9 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::{FluentConfig, RawCapture};
 use crate::error::{Error, Result};
-use crate::metrics::Metrics;
+use crate::metrics::{DropReason, Metrics};
 use crate::pipeline::PipelineState;
+use crate::server::hold::hold_until_settled;
 use crate::server::ip_filter::IpFilter;
 use crate::server::traits::{BoundAddr, ProtocolHandler};
 use convert::{extract_chunk_id, fluent_to_json};
@@ -41,11 +42,31 @@ const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 // TCP per-connection handler
 // ---------------------------------------------------------------------------
 
+/// Write the `{"ack": chunk}` response the Forward protocol returns for a chunk
+/// the server took.
+async fn send_ack<S: AsyncWrite + Unpin>(stream: &mut S, chunk: &str, peer_addr: SocketAddr) {
+    let ack = rmpv::Value::Map(vec![(
+        rmpv::Value::String("ack".into()),
+        rmpv::Value::String(chunk.into()),
+    )]);
+    let mut ack_buf = Vec::new();
+    if rmpv::encode::write_value(&mut ack_buf, &ack).is_ok()
+        && let Err(e) = stream.write_all(&ack_buf).await
+    {
+        debug!(peer = %peer_addr, error = %e, "Failed to send Fluent ACK");
+    }
+}
+
 /// Handle a single Fluent Forward TCP connection.
 ///
 /// Reads msgpack values from the stream, converts them to JSON, and
-/// processes through the pipeline. Sends ACK responses when the client
-/// includes a `chunk` option.
+/// processes through the pipeline.
+///
+/// A message carrying the `chunk` option is acknowledged only once the
+/// pipeline has settled every record in it. One it could not take gets no
+/// ack and the connection closes, which the Forward protocol's senders read as
+/// "resend the chunk". A message without `chunk` has no ack to withhold, so it
+/// is held, and the socket not read, until the pipeline takes it.
 async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
     mut stream: S,
     pipeline: Arc<PipelineState>,
@@ -109,35 +130,41 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
                     // Check for chunk ACK before processing
                     let chunk_id = extract_chunk_id(&msg);
 
-                    match fluent_to_json(&msg, raw_capture) {
-                        Ok(payloads) => {
-                            let (success, first_err) = pipeline.process_batch(&payloads).await;
-                            if first_err.is_some() {
-                                let failed = payloads.len() - success;
-                                debug!(peer = %peer_addr, success = success, failed = failed, "Fluent batch partially failed");
+                    match (fluent_to_json(&msg, raw_capture), chunk_id.as_deref()) {
+                        (Ok(payloads), Some(chunk)) => {
+                            let outcome = pipeline.process_batch(&payloads).await;
+                            if let Some(e) = outcome.unavailable {
+                                // No ack is the Forward protocol's retry signal; closing makes the
+                                // sender see it now rather than at its ack timeout.
+                                debug!(peer = %peer_addr, error = %e, accepted = outcome.accepted, "Fluent Forward chunk not taken; withholding the ack");
                                 metrics.inc_requests_error("fluent");
-                            } else {
+                                metrics.record_backpressure();
+                                return;
+                            }
+                            // The ack covers a record refused for good too: Forward has no refusal,
+                            // and a resend would be refused again.
+                            metrics.add_records_dropped("fluent", DropReason::Rejected, outcome.rejected as u64);
+                            if outcome.rejected == 0 {
                                 metrics.inc_requests_success("fluent");
+                            } else {
+                                metrics.inc_requests_error("fluent");
+                            }
+                            send_ack(&mut stream, chunk, peer_addr).await;
+                        }
+                        (Ok(payloads), None) => {
+                            if !hold_until_settled(&pipeline, &payloads, &metrics, "fluent", &shutdown).await {
+                                debug!(peer = %peer_addr, "Fluent Forward connection closing (shutdown during a hold)");
+                                return;
                             }
                         }
-                        Err(e) => {
+                        (Err(e), chunk) => {
                             debug!(peer = %peer_addr, error = %e, "Fluent Forward parse error");
                             metrics.inc_parse_failure("fluent");
                             metrics.inc_requests_error("fluent");
-                        }
-                    }
-
-                    // Send ACK response if chunk ID was provided
-                    if let Some(ref chunk) = chunk_id {
-                        let ack = rmpv::Value::Map(vec![(
-                            rmpv::Value::String("ack".into()),
-                            rmpv::Value::String(chunk.clone().into()),
-                        )]);
-                        let mut ack_buf = Vec::new();
-                        if rmpv::encode::write_value(&mut ack_buf, &ack).is_ok()
-                            && let Err(e) = stream.write_all(&ack_buf).await
-                        {
-                            debug!(peer = %peer_addr, error = %e, "Failed to send Fluent ACK");
+                            // A malformed message fails the same way every time it is sent.
+                            if let Some(chunk) = chunk {
+                                send_ack(&mut stream, chunk, peer_addr).await;
+                            }
                         }
                     }
 

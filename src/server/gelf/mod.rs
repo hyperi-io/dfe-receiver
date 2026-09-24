@@ -30,6 +30,7 @@ use crate::config::{GelfConfig, RawCapture};
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
+use crate::server::hold::hold_until_settled;
 use crate::server::ip_filter::IpFilter;
 use crate::server::traits::{BoundAddr, ProtocolHandler};
 use convert::gelf_to_json;
@@ -108,6 +109,10 @@ impl Decoder for GelfFrameDecoder {
 // TCP per-connection handler
 // ---------------------------------------------------------------------------
 
+/// Handle a single GELF TCP connection.
+///
+/// A message the pipeline cannot take is held, and the socket is not read,
+/// until it can: null-delimited GELF has no acknowledgement to ask for a retry.
 async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
     stream: S,
     pipeline: Arc<PipelineState>,
@@ -135,11 +140,10 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
 
                         match gelf_to_json(&raw, raw_capture) {
                             Ok(payload) => {
-                                if let Err(e) = pipeline.process(payload).await {
-                                    debug!(peer = %peer_addr, error = %e, "Failed to process GELF event");
-                                    metrics.inc_requests_error("gelf");
-                                } else {
-                                    metrics.inc_requests_success("gelf");
+                                let held = [payload];
+                                if !hold_until_settled(&pipeline, &held, &metrics, "gelf", &shutdown).await {
+                                    debug!(peer = %peer_addr, "GELF TCP connection closing (shutdown during a hold)");
+                                    break;
                                 }
                             }
                             Err(e) => {
