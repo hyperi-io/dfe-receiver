@@ -24,8 +24,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use parking_lot::Mutex;
 use scalo::tiered_sink::{CircuitBreaker, CircuitState};
-use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::config::{BufferConfig, QueueBound};
 use crate::error::Result;
@@ -33,6 +32,10 @@ use crate::sink::Sink;
 
 /// Messages taken per drain cycle.
 const DRAIN_BATCH: usize = 100;
+
+/// How long `flush` keeps draining before it gives up and reports what is left.
+/// Sits under a Kubernetes `terminationGracePeriodSeconds` of 30.
+const FLUSH_DEADLINE: Duration = Duration::from_secs(10);
 
 /// Message queued during sink unavailability.
 #[derive(Clone)]
@@ -221,25 +224,34 @@ impl<S: Sink + Send + Sync + 'static> InMemoryBuffer<S> {
         }
     }
 
-    /// Start background drain task.
-    pub fn start_drain_task(self: Arc<Self>, shutdown: CancellationToken) {
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_millis(100));
-
-            loop {
-                tokio::select! {
-                    _ = shutdown.cancelled() => {
-                        info!("Drain task stopping");
-                        // Final drain attempt
-                        let _ = self.try_drain().await;
-                        break;
-                    }
-                    _ = interval.tick() => {
-                        let _ = self.try_drain().await;
-                    }
-                }
+    /// Move queued records into the primary until the queue empties, a drain
+    /// stops making progress, or the deadline passes.
+    async fn drain_until_idle(&self) {
+        let deadline = tokio::time::Instant::now() + FLUSH_DEADLINE;
+        loop {
+            let queued = self.spill_queue.lock().messages.len();
+            if queued == 0 {
+                break;
             }
-        });
+            if self.try_drain().await == 0 {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                let remaining = self.spill_queue.lock().messages.len();
+                warn!(remaining, "Drain deadline reached, records still queued");
+                break;
+            }
+        }
+    }
+
+    /// Drain queued records into the primary, leaving the primary's own
+    /// in-flight records alone.
+    ///
+    /// This is what the periodic drain runs. A queued record waiting on a
+    /// broker outage is not a lost record, so this path must not call
+    /// [`Sink::flush`], whose timeout reports records lost on exit.
+    pub async fn drain_queued(&self) {
+        self.drain_until_idle().await;
     }
 }
 
@@ -299,15 +311,16 @@ impl<S: Sink + Send + Sync + 'static> Sink for InMemoryBuffer<S> {
         }
     }
 
-    /// Flush the sink and try to drain queued messages.
+    /// Flush the sink and drain queued messages.
     async fn flush(&self) -> Result<()> {
         // Flush primary
         if let Err(e) = self.primary.flush().await {
             debug!(error = %e, "Primary flush failed");
         }
 
-        // Try to drain
-        self.try_drain().await;
+        // try_drain moves at most DRAIN_BATCH per call, so one call leaves the
+        // rest of the queue behind.
+        self.drain_until_idle().await;
 
         Ok(())
     }
@@ -323,7 +336,7 @@ impl<S: Sink + Send + Sync + 'static> Sink for InMemoryBuffer<S> {
 mod tests {
     use super::*;
     use crate::error::Error;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
 
     /// Test sink that can be configured to fail.
     struct TestSink {
@@ -509,6 +522,89 @@ mod tests {
             3,
             "the records behind the failure were dropped"
         );
+    }
+
+    /// Sink that refuses until `accept` is set, and counts its flushes.
+    struct FlakySink {
+        accept: AtomicBool,
+        flushes: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Sink for FlakySink {
+        async fn send(&self, _topic: &str, _payload: Bytes) -> Result<()> {
+            if self.accept.load(Ordering::Relaxed) {
+                Ok(())
+            } else {
+                Err(Error::Transport("refusing".into()))
+            }
+        }
+
+        async fn flush(&self) -> Result<()> {
+            self.flushes.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn is_healthy(&self) -> bool {
+            true
+        }
+    }
+
+    /// Queue more than one drain batch, with the circuit opened by the failures
+    /// that queued them.
+    async fn buffer_with_a_full_queue(queued: usize) -> InMemoryBuffer<FlakySink> {
+        let buffer = InMemoryBuffer::new(
+            FlakySink {
+                accept: AtomicBool::new(false),
+                flushes: AtomicUsize::new(0),
+            },
+            &test_config(),
+        );
+
+        for _ in 0..queued {
+            let _ = buffer.send("t", Bytes::from("data")).await;
+        }
+        assert_eq!(buffer.stats().await.queue_size, queued);
+
+        // Let the primary take them, and close the circuit those failures opened.
+        buffer.primary.accept.store(true, Ordering::Relaxed);
+        buffer.circuit.reset().await;
+        buffer
+    }
+
+    /// `flush` empties the queue rather than stopping after `DRAIN_BATCH`.
+    #[tokio::test]
+    async fn flush_drains_past_a_single_batch() {
+        let queued = DRAIN_BATCH * 2 + 7;
+        let buffer = buffer_with_a_full_queue(queued).await;
+
+        buffer.flush().await.unwrap();
+
+        assert_eq!(
+            buffer.stats().await.queue_size,
+            0,
+            "flush stopped short of the whole queue"
+        );
+        assert_eq!(buffer.stats().await.drained_total, queued as u64);
+    }
+
+    /// The periodic drain moves the queue without flushing the primary, whose
+    /// timeout reports records lost on exit.
+    #[tokio::test]
+    async fn the_periodic_drain_does_not_flush_the_primary() {
+        let buffer = buffer_with_a_full_queue(DRAIN_BATCH + 1).await;
+
+        buffer.drain_queued().await;
+
+        assert_eq!(buffer.stats().await.queue_size, 0);
+        assert_eq!(
+            buffer.primary.flushes.load(Ordering::Relaxed),
+            0,
+            "the periodic drain flushed the primary"
+        );
+
+        buffer.flush().await.unwrap();
+        assert_eq!(buffer.primary.flushes.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
