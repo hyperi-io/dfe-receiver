@@ -237,11 +237,10 @@ impl Metrics {
         }
         metrics::counter!("receiver_requests_total", "transport" => transport.to_string())
             .increment(1);
+        // The app group's `records_received_total` is this same series, so it
+        // is counted here alone.
         if let Some(ref dfe) = self.dfe {
             dfe.records_received(1);
-        }
-        if let Some(ref app) = self.app_group {
-            app.record_received(1);
         }
     }
 
@@ -812,6 +811,101 @@ impl Default for Metrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Counts one named counter across every label set, as a `sum()` over the
+    /// name reads it.
+    struct CountingRecorder {
+        name: &'static str,
+        hits: Arc<AtomicU64>,
+    }
+
+    struct CountingHandle(Arc<AtomicU64>);
+
+    impl metrics::CounterFn for CountingHandle {
+        fn increment(&self, value: u64) {
+            self.0.fetch_add(value, Ordering::Relaxed);
+        }
+
+        fn absolute(&self, value: u64) {
+            self.0.store(value, Ordering::Relaxed);
+        }
+    }
+
+    impl metrics::Recorder for CountingRecorder {
+        fn describe_counter(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn describe_gauge(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn describe_histogram(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn register_counter(
+            &self,
+            key: &metrics::Key,
+            _: &metrics::Metadata<'_>,
+        ) -> metrics::Counter {
+            if key.name() == self.name {
+                metrics::Counter::from_arc(Arc::new(CountingHandle(Arc::clone(&self.hits))))
+            } else {
+                metrics::Counter::noop()
+            }
+        }
+
+        fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
+            metrics::Gauge::noop()
+        }
+
+        fn register_histogram(
+            &self,
+            _: &metrics::Key,
+            _: &metrics::Metadata<'_>,
+        ) -> metrics::Histogram {
+            metrics::Histogram::noop()
+        }
+    }
+
+    /// Run `f` with a thread-local recorder counting `name`.
+    fn counted(name: &'static str, f: impl FnOnce()) -> u64 {
+        let hits = Arc::new(AtomicU64::new(0));
+        let recorder = CountingRecorder {
+            name,
+            hits: Arc::clone(&hits),
+        };
+        metrics::with_local_recorder(&recorder, f);
+        hits.load(Ordering::Relaxed)
+    }
+
+    #[test]
+    fn a_request_counts_once_in_records_received_total() {
+        let manager = MetricsManager::with_config(scalo::metrics::MetricsConfig::offline(""));
+        let hits = counted("records_received_total", || {
+            let metrics = Metrics::register_on(
+                Arc::new(crate::config::ScalingConfig::default().build_pressure()),
+                &manager,
+            );
+            for _ in 0..3 {
+                metrics.inc_requests_total("http");
+            }
+        });
+        assert_eq!(hits, 3, "three requests received read as three");
+    }
 
     #[test]
     fn test_metrics_counters() {
