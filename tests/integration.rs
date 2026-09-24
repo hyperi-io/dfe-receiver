@@ -30,6 +30,8 @@ mod flow_sflow_e2e;
 mod fluent;
 #[path = "integration/gelf.rs"]
 mod gelf;
+#[path = "integration/grpc_outage.rs"]
+mod grpc_outage;
 #[path = "integration/grpc_sink.rs"]
 mod grpc_sink;
 #[path = "integration/http_ingest.rs"]

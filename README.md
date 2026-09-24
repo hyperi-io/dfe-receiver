@@ -176,10 +176,16 @@ curl -X POST http://localhost:8080/ingest \
 
 **Response Codes:**
 
-- `202 Accepted` - Message queued for delivery
+- `202 Accepted` - Message queued for delivery. While a destination is
+  unreachable the receiver holds the record in memory and re-sends it when the
+  destination returns
 - `400 Bad Request` - Invalid JSON or validation failure
 - `401 Unauthorized` - Authentication failed
-- `503 Service Unavailable` - Downstream unavailable or under pressure
+- `503 Service Unavailable` - Under memory pressure, or a destination has been
+  unreachable long enough to fill the in-memory hold (the
+  `buffer.pressure_threshold` share of `buffer.memory_limit`, or 1000 records
+  when no limit is set). Re-send the request: events of a batched request
+  accepted before the refusal then arrive twice, never zero times
 
 ### POST /webhook/{caller}
 
@@ -240,7 +246,10 @@ curl http://localhost:8080/livez
 
 ### GET /readyz
 
-Kubernetes readiness probe. Returns 503 if downstream sinks are unavailable.
+Kubernetes readiness probe. Returns 503 while the receiver is starting,
+draining or under memory pressure. A destination outage does not fail it: every
+replica shares the outage, so failing the probe would empty the Service, and
+ingest refuses per request with 503 instead.
 
 ```bash
 curl http://localhost:8080/readyz
