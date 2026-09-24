@@ -102,6 +102,27 @@ impl Error {
             | Error::Secrets(_) => true,
         }
     }
+
+    /// What a sender may be told about this error: the record's own fault in
+    /// its own words, and nothing of the receiver's internals -- no endpoint,
+    /// topic, path or configuration.
+    #[must_use]
+    pub fn public_message(&self) -> String {
+        match self {
+            Error::Validation(msg) | Error::Auth(msg) => msg.clone(),
+            Error::Routing(_) => "routing error".to_string(),
+            Error::Rejected(_) => "record rejected".to_string(),
+            Error::Buffer(_) => "service under pressure".to_string(),
+            Error::Shutdown => "shutting down".to_string(),
+            Error::Config(_)
+            | Error::Kafka(_)
+            | Error::Io(_)
+            | Error::Tls(_)
+            | Error::Server(_)
+            | Error::Transport(_)
+            | Error::Secrets(_) => "service unavailable".to_string(),
+        }
+    }
 }
 
 /// A 503 with `Retry-After`, the answer every HTTP listener gives when it
@@ -148,30 +169,16 @@ impl From<serde_json::Error> for Error {
 /// treat a 500 as final, and a record they drop is lost.
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
-        let (status, message) = match &self {
-            Error::Validation(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
-            Error::Auth(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),
-            Error::Routing(_) => (StatusCode::BAD_REQUEST, "routing error".to_string()),
-            Error::Rejected(_) => (StatusCode::BAD_REQUEST, "record rejected".to_string()),
-            Error::Buffer(_) => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "service under pressure".to_string(),
-            ),
-            Error::Shutdown => (StatusCode::SERVICE_UNAVAILABLE, "shutting down".to_string()),
-            Error::Kafka(_)
-            | Error::Transport(_)
-            | Error::Config(_)
-            | Error::Io(_)
-            | Error::Tls(_)
-            | Error::Server(_)
-            | Error::Secrets(_) => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "service unavailable".to_string(),
-            ),
+        let status = if matches!(self, Error::Auth(_)) {
+            StatusCode::UNAUTHORIZED
+        } else if self.is_retryable() {
+            StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            StatusCode::BAD_REQUEST
         };
 
         let body = axum::Json(serde_json::json!({
-            "error": message,
+            "error": self.public_message(),
         }));
 
         if status == StatusCode::SERVICE_UNAVAILABLE {
@@ -437,6 +444,37 @@ mod tests {
                 .map(|v| v.to_str().unwrap().to_string());
             let expected = retryable.then(|| RETRY_AFTER_SECS.to_string());
             assert_eq!(retry_after, expected, "{label}");
+        }
+    }
+
+    /// Only the record's own fault reaches the sender in its own words; every
+    /// other variant's detail stays out of both the message and the HTTP body.
+    #[tokio::test]
+    async fn no_answer_carries_internal_detail() {
+        const SECRET: &str = "kafka-internal.svc:9092/etc/secrets";
+        let every = [
+            Error::Config(SECRET.into()),
+            Error::Routing(SECRET.into()),
+            Error::Kafka(SECRET.into()),
+            Error::Io(std::io::Error::other(SECRET)),
+            Error::Tls(SECRET.into()),
+            Error::Server(SECRET.into()),
+            Error::Transport(SECRET.into()),
+            Error::Rejected(SECRET.into()),
+            Error::Buffer(SECRET.into()),
+            Error::Secrets(scalo::SecretsError::NotFound(SECRET.into())),
+        ];
+        for err in every {
+            let label = format!("{err:?}");
+            assert!(
+                !err.public_message().contains(SECRET),
+                "{label} put its detail in the public message"
+            );
+            let (_, body) = response_status_and_body(err).await;
+            assert!(
+                !body.contains(SECRET),
+                "{label} leaked into the body: {body}"
+            );
         }
     }
 

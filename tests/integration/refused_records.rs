@@ -37,6 +37,7 @@ use dfe_receiver::metrics::Metrics;
 use dfe_receiver::pipeline::PipelineState;
 use dfe_receiver::server::fluent::FluentHandler;
 use dfe_receiver::server::gelf::GelfHandler;
+use dfe_receiver::server::grpc::{GrpcVectorHandler, pb as grpc_pb};
 use dfe_receiver::server::lumberjack::LumberjackHandler;
 use dfe_receiver::server::prometheus_rw::{PrometheusRwHandler, proto as rw_proto};
 use dfe_receiver::server::splunk_hec::SplunkHecHandler;
@@ -87,11 +88,7 @@ fn bus_config() -> Config {
 /// Build the pipeline for `config` and fill its queue to one record short of
 /// its bound, so the next record is taken and every one after it is refused.
 async fn refusing_bus(config: &Config) -> Arc<PipelineState> {
-    let pipeline = Arc::new(
-        PipelineState::new(SharedConfig::new(config.clone()), CancellationToken::new())
-            .await
-            .expect("pipeline init"),
-    );
+    let pipeline = pipeline_for(config).await;
     let gauge = Metrics::default();
     let room_for_one = (DEFAULT_QUEUE_RECORDS - 1) as u64;
     for _ in 0..=DEFAULT_QUEUE_RECORDS {
@@ -111,6 +108,28 @@ async fn refusing_bus(config: &Config) -> Arc<PipelineState> {
         "the queue must have room for exactly one more record"
     );
     pipeline
+}
+
+/// A brokerless config that refuses, for good, any record without `must_have`.
+fn requiring_config() -> Config {
+    let mut config = Config::default();
+    config.server.bind_address = "127.0.0.1:0".to_string();
+    config.server.auth.mode = "none".to_string();
+    config.destinations.default = "loader".into();
+    config.loader.transport = "memory".to_string();
+    config.routing.dlq.enabled = false;
+    config.validation.required_fields = vec!["must_have".to_string()];
+    config.validation.dlq_on_invalid = false;
+    config
+}
+
+/// Build the pipeline for `config`.
+async fn pipeline_for(config: &Config) -> Arc<PipelineState> {
+    Arc::new(
+        PipelineState::new(SharedConfig::new(config.clone()), CancellationToken::new())
+            .await
+            .expect("pipeline init"),
+    )
 }
 
 /// A config delivering every record to the gRPC destination at `endpoint`.
@@ -260,6 +279,51 @@ async fn hec_answers_busy_when_part_of_a_batch_is_not_taken() {
     assert_eq!(status, 503, "body: {body}");
     assert_eq!(body["code"], 9, "{body}");
     assert!(retry.is_some(), "a busy answer must carry Retry-After");
+    assert_eq!(metrics.get_requests_success(), 0);
+}
+
+/// A raw HEC request the receiver could not place answers in HEC's own words
+/// and nothing of the cause. It used to put the receiver's error text in the
+/// body: "Internal server error: configuration error: Kafka sink not
+/// configured".
+#[tokio::test]
+async fn hec_raw_refusal_carries_no_internal_detail() {
+    // A DLQ directory under a plain file cannot be made, even as root, so the
+    // DLQ fails to start and a dead letter falls back to a bus there is none of.
+    let not_a_dir = tempfile::NamedTempFile::new().unwrap();
+    let mut config = requiring_config();
+    config.validation.dlq_on_invalid = true;
+    config.routing.dlq.enabled = true;
+    config.routing.dlq.mode = "file_only".to_string();
+    config.routing.dlq.kafka_enabled = false;
+    config.routing.dlq.file_path = not_a_dir.path().join("dlq").display().to_string();
+    config.splunk_hec.enabled = true;
+    config.splunk_hec.bind_address = "127.0.0.1:0".to_string();
+    config.splunk_hec.auth.mode = "none".to_string();
+    let pipeline = pipeline_for(&config).await;
+    let metrics = Arc::new(Metrics::default());
+    let handler = SplunkHecHandler::new(
+        config.splunk_hec.clone(),
+        config.raw_capture_for(&config.splunk_hec.raw_capture),
+        pipeline,
+        metrics.clone(),
+    );
+    let (addrs, shutdown) = serve(handler).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/services/collector/raw", addrs[0]))
+        .body("a raw line without the required field")
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    shutdown.cancel();
+
+    let text = body["text"].as_str().unwrap_or_default();
+    assert!(
+        ["Server is busy", "Internal server error"].contains(&text),
+        "the answer must be HEC's own wording and nothing of the cause: {body}"
+    );
     assert_eq!(metrics.get_requests_success(), 0);
 }
 
@@ -455,6 +519,108 @@ mod otlp {
         );
         assert_eq!(metrics.get_requests_success(), 0);
     }
+}
+
+// ---------------------------------------------------------------------------
+// gRPC push listener
+// ---------------------------------------------------------------------------
+
+/// A log event carrying `fields`, as the push protocol's peer sends it.
+fn log_event(fields: &[(&str, &str)]) -> grpc_pb::event::EventWrapper {
+    use grpc_pb::event::{EventWrapper, Log, Value, event_wrapper, value};
+
+    let fields = fields
+        .iter()
+        .map(|(key, text)| {
+            let value = Value {
+                kind: Some(value::Kind::RawBytes(text.as_bytes().to_vec())),
+            };
+            ((*key).to_string(), value)
+        })
+        .collect();
+    EventWrapper {
+        event: Some(event_wrapper::Event::Log(Log {
+            fields,
+            ..Log::default()
+        })),
+    }
+}
+
+/// Push `events` to the listener at `addr` and return the gRPC status code.
+async fn push(addr: SocketAddr, events: Vec<grpc_pb::event::EventWrapper>) -> tonic::Code {
+    use grpc_pb::vector::{PushEventsRequest, PushEventsResponse};
+
+    let channel = tonic::transport::Channel::from_shared(format!("http://{addr}"))
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    let mut client = tonic::client::Grpc::new(channel);
+    client.ready().await.unwrap();
+    let codec = tonic_prost::ProstCodec::<PushEventsRequest, PushEventsResponse>::default();
+    let path = http::uri::PathAndQuery::from_static("/vector.Vector/PushEvents");
+    match client
+        .unary(
+            tonic::Request::new(PushEventsRequest { events }),
+            path,
+            codec,
+        )
+        .await
+    {
+        Ok(_) => tonic::Code::Ok,
+        Err(status) => status.code(),
+    }
+}
+
+async fn grpc_listener(
+    mut config: Config,
+    pipeline: Arc<PipelineState>,
+) -> (SocketAddr, CancellationToken, Arc<Metrics>) {
+    config.grpc.enabled = true;
+    config.grpc.bind_address = "127.0.0.1:0".to_string();
+    let metrics = Arc::new(Metrics::default());
+    let handler = GrpcVectorHandler::new(config, pipeline, metrics.clone());
+    let (addrs, shutdown) = serve(handler).await;
+    (addrs[0], shutdown, metrics)
+}
+
+/// The gRPC push listener answers UNAVAILABLE, which the peer retries, when
+/// part of a push was not taken. It used to answer INTERNAL for every failure.
+#[tokio::test]
+async fn grpc_push_answers_unavailable_when_part_of_a_push_is_not_taken() {
+    let config = bus_config();
+    let pipeline = refusing_bus(&config).await;
+    let (addr, shutdown, metrics) = grpc_listener(config, pipeline).await;
+
+    let code = push(
+        addr,
+        vec![
+            log_event(&[("message", "one")]),
+            log_event(&[("message", "two")]),
+            log_event(&[("message", "three")]),
+        ],
+    )
+    .await;
+    shutdown.cancel();
+
+    assert_eq!(code, tonic::Code::Unavailable);
+    assert_eq!(metrics.get_requests_success(), 0);
+}
+
+/// The gRPC push listener answers INVALID_ARGUMENT, which the peer drops, for
+/// a record refused for good. It used to answer INTERNAL, which the peer
+/// retries, resending a record that can never land.
+#[tokio::test]
+async fn grpc_push_answers_invalid_argument_for_a_record_refused_for_good() {
+    let config = requiring_config();
+    let pipeline = pipeline_for(&config).await;
+    let (addr, shutdown, metrics) = grpc_listener(config, pipeline).await;
+
+    let code = push(addr, vec![log_event(&[("message", "no required field")])]).await;
+    shutdown.cancel();
+
+    assert_eq!(code, tonic::Code::InvalidArgument);
+    assert_eq!(metrics.get_requests_success(), 0);
 }
 
 // ---------------------------------------------------------------------------

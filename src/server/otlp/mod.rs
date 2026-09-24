@@ -27,7 +27,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::config::{OtlpConfig, RawCapture};
 use crate::error::{Error, Result, unavailable_response};
@@ -177,8 +177,10 @@ const OVERLOADED: &str = "server is overloaded, retry later";
 /// `INTERNAL` / HTTP 500 final, and a client must not retry an export answered
 /// with a populated `partial_success`.
 fn settle(metrics: &Metrics, records: usize, outcome: BatchOutcome) -> Settled {
+    // Debug, not warn: the pipeline logs the pressure edge once, and a line
+    // per refused export would flood the log for as long as it lasts.
     if let Some(e) = outcome.unavailable {
-        warn!(
+        debug!(
             records,
             accepted = outcome.accepted,
             error = %e,
@@ -194,11 +196,11 @@ fn settle(metrics: &Metrics, records: usize, outcome: BatchOutcome) -> Settled {
     };
     metrics.inc_requests_error("otlp");
     if outcome.accepted == 0 {
-        return Settled::AllRejected(e.to_string());
+        return Settled::AllRejected(e.public_message());
     }
     Settled::Taken(Some(Rejected {
         count: i64::try_from(outcome.rejected).unwrap_or(i64::MAX),
-        message: e.to_string(),
+        message: e.public_message(),
     }))
 }
 

@@ -20,6 +20,7 @@ pub mod convert;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use axum::body::Bytes;
@@ -33,7 +34,7 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::config::{RawCapture, SplunkHecConfig};
 use crate::error::{Error, RETRY_AFTER_SECS, Result};
@@ -44,6 +45,9 @@ use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
 use crate::server::traits::{BoundAddr, ProtocolHandler};
 
 use self::convert::{RawMetadata, hec_event_to_json, parse_hec_events, raw_to_json};
+
+/// Sampled counter for HEC event conversion failures (log 1 in 100).
+static HEC_CONVERSION_ERRORS: AtomicU64 = AtomicU64::new(0);
 
 /// Splunk HEC protocol handler.
 pub struct SplunkHecHandler {
@@ -163,13 +167,29 @@ impl HecError {
         }
     }
 
-    fn internal(detail: &str) -> Self {
+    /// Code 8, with no detail: the cause is the receiver's, and it is logged.
+    fn internal() -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             response: HecResponse {
-                text: format!("Internal server error: {detail}"),
+                text: "Internal server error".into(),
                 code: 8,
             },
+        }
+    }
+
+    /// The answer for an event the receiver could not turn into a record.
+    ///
+    /// Only a fault of the event itself names its cause; the receiver's own
+    /// failure is logged and answered with the bare code 8.
+    fn conversion_failed(e: &Error) -> Self {
+        if e.is_retryable() {
+            if scalo::logger::log_sampled(&HEC_CONVERSION_ERRORS, 100) {
+                warn!(error = %e, "HEC event conversion failed (1 in 100)");
+            }
+            Self::internal()
+        } else {
+            Self::invalid_data(&e.public_message())
         }
     }
 
@@ -218,7 +238,7 @@ fn batch_answer(
     if let Some(e) = outcome.first_rejection {
         debug!(transport, events, rejected = outcome.rejected, error = %e, "HEC request carried events refused for good");
         state.metrics.inc_requests_error("splunk_hec");
-        return Err(HecError::invalid_data(&e.to_string()));
+        return Err(HecError::invalid_data(&e.public_message()));
     }
     state.metrics.inc_requests_success("splunk_hec");
     Ok(Json(HecResponse::success()))
@@ -409,7 +429,7 @@ async fn event_handler(
     for event in events {
         let json = hec_event_to_json(event, state.raw_capture).map_err(|e| {
             state.metrics.inc_requests_error("splunk_hec");
-            HecError::invalid_data(&e.to_string())
+            HecError::conversion_failed(&e)
         })?;
         payloads.push(json);
     }
@@ -482,7 +502,7 @@ async fn raw_handler(
         }
         let json = raw_to_json(line, &metadata, state.raw_capture).map_err(|e| {
             state.metrics.inc_requests_error("splunk_hec");
-            HecError::internal(&e.to_string())
+            HecError::conversion_failed(&e)
         })?;
         payloads.push(json);
     }
@@ -547,5 +567,30 @@ mod tests {
         let resp = HecResponse::success();
         assert_eq!(resp.code, 0);
         assert_eq!(resp.text, "Success");
+    }
+
+    /// A conversion the receiver itself failed is code 8 with nothing of the
+    /// cause in the body; the cause goes to the log.
+    #[test]
+    fn a_receiver_side_conversion_failure_names_nothing_internal() {
+        let err = Error::Server("JSON serialize: /etc/dfe/secret.yaml".into());
+
+        let answer = HecError::conversion_failed(&err);
+
+        assert_eq!(answer.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(answer.response.code, 8);
+        assert_eq!(answer.response.text, "Internal server error");
+    }
+
+    /// An event at fault is told why, in its own terms.
+    #[test]
+    fn an_event_at_fault_is_told_why() {
+        let err = Error::Validation("event field cannot be blank".into());
+
+        let answer = HecError::conversion_failed(&err);
+
+        assert_eq!(answer.status, StatusCode::BAD_REQUEST);
+        assert_eq!(answer.response.code, 6);
+        assert!(answer.response.text.contains("event field cannot be blank"));
     }
 }

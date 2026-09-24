@@ -24,12 +24,12 @@ use tokio_util::sync::CancellationToken;
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, info, trace};
 
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
-use crate::pipeline::PipelineState;
+use crate::pipeline::{BatchOutcome, PipelineState};
 use crate::server::auth::{AuthMode, AuthState, validate_bearer_auth};
 use crate::server::http::create_auth_state;
 use crate::server::traits::{BoundAddr, ProtocolHandler};
@@ -66,7 +66,9 @@ impl Vector for VectorService {
     /// Handle unary push of events from Vector.
     ///
     /// Receives a batch of events, converts each from protobuf to JSON,
-    /// and processes through the pipeline.
+    /// and processes through the pipeline. An event the pipeline could not
+    /// take answers `UNAVAILABLE`, which the peer retries; one refused for good
+    /// answers `INVALID_ARGUMENT`, which it does not.
     async fn push_events(
         &self,
         request: Request<PushEventsRequest>,
@@ -80,7 +82,7 @@ impl Vector for VectorService {
             self.metrics.inc_requests_total("grpc");
             self.metrics.inc_requests_error("grpc");
             self.metrics.record_backpressure();
-            return Err(Status::unavailable("server is overloaded"));
+            return Err(Status::unavailable(OVERLOADED));
         }
 
         let req = request.into_inner();
@@ -94,39 +96,37 @@ impl Vector for VectorService {
         self.metrics.inc_requests_total("grpc");
 
         let start = std::time::Instant::now();
+        let mut outcome = BatchOutcome::default();
         for event in &req.events {
-            let json_bytes = convert::event_wrapper_to_json(event)
-                .map_err(|e| Status::invalid_argument(e.to_string()))?;
-
-            trace!(
-                transport = "grpc",
-                bytes = json_bytes.len(),
-                "Dispatching gRPC event to pipeline"
-            );
-
-            self.metrics
-                .add_bytes_received("grpc", json_bytes.len() as u64);
-
-            if let Err(e) = self.pipeline.process(json_bytes).await {
-                warn!(error = %e, transport = "grpc", "Failed to process gRPC event");
-                self.metrics.inc_requests_error("grpc");
-                self.metrics
-                    .record_request_duration("grpc", start.elapsed().as_secs_f64());
-                return Err(Status::internal(e.to_string()));
+            let result = match convert::event_wrapper_to_json(event) {
+                Ok(json_bytes) => {
+                    trace!(
+                        transport = "grpc",
+                        bytes = json_bytes.len(),
+                        "Dispatching gRPC event to pipeline"
+                    );
+                    self.metrics
+                        .add_bytes_received("grpc", json_bytes.len() as u64);
+                    self.pipeline.process(json_bytes).await
+                }
+                Err(e) => Err(e),
+            };
+            if outcome.record(result).is_break() {
+                break;
             }
         }
 
         let elapsed = start.elapsed();
+        self.metrics
+            .record_request_duration("grpc", elapsed.as_secs_f64());
         debug!(
             transport = "grpc",
             events = event_count,
+            accepted = outcome.accepted,
             duration_us = elapsed.as_micros(),
             "gRPC push_events completed"
         );
-        self.metrics
-            .record_request_duration("grpc", elapsed.as_secs_f64());
-        self.metrics.inc_requests_success("grpc");
-        Ok(Response::new(PushEventsResponse {}))
+        push_answer(&self.metrics, outcome)
     }
 
     /// Health check endpoint.
@@ -144,6 +144,34 @@ impl Vector for VectorService {
             status: status.into(),
         }))
     }
+}
+
+/// The message on a retryable push answer.
+const OVERLOADED: &str = "server is overloaded, retry later";
+
+/// The gRPC answer to a push, by the same classification every listener uses.
+///
+/// A record not taken answers `UNAVAILABLE`, even when others landed: the
+/// resend duplicates those, where OK would lose the rest. A record refused for
+/// good answers `INVALID_ARGUMENT`, which the peer drops rather than retries --
+/// `INTERNAL`, which it retries, would resend a record that can never land.
+fn push_answer(
+    metrics: &Metrics,
+    outcome: BatchOutcome,
+) -> std::result::Result<Response<PushEventsResponse>, Status> {
+    if let Some(e) = outcome.unavailable {
+        debug!(transport = "grpc", error = %e, "gRPC push not fully taken; answering UNAVAILABLE");
+        metrics.inc_requests_error("grpc");
+        metrics.record_backpressure();
+        return Err(Status::unavailable(OVERLOADED));
+    }
+    if let Some(e) = outcome.first_rejection {
+        debug!(transport = "grpc", error = %e, rejected = outcome.rejected, "gRPC push carried records refused for good");
+        metrics.inc_requests_error("grpc");
+        return Err(Status::invalid_argument(e.public_message()));
+    }
+    metrics.inc_requests_success("grpc");
+    Ok(Response::new(PushEventsResponse {}))
 }
 
 /// Create a tonic auth interceptor from the shared `AuthState`.
