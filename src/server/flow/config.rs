@@ -308,14 +308,26 @@ impl FlowConfig {
         if self.enabled && self.split.is_some() {
             return Err("flow.enabled and flow.split are mutually exclusive".into());
         }
-        if let Some(split) = &self.split
-            && split
+        // Readiness waits per port, so an enabled side with no port reads ready with nothing bound.
+        if self.enabled && self.ports.is_empty() {
+            return Err("flow.enabled needs at least one port in flow.ports".into());
+        }
+        if let Some(split) = &self.split {
+            for (side, listener) in [("netflow", &split.netflow), ("sflow", &split.sflow)] {
+                if listener.enabled && listener.ports.is_empty() {
+                    return Err(format!(
+                        "split.{side}.enabled needs at least one port in split.{side}.ports"
+                    ));
+                }
+            }
+            if split
                 .netflow
                 .ports
                 .iter()
                 .any(|p| split.sflow.ports.contains(p))
-        {
-            return Err("split.netflow.ports and split.sflow.ports must not overlap".into());
+            {
+                return Err("split.netflow.ports and split.sflow.ports must not overlap".into());
+            }
         }
         Ok(())
     }
@@ -404,6 +416,47 @@ split:
 ";
         let cfg: FlowConfig = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_enabled_with_no_ports() {
+        // No port binds no listener, and readiness passes with nothing to wait on.
+        let cfg: FlowConfig = serde_yaml_ng::from_str("enabled: true\nports: []\n").unwrap();
+        let err = cfg
+            .validate()
+            .expect_err("an enabled flow block with no port binds nothing");
+        assert!(err.contains("flow.ports"), "{err}");
+    }
+
+    #[test]
+    fn validate_rejects_an_enabled_split_side_with_no_ports() {
+        for (side, netflow, sflow) in [("netflow", "[]", "[6343]"), ("sflow", "[2055]", "[]")] {
+            let yaml = format!(
+                "split:\n  netflow:\n    ports: {netflow}\n    topic: n\n  \
+                 sflow:\n    ports: {sflow}\n    topic: s\n"
+            );
+            let cfg: FlowConfig = serde_yaml_ng::from_str(&yaml).unwrap();
+            let err = cfg
+                .validate()
+                .expect_err("an enabled split side with no port binds nothing");
+            assert!(err.contains(&format!("split.{side}.ports")), "{err}");
+        }
+    }
+
+    #[test]
+    fn validate_allows_no_ports_where_nothing_is_enabled() {
+        let unified: FlowConfig = serde_yaml_ng::from_str("enabled: false\nports: []\n").unwrap();
+        assert!(unified.validate().is_ok(), "a disabled block binds nothing");
+
+        let split: FlowConfig = serde_yaml_ng::from_str(
+            "split:\n  netflow:\n    enabled: false\n    ports: []\n    topic: n\n  \
+             sflow:\n    ports: [6343]\n    topic: s\n",
+        )
+        .unwrap();
+        assert!(
+            split.validate().is_ok(),
+            "a disabled split side binds nothing"
+        );
     }
 
     #[test]

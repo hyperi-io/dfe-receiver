@@ -403,6 +403,9 @@ routing:
   dlq:
     enabled: true
     topic: "dfe_receiver_dlq"
+    # How long a DLQ flush or shutdown waits for Kafka to ack queued entries, in
+    # milliseconds. Unset keeps scalo's default.
+    # kafka_send_timeout_ms: 10000
 
 # The named destination set. `kafka` (the bus, under the topic the record's
 # source resolves to) and `loader` (per the loader block below) are always

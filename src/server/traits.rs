@@ -104,6 +104,9 @@ pub trait ProtocolHandler: Send + Sync {
 /// The listener tasks of one handler, run until shutdown as one unit.
 ///
 /// A listener that fails, or stops before shutdown, fails the whole handler.
+/// Aborting a listener closes its socket but not the connection tasks it
+/// spawned, so an accepted connection can keep delivering while the pod reads
+/// not ready, the drain an L4 load balancer expects.
 #[derive(Default)]
 pub(crate) struct Listeners {
     tasks: JoinSet<Result<()>>,
@@ -126,6 +129,9 @@ impl Listeners {
     /// fails the handler with an error naming it, and the other listeners are
     /// aborted. After shutdown every listener is awaited, and the first error
     /// any of them returned is the handler's.
+    ///
+    /// A panicking listener reaches this only in dev and test builds: release
+    /// sets `panic = "abort"`, so the process exits and the pod restarts.
     pub(crate) async fn run(mut self, shutdown: &CancellationToken) -> Result<()> {
         if self.tasks.is_empty() {
             shutdown.cancelled().await;
