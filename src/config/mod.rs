@@ -2115,10 +2115,8 @@ pub struct KafkaConfig {
 impl Default for KafkaConfig {
     fn default() -> Self {
         let mut overrides = std::collections::HashMap::new();
-        // Enable rdkafka statistics at 5s intervals for Prometheus metrics.
-        // The KafkaProducer's ProducerContext parses the stats JSON callback
-        // and exposes broker RTT, queue depth, etc. via the global recorder.
-        overrides.insert("statistics.interval.ms".to_string(), "5000".to_string());
+        // "0" rather than absent: scalo's producer profiles turn stats on at 1 s, and no context here reads them.
+        overrides.insert("statistics.interval.ms".to_string(), "0".to_string());
 
         Self {
             // Empty on purpose: a bus destination with no brokers refuses to
@@ -3470,12 +3468,13 @@ webhook:
     }
 
     #[test]
-    fn test_kafka_default_enables_stats() {
+    fn test_kafka_default_turns_stats_off() {
+        // The sink's and the DLQ producer's contexts have no stats handler, so
+        // librdkafka building the JSON is work nothing reads.
         let config = KafkaConfig::default();
         assert_eq!(
             config.librdkafka_overrides.get("statistics.interval.ms"),
-            Some(&"5000".to_string()),
-            "stats at 5s intervals for Prometheus scraping"
+            Some(&"0".to_string()),
         );
     }
 
@@ -3492,7 +3491,7 @@ webhook:
         let scalo = config.to_scalo_kafka_config_for_producer();
         assert_eq!(
             scalo.librdkafka_overrides.get("statistics.interval.ms"),
-            Some(&"5000".to_string()),
+            Some(&"0".to_string()),
         );
         assert_eq!(
             scalo.librdkafka_overrides.get("message.max.bytes"),

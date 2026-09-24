@@ -352,6 +352,21 @@ mod tests {
         assert_eq!(failure_reason(&timed_out()), "MessageTimedOut");
     }
 
+    /// The default config turns librdkafka stats off on the client the sink
+    /// builds, over the profile's own interval: nothing here reads them.
+    #[test]
+    fn the_default_client_builds_no_stats() {
+        assert!(
+            PRODUCER_HIGH_THROUGHPUT
+                .iter()
+                .any(|(key, _)| *key == "statistics.interval.ms"),
+            "the profile no longer sets a stats interval, so this test proves nothing"
+        );
+        let scalo_config = KafkaConfig::default().to_scalo_kafka_config_for_producer();
+        let client = producer_client_config(&scalo_config);
+        assert_eq!(client.get("statistics.interval.ms"), Some("0"));
+    }
+
     #[test]
     fn failure_reason_falls_back_for_a_non_production_error() {
         assert_eq!(failure_reason(&KafkaError::Canceled), "other");

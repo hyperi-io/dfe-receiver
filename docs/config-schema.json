@@ -447,7 +447,7 @@
           "retries": 5
         },
         "librdkafka_overrides": {
-          "statistics.interval.ms": "5000"
+          "statistics.interval.ms": "0"
         }
       }
     },
@@ -2119,7 +2119,7 @@
             "type": "string"
           },
           "default": {
-            "statistics.interval.ms": "5000"
+            "statistics.interval.ms": "0"
           }
         }
       }
