@@ -62,6 +62,11 @@ struct DeliveryState {
     /// reports per record, so the log gets one line per topic and the counters
     /// carry the volume. Bounded by the configured topic set.
     logged: RwLock<FxHashSet<Box<str>>>,
+
+    /// Records librdkafka has queued whose delivery report is not recorded yet.
+    /// Its own out-queue length also counts the stats, log and error events on
+    /// its main queue, so it is not a record count.
+    awaiting_report: AtomicU64,
 }
 
 impl DeliveryState {
@@ -69,6 +74,7 @@ impl DeliveryState {
         Self {
             delivering: AtomicBool::new(true),
             logged: RwLock::new(FxHashSet::default()),
+            awaiting_report: AtomicU64::new(0),
         }
     }
 
@@ -123,6 +129,7 @@ impl ProducerContext for DeliveryObserver {
             Ok(_) => self.delivered(),
             Err((err, msg)) => self.failed(msg.topic(), err),
         }
+        self.state.awaiting_report.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -238,9 +245,11 @@ impl KafkaSink {
         // A clone shares the producer; only the last one dropped stops the
         // polling thread, so the sink keeps its producer while this runs.
         let producer = self.producer.clone();
+        let delivery = Arc::clone(&self.delivery);
         let remaining = tokio::task::spawn_blocking(move || {
+            // An Err only says the timeout expired, so the count says how many records it stranded.
             let _ = producer.flush(Timeout::After(timeout));
-            producer.in_flight_count().max(0) as usize
+            delivery.awaiting_report.load(Ordering::Relaxed)
         })
         .await
         .map_err(|e| Error::Transport(format!("kafka flush task failed: {e}")))?;
@@ -271,6 +280,10 @@ impl Sink for KafkaSink {
         trace!(topic, bytes, "Kafka produce enqueue");
 
         let record: BaseRecord<'_, (), [u8]> = BaseRecord::to(topic).payload(payload.as_ref());
+        // Counted before the enqueue, since the report can land before `send` returns.
+        self.delivery
+            .awaiting_report
+            .fetch_add(1, Ordering::Relaxed);
         match self.producer.send(record) {
             Ok(()) => {
                 let elapsed = start.elapsed();
@@ -288,6 +301,9 @@ impl Sink for KafkaSink {
                 Ok(())
             }
             Err((e, _)) => {
+                self.delivery
+                    .awaiting_report
+                    .fetch_sub(1, Ordering::Relaxed);
                 metrics::counter!("receiver_kafka_send_errors_total").increment(1);
                 // librdkafka refuses the same bytes on every retry, and the queue itself is fine.
                 if e.rdkafka_error_code() == Some(RDKafkaErrorCode::MessageSizeTooLarge) {
@@ -444,6 +460,77 @@ mod tests {
 
         assert!(matches!(result, Err(Error::Rejected(_))), "got {result:?}");
         assert!(sink.is_healthy());
+    }
+
+    /// A record librdkafka refused never gets a delivery report, so it must not
+    /// count as in flight at the shutdown flush.
+    #[tokio::test]
+    async fn a_refused_record_leaves_nothing_in_flight() {
+        let sink = KafkaSink::new(&unroutable_config("60000")).unwrap();
+        let ceiling = scalo::transport::kafka::MESSAGE_MAX_BYTES as usize;
+        let refused = sink
+            .send("events", Bytes::from(vec![b'x'; ceiling + 1]))
+            .await;
+        assert!(
+            matches!(refused, Err(Error::Rejected(_))),
+            "got {refused:?}"
+        );
+
+        let flushed = sink.flush_within(Duration::ZERO).await;
+        assert!(
+            flushed.is_ok(),
+            "a refused record read as stranded: {flushed:?}"
+        );
+    }
+
+    /// A timed-out flush reports the records still in flight, not librdkafka's
+    /// out-queue length, which also counts the stats, log and error events
+    /// waiting on the main queue.
+    ///
+    /// The test holds a read lock the first-failure log needs to write, so the
+    /// polling thread stalls inside the one record's delivery report and stats
+    /// events queue up behind it. A zero timeout flushes without polling them
+    /// away.
+    #[tokio::test]
+    async fn a_timed_out_flush_counts_records_not_queued_events() {
+        let mut config = unroutable_config("1000");
+        config
+            .librdkafka_overrides
+            .insert("statistics.interval.ms".to_string(), "200".to_string());
+        let sink = KafkaSink::new(&config).unwrap();
+        sink.send("stranded", Bytes::from_static(b"{}"))
+            .await
+            .expect("librdkafka queues locally regardless of broker reachability");
+
+        let state = Arc::clone(&sink.delivery);
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let _read = state.logged.read();
+            let _ = held_tx.send(());
+            let _ = release_rx.recv();
+        });
+        held_rx.recv().expect("the lock holder started");
+
+        // Health drops as the report starts, just before it blocks on the lock.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        while sink.is_healthy() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let report_started = !sink.is_healthy();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        let result = sink.flush_within(Duration::ZERO).await;
+
+        // Released before any assert: dropping the sink joins the stalled polling thread.
+        let _ = release_tx.send(());
+        holder.join().expect("the lock holder finished");
+
+        assert!(report_started, "the record's delivery report never arrived");
+        let message = result
+            .expect_err("the record's report has not finished, so it is still in flight")
+            .to_string();
+        assert!(message.contains("with 1 messages"), "{message}");
     }
 
     /// The shutdown flush must not hold a runtime worker.
