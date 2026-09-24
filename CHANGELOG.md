@@ -3,6 +3,18 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.15.37](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.36...v1.15.37) (2026-09-24)
+
+### Bug Fixes
+
+* **auth:** read credential specs through scalo's resolver ([17a832b](https://github.com/hyperi-io/dfe-receiver/commit/17a832b4c43eb924211ec65d7868f5b6cd90d542))
+* **ci:** skip PGO and BOLT for the rc.14 workstream ([#136](https://github.com/hyperi-io/dfe-receiver/issues/136)) ([bcc74d6](https://github.com/hyperi-io/dfe-receiver/commit/bcc74d6a18b8424e4167ca21f126581bd6ac36ea))
+* dead-letter to dfe_receiver_dlq by default ([19718d9](https://github.com/hyperi-io/dfe-receiver/commit/19718d98e185f7044dbc5fb46a9365636b499760))
+* **docs:** add the README `## Context` section and docs/architecture.md ([#133](https://github.com/hyperi-io/dfe-receiver/issues/133)) ([640b65b](https://github.com/hyperi-io/dfe-receiver/commit/640b65b323fafe39e6ab7ab0c2ec8fd8d817ec4c))
+* **docs:** name scalo, not rustlib ([#135](https://github.com/hyperi-io/dfe-receiver/issues/135)) ([b2176aa](https://github.com/hyperi-io/dfe-receiver/commit/b2176aa426dfa24a1de1d7eeb6d98bdb5508eca1))
+* **server:** apply the configured IP filter and rate limit on every listener ([57a7018](https://github.com/hyperi-io/dfe-receiver/commit/57a70181a48fa3fdc1c90ce455542d424afeaf15))
+* **sink:** observe Kafka delivery reports, and flush off the runtime worker ([4bd38d7](https://github.com/hyperi-io/dfe-receiver/commit/4bd38d7a2490c4100900eabeb0248c66cd86b39c)), closes [scalo-rs#26](https://github.com/hyperi-io/scalo-rs/issues/26) [#117](https://github.com/hyperi-io/dfe-receiver/issues/117)
+
 ## [1.15.36](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.35...v1.15.36) (2026-09-15)
 
 ### Bug Fixes
