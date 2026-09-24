@@ -25,8 +25,9 @@ The one external door. dfe-receiver and dfe-ui are the only two components in
 the stack that read untrusted input -- the loader, archiver and transforms have
 no listener an outsider reaches, and dfe-fetcher dials out rather than being
 dialled. So a dependency advisory here is not the same finding as the identical
-advisory in dfe-loader. Grade reachability first, severity second. The exposure
-model is dfe-infra's `docs/INGEST-EDGE.md`, which calls the receiver a
+advisory in dfe-loader. Grade reachability first, severity second, per
+`dfe-infra/docs/THREAT-MODEL.md`. The ingest edge is
+`dfe-infra/docs/INGEST-EDGE.md`, which calls the receiver a
 single-homed airlock: traffic from outside, produce to local Kafka, and Kafka
 never faces the network.
 

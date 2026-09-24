@@ -58,7 +58,7 @@ compiler optimisations. See [cargo-pgo](https://github.com/Kobzol/cargo-pgo).
 
 **Automated via hyperi-ci** on `release` channel when `.hyperi-ci.yaml` has
 `build.rust.optimize.pgo.enabled: true`. Workload: `scripts/pgo-workload.sh`
-(see `docs/PGO-WORKLOAD.md`).
+(see Workload requirements below).
 
 #### Local (manual) setup
 
@@ -84,9 +84,9 @@ parse → validate → route → produce to Kafka sink. Port checks, health
 probes, or trivial one-shot sends produce **negative PGO gains** because
 the compiler mis-optimises startup paths over production hot paths.
 
-See `scripts/pgo-workload.sh` (the orchestrator) and `src/bin/pgo-driver.rs`
+See `scripts/pgo-workload.sh` (the orchestrator) and `src/bin/pgo_driver.rs`
 (the load generator). Full workload-writing rules for any consumer
-project live in hyperi-ci's `docs/PGO-WORKLOAD-GUIDE.md`.
+project live in `hyperi-ci/docs/runtime/pgo-bolt.md`.
 
 ### BOLT post-link optimisation
 
