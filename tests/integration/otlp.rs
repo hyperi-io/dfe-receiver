@@ -22,8 +22,8 @@
 // just over clippy's 16 KiB threshold. Mirrors the lib crate's allow (main.rs).
 #![allow(clippy::large_futures)]
 
+use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use dfe_receiver::config::{Config, SharedConfig};
 use dfe_receiver::metrics::Metrics;
@@ -34,23 +34,14 @@ use dfe_receiver::server::traits::ProtocolHandler;
 use prost::Message;
 use tokio_util::sync::CancellationToken;
 
-/// Get a random port for testing.
-fn random_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    let port = listener.local_addr().expect("local addr").port();
-    drop(listener);
-    port
-}
-
 /// Create a minimal config for testing with OTLP enabled.
-fn test_config(grpc_port: u16, http_port: u16) -> Config {
+fn test_config() -> Config {
     let mut config = Config::default();
-    let main_http_port = random_port();
-    config.server.bind_address = format!("127.0.0.1:{main_http_port}");
+    config.server.bind_address = "127.0.0.1:0".to_string();
     config.server.auth.mode = "none".to_string();
     config.otlp.enabled = true;
-    config.otlp.grpc_bind_address = format!("127.0.0.1:{grpc_port}");
-    config.otlp.http_bind_address = format!("127.0.0.1:{http_port}");
+    config.otlp.grpc_bind_address = "127.0.0.1:0".to_string();
+    config.otlp.http_bind_address = "127.0.0.1:0".to_string();
     config.otlp.auth.mode = "none".to_string();
     // The loader on its memory transport: accepted, sent nowhere, no broker.
     config.destinations.default = "loader".into();
@@ -58,8 +49,16 @@ fn test_config(grpc_port: u16, http_port: u16) -> Config {
     config
 }
 
-/// Start the OTLP handler and return (shutdown_token, metrics).
-async fn start_otlp_handler(config: Config) -> (CancellationToken, Arc<Metrics>) {
+/// A running OTLP handler and the addresses its two listeners bound.
+struct Started {
+    shutdown: CancellationToken,
+    metrics: Arc<Metrics>,
+    grpc: SocketAddr,
+    http: SocketAddr,
+}
+
+/// Start the OTLP handler and wait for both listeners to bind.
+async fn start_otlp_handler(config: Config) -> Started {
     let metrics = Arc::new(Metrics::default());
     let shutdown = CancellationToken::new();
     let pipeline = Arc::new(
@@ -77,16 +76,20 @@ async fn start_otlp_handler(config: Config) -> (CancellationToken, Arc<Metrics>)
         pipeline,
         metrics.clone(),
     );
+    let grpc_bound = handler.grpc_bound_addr();
+    let http_bound = handler.http_bound_addr();
 
     let handler_shutdown = shutdown.clone();
-    tokio::spawn(async move {
-        let _ = handler.start(handler_shutdown).await;
-    });
+    let mut task = tokio::spawn(async move { handler.start(handler_shutdown).await });
+    let grpc = crate::common::bound_addr("OTLP gRPC", &grpc_bound, &mut task).await;
+    let http = crate::common::bound_addr("OTLP HTTP", &http_bound, &mut task).await;
 
-    // Wait for handler to start listening
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    (shutdown, metrics)
+    Started {
+        shutdown,
+        metrics,
+        grpc,
+        http,
+    }
 }
 
 /// Get total requests from metrics.
@@ -237,12 +240,9 @@ fn build_metrics_request() -> pb::collector::metrics::v1::ExportMetricsServiceRe
 async fn test_otlp_grpc_logs() {
     use pb::collector::logs::v1::logs_service_client::LogsServiceClient;
 
-    let grpc_port = random_port();
-    let http_port = random_port();
-    let config = test_config(grpc_port, http_port);
-    let (shutdown, metrics) = start_otlp_handler(config).await;
+    let otlp = start_otlp_handler(test_config()).await;
 
-    let mut client = LogsServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+    let mut client = LogsServiceClient::connect(format!("http://{}", otlp.grpc))
         .await
         .expect("Failed to connect to OTLP gRPC");
 
@@ -254,12 +254,15 @@ async fn test_otlp_grpc_logs() {
     );
 
     assert!(
-        requests_total(&metrics) > 0,
+        requests_total(&otlp.metrics) > 0,
         "Expected requests to be counted"
     );
-    assert!(bytes_received(&metrics) > 0, "Expected bytes to be counted");
+    assert!(
+        bytes_received(&otlp.metrics) > 0,
+        "Expected bytes to be counted"
+    );
 
-    shutdown.cancel();
+    otlp.shutdown.cancel();
 }
 
 /// Test sending traces via OTLP gRPC.
@@ -267,12 +270,9 @@ async fn test_otlp_grpc_logs() {
 async fn test_otlp_grpc_traces() {
     use pb::collector::trace::v1::trace_service_client::TraceServiceClient;
 
-    let grpc_port = random_port();
-    let http_port = random_port();
-    let config = test_config(grpc_port, http_port);
-    let (shutdown, metrics) = start_otlp_handler(config).await;
+    let otlp = start_otlp_handler(test_config()).await;
 
-    let mut client = TraceServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+    let mut client = TraceServiceClient::connect(format!("http://{}", otlp.grpc))
         .await
         .expect("Failed to connect to OTLP gRPC");
 
@@ -284,11 +284,11 @@ async fn test_otlp_grpc_traces() {
     );
 
     assert!(
-        requests_total(&metrics) > 0,
+        requests_total(&otlp.metrics) > 0,
         "Expected requests to be counted"
     );
 
-    shutdown.cancel();
+    otlp.shutdown.cancel();
 }
 
 /// Test sending metrics via OTLP gRPC.
@@ -296,12 +296,9 @@ async fn test_otlp_grpc_traces() {
 async fn test_otlp_grpc_metrics() {
     use pb::collector::metrics::v1::metrics_service_client::MetricsServiceClient;
 
-    let grpc_port = random_port();
-    let http_port = random_port();
-    let config = test_config(grpc_port, http_port);
-    let (shutdown, metrics) = start_otlp_handler(config).await;
+    let otlp = start_otlp_handler(test_config()).await;
 
-    let mut client = MetricsServiceClient::connect(format!("http://127.0.0.1:{grpc_port}"))
+    let mut client = MetricsServiceClient::connect(format!("http://{}", otlp.grpc))
         .await
         .expect("Failed to connect to OTLP gRPC");
 
@@ -313,11 +310,11 @@ async fn test_otlp_grpc_metrics() {
     );
 
     assert!(
-        requests_total(&metrics) > 0,
+        requests_total(&otlp.metrics) > 0,
         "Expected requests to be counted"
     );
 
-    shutdown.cancel();
+    otlp.shutdown.cancel();
 }
 
 // =============================================================================
@@ -327,17 +324,14 @@ async fn test_otlp_grpc_metrics() {
 /// Test sending logs via OTLP HTTP.
 #[tokio::test]
 async fn test_otlp_http_logs() {
-    let grpc_port = random_port();
-    let http_port = random_port();
-    let config = test_config(grpc_port, http_port);
-    let (shutdown, metrics) = start_otlp_handler(config).await;
+    let otlp = start_otlp_handler(test_config()).await;
 
     let client = reqwest::Client::new();
     let request = build_logs_request();
     let body = request.encode_to_vec();
 
     let resp = client
-        .post(format!("http://127.0.0.1:{http_port}/v1/logs"))
+        .post(format!("http://{}/v1/logs", otlp.http))
         .header("content-type", "application/x-protobuf")
         .body(body)
         .send()
@@ -352,28 +346,28 @@ async fn test_otlp_http_logs() {
     );
 
     assert!(
-        requests_total(&metrics) > 0,
+        requests_total(&otlp.metrics) > 0,
         "Expected requests to be counted"
     );
-    assert!(bytes_received(&metrics) > 0, "Expected bytes to be counted");
+    assert!(
+        bytes_received(&otlp.metrics) > 0,
+        "Expected bytes to be counted"
+    );
 
-    shutdown.cancel();
+    otlp.shutdown.cancel();
 }
 
 /// Test sending traces via OTLP HTTP.
 #[tokio::test]
 async fn test_otlp_http_traces() {
-    let grpc_port = random_port();
-    let http_port = random_port();
-    let config = test_config(grpc_port, http_port);
-    let (shutdown, metrics) = start_otlp_handler(config).await;
+    let otlp = start_otlp_handler(test_config()).await;
 
     let client = reqwest::Client::new();
     let request = build_traces_request();
     let body = request.encode_to_vec();
 
     let resp = client
-        .post(format!("http://127.0.0.1:{http_port}/v1/traces"))
+        .post(format!("http://{}/v1/traces", otlp.http))
         .header("content-type", "application/x-protobuf")
         .body(body)
         .send()
@@ -388,27 +382,24 @@ async fn test_otlp_http_traces() {
     );
 
     assert!(
-        requests_total(&metrics) > 0,
+        requests_total(&otlp.metrics) > 0,
         "Expected requests to be counted"
     );
 
-    shutdown.cancel();
+    otlp.shutdown.cancel();
 }
 
 /// Test sending metrics via OTLP HTTP.
 #[tokio::test]
 async fn test_otlp_http_metrics() {
-    let grpc_port = random_port();
-    let http_port = random_port();
-    let config = test_config(grpc_port, http_port);
-    let (shutdown, metrics) = start_otlp_handler(config).await;
+    let otlp = start_otlp_handler(test_config()).await;
 
     let client = reqwest::Client::new();
     let request = build_metrics_request();
     let body = request.encode_to_vec();
 
     let resp = client
-        .post(format!("http://127.0.0.1:{http_port}/v1/metrics"))
+        .post(format!("http://{}/v1/metrics", otlp.http))
         .header("content-type", "application/x-protobuf")
         .body(body)
         .send()
@@ -423,25 +414,22 @@ async fn test_otlp_http_metrics() {
     );
 
     assert!(
-        requests_total(&metrics) > 0,
+        requests_total(&otlp.metrics) > 0,
         "Expected requests to be counted"
     );
 
-    shutdown.cancel();
+    otlp.shutdown.cancel();
 }
 
 /// Test that invalid protobuf returns 400 on HTTP.
 #[tokio::test]
 async fn test_otlp_http_invalid_protobuf() {
-    let grpc_port = random_port();
-    let http_port = random_port();
-    let config = test_config(grpc_port, http_port);
-    let (shutdown, _metrics) = start_otlp_handler(config).await;
+    let otlp = start_otlp_handler(test_config()).await;
 
     let client = reqwest::Client::new();
 
     let resp = client
-        .post(format!("http://127.0.0.1:{http_port}/v1/logs"))
+        .post(format!("http://{}/v1/logs", otlp.http))
         .header("content-type", "application/x-protobuf")
         .body("not valid protobuf")
         .send()
@@ -455,21 +443,18 @@ async fn test_otlp_http_invalid_protobuf() {
         resp.status()
     );
 
-    shutdown.cancel();
+    otlp.shutdown.cancel();
 }
 
 /// Test that OTLP HTTP rejects unsupported JSON content-type.
 #[tokio::test]
 async fn test_otlp_http_json_unsupported() {
-    let grpc_port = random_port();
-    let http_port = random_port();
-    let config = test_config(grpc_port, http_port);
-    let (shutdown, _metrics) = start_otlp_handler(config).await;
+    let otlp = start_otlp_handler(test_config()).await;
 
     let client = reqwest::Client::new();
 
     let resp = client
-        .post(format!("http://127.0.0.1:{http_port}/v1/logs"))
+        .post(format!("http://{}/v1/logs", otlp.http))
         .header("content-type", "application/json")
         .body(r#"{"resourceLogs":[]}"#)
         .send()
@@ -482,16 +467,13 @@ async fn test_otlp_http_json_unsupported() {
         resp.status()
     );
 
-    shutdown.cancel();
+    otlp.shutdown.cancel();
 }
 
 /// Test bytes received tracking across multiple requests.
 #[tokio::test]
 async fn test_otlp_bytes_received_tracked() {
-    let grpc_port = random_port();
-    let http_port = random_port();
-    let config = test_config(grpc_port, http_port);
-    let (shutdown, metrics) = start_otlp_handler(config).await;
+    let otlp = start_otlp_handler(test_config()).await;
 
     let client = reqwest::Client::new();
 
@@ -499,7 +481,7 @@ async fn test_otlp_bytes_received_tracked() {
     let request = build_logs_request();
     let body = request.encode_to_vec();
     let resp = client
-        .post(format!("http://127.0.0.1:{http_port}/v1/logs"))
+        .post(format!("http://{}/v1/logs", otlp.http))
         .header("content-type", "application/x-protobuf")
         .body(body)
         .send()
@@ -511,7 +493,7 @@ async fn test_otlp_bytes_received_tracked() {
     let request = build_traces_request();
     let body = request.encode_to_vec();
     let resp = client
-        .post(format!("http://127.0.0.1:{http_port}/v1/traces"))
+        .post(format!("http://{}/v1/traces", otlp.http))
         .header("content-type", "application/x-protobuf")
         .body(body)
         .send()
@@ -521,13 +503,16 @@ async fn test_otlp_bytes_received_tracked() {
 
     // Verify cumulative metrics
     assert!(
-        requests_total(&metrics) >= 2,
+        requests_total(&otlp.metrics) >= 2,
         "Expected at least 2 requests, got {}",
-        requests_total(&metrics)
+        requests_total(&otlp.metrics)
     );
-    assert!(bytes_received(&metrics) > 0, "Expected bytes to be tracked");
+    assert!(
+        bytes_received(&otlp.metrics) > 0,
+        "Expected bytes to be tracked"
+    );
 
-    shutdown.cancel();
+    otlp.shutdown.cancel();
 }
 
 // =============================================================================
@@ -540,8 +525,8 @@ async fn test_otlp_bytes_received_tracked() {
 // accepting anything.
 
 /// A config with OTLP bearer auth armed on both endpoints.
-fn bearer_config(grpc_port: u16, http_port: u16) -> Config {
-    let mut config = test_config(grpc_port, http_port);
+fn bearer_config() -> Config {
+    let mut config = test_config();
     config.otlp.auth.mode = "bearer".to_string();
     config.otlp.auth.bearer.tokens = vec!["otlp-secret".to_string()];
     config
@@ -549,12 +534,10 @@ fn bearer_config(grpc_port: u16, http_port: u16) -> Config {
 
 #[tokio::test]
 async fn otlp_http_rejects_a_post_with_no_token() {
-    let grpc_port = random_port();
-    let http_port = random_port();
-    let (shutdown, metrics) = start_otlp_handler(bearer_config(grpc_port, http_port)).await;
+    let otlp = start_otlp_handler(bearer_config()).await;
 
     let resp = reqwest::Client::new()
-        .post(format!("http://127.0.0.1:{http_port}/v1/logs"))
+        .post(format!("http://{}/v1/logs", otlp.http))
         .header("content-type", "application/x-protobuf")
         .body(build_logs_request().encode_to_vec())
         .send()
@@ -567,22 +550,20 @@ async fn otlp_http_rejects_a_post_with_no_token() {
         "an unauthenticated post reached the OTLP HTTP endpoint under bearer mode"
     );
     assert_eq!(
-        requests_total(&metrics),
+        requests_total(&otlp.metrics),
         0,
         "the rejected post must not reach the pipeline"
     );
 
-    shutdown.cancel();
+    otlp.shutdown.cancel();
 }
 
 #[tokio::test]
 async fn otlp_http_rejects_a_post_with_the_wrong_token() {
-    let grpc_port = random_port();
-    let http_port = random_port();
-    let (shutdown, _metrics) = start_otlp_handler(bearer_config(grpc_port, http_port)).await;
+    let otlp = start_otlp_handler(bearer_config()).await;
 
     let resp = reqwest::Client::new()
-        .post(format!("http://127.0.0.1:{http_port}/v1/traces"))
+        .post(format!("http://{}/v1/traces", otlp.http))
         .header("content-type", "application/x-protobuf")
         .header("authorization", "Bearer not-the-token")
         .body(build_traces_request().encode_to_vec())
@@ -592,17 +573,15 @@ async fn otlp_http_rejects_a_post_with_the_wrong_token() {
 
     assert_eq!(resp.status(), 401);
 
-    shutdown.cancel();
+    otlp.shutdown.cancel();
 }
 
 #[tokio::test]
 async fn otlp_http_accepts_a_post_with_the_configured_token() {
-    let grpc_port = random_port();
-    let http_port = random_port();
-    let (shutdown, metrics) = start_otlp_handler(bearer_config(grpc_port, http_port)).await;
+    let otlp = start_otlp_handler(bearer_config()).await;
 
     let resp = reqwest::Client::new()
-        .post(format!("http://127.0.0.1:{http_port}/v1/logs"))
+        .post(format!("http://{}/v1/logs", otlp.http))
         .header("content-type", "application/x-protobuf")
         .header("authorization", "Bearer otlp-secret")
         .body(build_logs_request().encode_to_vec())
@@ -616,7 +595,7 @@ async fn otlp_http_accepts_a_post_with_the_configured_token() {
         "a correctly authenticated post was refused: {:?}",
         resp.text().await
     );
-    assert!(requests_total(&metrics) > 0);
+    assert!(requests_total(&otlp.metrics) > 0);
 
-    shutdown.cancel();
+    otlp.shutdown.cancel();
 }

@@ -83,32 +83,23 @@ fn filebeat_binary_path() -> Option<&'static PathBuf> {
         .as_ref()
 }
 
-/// Get a random port for testing.
-fn random_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    let port = listener.local_addr().expect("local addr").port();
-    drop(listener);
-    port
-}
-
 /// Create a minimal config for testing with Lumberjack enabled.
-fn test_config(lumberjack_port: u16) -> Config {
+fn test_config() -> Config {
     let mut config = Config::default();
     // HTTP server still needs a bind address (always enabled)
-    let http_port = random_port();
-    config.server.bind_address = format!("127.0.0.1:{http_port}");
+    config.server.bind_address = "127.0.0.1:0".to_string();
     config.server.auth.mode = "none".to_string();
     // Enable Lumberjack
     config.lumberjack.enabled = true;
-    config.lumberjack.bind_address = format!("127.0.0.1:{lumberjack_port}");
+    config.lumberjack.bind_address = "127.0.0.1:0".to_string();
     // The loader on its memory transport: accepted, sent nowhere, no broker.
     config.destinations.default = "loader".into();
     config.loader.transport = "memory".to_string();
     config
 }
 
-/// Start the Lumberjack handler and return (shutdown_token, metrics).
-async fn start_lumberjack_handler(config: Config) -> (CancellationToken, Arc<Metrics>) {
+/// Start the Lumberjack handler and return (shutdown_token, metrics, bound port).
+async fn start_lumberjack_handler(config: Config) -> (CancellationToken, Arc<Metrics>, u16) {
     let metrics = Arc::new(Metrics::default());
     let shutdown = CancellationToken::new();
     let pipeline = Arc::new(
@@ -121,15 +112,12 @@ async fn start_lumberjack_handler(config: Config) -> (CancellationToken, Arc<Met
     );
 
     let handler = LumberjackHandler::new(config.lumberjack.clone(), pipeline, metrics.clone());
+    let bound = handler.bound_addr();
 
     let handler_shutdown = shutdown.clone();
-    tokio::spawn(async move {
-        let _ = handler.start(handler_shutdown).await;
-    });
-
-    // Wait for handler to start listening
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    (shutdown, metrics)
+    let mut task = tokio::spawn(async move { handler.start(handler_shutdown).await });
+    let addr = crate::common::bound_addr("Lumberjack", &bound, &mut task).await;
+    (shutdown, metrics, addr.port())
 }
 
 /// Write a Filebeat YAML config to a file.
@@ -232,9 +220,7 @@ async fn test_filebeat_lumberjack_plaintext() {
         return;
     };
 
-    let port = random_port();
-    let config = test_config(port);
-    let (shutdown, metrics) = start_lumberjack_handler(config).await;
+    let (shutdown, metrics, port) = start_lumberjack_handler(test_config()).await;
 
     let tmp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let log_file = tmp_dir.path().join("test.log");

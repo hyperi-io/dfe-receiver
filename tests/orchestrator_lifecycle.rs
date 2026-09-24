@@ -33,7 +33,10 @@ impl Drop for ServerProcess {
     }
 }
 
-/// Take a port from the OS, then release it for the receiver to bind.
+/// Take a port from the OS, then release it for the receiver's metrics server.
+///
+/// scalo's service runtime binds `--metrics-addr` itself and reports no bound
+/// address, so this listener cannot be given port 0 and read back.
 fn free_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.local_addr().unwrap().port()
@@ -49,7 +52,6 @@ fn free_port() -> u16 {
 /// never appears.
 #[tokio::test]
 async fn orchestrator_runs_while_the_listeners_serve() {
-    let http_port = free_port();
     let metrics_port = free_port();
 
     let dir = tempfile::tempdir().unwrap();
@@ -62,7 +64,7 @@ async fn orchestrator_runs_while_the_listeners_serve() {
         // The broker is never reached: rdkafka resolves it in the background, so
         // the process serves without one and this test needs no container.
         r#"server:
-  bind_address: "127.0.0.1:{http_port}"
+  bind_address: "127.0.0.1:0"
 metrics:
   enabled: true
   address: "127.0.0.1:{metrics_port}"

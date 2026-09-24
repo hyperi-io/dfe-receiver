@@ -21,6 +21,7 @@
 // just over clippy's 16 KiB threshold. Mirrors the lib crate's allow (main.rs).
 #![allow(clippy::large_futures)]
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,24 +36,15 @@ use dfe_receiver::server::otlp::OtlpHandler;
 use dfe_receiver::server::prometheus_rw::PrometheusRwHandler;
 use dfe_receiver::server::splunk_hec::SplunkHecHandler;
 use dfe_receiver::server::syslog::SyslogHandler;
-use dfe_receiver::server::traits::ProtocolHandler;
+use dfe_receiver::server::traits::{BoundAddr, ProtocolHandler};
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpStream, UdpSocket};
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-
-/// An OS-assigned ephemeral port, released before the handler binds it.
-fn random_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    let port = listener.local_addr().expect("local addr").port();
-    drop(listener);
-    port
-}
 
 /// A config that starts, with nothing but the always-on HTTP listener enabled.
 fn base_config() -> Config {
     let mut config = Config::default();
-    config.server.bind_address = format!("127.0.0.1:{}", random_port());
+    config.server.bind_address = "127.0.0.1:0".to_string();
     config.server.auth.mode = "none".to_string();
     // The loader on its memory transport: accepted, sent nowhere, no broker.
     config.destinations.default = "loader".into();
@@ -92,35 +84,20 @@ async fn pipeline_for(config: &Config) -> Arc<PipelineState> {
     )
 }
 
-/// Spawn a handler and wait for its port to accept a connection.
-async fn spawn(handler: Box<dyn ProtocolHandler>, port: u16) -> CancellationToken {
+/// Spawn a handler and wait for the listener behind `bound` to bind.
+///
+/// Knowing the bind landed is what tells a listener that rejected the peer
+/// from one that never started: both refuse a connection.
+async fn spawn(
+    handler: Box<dyn ProtocolHandler>,
+    bound: BoundAddr,
+) -> (CancellationToken, SocketAddr) {
+    let name = handler.name();
     let shutdown = CancellationToken::new();
     let handler_shutdown = shutdown.clone();
     let mut task = tokio::spawn(async move { handler.start(handler_shutdown).await });
-    wait_for_port(port, &mut task).await;
-    shutdown
-}
-
-/// Poll the port until the handler accepts, or fail loudly.
-///
-/// A handler that cannot bind returns straight away and takes its error with
-/// it, so a fixed sleep leaves the test unable to tell a listener that rejected
-/// the peer from one that never started. Watching the task means a failed bind
-/// fails the test instead of satisfying it.
-async fn wait_for_port(port: u16, task: &mut JoinHandle<Result<(), dfe_receiver::error::Error>>) {
-    let addr = format!("127.0.0.1:{port}");
-    // 100 x 50ms = 5s, generous because it guards a race rather than measuring.
-    for _ in 0..100 {
-        if task.is_finished() {
-            let outcome = task.await;
-            panic!("the listener on port {port} exited before serving: {outcome:?}");
-        }
-        if TcpStream::connect(&addr).await.is_ok() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("the listener on port {port} never accepted a connection within 5s");
+    let addr = crate::common::bound_addr(name, &bound, &mut task).await;
+    (shutdown, addr)
 }
 
 /// Whether an admitted peer keeps its session.
@@ -128,8 +105,8 @@ async fn wait_for_port(port: u16, task: &mut JoinHandle<Result<(), dfe_receiver:
 /// A listener that admits the connection waits for the client to speak first,
 /// so the read blocks until the timeout. One that rejected it has already
 /// dropped the stream and the read returns EOF.
-async fn session_held(port: u16) -> bool {
-    let mut stream = TcpStream::connect(("127.0.0.1", port))
+async fn session_held(addr: SocketAddr) -> bool {
+    let mut stream = TcpStream::connect(addr)
         .await
         .expect("the listener must be bound");
     let mut buf = [0u8; 1];
@@ -143,8 +120,8 @@ async fn session_held(port: u16) -> bool {
 /// Connecting must succeed: the kernel completes the handshake for a bound
 /// port whatever the accept loop then does with the stream, so a refused
 /// connection means no listener, not a rejection.
-async fn connection_closed_immediately(port: u16) -> bool {
-    let mut stream = TcpStream::connect(("127.0.0.1", port))
+async fn connection_closed_immediately(addr: SocketAddr) -> bool {
+    let mut stream = TcpStream::connect(addr)
         .await
         .expect("the listener must be bound -- a refused connection is not a rejection");
     let mut buf = [0u8; 1];
@@ -201,13 +178,15 @@ async fn post_once(url: &str, content_type: &str, body: &'static [u8]) -> reqwes
         .map(|r| r.status().as_u16())
 }
 
-/// Build a protocol handler over a config and the pipeline behind it.
-type Build = dyn Fn(&Config, Arc<PipelineState>) -> Box<dyn ProtocolHandler>;
+/// Build a protocol handler over a config and the pipeline behind it, with
+/// the address cell of the listener under test.
+type Build = dyn Fn(&Config, Arc<PipelineState>) -> (Box<dyn ProtocolHandler>, BoundAddr);
 
-/// Start one handler on `port` and wait for it to accept.
-async fn start(config: &Config, build: &Build, port: u16) -> CancellationToken {
+/// Start one handler and wait for the listener under test to bind.
+async fn start(config: &Config, build: &Build) -> (CancellationToken, SocketAddr) {
     let pipeline = pipeline_for(config).await;
-    spawn(build(config, pipeline), port).await
+    let (handler, bound) = build(config, pipeline);
+    spawn(handler, bound).await
 }
 
 /// The ingest endpoint of one HTTP listener.
@@ -222,28 +201,26 @@ struct Endpoint {
 /// one.
 async fn tcp_honours_the_shared_ip_filter(
     protocol: &str,
-    configure: &dyn Fn(&mut Config, u16),
+    configure: &dyn Fn(&mut Config),
     build: &Build,
 ) {
     // Positive control: no filter, so the peer is admitted.
-    let port = random_port();
     let mut config = base_config();
-    configure(&mut config, port);
-    let shutdown = start(&config, build, port).await;
+    configure(&mut config);
+    let (shutdown, addr) = start(&config, build).await;
     assert!(
-        session_held(port).await,
+        session_held(addr).await,
         "{protocol} must hold a session for an admitted peer"
     );
     shutdown.cancel();
 
     // Same listener, loopback barred.
-    let port = random_port();
     let mut config = base_config();
-    configure(&mut config, port);
+    configure(&mut config);
     deny_loopback(&mut config);
-    let shutdown = start(&config, build, port).await;
+    let (shutdown, addr) = start(&config, build).await;
     assert!(
-        connection_closed_immediately(port).await,
+        connection_closed_immediately(addr).await,
         "a denied peer must not hold a {protocol} session"
     );
     shutdown.cancel();
@@ -252,7 +229,7 @@ async fn tcp_honours_the_shared_ip_filter(
 /// An HTTP listener answers an admitted peer and drops a barred one.
 async fn http_honours_the_shared_ip_filter(
     endpoint: &Endpoint,
-    configure: &dyn Fn(&mut Config, u16),
+    configure: &dyn Fn(&mut Config),
     build: &Build,
 ) {
     let Endpoint {
@@ -263,16 +240,10 @@ async fn http_honours_the_shared_ip_filter(
     } = *endpoint;
 
     // Positive control: no filter, so the request is served.
-    let port = random_port();
     let mut config = base_config();
-    configure(&mut config, port);
-    let shutdown = start(&config, build, port).await;
-    let answered = post_once(
-        &format!("http://127.0.0.1:{port}{path}"),
-        content_type,
-        body,
-    )
-    .await;
+    configure(&mut config);
+    let (shutdown, addr) = start(&config, build).await;
+    let answered = post_once(&format!("http://{addr}{path}"), content_type, body).await;
     assert!(
         answered.is_ok(),
         "{protocol} must answer an admitted peer, got: {:?}",
@@ -281,17 +252,11 @@ async fn http_honours_the_shared_ip_filter(
     shutdown.cancel();
 
     // Same listener, loopback barred.
-    let port = random_port();
     let mut config = base_config();
-    configure(&mut config, port);
+    configure(&mut config);
     deny_loopback(&mut config);
-    let shutdown = start(&config, build, port).await;
-    let response = post_once(
-        &format!("http://127.0.0.1:{port}{path}"),
-        content_type,
-        body,
-    )
-    .await;
+    let (shutdown, addr) = start(&config, build).await;
+    let response = post_once(&format!("http://{addr}{path}"), content_type, body).await;
     assert!(
         response.is_err(),
         "a denied peer must not reach {protocol}, got: {:?}",
@@ -303,16 +268,15 @@ async fn http_honours_the_shared_ip_filter(
 /// An HTTP listener serves inside the configured rate and answers 429 over it.
 async fn http_honours_the_shared_rate_limit(
     endpoint: &Endpoint,
-    configure: &dyn Fn(&mut Config, u16),
+    configure: &dyn Fn(&mut Config),
     build: &Build,
 ) {
-    let port = random_port();
     let mut config = base_config();
-    configure(&mut config, port);
+    configure(&mut config);
     throttle_hard(&mut config);
 
-    let shutdown = start(&config, build, port).await;
-    let statuses = parallel_post(format!("http://127.0.0.1:{port}{}", endpoint.path), 20).await;
+    let (shutdown, addr) = start(&config, build).await;
+    let statuses = parallel_post(format!("http://{addr}{}", endpoint.path), 20).await;
 
     assert!(
         statuses.iter().any(|status| *status != 429),
@@ -338,19 +302,24 @@ const HEC: Endpoint = Endpoint {
     body: br#"{"event":"x"}"#,
 };
 
-fn configure_hec(config: &mut Config, port: u16) {
+fn configure_hec(config: &mut Config) {
     config.splunk_hec.enabled = true;
-    config.splunk_hec.bind_address = format!("127.0.0.1:{port}");
+    config.splunk_hec.bind_address = "127.0.0.1:0".to_string();
     config.splunk_hec.auth.mode = "none".to_string();
 }
 
-fn build_hec(config: &Config, pipeline: Arc<PipelineState>) -> Box<dyn ProtocolHandler> {
-    Box::new(SplunkHecHandler::new(
+fn build_hec(
+    config: &Config,
+    pipeline: Arc<PipelineState>,
+) -> (Box<dyn ProtocolHandler>, BoundAddr) {
+    let handler = SplunkHecHandler::new(
         config.splunk_hec.clone(),
         config.raw_capture_for(&config.splunk_hec.raw_capture),
         pipeline,
         Arc::new(Metrics::default()),
-    ))
+    );
+    let bound = handler.bound_addr();
+    (Box::new(handler), bound)
 }
 
 #[tokio::test]
@@ -374,19 +343,24 @@ const PROMETHEUS_RW: Endpoint = Endpoint {
     body: b"x",
 };
 
-fn configure_rw(config: &mut Config, port: u16) {
+fn configure_rw(config: &mut Config) {
     config.prometheus_rw.enabled = true;
-    config.prometheus_rw.bind_address = format!("127.0.0.1:{port}");
+    config.prometheus_rw.bind_address = "127.0.0.1:0".to_string();
     config.prometheus_rw.auth.mode = "none".to_string();
 }
 
-fn build_rw(config: &Config, pipeline: Arc<PipelineState>) -> Box<dyn ProtocolHandler> {
-    Box::new(PrometheusRwHandler::new(
+fn build_rw(
+    config: &Config,
+    pipeline: Arc<PipelineState>,
+) -> (Box<dyn ProtocolHandler>, BoundAddr) {
+    let handler = PrometheusRwHandler::new(
         config.prometheus_rw.clone(),
         config.raw_capture_for(&config.prometheus_rw.raw_capture),
         pipeline,
         Arc::new(Metrics::default()),
-    ))
+    );
+    let bound = handler.bound_addr();
+    (Box::new(handler), bound)
 }
 
 #[tokio::test]
@@ -412,21 +386,26 @@ const OTLP_HTTP: Endpoint = Endpoint {
 };
 
 #[cfg(feature = "otlp")]
-fn configure_otlp(config: &mut Config, http_port: u16) {
+fn configure_otlp(config: &mut Config) {
     config.otlp.enabled = true;
-    config.otlp.grpc_bind_address = format!("127.0.0.1:{}", random_port());
-    config.otlp.http_bind_address = format!("127.0.0.1:{http_port}");
+    config.otlp.grpc_bind_address = "127.0.0.1:0".to_string();
+    config.otlp.http_bind_address = "127.0.0.1:0".to_string();
     config.otlp.auth.mode = "none".to_string();
 }
 
 #[cfg(feature = "otlp")]
-fn build_otlp(config: &Config, pipeline: Arc<PipelineState>) -> Box<dyn ProtocolHandler> {
-    Box::new(OtlpHandler::new(
+fn build_otlp(
+    config: &Config,
+    pipeline: Arc<PipelineState>,
+) -> (Box<dyn ProtocolHandler>, BoundAddr) {
+    let handler = OtlpHandler::new(
         config.otlp.clone(),
         config.raw_capture_for(&config.otlp.raw_capture),
         pipeline,
         Arc::new(Metrics::default()),
-    ))
+    );
+    let bound = handler.http_bound_addr();
+    (Box::new(handler), bound)
 }
 
 #[cfg(feature = "otlp")]
@@ -445,60 +424,80 @@ async fn otlp_http_applies_the_configured_rate_limit() {
 // Raw TCP listeners
 // ---------------------------------------------------------------------------
 
-fn configure_fluent(config: &mut Config, port: u16) {
+fn configure_fluent(config: &mut Config) {
     config.fluent.enabled = true;
-    config.fluent.bind_address = format!("127.0.0.1:{port}");
+    config.fluent.bind_address = "127.0.0.1:0".to_string();
 }
 
-fn build_fluent(config: &Config, pipeline: Arc<PipelineState>) -> Box<dyn ProtocolHandler> {
-    Box::new(FluentHandler::new(
+fn build_fluent(
+    config: &Config,
+    pipeline: Arc<PipelineState>,
+) -> (Box<dyn ProtocolHandler>, BoundAddr) {
+    let handler = FluentHandler::new(
         config.fluent.clone(),
         config.raw_capture_for(&config.fluent.raw_capture),
         pipeline,
         Arc::new(Metrics::default()),
-    ))
+    );
+    let bound = handler.bound_addr();
+    (Box::new(handler), bound)
 }
 
-fn configure_gelf(config: &mut Config, port: u16) {
+fn configure_gelf(config: &mut Config) {
     config.gelf.enabled = true;
-    config.gelf.bind_address = format!("127.0.0.1:{port}");
+    config.gelf.bind_address = "127.0.0.1:0".to_string();
 }
 
-fn build_gelf(config: &Config, pipeline: Arc<PipelineState>) -> Box<dyn ProtocolHandler> {
-    Box::new(GelfHandler::new(
+fn build_gelf(
+    config: &Config,
+    pipeline: Arc<PipelineState>,
+) -> (Box<dyn ProtocolHandler>, BoundAddr) {
+    let handler = GelfHandler::new(
         config.gelf.clone(),
         config.raw_capture_for(&config.gelf.raw_capture),
         pipeline,
         Arc::new(Metrics::default()),
-    ))
+    );
+    let bound = handler.bound_addr();
+    (Box::new(handler), bound)
 }
 
-fn configure_lumberjack(config: &mut Config, port: u16) {
+fn configure_lumberjack(config: &mut Config) {
     config.lumberjack.enabled = true;
-    config.lumberjack.bind_address = format!("127.0.0.1:{port}");
+    config.lumberjack.bind_address = "127.0.0.1:0".to_string();
 }
 
-fn build_lumberjack(config: &Config, pipeline: Arc<PipelineState>) -> Box<dyn ProtocolHandler> {
-    Box::new(LumberjackHandler::new(
+fn build_lumberjack(
+    config: &Config,
+    pipeline: Arc<PipelineState>,
+) -> (Box<dyn ProtocolHandler>, BoundAddr) {
+    let handler = LumberjackHandler::new(
         config.lumberjack.clone(),
         pipeline,
         Arc::new(Metrics::default()),
-    ))
+    );
+    let bound = handler.bound_addr();
+    (Box::new(handler), bound)
 }
 
-fn configure_syslog(config: &mut Config, tcp_port: u16) {
+fn configure_syslog(config: &mut Config) {
     config.syslog.enabled = true;
-    config.syslog.udp_bind_address = format!("127.0.0.1:{}", random_port());
-    config.syslog.tcp_bind_address = format!("127.0.0.1:{tcp_port}");
+    config.syslog.udp_bind_address = "127.0.0.1:0".to_string();
+    config.syslog.tcp_bind_address = "127.0.0.1:0".to_string();
 }
 
-fn build_syslog(config: &Config, pipeline: Arc<PipelineState>) -> Box<dyn ProtocolHandler> {
-    Box::new(SyslogHandler::new(
+fn build_syslog(
+    config: &Config,
+    pipeline: Arc<PipelineState>,
+) -> (Box<dyn ProtocolHandler>, BoundAddr) {
+    let handler = SyslogHandler::new(
         config.syslog.clone(),
         config.raw_capture_for(&config.syslog.raw_capture),
         pipeline,
         Arc::new(Metrics::default()),
-    ))
+    );
+    let bound = handler.tcp_bound_addr();
+    (Box::new(handler), bound)
 }
 
 #[tokio::test]
@@ -526,52 +525,52 @@ async fn an_allowlist_admits_only_the_sources_it_names() {
     // The other arm of the filter enum, and the one an operator reaches for
     // first. A denylist test never runs it: an allowlist bars every source it
     // does not name, which is the opposite default.
-    let port = random_port();
     let mut config = base_config();
-    configure_gelf(&mut config, port);
+    configure_gelf(&mut config);
     allow_only(&mut config, "127.0.0.0/8");
-    let shutdown = start(&config, &build_gelf, port).await;
+    let (shutdown, addr) = start(&config, &build_gelf).await;
     assert!(
-        session_held(port).await,
+        session_held(addr).await,
         "an allowlisted peer must hold a session"
     );
     shutdown.cancel();
 
-    let port = random_port();
     let mut config = base_config();
-    configure_gelf(&mut config, port);
+    configure_gelf(&mut config);
     allow_only(&mut config, "10.0.0.0/8");
-    let shutdown = start(&config, &build_gelf, port).await;
+    let (shutdown, addr) = start(&config, &build_gelf).await;
     assert!(
-        connection_closed_immediately(port).await,
+        connection_closed_immediately(addr).await,
         "a peer outside the allowlist must be dropped"
     );
     shutdown.cancel();
 }
 
+/// Start a syslog handler on `config` and wait for its UDP listener to bind.
+async fn start_syslog_udp(
+    config: &Config,
+    metrics: Arc<Metrics>,
+) -> (CancellationToken, SocketAddr) {
+    let pipeline = pipeline_for(config).await;
+    let handler = SyslogHandler::new(
+        config.syslog.clone(),
+        config.raw_capture_for(&config.syslog.raw_capture),
+        pipeline,
+        metrics,
+    );
+    let bound = handler.udp_bound_addr();
+    spawn(Box::new(handler), bound).await
+}
+
 #[tokio::test]
 async fn syslog_applies_the_configured_ip_filter_per_udp_datagram() {
     // Positive control: no filter, so the datagram is counted and parsed.
-    let udp_port = random_port();
-    let tcp_port = random_port();
     let mut config = base_config();
-    config.syslog.enabled = true;
-    config.syslog.udp_bind_address = format!("127.0.0.1:{udp_port}");
-    config.syslog.tcp_bind_address = format!("127.0.0.1:{tcp_port}");
+    configure_syslog(&mut config);
 
     let metrics = Arc::new(Metrics::default());
-    let pipeline = pipeline_for(&config).await;
-    let shutdown = spawn(
-        Box::new(SyslogHandler::new(
-            config.syslog.clone(),
-            config.raw_capture_for(&config.syslog.raw_capture),
-            pipeline,
-            metrics.clone(),
-        )),
-        tcp_port,
-    )
-    .await;
-    send_syslog_datagram(udp_port).await;
+    let (shutdown, udp) = start_syslog_udp(&config, metrics.clone()).await;
+    send_syslog_datagram(udp).await;
     assert_eq!(
         counted_requests(&metrics).await,
         1,
@@ -580,27 +579,13 @@ async fn syslog_applies_the_configured_ip_filter_per_udp_datagram() {
     shutdown.cancel();
 
     // Same listener, loopback barred.
-    let udp_port = random_port();
-    let tcp_port = random_port();
     let mut config = base_config();
-    config.syslog.enabled = true;
-    config.syslog.udp_bind_address = format!("127.0.0.1:{udp_port}");
-    config.syslog.tcp_bind_address = format!("127.0.0.1:{tcp_port}");
+    configure_syslog(&mut config);
     deny_loopback(&mut config);
 
     let metrics = Arc::new(Metrics::default());
-    let pipeline = pipeline_for(&config).await;
-    let shutdown = spawn(
-        Box::new(SyslogHandler::new(
-            config.syslog.clone(),
-            config.raw_capture_for(&config.syslog.raw_capture),
-            pipeline,
-            metrics.clone(),
-        )),
-        tcp_port,
-    )
-    .await;
-    send_syslog_datagram(udp_port).await;
+    let (shutdown, udp) = start_syslog_udp(&config, metrics.clone()).await;
+    send_syslog_datagram(udp).await;
     assert_eq!(
         counted_requests(&metrics).await,
         0,
@@ -610,13 +595,10 @@ async fn syslog_applies_the_configured_ip_filter_per_udp_datagram() {
 }
 
 /// Send one well-formed syslog line to the UDP listener.
-async fn send_syslog_datagram(udp_port: u16) {
+async fn send_syslog_datagram(udp: SocketAddr) {
     let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind sender");
     socket
-        .send_to(
-            b"<34>1 2026-01-01T00:00:00Z host app - - - hello",
-            ("127.0.0.1", udp_port),
-        )
+        .send_to(b"<34>1 2026-01-01T00:00:00Z host app - - - hello", udp)
         .await
         .expect("send datagram");
 }

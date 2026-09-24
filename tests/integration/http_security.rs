@@ -30,55 +30,15 @@ use std::time::Duration;
 use dfe_receiver::config::{AcceptedHeader, BearerConfig, Config, SharedConfig};
 use dfe_receiver::metrics::Metrics;
 use dfe_receiver::pipeline::PipelineState;
-use dfe_receiver::server::http;
+use dfe_receiver::server::http::HttpHandler;
+use dfe_receiver::server::traits::ProtocolHandler;
 use scalo::memory::{MemoryGuard, MemoryGuardConfig, UsageSource};
 use tokio_util::sync::CancellationToken;
 
-/// Get a random port for testing.
-fn random_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    let port = listener.local_addr().expect("local addr").port();
-    drop(listener);
-    port
-}
-
-/// Poll the loopback port until OUR server accepts, or panic on the budget.
-///
-/// A fixed sleep races the server's bind under parallel CI load and surfaces as
-/// `ConnectionRefused` on the test's own port. This is the polling half of the
-/// `grpc_sink.rs` hardening, with one addition that file gets for free: there,
-/// `GrpcTransport::new` has already proved the bind before the poll starts,
-/// whereas `run_server` only reports a failed bind by returning. Every
-/// integration test compiles into one binary and ~30 of them call
-/// `random_port`, so a port picked here can be taken before `run_server` binds
-/// it; the poll would then ratify the winner's listener and the assertions would
-/// run against a server with someone else's config. Watching the task means a
-/// lost race fails loudly instead. It is not airtight -- a connect that lands
-/// before our own bind is even attempted still slips through -- so treat a
-/// confusing failure in this file as a possible port collision.
-async fn wait_for_port(
-    port: u16,
-    server: &mut tokio::task::JoinHandle<Result<(), dfe_receiver::error::Error>>,
-) {
-    let addr = format!("127.0.0.1:{port}");
-    // 300 x 50ms = 15s, generous because it guards a race rather than measuring.
-    for _ in 0..300 {
-        if server.is_finished() {
-            let outcome = server.await;
-            panic!("test HTTP server on port {port} exited before serving: {outcome:?}");
-        }
-        if tokio::net::TcpStream::connect(&addr).await.is_ok() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("HTTP server on port {port} never accepted connections within 15s");
-}
-
 /// Create a test config with specified settings.
-fn test_config(port: u16, max_body_size: usize, timeout_ms: u64, auth_mode: &str) -> Config {
+fn test_config(max_body_size: usize, timeout_ms: u64, auth_mode: &str) -> Config {
     let mut config = Config::default();
-    config.server.bind_address = format!("127.0.0.1:{port}");
+    config.server.bind_address = "127.0.0.1:0".to_string();
     config.server.max_body_size = max_body_size;
     config.server.request_timeout_ms = timeout_ms;
     config.server.auth.mode = auth_mode.to_string();
@@ -119,14 +79,6 @@ async fn start_test_server_with_pipeline(
     config: Config,
     guard: Option<Arc<MemoryGuard>>,
 ) -> (String, CancellationToken, Arc<PipelineState>) {
-    let port = config
-        .server
-        .bind_address
-        .split(':')
-        .last()
-        .and_then(|p| p.parse::<u16>().ok())
-        .unwrap_or(8080);
-
     let metrics = Arc::new(Metrics::default());
     let shutdown = CancellationToken::new();
     let pipeline = Arc::new(
@@ -140,21 +92,17 @@ async fn start_test_server_with_pipeline(
         .expect("Failed to create pipeline"),
     );
 
+    let handler = HttpHandler::new(
+        config.server.bind_address.clone(),
+        pipeline.clone(),
+        metrics,
+    );
+    let bound = handler.bound_addr();
     let server_shutdown = shutdown.clone();
-    let server_metrics = metrics.clone();
-    let server_pipeline = pipeline.clone();
-    let bind_addr = config.server.bind_address.clone();
+    let mut server = tokio::spawn(async move { handler.start(server_shutdown).await });
+    let addr = crate::common::bound_addr("HTTP", &bound, &mut server).await;
 
-    // Returned, not swallowed: `wait_for_port` reads the task's exit as proof
-    // the bind failed, which is the only signal `run_server` gives.
-    let mut server = tokio::spawn(async move {
-        http::run_server(&bind_addr, server_pipeline, server_metrics, server_shutdown).await
-    });
-
-    wait_for_port(port, &mut server).await;
-
-    let url = format!("http://127.0.0.1:{port}");
-    (url, shutdown, pipeline)
+    (format!("http://{addr}"), shutdown, pipeline)
 }
 
 // =============================================================================
@@ -164,9 +112,8 @@ async fn start_test_server_with_pipeline(
 /// Test that requests within body size limit are accepted.
 #[tokio::test]
 async fn test_body_size_within_limit() {
-    let port = random_port();
     let max_body = 1024; // 1KB limit
-    let config = test_config(port, max_body, 30_000, "none");
+    let config = test_config(max_body, 30_000, "none");
 
     let (url, shutdown) = start_test_server(config).await;
     let client = reqwest::Client::new();
@@ -193,9 +140,8 @@ async fn test_body_size_within_limit() {
 /// Test that requests exceeding body size limit are rejected.
 #[tokio::test]
 async fn test_body_size_exceeds_limit() {
-    let port = random_port();
     let max_body = 100; // Very small limit (100 bytes)
-    let config = test_config(port, max_body, 30_000, "none");
+    let config = test_config(max_body, 30_000, "none");
 
     let (url, shutdown) = start_test_server(config).await;
     let client = reqwest::Client::new();
@@ -226,9 +172,8 @@ async fn test_body_size_exceeds_limit() {
 /// Test that exactly-at-limit requests are accepted.
 #[tokio::test]
 async fn test_body_size_at_limit() {
-    let port = random_port();
     let max_body = 100;
-    let config = test_config(port, max_body, 30_000, "none");
+    let config = test_config(max_body, 30_000, "none");
 
     let (url, shutdown) = start_test_server(config).await;
     let client = reqwest::Client::new();
@@ -263,8 +208,7 @@ async fn test_body_size_at_limit() {
 /// Test that unauthenticated requests are rejected when auth is required.
 #[tokio::test]
 async fn test_auth_required_no_header() {
-    let port = random_port();
-    let mut config = test_config(port, 10_000, 30_000, "header");
+    let mut config = test_config(10_000, 30_000, "header");
     config.server.auth.accepted_headers = vec![AcceptedHeader {
         name: "x-api-key".to_string(),
         values: vec!["secret-key".to_string()],
@@ -295,8 +239,7 @@ async fn test_auth_required_no_header() {
 /// Test that requests with wrong auth are rejected.
 #[tokio::test]
 async fn test_auth_wrong_header_value() {
-    let port = random_port();
-    let mut config = test_config(port, 10_000, 30_000, "header");
+    let mut config = test_config(10_000, 30_000, "header");
     config.server.auth.accepted_headers = vec![AcceptedHeader {
         name: "x-api-key".to_string(),
         values: vec!["secret-key".to_string()],
@@ -328,8 +271,7 @@ async fn test_auth_wrong_header_value() {
 /// Test that requests with correct auth are accepted.
 #[tokio::test]
 async fn test_auth_correct_header() {
-    let port = random_port();
-    let mut config = test_config(port, 10_000, 30_000, "header");
+    let mut config = test_config(10_000, 30_000, "header");
     config.server.auth.accepted_headers = vec![AcceptedHeader {
         name: "x-api-key".to_string(),
         values: vec!["secret-key".to_string()],
@@ -360,8 +302,7 @@ async fn test_auth_correct_header() {
 /// Test bearer token authentication.
 #[tokio::test]
 async fn test_bearer_auth_valid_token() {
-    let port = random_port();
-    let mut config = test_config(port, 10_000, 30_000, "bearer");
+    let mut config = test_config(10_000, 30_000, "bearer");
     config.server.auth.bearer = BearerConfig {
         tokens: vec!["valid-token-123".to_string()],
         secret_source: None,
@@ -396,8 +337,7 @@ async fn test_bearer_auth_valid_token() {
 /// Test bearer token authentication with invalid token.
 #[tokio::test]
 async fn test_bearer_auth_invalid_token() {
-    let port = random_port();
-    let mut config = test_config(port, 10_000, 30_000, "bearer");
+    let mut config = test_config(10_000, 30_000, "bearer");
     config.server.auth.bearer = BearerConfig {
         tokens: vec!["valid-token-123".to_string()],
         secret_source: None,
@@ -437,8 +377,7 @@ async fn test_bearer_auth_invalid_token() {
 /// probes were only ever exercised where auth was off.
 #[tokio::test]
 async fn test_probe_paths_answer_with_bearer_auth_enabled() {
-    let port = random_port();
-    let mut config = test_config(port, 10_000, 30_000, "bearer");
+    let mut config = test_config(10_000, 30_000, "bearer");
     config.server.auth.bearer = BearerConfig {
         tokens: vec!["valid-token-123".to_string()],
         secret_source: None,
@@ -493,8 +432,7 @@ async fn test_probe_paths_answer_with_bearer_auth_enabled() {
 /// that the request is not accepted, not which rejection is chosen.
 #[tokio::test]
 async fn test_bearer_mode_without_tokens_rejects_unauthenticated() {
-    let port = random_port();
-    let mut config = test_config(port, 10_000, 30_000, "bearer");
+    let mut config = test_config(10_000, 30_000, "bearer");
     // The misconfiguration: bearer mode asked for, no token source supplied.
     config.server.auth.bearer = BearerConfig {
         tokens: vec![],
@@ -528,8 +466,7 @@ async fn test_bearer_mode_without_tokens_rejects_unauthenticated() {
 /// server has no tokens to compare it against.
 #[tokio::test]
 async fn test_bearer_mode_without_tokens_rejects_arbitrary_token() {
-    let port = random_port();
-    let mut config = test_config(port, 10_000, 30_000, "bearer");
+    let mut config = test_config(10_000, 30_000, "bearer");
     config.server.auth.bearer = BearerConfig {
         tokens: vec![],
         secret_source: None,
@@ -573,11 +510,9 @@ async fn test_bearer_mode_without_tokens_rejects_arbitrary_token() {
 async fn test_grpc_auth_setup_failure_aborts_instead_of_serving_open() {
     use dfe_receiver::server::traits::ProtocolHandler;
 
-    let http_port = random_port();
-    let grpc_port = random_port();
-    let mut config = test_config(http_port, 10_000, 30_000, "none");
+    let mut config = test_config(10_000, 30_000, "none");
     config.grpc.enabled = true;
-    config.grpc.bind_address = format!("127.0.0.1:{grpc_port}");
+    config.grpc.bind_address = "127.0.0.1:0".to_string();
     config.grpc.auth.mode = "bearer".to_string();
     config.grpc.auth.bearer = BearerConfig {
         tokens: vec![],
@@ -618,8 +553,7 @@ async fn test_grpc_auth_setup_failure_aborts_instead_of_serving_open() {
 /// Test that health endpoints are accessible.
 #[tokio::test]
 async fn test_health_endpoints() {
-    let port = random_port();
-    let config = test_config(port, 10_000, 30_000, "none");
+    let config = test_config(10_000, 30_000, "none");
 
     let (url, shutdown) = start_test_server(config).await;
     let client = reqwest::Client::new();
@@ -652,8 +586,7 @@ async fn test_health_endpoints() {
 /// makes a re-added alias fail a test instead of hiding for six days.
 #[tokio::test]
 async fn test_retired_health_paths_are_gone() {
-    let port = random_port();
-    let config = test_config(port, 10_000, 30_000, "none");
+    let config = test_config(10_000, 30_000, "none");
 
     let (url, shutdown) = start_test_server(config).await;
     let client = reqwest::Client::new();
@@ -687,8 +620,7 @@ async fn test_retired_health_paths_are_gone() {
 /// Test that binary garbage is rejected.
 #[tokio::test]
 async fn test_reject_binary_garbage() {
-    let port = random_port();
-    let config = test_config(port, 10_000, 30_000, "none");
+    let config = test_config(10_000, 30_000, "none");
 
     let (url, shutdown) = start_test_server(config).await;
     let client = reqwest::Client::new();
@@ -716,8 +648,7 @@ async fn test_reject_binary_garbage() {
 /// Test that empty requests are handled.
 #[tokio::test]
 async fn test_handle_empty_request() {
-    let port = random_port();
-    let config = test_config(port, 10_000, 30_000, "none");
+    let config = test_config(10_000, 30_000, "none");
 
     let (url, shutdown) = start_test_server(config).await;
     let client = reqwest::Client::new();
@@ -744,8 +675,7 @@ async fn test_handle_empty_request() {
 /// Test that non-JSON content types are handled.
 #[tokio::test]
 async fn test_wrong_content_type() {
-    let port = random_port();
-    let config = test_config(port, 10_000, 30_000, "none");
+    let config = test_config(10_000, 30_000, "none");
 
     let (url, shutdown) = start_test_server(config).await;
     let client = reqwest::Client::new();
@@ -769,8 +699,7 @@ async fn test_wrong_content_type() {
 /// Test concurrent requests don't cause issues.
 #[tokio::test]
 async fn test_concurrent_requests() {
-    let port = random_port();
-    let config = test_config(port, 10_000, 30_000, "none");
+    let config = test_config(10_000, 30_000, "none");
 
     let (url, shutdown) = start_test_server(config).await;
     let client = reqwest::Client::new();
@@ -810,8 +739,7 @@ async fn test_concurrent_requests() {
 async fn test_bearer_auth_from_file() {
     use std::io::Write;
 
-    let port = random_port();
-    let mut config = test_config(port, 10_000, 30_000, "bearer");
+    let mut config = test_config(10_000, 30_000, "bearer");
 
     // Write tokens to a temp file
     let mut token_file = tempfile::NamedTempFile::new().expect("Failed to create temp file");
@@ -895,8 +823,7 @@ async fn test_bearer_auth_from_file() {
 /// with a new token and waits for refresh.
 #[tokio::test]
 async fn test_bearer_auth_file_refresh() {
-    let port = random_port();
-    let mut config = test_config(port, 10_000, 30_000, "bearer");
+    let mut config = test_config(10_000, 30_000, "bearer");
 
     // Write initial token
     let token_file = tempfile::NamedTempFile::new().expect("Failed to create temp file");
@@ -984,8 +911,7 @@ async fn test_bearer_auth_file_refresh() {
 async fn test_bearer_auth_file_comma_separated() {
     use std::io::Write;
 
-    let port = random_port();
-    let mut config = test_config(port, 10_000, 30_000, "bearer");
+    let mut config = test_config(10_000, 30_000, "bearer");
 
     // Write comma-separated tokens
     let mut token_file = tempfile::NamedTempFile::new().expect("Failed to create temp file");
@@ -1055,8 +981,7 @@ async fn test_bearer_auth_file_comma_separated() {
 /// Test that requests within burst are accepted when rate limiting is enabled.
 #[tokio::test]
 async fn test_rate_limit_allows_within_burst() {
-    let port = random_port();
-    let mut config = test_config(port, 10_000, 30_000, "none");
+    let mut config = test_config(10_000, 30_000, "none");
     config.server.rate_limit.enabled = true;
     config.server.rate_limit.requests_per_second = 10;
     config.server.rate_limit.burst = 5;
@@ -1094,8 +1019,7 @@ async fn test_rate_limit_allows_within_burst() {
 /// concurrent requests from the same "IP" to overwhelm the GCRA limiter.
 #[tokio::test]
 async fn test_rate_limit_rejects_over_burst() {
-    let port = random_port();
-    let mut config = test_config(port, 10_000, 30_000, "none");
+    let mut config = test_config(10_000, 30_000, "none");
     config.server.rate_limit.enabled = true;
     config.server.rate_limit.requests_per_second = 1;
     config.server.rate_limit.burst = 1;
@@ -1152,8 +1076,7 @@ async fn test_rate_limit_rejects_over_burst() {
 /// would demand.
 #[tokio::test]
 async fn test_rate_limit_replenishes_at_the_configured_rate() {
-    let port = random_port();
-    let mut config = test_config(port, 10_000, 30_000, "none");
+    let mut config = test_config(10_000, 30_000, "none");
     config.server.rate_limit.enabled = true;
     config.server.rate_limit.requests_per_second = 5;
     config.server.rate_limit.burst = 1;
@@ -1214,8 +1137,7 @@ async fn post_ingest(client: &reqwest::Client, url: &str, seq: u32) -> u16 {
 /// Test that rate limiting disabled allows all requests.
 #[tokio::test]
 async fn test_rate_limit_disabled_allows_all() {
-    let port = random_port();
-    let mut config = test_config(port, 10_000, 30_000, "none");
+    let mut config = test_config(10_000, 30_000, "none");
     config.server.rate_limit.enabled = false;
 
     let (url, shutdown) = start_test_server(config).await;
@@ -1254,12 +1176,11 @@ async fn test_rate_limit_disabled_allows_all() {
 /// so we expect a connection error, not an HTTP response.
 #[tokio::test]
 async fn test_ip_denylist_rejects() {
-    let port = random_port();
-    let mut config = test_config(port, 10_000, 30_000, "none");
+    let mut config = test_config(10_000, 30_000, "none");
     config.server.ip_filter.mode = "denylist".to_string();
     config.server.ip_filter.cidrs = vec!["127.0.0.0/8".to_string()];
 
-    let (_url, shutdown) = start_test_server(config).await;
+    let (url, shutdown) = start_test_server(config).await;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(2))
         .build()
@@ -1269,7 +1190,7 @@ async fn test_ip_denylist_rejects() {
     // The server drops the TCP connection at accept level, so reqwest
     // should get a connection error (reset/closed/refused).
     let response = client
-        .post(format!("http://127.0.0.1:{port}/ingest"))
+        .post(format!("{url}/ingest"))
         .header("content-type", "application/json")
         .body(r#"{"test":"data"}"#)
         .send()
@@ -1287,12 +1208,11 @@ async fn test_ip_denylist_rejects() {
 /// Test that allowlist rejects non-matching IPs.
 #[tokio::test]
 async fn test_ip_allowlist_rejects_non_matching() {
-    let port = random_port();
-    let mut config = test_config(port, 10_000, 30_000, "none");
+    let mut config = test_config(10_000, 30_000, "none");
     config.server.ip_filter.mode = "allowlist".to_string();
     config.server.ip_filter.cidrs = vec!["10.0.0.0/8".to_string()]; // Localhost not in allowlist
 
-    let (_url, shutdown) = start_test_server(config).await;
+    let (url, shutdown) = start_test_server(config).await;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(2))
         .build()
@@ -1300,7 +1220,7 @@ async fn test_ip_allowlist_rejects_non_matching() {
 
     // Request from localhost (127.0.0.1) -- not in 10.0.0.0/8 allowlist
     let response = client
-        .post(format!("http://127.0.0.1:{port}/ingest"))
+        .post(format!("{url}/ingest"))
         .header("content-type", "application/json")
         .body(r#"{"test":"data"}"#)
         .send()
@@ -1319,8 +1239,7 @@ async fn test_ip_allowlist_rejects_non_matching() {
 /// Test that allowlist accepts matching IPs.
 #[tokio::test]
 async fn test_ip_allowlist_accepts_matching() {
-    let port = random_port();
-    let mut config = test_config(port, 10_000, 30_000, "none");
+    let mut config = test_config(10_000, 30_000, "none");
     config.server.ip_filter.mode = "allowlist".to_string();
     config.server.ip_filter.cidrs = vec!["127.0.0.0/8".to_string()]; // Localhost IS in allowlist
 
@@ -1351,8 +1270,7 @@ async fn test_ip_allowlist_accepts_matching() {
 /// Test that disabled IP filter allows all connections.
 #[tokio::test]
 async fn test_ip_filter_disabled() {
-    let port = random_port();
-    let mut config = test_config(port, 10_000, 30_000, "none");
+    let mut config = test_config(10_000, 30_000, "none");
     config.server.ip_filter.mode = "disabled".to_string();
 
     let (url, shutdown) = start_test_server(config).await;
@@ -1390,8 +1308,7 @@ async fn test_ip_filter_disabled() {
 /// causing the ingest handler to respond with 503 + `retry-after: 5`.
 #[tokio::test]
 async fn test_503_when_pipeline_not_ready() {
-    let port = random_port();
-    let mut config = test_config(port, 10_000, 30_000, "none");
+    let mut config = test_config(10_000, 30_000, "none");
     // Tiny memory limit so we can trigger pressure by adding bytes
     config.buffer.memory_limit = 100;
     config.buffer.pressure_threshold = 0.8;
@@ -1478,13 +1395,15 @@ async fn test_503_when_pipeline_not_ready() {
 async fn test_slowloris_protection() {
     use tokio::io::AsyncWriteExt;
 
-    let port = random_port();
-    let config = test_config(port, 10_000, 30_000, "none");
+    let config = test_config(10_000, 30_000, "none");
 
-    let (_url, shutdown) = start_test_server(config).await;
+    let (url, shutdown) = start_test_server(config).await;
+    let authority = url
+        .strip_prefix("http://")
+        .expect("the test URL is plain HTTP");
 
     // Open raw TCP connection
-    let mut stream = tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
+    let mut stream = tokio::net::TcpStream::connect(authority)
         .await
         .expect("Failed to connect");
 
@@ -1543,8 +1462,7 @@ async fn test_slowloris_protection() {
 /// requests. All should complete (no hangs).
 #[tokio::test]
 async fn test_concurrency_limit() {
-    let port = random_port();
-    let mut config = test_config(port, 10_000, 30_000, "none");
+    let mut config = test_config(10_000, 30_000, "none");
     config.server.max_concurrent_requests = 2;
 
     let (url, shutdown) = start_test_server(config).await;

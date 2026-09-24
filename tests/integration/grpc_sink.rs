@@ -27,14 +27,6 @@ use dfe_receiver::{Error, Result};
 use scalo::transport::TransportReceiver;
 use scalo::transport::grpc::{GrpcConfig, GrpcTransport};
 
-/// Allocate a random port for test isolation.
-fn random_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    let port = listener.local_addr().expect("local addr").port();
-    drop(listener);
-    port
-}
-
 /// Send with retry on transient backpressure.
 ///
 /// `GrpcSink::send` surfaces backpressure as `Err(Transport("...backpressured"))`
@@ -56,45 +48,14 @@ async fn send_with_retry(sink: &GrpcSink, topic: &str, payload: Bytes) -> Result
     ))
 }
 
-/// Poll the loopback port until it accepts a TCP connection or the
-/// budget is exhausted. Replaces blind sleep waits that race tonic's
-/// server bind under parallel CI load.
-async fn wait_for_port(port: u16) {
-    let addr = format!("127.0.0.1:{port}");
-    // 300 x 50ms = 15s budget. ARC runners under parallel CI load can take
-    // well over 5s to bind tonic's server, which flaked the grpc_sink tests.
-    for _ in 0..300 {
-        if tokio::net::TcpStream::connect(&addr).await.is_ok() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("gRPC server on port {port} never accepted connections within 15s");
-}
-
 /// Spin up an in-process gRPC server, returning (endpoint, transport, port).
 async fn start_server() -> (String, GrpcTransport, u16) {
-    // `random_port()` can collide under parallel CI load -- the port is free
-    // when picked but grabbed by another test before GrpcTransport binds, so
-    // `new()` fails fast. Retry on a fresh port rather than flake the test.
-    let mut last_err = String::new();
-    for _ in 0..20 {
-        let port = random_port();
-        let listen = format!("127.0.0.1:{port}");
-        let config = GrpcConfig::server(&listen);
-        match GrpcTransport::new(&config).await {
-            Ok(transport) => {
-                wait_for_port(port).await;
-                let endpoint = format!("http://127.0.0.1:{port}");
-                return (endpoint, transport, port);
-            }
-            Err(e) => {
-                last_err = e.to_string();
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        }
-    }
-    panic!("failed to start gRPC server after 20 attempts: {last_err}");
+    let (endpoint, transport) = crate::common::grpc_destination().await;
+    let port = transport
+        .local_addr()
+        .expect("a server-mode transport has a bound address")
+        .port();
+    (endpoint, transport, port)
 }
 
 #[tokio::test]

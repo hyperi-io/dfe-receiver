@@ -38,47 +38,10 @@ use tokio_util::sync::CancellationToken;
 use crate::common::{kafka_backend, kafka_consume_next, kafka_consumer, test_topic};
 use crate::test_name;
 
-/// A port the OS says is free right now.
-///
-/// Guessing a random port in 30000-50000 collides on a busy runner -- that
-/// range is also where testcontainers maps its host ports -- and a collision
-/// makes the handler's bind fail, so the port never accepts and the wait below
-/// burns its whole budget on a server that was never listening.
-fn random_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    let port = listener.local_addr().expect("local addr").port();
-    drop(listener);
-    port
-}
-
-/// Poll the loopback port until it accepts a TCP connection or the budget
-/// is exhausted. Replaces blind `sleep` waits that race the spawned
-/// handler's bind and produce ConnectionRefused on busy ARC runners.
-///
-/// The budget is generous because it is protecting against a race, not
-/// measuring anything: a loaded machine takes longer to get the handler bound,
-/// and the poll returns the instant it is up, so a larger ceiling costs
-/// nothing on a quiet one.
-const PORT_WAIT_BUDGET: Duration = Duration::from_secs(30);
-const PORT_POLL_INTERVAL: Duration = Duration::from_millis(50);
-
-async fn wait_for_port(port: u16) {
-    let addr = format!("127.0.0.1:{port}");
-    let deadline = tokio::time::Instant::now() + PORT_WAIT_BUDGET;
-    while tokio::time::Instant::now() < deadline {
-        if tokio::net::TcpStream::connect(&addr).await.is_ok() {
-            return;
-        }
-        tokio::time::sleep(PORT_POLL_INTERVAL).await;
-    }
-    panic!("port {port} never accepted connections within {PORT_WAIT_BUDGET:?}");
-}
-
 /// Build a config wired to route via Kafka (rather than the in-memory loader).
 fn kafka_config(kf: &crate::common::KafkaTestConfig, topic: &str) -> Config {
     let mut config = Config::default();
-    let http_port = random_port();
-    config.server.bind_address = format!("127.0.0.1:{http_port}");
+    config.server.bind_address = "127.0.0.1:0".to_string();
     config.server.auth.mode = "none".to_string();
 
     config.kafka = kf.to_receiver_kafka_config();
@@ -108,9 +71,8 @@ async fn test_prometheus_rw_to_kafka_roundtrip() {
 
     let topic = test_topic("promrw");
     let mut config = kafka_config(&kf, &topic);
-    let rw_port = random_port();
     config.prometheus_rw.enabled = true;
-    config.prometheus_rw.bind_address = format!("127.0.0.1:{rw_port}");
+    config.prometheus_rw.bind_address = "127.0.0.1:0".to_string();
     config.prometheus_rw.mode = "native".to_string();
     config.prometheus_rw.auth.mode = "none".to_string();
 
@@ -135,15 +97,10 @@ async fn test_prometheus_rw_to_kafka_roundtrip() {
         pipeline,
         metrics.clone(),
     );
+    let bound = handler.bound_addr();
     let handler_shutdown = shutdown.clone();
-    tokio::spawn(async move {
-        // Surfaced, not swallowed: a failed bind here used to be invisible,
-        // and the only symptom was the port wait below timing out.
-        if let Err(e) = handler.start(handler_shutdown).await {
-            eprintln!("handler exited with an error: {e}");
-        }
-    });
-    wait_for_port(rw_port).await;
+    let mut task = tokio::spawn(async move { handler.start(handler_shutdown).await });
+    let rw = crate::common::bound_addr("remote write", &bound, &mut task).await;
 
     // Build a valid Prometheus RW WriteRequest
     let request = proto::WriteRequest {
@@ -174,7 +131,7 @@ async fn test_prometheus_rw_to_kafka_roundtrip() {
     // POST to receiver
     let client = reqwest::Client::new();
     let resp = client
-        .post(format!("http://127.0.0.1:{rw_port}/api/v1/write"))
+        .post(format!("http://{rw}/api/v1/write"))
         .header("Content-Type", "application/x-protobuf")
         .header("Content-Encoding", "snappy")
         .header("X-Prometheus-Remote-Write-Version", "0.1.0")
@@ -216,9 +173,8 @@ async fn test_splunk_hec_to_kafka_roundtrip() {
 
     let topic = test_topic("hec");
     let mut config = kafka_config(&kf, &topic);
-    let hec_port = random_port();
     config.splunk_hec.enabled = true;
-    config.splunk_hec.bind_address = format!("127.0.0.1:{hec_port}");
+    config.splunk_hec.bind_address = "127.0.0.1:0".to_string();
     config.splunk_hec.auth.mode = "none".to_string();
 
     // Subscribe to Kafka
@@ -242,15 +198,10 @@ async fn test_splunk_hec_to_kafka_roundtrip() {
         pipeline,
         metrics.clone(),
     );
+    let bound = handler.bound_addr();
     let handler_shutdown = shutdown.clone();
-    tokio::spawn(async move {
-        // Surfaced, not swallowed: a failed bind here used to be invisible,
-        // and the only symptom was the port wait below timing out.
-        if let Err(e) = handler.start(handler_shutdown).await {
-            eprintln!("handler exited with an error: {e}");
-        }
-    });
-    wait_for_port(hec_port).await;
+    let mut task = tokio::spawn(async move { handler.start(handler_shutdown).await });
+    let hec = crate::common::bound_addr("HEC", &bound, &mut task).await;
 
     // Send an HEC event
     let event = serde_json::json!({
@@ -260,9 +211,7 @@ async fn test_splunk_hec_to_kafka_roundtrip() {
     });
     let client = reqwest::Client::new();
     let resp = client
-        .post(format!(
-            "http://127.0.0.1:{hec_port}/services/collector/event"
-        ))
+        .post(format!("http://{hec}/services/collector/event"))
         .header("Content-Type", "application/json")
         .body(event.to_string())
         .send()
@@ -321,9 +270,8 @@ async fn test_webhook_to_kafka_roundtrip() {
     // The caller's topic is fixed by config and carries no suffix.
     let topic = test_topic("webhook");
     let mut config = kafka_config(&kf, &topic);
-    let webhook_port = random_port();
     config.webhook.enabled = true;
-    config.webhook.bind_address = Some(format!("127.0.0.1:{webhook_port}"));
+    config.webhook.bind_address = Some("127.0.0.1:0".to_string());
     config.webhook.callers = vec![WebhookCallerConfig {
         name: "runzero".to_string(),
         topic: topic.clone(),
@@ -353,19 +301,16 @@ async fn test_webhook_to_kafka_roundtrip() {
         .expect("pipeline init"),
     );
     let handler = WebhookHandler::new(config, pipeline, metrics.clone());
+    let bound = handler.bound_addr();
     let handler_shutdown = shutdown.clone();
-    tokio::spawn(async move {
-        if let Err(e) = handler.start(handler_shutdown).await {
-            eprintln!("handler exited with an error: {e}");
-        }
-    });
-    wait_for_port(webhook_port).await;
+    let mut task = tokio::spawn(async move { handler.start(handler_shutdown).await });
+    let webhook = crate::common::bound_addr("webhook", &bound, &mut task).await;
 
     // Replay the capture: runZero's headers, the shared secret in place of
     // the redacted value.
     let client = reqwest::Client::new();
     let resp = client
-        .post(format!("http://127.0.0.1:{webhook_port}/webhook/runzero"))
+        .post(format!("http://{webhook}/webhook/runzero"))
         .header("content-type", "application/json")
         .header(
             "user-agent",
@@ -424,9 +369,8 @@ async fn test_webhook_array_with_a_bad_element_delivers_nothing() {
 
     let topic = test_topic("webhook-array");
     let mut config = kafka_config(&kf, &topic);
-    let webhook_port = random_port();
     config.webhook.enabled = true;
-    config.webhook.bind_address = Some(format!("127.0.0.1:{webhook_port}"));
+    config.webhook.bind_address = Some("127.0.0.1:0".to_string());
     config.webhook.callers = vec![WebhookCallerConfig {
         name: "bulk".to_string(),
         topic: topic.clone(),
@@ -456,16 +400,13 @@ async fn test_webhook_array_with_a_bad_element_delivers_nothing() {
         .expect("pipeline init"),
     );
     let handler = WebhookHandler::new(config, pipeline, metrics.clone());
+    let bound = handler.bound_addr();
     let handler_shutdown = shutdown.clone();
-    tokio::spawn(async move {
-        if let Err(e) = handler.start(handler_shutdown).await {
-            eprintln!("handler exited with an error: {e}");
-        }
-    });
-    wait_for_port(webhook_port).await;
+    let mut task = tokio::spawn(async move { handler.start(handler_shutdown).await });
+    let webhook = crate::common::bound_addr("webhook", &bound, &mut task).await;
 
     let client = reqwest::Client::new();
-    let url = format!("http://127.0.0.1:{webhook_port}/webhook/bulk");
+    let url = format!("http://{webhook}/webhook/bulk");
 
     // An object followed by a number: the request is refused as a whole.
     let resp = client

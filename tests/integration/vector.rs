@@ -37,7 +37,10 @@ use std::time::Duration;
 use dfe_receiver::config::{Config, SharedConfig};
 use dfe_receiver::metrics::Metrics;
 use dfe_receiver::pipeline::PipelineState;
+use dfe_receiver::server::grpc::GrpcVectorHandler;
 use dfe_receiver::server::http;
+use dfe_receiver::server::http::HttpHandler;
+use dfe_receiver::server::traits::ProtocolHandler;
 use tokio_util::sync::CancellationToken;
 
 /// Install the rustls CryptoProvider (needed when both ring and aws-lc-rs are available).
@@ -97,18 +100,10 @@ fn openssl_available() -> bool {
         .unwrap_or(false)
 }
 
-/// Get a random port for testing.
-fn random_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    let port = listener.local_addr().expect("local addr").port();
-    drop(listener);
-    port
-}
-
 /// Create a minimal config for testing with loader destination (no Kafka needed).
-fn test_config(http_port: u16) -> Config {
+fn test_config() -> Config {
     let mut config = Config::default();
-    config.server.bind_address = format!("127.0.0.1:{http_port}");
+    config.server.bind_address = "127.0.0.1:0".to_string();
     config.server.max_body_size = 10 * 1024 * 1024;
     config.server.request_timeout_ms = 30_000;
     config.server.auth.mode = "none".to_string();
@@ -118,8 +113,8 @@ fn test_config(http_port: u16) -> Config {
     config
 }
 
-/// Start a test HTTP server and return the shutdown token.
-async fn start_http_server(config: Config) -> CancellationToken {
+/// Start a test HTTP server and return the shutdown token and the port it bound.
+async fn start_http_server(config: Config) -> (CancellationToken, u16) {
     let metrics = Arc::new(Metrics::default());
     let shutdown = CancellationToken::new();
     let pipeline = Arc::new(
@@ -131,17 +126,28 @@ async fn start_http_server(config: Config) -> CancellationToken {
         .expect("Failed to create pipeline"),
     );
 
+    let handler = HttpHandler::new(config.server.bind_address.clone(), pipeline, metrics);
+    let bound = handler.bound_addr();
     let server_shutdown = shutdown.clone();
-    let server_metrics = metrics.clone();
-    let bind_addr = config.server.bind_address.clone();
+    let mut task = tokio::spawn(async move { handler.start(server_shutdown).await });
+    let addr = crate::common::bound_addr("HTTP", &bound, &mut task).await;
+    (shutdown, addr.port())
+}
 
-    tokio::spawn(async move {
-        let _ = http::run_server(&bind_addr, pipeline, server_metrics, server_shutdown).await;
-    });
-
-    // Wait for server to start
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    shutdown
+/// Start the Vector-protocol gRPC listener and return the port it bound.
+async fn start_grpc_server(
+    config: Config,
+    pipeline: Arc<PipelineState>,
+    metrics: Arc<Metrics>,
+    shutdown: &CancellationToken,
+) -> u16 {
+    let handler = GrpcVectorHandler::new(config, pipeline, metrics);
+    let bound = handler.bound_addr();
+    let server_shutdown = shutdown.clone();
+    let mut task = tokio::spawn(async move { handler.start(server_shutdown).await });
+    crate::common::bound_addr("gRPC", &bound, &mut task)
+        .await
+        .port()
 }
 
 /// Write a Vector YAML config to a file.
@@ -282,9 +288,7 @@ async fn test_vector_http_sink() {
         return;
     };
 
-    let port = random_port();
-    let config = test_config(port);
-    let shutdown = start_http_server(config).await;
+    let (shutdown, port) = start_http_server(test_config()).await;
 
     let tmp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let config_path = tmp_dir.path().join("vector.yaml");
@@ -356,19 +360,18 @@ async fn test_vector_https_sink() {
         return;
     }
 
-    let port = random_port();
     let tmp_dir = tempfile::tempdir().expect("Failed to create temp dir");
 
     // Generate self-signed TLS cert
     let (cert_path, key_path) = generate_self_signed_cert(tmp_dir.path());
 
     // Configure receiver with TLS
-    let mut config = test_config(port);
+    let mut config = test_config();
     config.server.tls.enabled = true;
     config.server.tls.cert_file = Some(cert_path.to_str().unwrap().to_string());
     config.server.tls.key_file = Some(key_path.to_str().unwrap().to_string());
 
-    let shutdown = start_http_server(config).await;
+    let (shutdown, port) = start_http_server(config).await;
 
     let config_path = tmp_dir.path().join("vector.yaml");
     let cert_path_str = cert_path.to_str().unwrap();
@@ -434,19 +437,9 @@ async fn test_vector_grpc_sink() {
         return;
     };
 
-    let http_port = random_port();
-    let grpc_port = random_port();
-
-    // Ensure different ports
-    let grpc_port = if grpc_port == http_port {
-        grpc_port + 1
-    } else {
-        grpc_port
-    };
-
-    let mut config = test_config(http_port);
+    let mut config = test_config();
     config.grpc.enabled = true;
-    config.grpc.bind_address = format!("127.0.0.1:{grpc_port}");
+    config.grpc.bind_address = "127.0.0.1:0".to_string();
 
     let metrics = Arc::new(Metrics::default());
     let shutdown = CancellationToken::new();
@@ -468,24 +461,8 @@ async fn test_vector_grpc_sink() {
         let _ = http::run_server(&http_addr, http_pipeline, http_metrics, http_shutdown).await;
     });
 
-    // Spawn gRPC server
-    let grpc_config = config.clone();
-    let grpc_pipeline = pipeline.clone();
-    let grpc_metrics = metrics.clone();
-    let grpc_shutdown = shutdown.clone();
-    tokio::spawn(async move {
-        let _ = dfe_receiver::server::grpc::run_server(
-            &grpc_config,
-            grpc_pipeline,
-            grpc_metrics,
-            None, // No auth for this test
-            grpc_shutdown,
-        )
-        .await;
-    });
-
-    // Wait for servers to start
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // gRPC server; the default gRPC auth mode is none, so no interceptor
+    let grpc_port = start_grpc_server(config, pipeline, metrics, &shutdown).await;
 
     let tmp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let config_path = tmp_dir.path().join("vector.yaml");
@@ -551,22 +528,12 @@ async fn test_vector_grpc_tls_sink() {
         return;
     }
 
-    let http_port = random_port();
-    let grpc_port = random_port();
-
-    // Ensure different ports
-    let grpc_port = if grpc_port == http_port {
-        grpc_port + 1
-    } else {
-        grpc_port
-    };
-
     let tmp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let (cert_path, key_path) = generate_self_signed_cert(tmp_dir.path());
 
-    let mut config = test_config(http_port);
+    let mut config = test_config();
     config.grpc.enabled = true;
-    config.grpc.bind_address = format!("127.0.0.1:{grpc_port}");
+    config.grpc.bind_address = "127.0.0.1:0".to_string();
     config.grpc.tls.enabled = true;
     config.grpc.tls.cert_file = Some(cert_path.to_str().unwrap().to_string());
     config.grpc.tls.key_file = Some(key_path.to_str().unwrap().to_string());
@@ -591,35 +558,8 @@ async fn test_vector_grpc_tls_sink() {
         let _ = http::run_server(&http_addr, http_pipeline, http_metrics, http_shutdown).await;
     });
 
-    // Spawn gRPC server with TLS
-    let grpc_config = config.clone();
-    let grpc_pipeline = pipeline.clone();
-    let grpc_metrics = metrics.clone();
-    let grpc_shutdown = shutdown.clone();
-    tokio::spawn(async move {
-        if let Err(e) = dfe_receiver::server::grpc::run_server(
-            &grpc_config,
-            grpc_pipeline,
-            grpc_metrics,
-            None,
-            grpc_shutdown,
-        )
-        .await
-        {
-            eprintln!("gRPC TLS server error: {e}");
-        }
-    });
-
-    // Wait for gRPC TLS server to accept connections (may take longer under load)
-    for _ in 0..50 {
-        if tokio::net::TcpStream::connect(format!("127.0.0.1:{grpc_port}"))
-            .await
-            .is_ok()
-        {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    // gRPC server with TLS; the default gRPC auth mode is none, so no interceptor
+    let grpc_port = start_grpc_server(config, pipeline, metrics, &shutdown).await;
 
     let config_path = tmp_dir.path().join("vector.yaml");
     let cert_path_str = cert_path.to_str().unwrap();
@@ -683,8 +623,7 @@ async fn test_vector_http_bearer_auth() {
         return;
     };
 
-    let port = random_port();
-    let mut config = test_config(port);
+    let mut config = test_config();
     config.server.auth.mode = "bearer".to_string();
     config.server.auth.bearer = BearerConfig {
         tokens: vec!["vector-test-token-42".to_string()],
@@ -692,7 +631,7 @@ async fn test_vector_http_bearer_auth() {
         refresh_interval_secs: 300,
     };
 
-    let shutdown = start_http_server(config).await;
+    let (shutdown, port) = start_http_server(config).await;
 
     let tmp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let config_path = tmp_dir.path().join("vector.yaml");

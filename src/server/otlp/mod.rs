@@ -25,6 +25,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
+use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 
@@ -35,7 +36,7 @@ use crate::pipeline::PipelineState;
 use crate::server::auth::{AuthMode, AuthState, validate_bearer_auth};
 use crate::server::http::create_auth_state;
 use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
-use crate::server::traits::ProtocolHandler;
+use crate::server::traits::{BoundAddr, ProtocolHandler};
 use convert::OtlpMode;
 
 // ---------------------------------------------------------------------------
@@ -264,6 +265,7 @@ async fn run_grpc_server(
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
     shutdown: CancellationToken,
+    bound: &BoundAddr,
 ) -> Result<()> {
     let addr: SocketAddr = config
         .grpc_bind_address
@@ -343,10 +345,17 @@ async fn run_grpc_server(
             .add_service(MetricsServiceServer::new(metrics_svc))
     };
 
+    // Bound here rather than inside tonic, which keeps the address it took to itself.
+    // tonic's own bind also sets TCP_NODELAY, which a hand-bound stream must be given.
+    let incoming = TcpIncoming::bind(addr)
+        .map_err(|e| Error::Server(format!("OTLP gRPC server error: {e}")))?
+        .with_nodelay(Some(true));
+    bound.publish(&incoming.local_addr());
+
     info!(addr = %addr, mode = ?mode, "OTLP gRPC server listening");
 
     router
-        .serve_with_shutdown(addr, shutdown.cancelled_owned())
+        .serve_with_incoming_shutdown(incoming, shutdown.cancelled_owned())
         .await
         .map_err(|e| Error::Server(format!("OTLP gRPC server error: {e}")))?;
 
@@ -365,6 +374,7 @@ async fn run_http_server(
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
     shutdown: CancellationToken,
+    bound: &BoundAddr,
 ) -> Result<()> {
     use axum::Router;
     use axum::body::Bytes;
@@ -494,6 +504,7 @@ async fn run_http_server(
     let listener = TcpListener::bind(addr)
         .await
         .map_err(|e| Error::Server(format!("failed to bind OTLP HTTP: {e}")))?;
+    bound.publish(&listener.local_addr());
 
     // Same TLS wiring as the Splunk HEC listener, over the same `tls:` block
     // the gRPC endpoint uses.
@@ -570,6 +581,8 @@ pub struct OtlpHandler {
     raw_capture: RawCapture,
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
+    grpc_bound: BoundAddr,
+    http_bound: BoundAddr,
 }
 
 impl OtlpHandler {
@@ -584,7 +597,21 @@ impl OtlpHandler {
             raw_capture,
             pipeline,
             metrics,
+            grpc_bound: BoundAddr::default(),
+            http_bound: BoundAddr::default(),
         }
+    }
+
+    /// The address the gRPC listener bound, once [`ProtocolHandler::start`] binds it.
+    #[must_use]
+    pub fn grpc_bound_addr(&self) -> BoundAddr {
+        self.grpc_bound.clone()
+    }
+
+    /// The address the HTTP listener bound, once [`ProtocolHandler::start`] binds it.
+    #[must_use]
+    pub fn http_bound_addr(&self) -> BoundAddr {
+        self.http_bound.clone()
     }
 }
 
@@ -612,6 +639,7 @@ impl ProtocolHandler for OtlpHandler {
         let grpc_pipeline = self.pipeline.clone();
         let grpc_metrics = self.metrics.clone();
         let grpc_shutdown = shutdown.clone();
+        let grpc_bound = self.grpc_bound.clone();
 
         let grpc_handle = tokio::spawn(async move {
             run_grpc_server(
@@ -620,6 +648,7 @@ impl ProtocolHandler for OtlpHandler {
                 grpc_pipeline,
                 grpc_metrics,
                 grpc_shutdown,
+                &grpc_bound,
             )
             .await
         });
@@ -629,6 +658,7 @@ impl ProtocolHandler for OtlpHandler {
         let http_pipeline = self.pipeline.clone();
         let http_metrics = self.metrics.clone();
         let http_shutdown = shutdown.clone();
+        let http_bound = self.http_bound.clone();
 
         let http_handle = tokio::spawn(async move {
             run_http_server(
@@ -637,6 +667,7 @@ impl ProtocolHandler for OtlpHandler {
                 http_pipeline,
                 http_metrics,
                 http_shutdown,
+                &http_bound,
             )
             .await
         });

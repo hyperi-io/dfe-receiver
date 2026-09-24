@@ -45,6 +45,103 @@ pub fn load_dotenv() {
 }
 
 // ---------------------------------------------------------------------------
+// Listener addresses
+// ---------------------------------------------------------------------------
+//
+// A listener binds port 0 and reports the port it got, because a port picked
+// and handed over can be taken by any process before the bind lands.
+
+/// How long a receiver listener gets to bind before the test gives up on it.
+const BIND_DEADLINE: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Wait for a receiver listener configured on port 0 to bind, and return the
+/// address it took.
+///
+/// `task` runs the handler's `start()`. A handler that cannot bind returns its
+/// error, and watching the task reports that error instead of a timeout.
+///
+/// # Panics
+///
+/// When the task ends before the bind lands, or the bind takes longer than
+/// [`BIND_DEADLINE`].
+pub async fn bound_addr<T: std::fmt::Debug>(
+    listener: &str,
+    bound: &dfe_receiver::server::traits::BoundAddr,
+    task: &mut tokio::task::JoinHandle<T>,
+) -> std::net::SocketAddr {
+    tokio::select! {
+        biased;
+        addr = bound.wait() => addr,
+        outcome = task => panic!("the {listener} listener exited before it bound: {outcome:?}"),
+        () = tokio::time::sleep(BIND_DEADLINE) => {
+            panic!("the {listener} listener did not bind within {BIND_DEADLINE:?}")
+        }
+    }
+}
+
+/// Start a scalo gRPC Push server on a free loopback port, standing in for a
+/// destination such as dfe-loader, and return its endpoint URL with it.
+///
+/// # Panics
+///
+/// When the server cannot bind.
+pub async fn grpc_destination() -> (String, scalo::transport::grpc::GrpcTransport) {
+    use scalo::transport::grpc::{GrpcConfig, GrpcTransport};
+
+    // `new` returns once the listener is bound, so the endpoint is ready here.
+    let transport = match GrpcTransport::new(&GrpcConfig::server("127.0.0.1:0")).await {
+        Ok(transport) => transport,
+        Err(e) => panic!("the gRPC destination could not bind a loopback port: {e}"),
+    };
+    let Some(addr) = transport.local_addr() else {
+        panic!("a server-mode gRPC transport reports the address it bound");
+    };
+    (format!("http://{addr}"), transport)
+}
+
+/// A loopback TCP port held bound but never listening.
+///
+/// A connection to it is refused, and no other socket can bind it while this
+/// holds it, so the address stays closed for as long as the test needs.
+pub struct ClosedPort {
+    _socket: socket2::Socket,
+    addr: std::net::SocketAddr,
+}
+
+impl ClosedPort {
+    /// Hold a free loopback port.
+    ///
+    /// # Errors
+    ///
+    /// When the socket cannot be created or bound.
+    pub fn loopback() -> std::io::Result<Self> {
+        use socket2::{Domain, Protocol, Socket, Type};
+
+        let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+        // Left without SO_REUSEADDR, so no other socket can share the port, even one that sets it.
+        socket.bind(&std::net::SocketAddr::from(([127, 0, 0, 1], 0)).into())?;
+        let addr = socket
+            .local_addr()?
+            .as_socket()
+            .ok_or_else(|| std::io::Error::other("a bound IPv4 socket has no inet address"))?;
+        Ok(Self {
+            _socket: socket,
+            addr,
+        })
+    }
+
+    /// The address held closed.
+    pub fn addr(&self) -> std::net::SocketAddr {
+        self.addr
+    }
+
+    /// Give the port up for a server that must come up on this exact address.
+    pub fn release(self) -> std::net::SocketAddr {
+        self.addr
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Kafka
 // ---------------------------------------------------------------------------
 

@@ -51,7 +51,7 @@ use crate::pipeline::PipelineState;
 use crate::server::auth::{AuthState, BearerTokenProvider, token_auth_middleware};
 use crate::server::ip_filter::IpFilter;
 use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
-use crate::server::traits::ProtocolHandler;
+use crate::server::traits::{BoundAddr, ProtocolHandler};
 
 /// TLS handshake timeout to prevent slow TLS attacks.
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -100,6 +100,7 @@ pub struct HttpHandler {
     bind_address: String,
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
+    bound: BoundAddr,
 }
 
 impl HttpHandler {
@@ -109,7 +110,14 @@ impl HttpHandler {
             bind_address,
             pipeline,
             metrics,
+            bound: BoundAddr::default(),
         }
+    }
+
+    /// The address the listener bound, once [`ProtocolHandler::start`] binds it.
+    #[must_use]
+    pub fn bound_addr(&self) -> BoundAddr {
+        self.bound.clone()
     }
 }
 
@@ -124,11 +132,12 @@ impl ProtocolHandler for HttpHandler {
     }
 
     async fn start(&self, shutdown: CancellationToken) -> Result<()> {
-        run_server(
+        serve(
             &self.bind_address,
             self.pipeline.clone(),
             self.metrics.clone(),
             shutdown,
+            &self.bound,
         )
         .await
     }
@@ -232,6 +241,17 @@ pub async fn run_server(
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
     shutdown: CancellationToken,
+) -> Result<()> {
+    serve(addr, pipeline, metrics, shutdown, &BoundAddr::default()).await
+}
+
+/// Run the HTTP server, publishing the address it binds to `bound`.
+async fn serve(
+    addr: &str,
+    pipeline: Arc<PipelineState>,
+    metrics: Arc<Metrics>,
+    shutdown: CancellationToken,
+    bound: &BoundAddr,
 ) -> Result<()> {
     let config = pipeline.config();
 
@@ -351,6 +371,7 @@ pub async fn run_server(
     let listener = TcpListener::bind(addr)
         .await
         .map_err(|e| Error::Server(format!("failed to bind: {e}")))?;
+    bound.publish(&listener.local_addr());
 
     if let Some(ref provider) = tls_provider {
         let acceptor_handle = provider.acceptor_handle();

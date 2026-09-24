@@ -34,7 +34,7 @@ use crate::error::{Error, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
 use crate::server::ip_filter::IpFilter;
-use crate::server::traits::ProtocolHandler;
+use crate::server::traits::{BoundAddr, ProtocolHandler};
 use codec::{Frame, decompress_and_parse, encode_ack, read_frame};
 
 /// TLS handshake timeout (matches HTTP handler).
@@ -180,6 +180,7 @@ pub struct LumberjackHandler {
     config: LumberjackConfig,
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
+    bound: BoundAddr,
 }
 
 impl LumberjackHandler {
@@ -192,7 +193,14 @@ impl LumberjackHandler {
             config,
             pipeline,
             metrics,
+            bound: BoundAddr::default(),
         }
+    }
+
+    /// The address the listener bound, once [`ProtocolHandler::start`] binds it.
+    #[must_use]
+    pub fn bound_addr(&self) -> BoundAddr {
+        self.bound.clone()
     }
 }
 
@@ -216,6 +224,7 @@ impl ProtocolHandler for LumberjackHandler {
         let listener = TcpListener::bind(addr)
             .await
             .map_err(|e| Error::Server(format!("failed to bind Lumberjack listener: {e}")))?;
+        self.bound.publish(&listener.local_addr());
 
         // A Lumberjack frame carries no credential, so the IP filter and the
         // TLS handshake are the whole admission surface on this port.

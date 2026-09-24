@@ -31,7 +31,7 @@ use crate::error::{Error, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
 use crate::server::ip_filter::IpFilter;
-use crate::server::traits::ProtocolHandler;
+use crate::server::traits::{BoundAddr, ProtocolHandler};
 use convert::{extract_chunk_id, fluent_to_json};
 
 /// TLS handshake timeout.
@@ -163,10 +163,12 @@ async fn run_tcp(
     max_buffer_size: usize,
     raw_capture: RawCapture,
     ip_filter: IpFilter,
+    bound: BoundAddr,
 ) -> Result<()> {
     let listener = TcpListener::bind(bind_addr)
         .await
         .map_err(|e| Error::Server(format!("failed to bind Fluent Forward listener: {e}")))?;
+    bound.publish(&listener.local_addr());
 
     let tls_enabled = tls_acceptor.is_some();
     info!(addr = %bind_addr, tls = tls_enabled, "Fluent Forward listener started");
@@ -245,6 +247,7 @@ pub struct FluentHandler {
     raw_capture: RawCapture,
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
+    bound: BoundAddr,
 }
 
 impl FluentHandler {
@@ -259,7 +262,14 @@ impl FluentHandler {
             raw_capture,
             pipeline,
             metrics,
+            bound: BoundAddr::default(),
         }
+    }
+
+    /// The address the listener bound, once [`ProtocolHandler::start`] binds it.
+    #[must_use]
+    pub fn bound_addr(&self) -> BoundAddr {
+        self.bound.clone()
     }
 }
 
@@ -296,6 +306,7 @@ impl ProtocolHandler for FluentHandler {
         let tcp_shutdown = shutdown.clone();
         let max_buffer_size = self.config.max_message_size;
         let raw_capture = self.raw_capture;
+        let bound = self.bound.clone();
 
         let tcp_handle = tokio::spawn(async move {
             if let Err(e) = run_tcp(
@@ -307,6 +318,7 @@ impl ProtocolHandler for FluentHandler {
                 max_buffer_size,
                 raw_capture,
                 ip_filter,
+                bound,
             )
             .await
             {

@@ -32,27 +32,18 @@ use dfe_receiver::server::traits::ProtocolHandler;
 use prost::Message;
 use tokio_util::sync::CancellationToken;
 
-/// Get a random port for testing.
-fn random_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    let port = listener.local_addr().expect("local addr").port();
-    drop(listener);
-    port
-}
-
 /// Create a minimal config for testing with Prometheus RW enabled.
-fn test_config(rw_port: u16) -> Config {
-    test_config_with_mode(rw_port, "native")
+fn test_config() -> Config {
+    test_config_with_mode("native")
 }
 
 /// Create a config with a specific output mode.
-fn test_config_with_mode(rw_port: u16, mode: &str) -> Config {
+fn test_config_with_mode(mode: &str) -> Config {
     let mut config = Config::default();
-    let http_port = random_port();
-    config.server.bind_address = format!("127.0.0.1:{http_port}");
+    config.server.bind_address = "127.0.0.1:0".to_string();
     config.server.auth.mode = "none".to_string();
     config.prometheus_rw.enabled = true;
-    config.prometheus_rw.bind_address = format!("127.0.0.1:{rw_port}");
+    config.prometheus_rw.bind_address = "127.0.0.1:0".to_string();
     config.prometheus_rw.mode = mode.to_string();
     config.prometheus_rw.auth.mode = "none".to_string();
     // The loader on its memory transport: accepted, sent nowhere, no broker.
@@ -63,14 +54,6 @@ fn test_config_with_mode(rw_port: u16, mode: &str) -> Config {
 
 /// Start the Prometheus RW handler and return (shutdown_token, metrics, base_url).
 async fn start_rw_handler(config: Config) -> (CancellationToken, Arc<Metrics>, String) {
-    let rw_port = config
-        .prometheus_rw
-        .bind_address
-        .rsplit(':')
-        .next()
-        .and_then(|p| p.parse::<u16>().ok())
-        .unwrap();
-
     let metrics = Arc::new(Metrics::default());
     let shutdown = CancellationToken::new();
     let pipeline = Arc::new(
@@ -88,16 +71,13 @@ async fn start_rw_handler(config: Config) -> (CancellationToken, Arc<Metrics>, S
         pipeline,
         metrics.clone(),
     );
+    let bound = handler.bound_addr();
 
     let handler_shutdown = shutdown.clone();
-    tokio::spawn(async move {
-        let _ = handler.start(handler_shutdown).await;
-    });
+    let mut task = tokio::spawn(async move { handler.start(handler_shutdown).await });
+    let addr = crate::common::bound_addr("remote write", &bound, &mut task).await;
 
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    let url = format!("http://127.0.0.1:{rw_port}");
-    (shutdown, metrics, url)
+    (shutdown, metrics, format!("http://{addr}"))
 }
 
 /// Encode a WriteRequest to Snappy-compressed protobuf bytes.
@@ -149,8 +129,7 @@ fn make_timeseries(name: &str, value: f64, timestamp_ms: i64) -> proto::TimeSeri
 
 #[tokio::test]
 async fn test_single_timeseries() {
-    let port = random_port();
-    let config = test_config(port);
+    let config = test_config();
     let (shutdown, metrics, url) = start_rw_handler(config).await;
 
     let request = proto::WriteRequest {
@@ -187,8 +166,7 @@ async fn test_single_timeseries() {
 
 #[tokio::test]
 async fn test_multiple_timeseries() {
-    let port = random_port();
-    let config = test_config(port);
+    let config = test_config();
     let (shutdown, metrics, url) = start_rw_handler(config).await;
 
     let request = proto::WriteRequest {
@@ -224,8 +202,7 @@ async fn test_multiple_timeseries() {
 
 #[tokio::test]
 async fn test_multiple_samples_per_timeseries() {
-    let port = random_port();
-    let config = test_config(port);
+    let config = test_config();
     let (shutdown, metrics, url) = start_rw_handler(config).await;
 
     let request = proto::WriteRequest {
@@ -278,8 +255,7 @@ async fn test_multiple_samples_per_timeseries() {
 
 #[tokio::test]
 async fn test_empty_body_returns_400() {
-    let port = random_port();
-    let config = test_config(port);
+    let config = test_config();
     let (shutdown, _metrics, url) = start_rw_handler(config).await;
 
     let resp = reqwest::Client::new()
@@ -298,8 +274,7 @@ async fn test_empty_body_returns_400() {
 
 #[tokio::test]
 async fn test_invalid_protobuf_returns_400() {
-    let port = random_port();
-    let config = test_config(port);
+    let config = test_config();
     let (shutdown, _metrics, url) = start_rw_handler(config).await;
 
     // Send valid Snappy but invalid protobuf
@@ -330,8 +305,7 @@ async fn test_invalid_protobuf_returns_400() {
 
 #[tokio::test]
 async fn test_invalid_snappy_returns_400() {
-    let port = random_port();
-    let config = test_config(port);
+    let config = test_config();
     let (shutdown, _metrics, url) = start_rw_handler(config).await;
 
     // Send data that's not valid Snappy
@@ -352,8 +326,7 @@ async fn test_invalid_snappy_returns_400() {
 
 #[tokio::test]
 async fn test_bytes_received_tracked() {
-    let port = random_port();
-    let config = test_config(port);
+    let config = test_config();
     let (shutdown, metrics, url) = start_rw_handler(config).await;
 
     let request = proto::WriteRequest {
@@ -387,8 +360,7 @@ async fn test_bytes_received_tracked() {
 
 #[tokio::test]
 async fn test_empty_write_request() {
-    let port = random_port();
-    let config = test_config(port);
+    let config = test_config();
     let (shutdown, metrics, url) = start_rw_handler(config).await;
 
     // Valid but empty WriteRequest (no timeseries)
@@ -425,8 +397,7 @@ async fn test_empty_write_request() {
 
 #[tokio::test]
 async fn test_otel_mode_single_timeseries() {
-    let port = random_port();
-    let config = test_config_with_mode(port, "otel");
+    let config = test_config_with_mode("otel");
     let (shutdown, metrics, url) = start_rw_handler(config).await;
 
     let request = proto::WriteRequest {
@@ -462,8 +433,7 @@ async fn test_otel_mode_single_timeseries() {
 
 #[tokio::test]
 async fn test_hyperdx_mode_single_timeseries() {
-    let port = random_port();
-    let config = test_config_with_mode(port, "hyperdx");
+    let config = test_config_with_mode("hyperdx");
     let (shutdown, metrics, url) = start_rw_handler(config).await;
 
     let request = proto::WriteRequest {

@@ -23,13 +23,17 @@
 // 16 KiB threshold, as in tests/integration/vector.rs.
 #![allow(clippy::large_futures)]
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use dfe_receiver::config::{Config, SharedConfig, SourceRule};
 use dfe_receiver::metrics::Metrics;
 use dfe_receiver::pipeline::PipelineState;
-use scalo::transport::grpc::{GrpcConfig, GrpcTransport};
+use dfe_receiver::server::grpc::GrpcVectorHandler;
+use dfe_receiver::server::http::HttpHandler;
+use dfe_receiver::server::traits::ProtocolHandler;
+use scalo::transport::grpc::GrpcTransport;
 use scalo::transport::{TransportReceiver, VectorCompatClient};
 use tokio_util::sync::CancellationToken;
 
@@ -55,59 +59,8 @@ fn fetcher_record(source: &str) -> serde_json::Value {
     })
 }
 
-/// Allocate a free loopback port.
-fn random_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    let port = listener.local_addr().expect("local addr").port();
-    drop(listener);
-    port
-}
-
-/// Poll until the port accepts a TCP connection, or fail after 15s.
-async fn wait_for_port(port: u16) {
-    let addr = format!("127.0.0.1:{port}");
-    for _ in 0..300 {
-        if tokio::net::TcpStream::connect(&addr).await.is_ok() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("nothing listening on 127.0.0.1:{port} within 15s");
-}
-
-/// Start a mock dfe-loader: a scalo gRPC server accepting Push RPCs.
-async fn start_mock_loader() -> (String, GrpcTransport) {
-    // The port is free when picked but can be taken before the bind lands under
-    // parallel CI load, so retry on a fresh one.
-    let mut last_err = String::new();
-    for _ in 0..20 {
-        let port = random_port();
-        let config = GrpcConfig::server(&format!("127.0.0.1:{port}"));
-        match GrpcTransport::new(&config).await {
-            Ok(transport) => {
-                wait_for_port(port).await;
-                return (format!("http://127.0.0.1:{port}"), transport);
-            }
-            Err(e) => {
-                last_err = e.to_string();
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        }
-    }
-    panic!("mock loader failed to start after 20 attempts: {last_err}");
-}
-
 /// Start the receiver's gRPC listener over a pipeline built from `config`.
-async fn start_receiver_grpc(config: Config) -> (u16, CancellationToken) {
-    let port: u16 = config
-        .grpc
-        .bind_address
-        .rsplit(':')
-        .next()
-        .expect("bind address has a port")
-        .parse()
-        .expect("port parses");
-
+async fn start_receiver_grpc(config: Config) -> (SocketAddr, CancellationToken) {
     let metrics = Arc::new(Metrics::default());
     let shutdown = CancellationToken::new();
     let pipeline = Arc::new(
@@ -116,33 +69,17 @@ async fn start_receiver_grpc(config: Config) -> (u16, CancellationToken) {
             .expect("pipeline"),
     );
 
+    // The default gRPC auth mode is none, so the handler registers no interceptor.
+    let handler = GrpcVectorHandler::new(config, pipeline, metrics);
+    let bound = handler.bound_addr();
     let server_shutdown = shutdown.clone();
-    tokio::spawn(async move {
-        let _ = dfe_receiver::server::grpc::run_server(
-            &config,
-            pipeline,
-            metrics,
-            None,
-            server_shutdown,
-        )
-        .await;
-    });
-
-    wait_for_port(port).await;
-    (port, shutdown)
+    let mut task = tokio::spawn(async move { handler.start(server_shutdown).await });
+    let addr = crate::common::bound_addr("gRPC", &bound, &mut task).await;
+    (addr, shutdown)
 }
 
 /// Start the receiver's HTTP listener over a pipeline built from `config`.
-async fn start_receiver_http(config: Config) -> (u16, CancellationToken) {
-    let port: u16 = config
-        .server
-        .bind_address
-        .rsplit(':')
-        .next()
-        .expect("bind address has a port")
-        .parse()
-        .expect("port parses");
-
+async fn start_receiver_http(config: Config) -> (SocketAddr, CancellationToken) {
     let metrics = Arc::new(Metrics::default());
     let shutdown = CancellationToken::new();
     let pipeline = Arc::new(
@@ -151,26 +88,18 @@ async fn start_receiver_http(config: Config) -> (u16, CancellationToken) {
             .expect("pipeline"),
     );
 
+    let handler = HttpHandler::new(config.server.bind_address.clone(), pipeline, metrics);
+    let bound = handler.bound_addr();
     let server_shutdown = shutdown.clone();
-    let bind_address = config.server.bind_address.clone();
-    tokio::spawn(async move {
-        let _ = dfe_receiver::server::http::run_server(
-            &bind_address,
-            pipeline,
-            metrics,
-            server_shutdown,
-        )
-        .await;
-    });
-
-    wait_for_port(port).await;
-    (port, shutdown)
+    let mut task = tokio::spawn(async move { handler.start(server_shutdown).await });
+    let addr = crate::common::bound_addr("HTTP", &bound, &mut task).await;
+    (addr, shutdown)
 }
 
 /// A receiver-based source: routed on a field of its own, not on `_source`.
 fn kvproof_config(loader_endpoint: String) -> Config {
     let mut config = Config::default();
-    config.server.bind_address = format!("127.0.0.1:{}", random_port());
+    config.server.bind_address = "127.0.0.1:0".to_string();
     config.server.auth.mode = "none".to_string();
     config.destinations.default = "loader".into();
     config.loader.transport = "grpc".to_string();
@@ -204,21 +133,21 @@ async fn drain_loader(server: &GrpcTransport, want: usize) -> Vec<bytes::Bytes> 
 /// receiver must hand the field through untouched.
 #[tokio::test]
 async fn test_grpc_push_forwards_source_to_the_loader() {
-    let (loader_endpoint, loader) = start_mock_loader().await;
+    let (loader_endpoint, loader) = crate::common::grpc_destination().await;
 
     let mut config = Config::default();
     config.grpc.enabled = true;
-    config.grpc.bind_address = format!("127.0.0.1:{}", random_port());
+    config.grpc.bind_address = "127.0.0.1:0".to_string();
     config.destinations.default = "loader".into();
     config.loader.transport = "grpc".to_string();
     config.loader.grpc_endpoint = Some(loader_endpoint);
     config.routing.source_rules = vec![fetcher_source_rule("crates_audit")];
     config.routing.dlq.enabled = false;
 
-    let (port, shutdown) = start_receiver_grpc(config).await;
+    let (addr, shutdown) = start_receiver_grpc(config).await;
 
-    let client = VectorCompatClient::connect_lazy(&format!("http://127.0.0.1:{port}"))
-        .expect("vector client");
+    let client =
+        VectorCompatClient::connect_lazy(&format!("http://{addr}")).expect("vector client");
     client
         .send_events(&[fetcher_record("crates_audit")])
         .await
@@ -247,20 +176,20 @@ async fn test_grpc_push_forwards_source_to_the_loader() {
 /// encoding enabled rejects every scalo-originated push.
 #[tokio::test]
 async fn test_grpc_push_accepts_gzip() {
-    let (loader_endpoint, loader) = start_mock_loader().await;
+    let (loader_endpoint, loader) = crate::common::grpc_destination().await;
 
     let mut config = Config::default();
     config.grpc.enabled = true;
-    config.grpc.bind_address = format!("127.0.0.1:{}", random_port());
+    config.grpc.bind_address = "127.0.0.1:0".to_string();
     config.destinations.default = "loader".into();
     config.loader.transport = "grpc".to_string();
     config.loader.grpc_endpoint = Some(loader_endpoint);
     config.routing.dlq.enabled = false;
 
-    let (port, shutdown) = start_receiver_grpc(config).await;
+    let (addr, shutdown) = start_receiver_grpc(config).await;
 
-    let client = VectorCompatClient::connect_lazy(&format!("http://127.0.0.1:{port}"))
-        .expect("vector client");
+    let client =
+        VectorCompatClient::connect_lazy(&format!("http://{addr}")).expect("vector client");
     let result = client.send_events(&[fetcher_record("main")]).await;
     let received = drain_loader(&loader, 1).await;
     shutdown.cancel();
@@ -276,11 +205,11 @@ async fn test_grpc_push_accepts_gzip() {
 /// `_source` NULL, which is what a live slim deploy showed.
 #[tokio::test]
 async fn test_http_ingest_stamps_the_matched_source_for_the_loader() {
-    let (loader_endpoint, loader) = start_mock_loader().await;
-    let (port, shutdown) = start_receiver_http(kvproof_config(loader_endpoint)).await;
+    let (loader_endpoint, loader) = crate::common::grpc_destination().await;
+    let (addr, shutdown) = start_receiver_http(kvproof_config(loader_endpoint)).await;
 
     let response = reqwest::Client::new()
-        .post(format!("http://127.0.0.1:{port}/ingest"))
+        .post(format!("http://{addr}/ingest"))
         .header("content-type", "application/json")
         .body(r#"{"app":"kvproof","message":"hello"}"#)
         .send()
@@ -314,11 +243,11 @@ async fn test_http_ingest_stamps_the_matched_source_for_the_loader() {
 /// `_source` NULL and a table picked by the loader's own fallback.
 #[tokio::test]
 async fn test_http_ingest_stamps_the_catch_all_source_when_no_rule_matches() {
-    let (loader_endpoint, loader) = start_mock_loader().await;
-    let (port, shutdown) = start_receiver_http(kvproof_config(loader_endpoint)).await;
+    let (loader_endpoint, loader) = crate::common::grpc_destination().await;
+    let (addr, shutdown) = start_receiver_http(kvproof_config(loader_endpoint)).await;
 
     let response = reqwest::Client::new()
-        .post(format!("http://127.0.0.1:{port}/ingest"))
+        .post(format!("http://{addr}/ingest"))
         .header("content-type", "application/json")
         .body(r#"{"app":"something_else","message":"hello"}"#)
         .send()
@@ -343,11 +272,11 @@ async fn test_http_ingest_stamps_the_catch_all_source_when_no_rule_matches() {
 /// name makes the loader's ClickHouse JSON column reject the whole record.
 #[tokio::test]
 async fn test_http_ingest_never_overwrites_a_sender_source() {
-    let (loader_endpoint, loader) = start_mock_loader().await;
-    let (port, shutdown) = start_receiver_http(kvproof_config(loader_endpoint)).await;
+    let (loader_endpoint, loader) = crate::common::grpc_destination().await;
+    let (addr, shutdown) = start_receiver_http(kvproof_config(loader_endpoint)).await;
 
     let response = reqwest::Client::new()
-        .post(format!("http://127.0.0.1:{port}/ingest"))
+        .post(format!("http://{addr}/ingest"))
         .header("content-type", "application/json")
         .body(r#"{"app":"kvproof","_source":"crates_audit"}"#)
         .send()
@@ -373,13 +302,13 @@ async fn test_http_ingest_never_overwrites_a_sender_source() {
 /// With enrichment off, no source rule fires and the record is untouched.
 #[tokio::test]
 async fn test_http_ingest_adds_no_source_when_enrichment_is_disabled() {
-    let (loader_endpoint, loader) = start_mock_loader().await;
+    let (loader_endpoint, loader) = crate::common::grpc_destination().await;
     let mut config = kvproof_config(loader_endpoint);
     config.server.auth.include_common_header = false;
-    let (port, shutdown) = start_receiver_http(config).await;
+    let (addr, shutdown) = start_receiver_http(config).await;
 
     let response = reqwest::Client::new()
-        .post(format!("http://127.0.0.1:{port}/ingest"))
+        .post(format!("http://{addr}/ingest"))
         .header("content-type", "application/json")
         .body(r#"{"app":"kvproof","message":"hello"}"#)
         .send()

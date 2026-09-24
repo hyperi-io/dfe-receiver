@@ -23,7 +23,6 @@
 #![allow(clippy::large_futures)]
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use dfe_receiver::config::{Config, SharedConfig};
 use dfe_receiver::metrics::Metrics;
@@ -32,32 +31,15 @@ use dfe_receiver::server::splunk_hec::SplunkHecHandler;
 use dfe_receiver::server::traits::ProtocolHandler;
 use tokio_util::sync::CancellationToken;
 
-/// Get a free port for testing.
-///
-/// Binds an OS-assigned ephemeral port and immediately drops the listener,
-/// returning the port the kernel picked. This is collision-free across the
-/// 500+ tests nextest runs in parallel -- the previous `10000 + uuid % 10000`
-/// scheme could (and did) hand two tests the same port, leaving the loser's
-/// handler unable to bind while its client hung forever on a port with no
-/// listener (reqwest has no default timeout).
-fn random_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("bind ephemeral port")
-        .local_addr()
-        .expect("read local addr")
-        .port()
-}
-
 /// Create a minimal config for testing with Splunk HEC enabled.
-fn test_config(hec_port: u16) -> Config {
+fn test_config() -> Config {
     let mut config = Config::default();
     // HTTP server still needs a bind address (always enabled)
-    let http_port = random_port();
-    config.server.bind_address = format!("127.0.0.1:{http_port}");
+    config.server.bind_address = "127.0.0.1:0".to_string();
     config.server.auth.mode = "none".to_string();
     // Enable Splunk HEC
     config.splunk_hec.enabled = true;
-    config.splunk_hec.bind_address = format!("127.0.0.1:{hec_port}");
+    config.splunk_hec.bind_address = "127.0.0.1:0".to_string();
     config.splunk_hec.auth.mode = "none".to_string();
     // The loader on its memory transport: accepted, sent nowhere, no broker.
     config.destinations.default = "loader".into();
@@ -66,8 +48,8 @@ fn test_config(hec_port: u16) -> Config {
 }
 
 /// Create a config with bearer auth enabled.
-fn test_config_with_auth(hec_port: u16, token: &str) -> Config {
-    let mut config = test_config(hec_port);
+fn test_config_with_auth(token: &str) -> Config {
+    let mut config = test_config();
     config.splunk_hec.auth.mode = "bearer".to_string();
     config.splunk_hec.auth.bearer.tokens = vec![token.to_string()];
     config
@@ -75,14 +57,6 @@ fn test_config_with_auth(hec_port: u16, token: &str) -> Config {
 
 /// Start the HEC handler and return (shutdown_token, metrics, base_url).
 async fn start_hec_handler(config: Config) -> (CancellationToken, Arc<Metrics>, String) {
-    let hec_port = config
-        .splunk_hec
-        .bind_address
-        .split(':')
-        .last()
-        .and_then(|p| p.parse::<u16>().ok())
-        .unwrap();
-
     let metrics = Arc::new(Metrics::default());
     let shutdown = CancellationToken::new();
     let pipeline = Arc::new(
@@ -100,17 +74,13 @@ async fn start_hec_handler(config: Config) -> (CancellationToken, Arc<Metrics>, 
         pipeline,
         metrics.clone(),
     );
+    let bound = handler.bound_addr();
 
     let handler_shutdown = shutdown.clone();
-    tokio::spawn(async move {
-        let _ = handler.start(handler_shutdown).await;
-    });
+    let mut task = tokio::spawn(async move { handler.start(handler_shutdown).await });
+    let addr = crate::common::bound_addr("HEC", &bound, &mut task).await;
 
-    // Wait for handler to start listening
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    let url = format!("http://127.0.0.1:{hec_port}");
-    (shutdown, metrics, url)
+    (shutdown, metrics, format!("http://{addr}"))
 }
 
 /// Get total events received from metrics.
@@ -125,8 +95,7 @@ fn events_received(metrics: &Metrics) -> u64 {
 /// Test sending a single HEC event.
 #[tokio::test]
 async fn test_hec_single_event() {
-    let port = random_port();
-    let config = test_config(port);
+    let config = test_config();
     let (shutdown, metrics, url) = start_hec_handler(config).await;
 
     let client = reqwest::Client::new();
@@ -153,8 +122,7 @@ async fn test_hec_single_event() {
 /// Test sending batched NDJSON events.
 #[tokio::test]
 async fn test_hec_batch_events() {
-    let port = random_port();
-    let config = test_config(port);
+    let config = test_config();
     let (shutdown, metrics, url) = start_hec_handler(config).await;
 
     let client = reqwest::Client::new();
@@ -183,8 +151,7 @@ async fn test_hec_batch_events() {
 /// Test sending event with full HEC metadata.
 #[tokio::test]
 async fn test_hec_event_with_metadata() {
-    let port = random_port();
-    let config = test_config(port);
+    let config = test_config();
     let (shutdown, _metrics, url) = start_hec_handler(config).await;
 
     let client = reqwest::Client::new();
@@ -207,8 +174,7 @@ async fn test_hec_event_with_metadata() {
 /// Test that empty body returns HEC error code 5 (no data).
 #[tokio::test]
 async fn test_hec_empty_body() {
-    let port = random_port();
-    let config = test_config(port);
+    let config = test_config();
     let (shutdown, _metrics, url) = start_hec_handler(config).await;
 
     let client = reqwest::Client::new();
@@ -229,8 +195,7 @@ async fn test_hec_empty_body() {
 /// Test that invalid JSON returns HEC error code 6 (invalid data format).
 #[tokio::test]
 async fn test_hec_invalid_json() {
-    let port = random_port();
-    let config = test_config(port);
+    let config = test_config();
     let (shutdown, _metrics, url) = start_hec_handler(config).await;
 
     let client = reqwest::Client::new();
@@ -255,8 +220,7 @@ async fn test_hec_invalid_json() {
 /// Test sending raw text events.
 #[tokio::test]
 async fn test_hec_raw_events() {
-    let port = random_port();
-    let config = test_config(port);
+    let config = test_config();
     let (shutdown, metrics, url) = start_hec_handler(config).await;
 
     let client = reqwest::Client::new();
@@ -287,8 +251,7 @@ async fn test_hec_raw_events() {
 /// Test health endpoint returns correct HEC format.
 #[tokio::test]
 async fn test_hec_health() {
-    let port = random_port();
-    let config = test_config(port);
+    let config = test_config();
     let (shutdown, _metrics, url) = start_hec_handler(config).await;
 
     let client = reqwest::Client::new();
@@ -313,9 +276,8 @@ async fn test_hec_health() {
 /// Test that Splunk auth prefix is accepted.
 #[tokio::test]
 async fn test_hec_auth_splunk_prefix() {
-    let port = random_port();
     let token = "test-hec-token-123";
-    let config = test_config_with_auth(port, token);
+    let config = test_config_with_auth(token);
     let (shutdown, _metrics, url) = start_hec_handler(config).await;
 
     let client = reqwest::Client::new();
@@ -337,9 +299,8 @@ async fn test_hec_auth_splunk_prefix() {
 /// Test that Bearer auth prefix is also accepted.
 #[tokio::test]
 async fn test_hec_auth_bearer_prefix() {
-    let port = random_port();
     let token = "test-hec-token-456";
-    let config = test_config_with_auth(port, token);
+    let config = test_config_with_auth(token);
     let (shutdown, _metrics, url) = start_hec_handler(config).await;
 
     let client = reqwest::Client::new();
@@ -361,8 +322,7 @@ async fn test_hec_auth_bearer_prefix() {
 /// Test that missing/invalid auth is rejected.
 #[tokio::test]
 async fn test_hec_auth_rejected() {
-    let port = random_port();
-    let config = test_config_with_auth(port, "correct-token");
+    let config = test_config_with_auth("correct-token");
     let (shutdown, _metrics, url) = start_hec_handler(config).await;
 
     let client = reqwest::Client::new();
@@ -394,8 +354,7 @@ async fn test_hec_auth_rejected() {
 /// Test the /services/collector/event/1.0 versioned endpoint.
 #[tokio::test]
 async fn test_hec_versioned_endpoint() {
-    let port = random_port();
-    let config = test_config(port);
+    let config = test_config();
     let (shutdown, _metrics, url) = start_hec_handler(config).await;
 
     let client = reqwest::Client::new();
