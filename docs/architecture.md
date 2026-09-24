@@ -67,11 +67,9 @@ decode, and nothing else. The moment it holds JSON bytes it calls the same
 pipeline every other handler calls, so validation, routing, backpressure and
 metrics exist once rather than eleven times.
 
-`ProtocolHandler` (`src/server/traits.rs`) is where the two halves meet:
-`name()`, `bind_address()`, `start(shutdown)`, `is_healthy()`.
-`Server::build_handlers` (`src/server/mod.rs:93`) collects the enabled handlers
-and spawns each one. Adding a protocol is a directory under `src/server/` plus a
-block in `build_handlers` -- it does not touch the core path.
+`ProtocolHandler` (`src/server/traits.rs`) is where the two halves meet: `name()`, `bind_address()`, `listeners()`, `start(shutdown)`. `Server::build_handlers` (`src/server/mod.rs:125`) collects the enabled handlers, and `Server::run` spawns each one. Adding a protocol is a directory under `src/server/` plus a block in `build_handlers` -- it does not touch the core path.
+
+`listeners()` returns one `BoundAddr` per socket the handler binds, and `/readyz` waits on all of them: it answers 503 until every enabled listener is serving, and again once any of them stops. A listener that cannot bind, or stops before shutdown, fails its handler's `start()`, the handler's other listeners stop with it, and the process logs `Protocol handler failed` and stays up. An enabled handler that cannot be built fails the same way.
 
 HTTP is the exception to opt-in. It always runs, because `/livez` and `/readyz`
 ride its listener, so exposing ingest exposes both probe paths.

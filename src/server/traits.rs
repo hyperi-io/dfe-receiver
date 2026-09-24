@@ -10,7 +10,8 @@
 //!
 //! All ingestion protocols (HTTP/JSON, gRPC/Vector, OTLP, Prometheus Remote
 //! Write, etc.) implement [`ProtocolHandler`]. The server orchestration layer
-//! starts all enabled handlers in parallel and monitors their health.
+//! starts all enabled handlers in parallel, and readiness waits on every
+//! listener they bind.
 
 use std::future::Future;
 use std::net::SocketAddr;
@@ -98,11 +99,6 @@ pub trait ProtocolHandler: Send + Sync {
     ///
     /// Returns an error when a listener cannot bind, or stops before shutdown.
     async fn start(&self, shutdown: CancellationToken) -> Result<()>;
-
-    /// Check if the handler is healthy and accepting traffic.
-    fn is_healthy(&self) -> bool {
-        true
-    }
 }
 
 /// The listener tasks of one handler, run until shutdown as one unit.
