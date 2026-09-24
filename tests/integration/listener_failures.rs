@@ -427,6 +427,18 @@ async fn a_flow_handler_that_cannot_build_keeps_the_pod_not_ready() {
     assert_never_ready(server, &pipeline, "the flow handler unable to build").await;
 }
 
+/// Flow enabled with no port binds no socket, so it must keep the pod not ready.
+#[tokio::test]
+async fn flow_enabled_with_no_ports_keeps_the_pod_not_ready() {
+    let mut config = flow_config();
+    config.flow.enabled = true;
+    config.flow.ports = Vec::new();
+    let pipeline = pipeline_for(&config).await;
+
+    let server = Server::with_flow_metrics(pipeline.clone(), metrics(), flow_metrics_for_test());
+    assert_never_ready(server, &pipeline, "flow enabled and no flow port").await;
+}
+
 /// Flow enabled on a server built without flow metrics keeps the pod not ready.
 #[tokio::test]
 async fn flow_enabled_without_flow_metrics_keeps_the_pod_not_ready() {

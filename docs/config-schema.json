@@ -413,7 +413,8 @@
           "topic_suffix": ".dlq",
           "file_enabled": true,
           "file_path": "/var/spool/dfe/dlq",
-          "kafka_enabled": true
+          "kafka_enabled": true,
+          "kafka_send_timeout_ms": null
         }
       }
     },
@@ -1864,7 +1865,8 @@
             "topic_suffix": ".dlq",
             "file_enabled": true,
             "file_path": "/var/spool/dfe/dlq",
-            "kafka_enabled": true
+            "kafka_enabled": true,
+            "kafka_send_timeout_ms": null
           }
         }
       }
@@ -1940,6 +1942,16 @@
           "description": "Kafka backend settings.",
           "type": "boolean",
           "default": true
+        },
+        "kafka_send_timeout_ms": {
+          "description": "How long a DLQ flush or shutdown waits for Kafka to ack queued entries,\nin milliseconds: scalo's `KafkaDlqConfig::send_timeout_ms`. Unset keeps\nscalo's default.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "default": null
         }
       }
     },
