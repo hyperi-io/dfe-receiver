@@ -348,7 +348,8 @@ async fn test_full_pipeline_to_kafka() {
 async fn test_http_to_kafka() {
     use dfe_receiver::metrics::Metrics;
     use dfe_receiver::pipeline::Orchestrator;
-    use dfe_receiver::server::http;
+    use dfe_receiver::server::http::HttpHandler;
+    use dfe_receiver::server::traits::ProtocolHandler;
     use tokio_util::sync::CancellationToken;
 
     if !kafka_available().await {
@@ -368,15 +369,9 @@ async fn test_http_to_kafka() {
     config.kafka.producer.batch_messages = 1;
     config.kafka.producer.linger_ms = 0;
 
-    // A port the OS says is free, rather than a guess that collides on a busy
-    // runner and leaves the handler's bind failing silently.
-    let port = {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-        let port = listener.local_addr().expect("local addr").port();
-        drop(listener);
-        port
-    };
-    config.server.bind_address = format!("127.0.0.1:{port}");
+    // Port 0, read back once bound: a port picked and handed over can be taken
+    // by another process before the handler binds it.
+    config.server.bind_address = "127.0.0.1:0".to_string();
 
     let metrics = Arc::new(Metrics::default());
     let shutdown = CancellationToken::new();
@@ -388,22 +383,15 @@ async fn test_http_to_kafka() {
     let pipeline = orchestrator.state();
 
     // Spawn HTTP server
+    let handler = HttpHandler::new(config.server.bind_address.clone(), pipeline, metrics);
+    let bound = handler.bound_addr();
     let server_shutdown = shutdown.clone();
-    let server_metrics = metrics.clone();
-    let server_pipeline = pipeline.clone();
-    let bind_addr = config.server.bind_address.clone();
-
-    let server_handle = tokio::spawn(async move {
-        let _ =
-            http::run_server(&bind_addr, server_pipeline, server_metrics, server_shutdown).await;
-    });
-
-    // Wait for server to start
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    let mut server_handle = tokio::spawn(async move { handler.start(server_shutdown).await });
+    let addr = super::common::bound_addr("HTTP", &bound, &mut server_handle).await;
 
     // Send HTTP request
     let client = reqwest::Client::new();
-    let url = format!("http://127.0.0.1:{port}/ingest");
+    let url = format!("http://{addr}/ingest");
 
     for i in 0..3 {
         let payload = format!(r#"{{"event_category":"http_test","seq":{i}}}"#);

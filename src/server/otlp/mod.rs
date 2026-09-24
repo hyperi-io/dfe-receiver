@@ -36,7 +36,7 @@ use crate::pipeline::PipelineState;
 use crate::server::auth::{AuthMode, AuthState, validate_bearer_auth};
 use crate::server::http::create_auth_state;
 use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
-use crate::server::traits::{BoundAddr, ProtocolHandler};
+use crate::server::traits::{BoundAddr, Listeners, ProtocolHandler};
 use convert::OtlpMode;
 
 // ---------------------------------------------------------------------------
@@ -346,11 +346,11 @@ async fn run_grpc_server(
     };
 
     // Bound here rather than inside tonic, which keeps the address it took to itself.
-    // tonic's own bind also sets TCP_NODELAY, which a hand-bound stream must be given.
+    // serve_with_incoming_shutdown drops the builder's TCP settings, so they go on the TcpIncoming.
     let incoming = TcpIncoming::bind(addr)
         .map_err(|e| Error::Server(format!("OTLP gRPC server error: {e}")))?
         .with_nodelay(Some(true));
-    bound.publish(&incoming.local_addr());
+    let _serving = bound.publish(&incoming.local_addr());
 
     info!(addr = %addr, mode = ?mode, "OTLP gRPC server listening");
 
@@ -504,7 +504,6 @@ async fn run_http_server(
     let listener = TcpListener::bind(addr)
         .await
         .map_err(|e| Error::Server(format!("failed to bind OTLP HTTP: {e}")))?;
-    bound.publish(&listener.local_addr());
 
     // Same TLS wiring as the Splunk HEC listener, over the same `tls:` block
     // the gRPC endpoint uses.
@@ -528,6 +527,9 @@ async fn run_http_server(
     } else {
         tls_acceptor.map(|a| Arc::new(parking_lot::RwLock::new(a)))
     };
+
+    // Published once TLS is ready, so a failed TLS setup never reads as serving.
+    let _serving = bound.publish(&listener.local_addr());
 
     if let Some(handle) = acceptor_handle {
         info!(addr = %addr, mode = ?mode, tls = true, "OTLP HTTP server listening");
@@ -625,6 +627,10 @@ impl ProtocolHandler for OtlpHandler {
         &self.config.grpc_bind_address
     }
 
+    fn listeners(&self) -> Vec<BoundAddr> {
+        vec![self.grpc_bound.clone(), self.http_bound.clone()]
+    }
+
     async fn start(&self, shutdown: CancellationToken) -> Result<()> {
         if self.raw_capture.enabled && OtlpMode::from_str(&self.config.mode) == OtlpMode::Generic {
             warn!(
@@ -633,15 +639,15 @@ impl ProtocolHandler for OtlpHandler {
             );
         }
 
-        // Spawn gRPC and HTTP servers concurrently
+        let mut listeners = Listeners::default();
+
         let grpc_config = self.config.clone();
         let grpc_raw = self.raw_capture;
         let grpc_pipeline = self.pipeline.clone();
         let grpc_metrics = self.metrics.clone();
         let grpc_shutdown = shutdown.clone();
         let grpc_bound = self.grpc_bound.clone();
-
-        let grpc_handle = tokio::spawn(async move {
+        listeners.spawn("OTLP gRPC", async move {
             run_grpc_server(
                 &grpc_config,
                 grpc_raw,
@@ -659,8 +665,7 @@ impl ProtocolHandler for OtlpHandler {
         let http_metrics = self.metrics.clone();
         let http_shutdown = shutdown.clone();
         let http_bound = self.http_bound.clone();
-
-        let http_handle = tokio::spawn(async move {
+        listeners.spawn("OTLP HTTP", async move {
             run_http_server(
                 &http_config,
                 http_raw,
@@ -672,11 +677,7 @@ impl ProtocolHandler for OtlpHandler {
             .await
         });
 
-        // Wait for shutdown
-        shutdown.cancelled().await;
-
-        let _ = grpc_handle.await;
-        let _ = http_handle.await;
+        listeners.run(&shutdown).await?;
 
         info!("OTLP handler stopped");
         Ok(())

@@ -12,7 +12,7 @@
 //! and delivery to sinks with backpressure support.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -36,6 +36,7 @@ use crate::config::{Config, SharedConfig};
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
 use crate::routing::{self, RouteResult, Router};
+use crate::server::traits::BoundAddr;
 use crate::sink::Sink;
 use crate::sink::file::FileSink;
 use crate::sink::grpc::GrpcSink;
@@ -111,7 +112,8 @@ pub struct PipelineState {
     /// check (byte-identical to pre-governor behaviour).
     pressure: Option<Arc<UnifiedPressure>>,
     dlq: Option<Arc<Dlq>>,
-    ready: AtomicBool,
+    /// The listeners readiness waits on, `None` until the server declares them.
+    listeners: RwLock<Option<Vec<BoundAddr>>>,
 }
 
 impl PipelineState {
@@ -288,7 +290,7 @@ impl PipelineState {
             memory_guard,
             pressure,
             dlq,
-            ready: AtomicBool::new(true),
+            listeners: RwLock::new(None),
         })
     }
 
@@ -305,9 +307,11 @@ impl PipelineState {
     /// Admission check for a request: shed with 503 when this is false.
     ///
     /// Consults sink health as well as pressure, because accepting a record
-    /// the pipeline cannot deliver loses it.
+    /// the pipeline cannot deliver loses it. Listener state stays with
+    /// [`probe_ready`](Self::probe_ready): one listener that failed to bind
+    /// does not shed the traffic another one is serving.
     pub fn is_ready(&self) -> bool {
-        if !self.probe_ready() {
+        if self.under_pressure() {
             return false;
         }
 
@@ -326,7 +330,11 @@ impl PipelineState {
         })
     }
 
-    /// What `/readyz` answers: startup state and pressure, NOT sink health.
+    /// What `/readyz` answers: every listener the server enabled is bound and
+    /// serving, and there is no pressure. NOT sink health.
+    ///
+    /// False until [`watch_listeners`](Self::watch_listeners) declares the
+    /// listeners, so a probe that lands before the server starts cannot pass.
     ///
     /// A sink outage is shared by every replica, so failing the probe on it
     /// empties the Service of endpoints fleet-wide and turns a degradation
@@ -334,16 +342,21 @@ impl PipelineState {
     /// still answers 503 + retry-after per request while the pod remains
     /// routable.
     pub fn probe_ready(&self) -> bool {
-        if !self.ready.load(Ordering::Relaxed) {
-            return false;
-        }
+        let serving = self
+            .listeners
+            .read()
+            .as_deref()
+            .is_some_and(|listeners| listeners.iter().all(BoundAddr::is_serving));
 
         // Not ready under high pressure (originator brake source of truth).
-        if self.under_pressure() {
-            return false;
-        }
+        serving && !self.under_pressure()
+    }
 
-        true
+    /// Declare the listeners [`probe_ready`](Self::probe_ready) waits on:
+    /// every one must be bound and serving for the probe to pass. Replaces
+    /// any earlier declaration.
+    pub fn watch_listeners(&self, listeners: Vec<BoundAddr>) {
+        *self.listeners.write() = Some(listeners);
     }
 
     /// Get memory pressure level.
@@ -1152,6 +1165,7 @@ mod tests {
         config.buffer.memory_limit = 1000;
         config.buffer.pressure_threshold = 0.8;
         let state = test_state_on_reservations(config).await;
+        state.watch_listeners(Vec::new());
 
         assert!(state.probe_ready(), "a fresh pipeline must pass the probe");
         assert!(state.is_ready(), "and must admit requests");
@@ -1163,6 +1177,34 @@ mod tests {
             "pressure must fail the probe -- a scale-out relieves it"
         );
         assert!(!state.is_ready(), "and must also stop admitting");
+    }
+
+    #[tokio::test]
+    async fn the_probe_waits_for_every_declared_listener() {
+        let state = test_state().await;
+        assert!(
+            !state.probe_ready(),
+            "no probe may pass before the server declares its listeners"
+        );
+
+        let http = BoundAddr::default();
+        let syslog = BoundAddr::default();
+        state.watch_listeners(vec![http.clone(), syslog.clone()]);
+        assert!(!state.probe_ready(), "neither listener has bound");
+
+        let addr = Ok(std::net::SocketAddr::from(([127, 0, 0, 1], 9)));
+        let _http_serving = http.publish(&addr);
+        assert!(!state.probe_ready(), "syslog has not bound");
+        assert!(state.is_ready(), "admission does not wait on listeners");
+
+        let syslog_serving = syslog.publish(&addr);
+        assert!(state.probe_ready(), "every declared listener is serving");
+
+        drop(syslog_serving);
+        assert!(
+            !state.probe_ready(),
+            "a listener that stopped must fail the probe"
+        );
     }
 
     #[tokio::test]

@@ -220,6 +220,9 @@ impl Server {
     }
 
     /// Run all enabled protocol handlers until shutdown is signalled.
+    ///
+    /// A handler that fails is logged and stays down, and readiness stays
+    /// false for as long as any of its listeners is not serving.
     pub async fn run(&self, shutdown: CancellationToken) -> Result<()> {
         let handlers = self.build_handlers();
 
@@ -232,6 +235,13 @@ impl Server {
             );
         }
 
+        self.state.watch_listeners(
+            handlers
+                .iter()
+                .flat_map(|handler| handler.listeners())
+                .collect(),
+        );
+
         // Spawn all handlers concurrently
         let mut join_handles = Vec::with_capacity(handlers.len());
         for handler in handlers {
@@ -239,20 +249,26 @@ impl Server {
             let name = handler.name();
 
             let handle = tokio::spawn(async move {
-                if let Err(e) = handler.start(handler_shutdown).await {
-                    error!(handler = name, error = %e, "Protocol handler failed");
+                match handler.start(handler_shutdown.clone()).await {
+                    Err(e) => error!(handler = name, error = %e, "Protocol handler failed"),
+                    Ok(()) if !handler_shutdown.is_cancelled() => {
+                        error!(handler = name, "Protocol handler stopped before shutdown");
+                    }
+                    Ok(()) => {}
                 }
             });
 
-            join_handles.push(handle);
+            join_handles.push((name, handle));
         }
 
         // Wait for shutdown
         shutdown.cancelled().await;
 
         // Wait for all handlers to finish
-        for handle in join_handles {
-            let _ = handle.await;
+        for (name, handle) in join_handles {
+            if let Err(e) = handle.await {
+                error!(handler = name, error = %e, "Protocol handler panicked");
+            }
         }
 
         info!("Server shutdown complete");

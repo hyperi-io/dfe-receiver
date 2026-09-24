@@ -36,7 +36,7 @@ use crate::error::{Error, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
 use crate::server::ip_filter::IpFilter;
-use crate::server::traits::{BoundAddr, ProtocolHandler};
+use crate::server::traits::{BoundAddr, Listeners, ProtocolHandler};
 use convert::syslog_to_json;
 use framing::SyslogFrameDecoder;
 
@@ -63,7 +63,7 @@ async fn run_udp(
     let socket = UdpSocket::bind(bind_addr)
         .await
         .map_err(|e| Error::Server(format!("failed to bind syslog UDP socket: {e}")))?;
-    bound.publish(&socket.local_addr());
+    let _serving = bound.publish(&socket.local_addr());
 
     info!(addr = %bind_addr, protocol = "udp", "Syslog UDP listener started");
 
@@ -208,7 +208,7 @@ async fn run_tcp(
     let listener = TcpListener::bind(bind_addr)
         .await
         .map_err(|e| Error::Server(format!("failed to bind syslog {label} listener: {e}")))?;
-    bound.publish(&listener.local_addr());
+    let _serving = bound.publish(&listener.local_addr());
 
     let tls_enabled = tls_acceptor.is_some();
     info!(addr = %bind_addr, tls = tls_enabled, "Syslog {label} listener started");
@@ -340,8 +340,16 @@ impl ProtocolHandler for SyslogHandler {
         &self.config.tcp_bind_address
     }
 
+    fn listeners(&self) -> Vec<BoundAddr> {
+        let mut listeners = vec![self.udp_bound.clone(), self.tcp_bound.clone()];
+        if self.config.tls.enabled {
+            listeners.push(self.tls_bound.clone());
+        }
+        listeners
+    }
+
     async fn start(&self, shutdown: CancellationToken) -> Result<()> {
-        // Parse bind addresses
+        // Settle what can fail before any listener binds, so a failed start leaves none serving.
         let udp_addr: SocketAddr = self
             .config
             .udp_bind_address
@@ -354,6 +362,23 @@ impl ProtocolHandler for SyslogHandler {
             .parse()
             .map_err(|e| Error::Config(format!("invalid syslog TCP bind address: {e}")))?;
 
+        let tls = if self.config.tls.enabled {
+            let tls_addr: SocketAddr = self
+                .config
+                .tls_bind_address
+                .parse()
+                .map_err(|e| Error::Config(format!("invalid syslog TLS bind address: {e}")))?;
+            // The config asks for a TLS listener, so no acceptor fails the start.
+            let acceptor = super::tls::build_tls_acceptor_async(&self.config.tls)
+                .await?
+                .ok_or_else(|| {
+                    Error::Tls("syslog TLS is enabled but no TLS acceptor was built".into())
+                })?;
+            Some((tls_addr, acceptor))
+        } else {
+            None
+        };
+
         let max_msg = self.config.max_message_size;
         let raw_capture = self.raw_capture;
 
@@ -362,107 +387,53 @@ impl ProtocolHandler for SyslogHandler {
         // two of these three listeners.
         let ip_filter = IpFilter::from_config(&self.pipeline.config().server.ip_filter);
 
-        // Spawn UDP listener
-        let udp_handle = {
-            let pipeline = self.pipeline.clone();
-            let metrics = self.metrics.clone();
-            let udp_shutdown = shutdown.clone();
-            let ip_filter = ip_filter.clone();
-            let bound = self.udp_bound.clone();
-            tokio::spawn(async move {
-                if let Err(e) = run_udp(
-                    udp_addr,
-                    pipeline,
-                    metrics,
-                    udp_shutdown,
-                    raw_capture,
-                    ip_filter,
-                    bound,
-                )
-                .await
-                {
-                    error!(error = %e, "Syslog UDP listener failed");
-                }
-            })
-        };
-
-        // Spawn TCP listener (plain)
-        let tcp_handle = {
-            let pipeline = self.pipeline.clone();
-            let metrics = self.metrics.clone();
-            let tcp_shutdown = shutdown.clone();
-            let ip_filter = ip_filter.clone();
-            let bound = self.tcp_bound.clone();
-            tokio::spawn(async move {
-                if let Err(e) = run_tcp(
-                    tcp_addr,
-                    pipeline,
-                    metrics,
-                    tcp_shutdown,
-                    None,
+        let mut listeners = Listeners::default();
+        listeners.spawn(
+            "syslog UDP",
+            run_udp(
+                udp_addr,
+                self.pipeline.clone(),
+                self.metrics.clone(),
+                shutdown.clone(),
+                raw_capture,
+                ip_filter.clone(),
+                self.udp_bound.clone(),
+            ),
+        );
+        listeners.spawn(
+            "syslog TCP",
+            run_tcp(
+                tcp_addr,
+                self.pipeline.clone(),
+                self.metrics.clone(),
+                shutdown.clone(),
+                None,
+                max_msg,
+                raw_capture,
+                "TCP",
+                ip_filter.clone(),
+                self.tcp_bound.clone(),
+            ),
+        );
+        if let Some((tls_addr, acceptor)) = tls {
+            listeners.spawn(
+                "syslog TLS",
+                run_tcp(
+                    tls_addr,
+                    self.pipeline.clone(),
+                    self.metrics.clone(),
+                    shutdown.clone(),
+                    Some(acceptor),
                     max_msg,
                     raw_capture,
-                    "TCP",
+                    "TLS",
                     ip_filter,
-                    bound,
-                )
-                .await
-                {
-                    error!(error = %e, "Syslog TCP listener failed");
-                }
-            })
-        };
-
-        // Spawn TLS listener (if TLS enabled)
-        let tls_handle = if self.config.tls.enabled {
-            let tls_addr: SocketAddr = self
-                .config
-                .tls_bind_address
-                .parse()
-                .map_err(|e| Error::Config(format!("invalid syslog TLS bind address: {e}")))?;
-
-            let tls_acceptor = super::tls::build_tls_acceptor_async(&self.config.tls).await?;
-
-            if let Some(acceptor) = tls_acceptor {
-                let pipeline = self.pipeline.clone();
-                let metrics = self.metrics.clone();
-                let tls_shutdown = shutdown.clone();
-                let bound = self.tls_bound.clone();
-                Some(tokio::spawn(async move {
-                    if let Err(e) = run_tcp(
-                        tls_addr,
-                        pipeline,
-                        metrics,
-                        tls_shutdown,
-                        Some(acceptor),
-                        max_msg,
-                        raw_capture,
-                        "TLS",
-                        ip_filter,
-                        bound,
-                    )
-                    .await
-                    {
-                        error!(error = %e, "Syslog TLS listener failed");
-                    }
-                }))
-            } else {
-                warn!("Syslog TLS enabled but no TLS acceptor built (check cert config)");
-                None
-            }
-        } else {
-            None
-        };
-
-        // Wait for shutdown
-        shutdown.cancelled().await;
-
-        // Wait for all listeners to finish
-        let _ = udp_handle.await;
-        let _ = tcp_handle.await;
-        if let Some(handle) = tls_handle {
-            let _ = handle.await;
+                    self.tls_bound.clone(),
+                ),
+            );
         }
+
+        listeners.run(&shutdown).await?;
 
         info!("Syslog server stopped");
         Ok(())

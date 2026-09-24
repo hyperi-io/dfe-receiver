@@ -42,6 +42,8 @@ mod http_security;
 mod kafka_sink;
 #[path = "integration/listener_admission.rs"]
 mod listener_admission;
+#[path = "integration/listener_failures.rs"]
+mod listener_failures;
 #[path = "integration/lumberjack.rs"]
 mod lumberjack;
 #[path = "integration/named_destinations.rs"]

@@ -214,6 +214,10 @@ impl ProtocolHandler for LumberjackHandler {
         &self.config.bind_address
     }
 
+    fn listeners(&self) -> Vec<BoundAddr> {
+        vec![self.bound.clone()]
+    }
+
     async fn start(&self, shutdown: CancellationToken) -> Result<()> {
         let addr: SocketAddr = self
             .config
@@ -224,7 +228,6 @@ impl ProtocolHandler for LumberjackHandler {
         let listener = TcpListener::bind(addr)
             .await
             .map_err(|e| Error::Server(format!("failed to bind Lumberjack listener: {e}")))?;
-        self.bound.publish(&listener.local_addr());
 
         // A Lumberjack frame carries no credential, so the IP filter and the
         // TLS handshake are the whole admission surface on this port.
@@ -239,6 +242,9 @@ impl ProtocolHandler for LumberjackHandler {
             info!(addr = %addr, tls = false, "Lumberjack server listening");
             None
         };
+
+        // Published once TLS is ready, so a failed TLS setup never reads as serving.
+        let _serving = self.bound.publish(&listener.local_addr());
 
         loop {
             tokio::select! {
