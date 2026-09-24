@@ -51,7 +51,7 @@ use crate::pipeline::PipelineState;
 use crate::server::http::split_json_array;
 use crate::server::ip_filter::IpFilter;
 use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
-use crate::server::traits::ProtocolHandler;
+use crate::server::traits::{BoundAddr, ProtocolHandler};
 
 use self::auth::CallerAuth;
 
@@ -66,6 +66,7 @@ pub struct WebhookHandler {
     config: Config,
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
+    bound: BoundAddr,
 }
 
 impl WebhookHandler {
@@ -78,7 +79,14 @@ impl WebhookHandler {
             config,
             pipeline,
             metrics,
+            bound: BoundAddr::default(),
         }
+    }
+
+    /// The address the listener bound, once [`ProtocolHandler::start`] binds it.
+    #[must_use]
+    pub fn bound_addr(&self) -> BoundAddr {
+        self.bound.clone()
     }
 }
 
@@ -98,6 +106,7 @@ impl ProtocolHandler for WebhookHandler {
             self.pipeline.clone(),
             self.metrics.clone(),
             shutdown,
+            &self.bound,
         )
         .await
     }
@@ -269,6 +278,7 @@ async fn run_webhook_server(
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
     shutdown: CancellationToken,
+    bound: &BoundAddr,
 ) -> Result<()> {
     let webhook = &config.webhook;
     let Some(bind_address) = webhook.bind_address.as_deref() else {
@@ -286,6 +296,7 @@ async fn run_webhook_server(
     let listener = TcpListener::bind(addr)
         .await
         .map_err(|e| Error::Server(format!("webhook failed to bind: {e}")))?;
+    bound.publish(&listener.local_addr());
 
     let ip_filter = IpFilter::from_config(&config.server.ip_filter);
 

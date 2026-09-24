@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 use tonic::service::interceptor::InterceptedService;
+use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
 use tracing::{debug, info, trace, warn};
 
@@ -31,7 +32,7 @@ use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
 use crate::server::auth::{AuthMode, AuthState, validate_bearer_auth};
 use crate::server::http::create_auth_state;
-use crate::server::traits::ProtocolHandler;
+use crate::server::traits::{BoundAddr, ProtocolHandler};
 
 // Include generated proto code.
 // The `event` package types and `vector` package service.
@@ -175,6 +176,7 @@ pub struct GrpcVectorHandler {
     config: Config,
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
+    bound: BoundAddr,
 }
 
 impl GrpcVectorHandler {
@@ -184,7 +186,14 @@ impl GrpcVectorHandler {
             config,
             pipeline,
             metrics,
+            bound: BoundAddr::default(),
         }
+    }
+
+    /// The address the listener bound, once [`ProtocolHandler::start`] binds it.
+    #[must_use]
+    pub fn bound_addr(&self) -> BoundAddr {
+        self.bound.clone()
     }
 }
 
@@ -211,12 +220,13 @@ impl ProtocolHandler for GrpcVectorHandler {
             None
         };
 
-        run_server(
+        serve(
             &self.config,
             self.pipeline.clone(),
             self.metrics.clone(),
             auth_state,
             shutdown,
+            &self.bound,
         )
         .await
     }
@@ -229,6 +239,26 @@ pub async fn run_server(
     metrics: Arc<Metrics>,
     auth_state: Option<AuthState>,
     shutdown: CancellationToken,
+) -> Result<()> {
+    serve(
+        config,
+        pipeline,
+        metrics,
+        auth_state,
+        shutdown,
+        &BoundAddr::default(),
+    )
+    .await
+}
+
+/// Run the gRPC server, publishing the address it binds to `bound`.
+async fn serve(
+    config: &Config,
+    pipeline: Arc<PipelineState>,
+    metrics: Arc<Metrics>,
+    auth_state: Option<AuthState>,
+    shutdown: CancellationToken,
+    bound: &BoundAddr,
 ) -> Result<()> {
     let addr: SocketAddr = config
         .grpc
@@ -268,10 +298,17 @@ pub async fn run_server(
         builder.add_service(vector_server)
     };
 
+    // Bound here rather than inside tonic, which keeps the address it took to itself.
+    // tonic's own bind also sets TCP_NODELAY, which a hand-bound stream must be given.
+    let incoming = TcpIncoming::bind(addr)
+        .map_err(|e| Error::Server(format!("gRPC server error: {e}")))?
+        .with_nodelay(Some(true));
+    bound.publish(&incoming.local_addr());
+
     info!(addr = %addr, "gRPC server listening");
 
     router
-        .serve_with_shutdown(addr, shutdown.cancelled_owned())
+        .serve_with_incoming_shutdown(incoming, shutdown.cancelled_owned())
         .await
         .map_err(|e| Error::Server(format!("gRPC server error: {e}")))?;
 

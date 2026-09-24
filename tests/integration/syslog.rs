@@ -23,6 +23,7 @@
 // just over clippy's 16 KiB threshold. Mirrors the lib crate's allow (main.rs).
 #![allow(clippy::large_futures)]
 
+use std::net::SocketAddr;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
@@ -43,25 +44,16 @@ fn has_logger() -> bool {
         .unwrap_or(false)
 }
 
-/// Get a random port for testing (use high ports to avoid privilege issues).
-fn random_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    let port = listener.local_addr().expect("local addr").port();
-    drop(listener);
-    port
-}
-
 /// Create a minimal config for testing with syslog enabled.
-fn test_config(udp_port: u16, tcp_port: u16) -> Config {
+fn test_config() -> Config {
     let mut config = Config::default();
     // HTTP server still needs a bind address (always enabled)
-    let http_port = random_port();
-    config.server.bind_address = format!("127.0.0.1:{http_port}");
+    config.server.bind_address = "127.0.0.1:0".to_string();
     config.server.auth.mode = "none".to_string();
-    // Enable syslog on high ports
+    // Port 0, so each listener takes a free port at bind time
     config.syslog.enabled = true;
-    config.syslog.udp_bind_address = format!("127.0.0.1:{udp_port}");
-    config.syslog.tcp_bind_address = format!("127.0.0.1:{tcp_port}");
+    config.syslog.udp_bind_address = "127.0.0.1:0".to_string();
+    config.syslog.tcp_bind_address = "127.0.0.1:0".to_string();
     // Disable TLS for tests
     config.syslog.tls.enabled = false;
     // The loader on its memory transport: accepted, sent nowhere, no broker.
@@ -70,8 +62,16 @@ fn test_config(udp_port: u16, tcp_port: u16) -> Config {
     config
 }
 
-/// Start the syslog handler and return (shutdown_token, metrics).
-async fn start_syslog_handler(config: Config) -> (CancellationToken, Arc<Metrics>) {
+/// A running syslog handler and the addresses its listeners bound.
+struct Started {
+    shutdown: CancellationToken,
+    metrics: Arc<Metrics>,
+    udp: SocketAddr,
+    tcp: SocketAddr,
+}
+
+/// Start the syslog handler and wait for its UDP and TCP listeners to bind.
+async fn start_syslog_handler(config: Config) -> Started {
     let metrics = Arc::new(Metrics::default());
     let shutdown = CancellationToken::new();
     let pipeline = Arc::new(
@@ -89,15 +89,20 @@ async fn start_syslog_handler(config: Config) -> (CancellationToken, Arc<Metrics
         pipeline,
         metrics.clone(),
     );
+    let udp_bound = handler.udp_bound_addr();
+    let tcp_bound = handler.tcp_bound_addr();
 
     let handler_shutdown = shutdown.clone();
-    tokio::spawn(async move {
-        let _ = handler.start(handler_shutdown).await;
-    });
+    let mut task = tokio::spawn(async move { handler.start(handler_shutdown).await });
+    let udp = crate::common::bound_addr("syslog UDP", &udp_bound, &mut task).await;
+    let tcp = crate::common::bound_addr("syslog TCP", &tcp_bound, &mut task).await;
 
-    // Wait for handler to start listening
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    (shutdown, metrics)
+    Started {
+        shutdown,
+        metrics,
+        udp,
+        tcp,
+    }
 }
 
 /// Get requests_total from metrics.
@@ -126,10 +131,7 @@ async fn test_syslog_udp_rfc5424() {
         return;
     }
 
-    let udp_port = random_port();
-    let tcp_port = random_port();
-    let config = test_config(udp_port, tcp_port);
-    let (shutdown, metrics) = start_syslog_handler(config).await;
+    let syslog = start_syslog_handler(test_config()).await;
 
     // Send an RFC 5424 message via UDP
     let output = Command::new("logger")
@@ -137,7 +139,7 @@ async fn test_syslog_udp_rfc5424() {
             "--server",
             "127.0.0.1",
             "--port",
-            &udp_port.to_string(),
+            &syslog.udp.port().to_string(),
             "--udp",
             "--rfc5424",
             "--tag",
@@ -156,16 +158,16 @@ async fn test_syslog_udp_rfc5424() {
     // Wait for processing
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let total = requests_total(&metrics);
+    let total = requests_total(&syslog.metrics);
     assert!(total >= 1, "Expected at least 1 request, got {total}");
 
-    let success = requests_success(&metrics);
+    let success = requests_success(&syslog.metrics);
     assert!(
         success >= 1,
         "Expected at least 1 successful request, got {success}"
     );
 
-    shutdown.cancel();
+    syslog.shutdown.cancel();
     tokio::time::sleep(Duration::from_millis(100)).await;
 }
 
@@ -176,10 +178,7 @@ async fn test_syslog_udp_rfc3164() {
         return;
     }
 
-    let udp_port = random_port();
-    let tcp_port = random_port();
-    let config = test_config(udp_port, tcp_port);
-    let (shutdown, metrics) = start_syslog_handler(config).await;
+    let syslog = start_syslog_handler(test_config()).await;
 
     // Send an RFC 3164 message via UDP
     let output = Command::new("logger")
@@ -187,7 +186,7 @@ async fn test_syslog_udp_rfc3164() {
             "--server",
             "127.0.0.1",
             "--port",
-            &udp_port.to_string(),
+            &syslog.udp.port().to_string(),
             "--udp",
             "--rfc3164",
             "--tag",
@@ -203,10 +202,10 @@ async fn test_syslog_udp_rfc3164() {
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let total = requests_total(&metrics);
+    let total = requests_total(&syslog.metrics);
     assert!(total >= 1, "Expected at least 1 request, got {total}");
 
-    shutdown.cancel();
+    syslog.shutdown.cancel();
     tokio::time::sleep(Duration::from_millis(100)).await;
 }
 
@@ -217,10 +216,7 @@ async fn test_syslog_udp_multiple_messages() {
         return;
     }
 
-    let udp_port = random_port();
-    let tcp_port = random_port();
-    let config = test_config(udp_port, tcp_port);
-    let (shutdown, metrics) = start_syslog_handler(config).await;
+    let syslog = start_syslog_handler(test_config()).await;
 
     // Send 5 messages
     for i in 0..5 {
@@ -229,7 +225,7 @@ async fn test_syslog_udp_multiple_messages() {
                 "--server",
                 "127.0.0.1",
                 "--port",
-                &udp_port.to_string(),
+                &syslog.udp.port().to_string(),
                 "--udp",
                 "--rfc5424",
                 "--tag",
@@ -244,16 +240,16 @@ async fn test_syslog_udp_multiple_messages() {
 
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let total = requests_total(&metrics);
+    let total = requests_total(&syslog.metrics);
     assert!(total >= 5, "Expected at least 5 requests, got {total}");
 
-    let success = requests_success(&metrics);
+    let success = requests_success(&syslog.metrics);
     assert!(
         success >= 5,
         "Expected at least 5 successful requests, got {success}"
     );
 
-    shutdown.cancel();
+    syslog.shutdown.cancel();
     tokio::time::sleep(Duration::from_millis(100)).await;
 }
 
@@ -268,10 +264,7 @@ async fn test_syslog_tcp_rfc5424() {
         return;
     }
 
-    let udp_port = random_port();
-    let tcp_port = random_port();
-    let config = test_config(udp_port, tcp_port);
-    let (shutdown, metrics) = start_syslog_handler(config).await;
+    let syslog = start_syslog_handler(test_config()).await;
 
     // Send an RFC 5424 message via TCP
     let output = Command::new("logger")
@@ -279,7 +272,7 @@ async fn test_syslog_tcp_rfc5424() {
             "--server",
             "127.0.0.1",
             "--port",
-            &tcp_port.to_string(),
+            &syslog.tcp.port().to_string(),
             "--tcp",
             "--rfc5424",
             "--tag",
@@ -295,16 +288,16 @@ async fn test_syslog_tcp_rfc5424() {
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let total = requests_total(&metrics);
+    let total = requests_total(&syslog.metrics);
     assert!(total >= 1, "Expected at least 1 request, got {total}");
 
-    let success = requests_success(&metrics);
+    let success = requests_success(&syslog.metrics);
     assert!(
         success >= 1,
         "Expected at least 1 successful request, got {success}"
     );
 
-    shutdown.cancel();
+    syslog.shutdown.cancel();
     tokio::time::sleep(Duration::from_millis(100)).await;
 }
 
@@ -315,10 +308,7 @@ async fn test_syslog_tcp_octet_counting() {
         return;
     }
 
-    let udp_port = random_port();
-    let tcp_port = random_port();
-    let config = test_config(udp_port, tcp_port);
-    let (shutdown, metrics) = start_syslog_handler(config).await;
+    let syslog = start_syslog_handler(test_config()).await;
 
     // Send an RFC 5424 message with octet counting via TCP
     let output = Command::new("logger")
@@ -326,7 +316,7 @@ async fn test_syslog_tcp_octet_counting() {
             "--server",
             "127.0.0.1",
             "--port",
-            &tcp_port.to_string(),
+            &syslog.tcp.port().to_string(),
             "--tcp",
             "--rfc5424",
             "--octet-count",
@@ -341,10 +331,10 @@ async fn test_syslog_tcp_octet_counting() {
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let total = requests_total(&metrics);
+    let total = requests_total(&syslog.metrics);
     assert!(total >= 1, "Expected at least 1 request, got {total}");
 
-    shutdown.cancel();
+    syslog.shutdown.cancel();
     tokio::time::sleep(Duration::from_millis(100)).await;
 }
 
@@ -355,10 +345,7 @@ async fn test_syslog_tcp_rfc3164() {
         return;
     }
 
-    let udp_port = random_port();
-    let tcp_port = random_port();
-    let config = test_config(udp_port, tcp_port);
-    let (shutdown, metrics) = start_syslog_handler(config).await;
+    let syslog = start_syslog_handler(test_config()).await;
 
     // Send an RFC 3164 message via TCP
     let output = Command::new("logger")
@@ -366,7 +353,7 @@ async fn test_syslog_tcp_rfc3164() {
             "--server",
             "127.0.0.1",
             "--port",
-            &tcp_port.to_string(),
+            &syslog.tcp.port().to_string(),
             "--tcp",
             "--rfc3164",
             "--tag",
@@ -380,10 +367,10 @@ async fn test_syslog_tcp_rfc3164() {
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let total = requests_total(&metrics);
+    let total = requests_total(&syslog.metrics);
     assert!(total >= 1, "Expected at least 1 request, got {total}");
 
-    shutdown.cancel();
+    syslog.shutdown.cancel();
     tokio::time::sleep(Duration::from_millis(100)).await;
 }
 
@@ -398,10 +385,7 @@ async fn test_syslog_structured_data() {
         return;
     }
 
-    let udp_port = random_port();
-    let tcp_port = random_port();
-    let config = test_config(udp_port, tcp_port);
-    let (shutdown, metrics) = start_syslog_handler(config).await;
+    let syslog = start_syslog_handler(test_config()).await;
 
     // Send RFC 5424 message with structured data via UDP
     let output = Command::new("logger")
@@ -409,7 +393,7 @@ async fn test_syslog_structured_data() {
             "--server",
             "127.0.0.1",
             "--port",
-            &udp_port.to_string(),
+            &syslog.udp.port().to_string(),
             "--udp",
             "--rfc5424",
             "--tag",
@@ -429,16 +413,16 @@ async fn test_syslog_structured_data() {
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let total = requests_total(&metrics);
+    let total = requests_total(&syslog.metrics);
     assert!(total >= 1, "Expected at least 1 request, got {total}");
 
-    let success = requests_success(&metrics);
+    let success = requests_success(&syslog.metrics);
     assert!(
         success >= 1,
         "Expected at least 1 successful request, got {success}"
     );
 
-    shutdown.cancel();
+    syslog.shutdown.cancel();
     tokio::time::sleep(Duration::from_millis(100)).await;
 }
 
@@ -453,17 +437,14 @@ async fn test_syslog_bytes_received_tracked() {
         return;
     }
 
-    let udp_port = random_port();
-    let tcp_port = random_port();
-    let config = test_config(udp_port, tcp_port);
-    let (shutdown, metrics) = start_syslog_handler(config).await;
+    let syslog = start_syslog_handler(test_config()).await;
 
     let output = Command::new("logger")
         .args([
             "--server",
             "127.0.0.1",
             "--port",
-            &udp_port.to_string(),
+            &syslog.udp.port().to_string(),
             "--udp",
             "--rfc5424",
             "--tag",
@@ -477,9 +458,9 @@ async fn test_syslog_bytes_received_tracked() {
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let bytes = bytes_received(&metrics);
+    let bytes = bytes_received(&syslog.metrics);
     assert!(bytes > 0, "Expected bytes_received > 0, got {bytes}");
 
-    shutdown.cancel();
+    syslog.shutdown.cancel();
     tokio::time::sleep(Duration::from_millis(100)).await;
 }

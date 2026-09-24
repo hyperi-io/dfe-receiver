@@ -28,6 +28,7 @@
 #![allow(clippy::large_futures)]
 
 use std::io::Write;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, OnceLock};
@@ -80,20 +81,12 @@ fn fluent_bit_binary_path() -> Option<&'static PathBuf> {
         .as_ref()
 }
 
-fn random_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    let port = listener.local_addr().expect("local addr").port();
-    drop(listener);
-    port
-}
-
-fn test_config(fluent_port: u16) -> Config {
+fn test_config() -> Config {
     let mut config = Config::default();
-    let http_port = random_port();
-    config.server.bind_address = format!("127.0.0.1:{http_port}");
+    config.server.bind_address = "127.0.0.1:0".to_string();
     config.server.auth.mode = "none".to_string();
     config.fluent.enabled = true;
-    config.fluent.bind_address = format!("127.0.0.1:{fluent_port}");
+    config.fluent.bind_address = "127.0.0.1:0".to_string();
     config.fluent.tls.enabled = false;
     // The loader on its memory transport: accepted, sent nowhere, no broker.
     config.destinations.default = "loader".into();
@@ -101,7 +94,7 @@ fn test_config(fluent_port: u16) -> Config {
     config
 }
 
-async fn start_fluent_handler(config: Config) -> (CancellationToken, Arc<Metrics>) {
+async fn start_fluent_handler(config: Config) -> (CancellationToken, Arc<Metrics>, SocketAddr) {
     let metrics = Arc::new(Metrics::default());
     let shutdown = CancellationToken::new();
     let pipeline = Arc::new(
@@ -119,14 +112,12 @@ async fn start_fluent_handler(config: Config) -> (CancellationToken, Arc<Metrics
         pipeline,
         metrics.clone(),
     );
+    let bound = handler.bound_addr();
 
     let handler_shutdown = shutdown.clone();
-    tokio::spawn(async move {
-        let _ = handler.start(handler_shutdown).await;
-    });
-
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    (shutdown, metrics)
+    let mut task = tokio::spawn(async move { handler.start(handler_shutdown).await });
+    let addr = crate::common::bound_addr("Fluent Forward", &bound, &mut task).await;
+    (shutdown, metrics, addr)
 }
 
 fn requests_total(metrics: &Metrics) -> u64 {
@@ -226,9 +217,8 @@ async fn test_fluent_bit_forward_output() {
         return;
     };
 
-    let port = random_port();
-    let config = test_config(port);
-    let (shutdown, metrics) = start_fluent_handler(config).await;
+    let (shutdown, metrics, addr) = start_fluent_handler(test_config()).await;
+    let port = addr.port();
 
     let tmp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let config_path = tmp_dir.path().join("fluent-bit.yaml");
@@ -292,9 +282,8 @@ async fn test_fluent_bit_forward_multiple_batches() {
         return;
     };
 
-    let port = random_port();
-    let config = test_config(port);
-    let (shutdown, metrics) = start_fluent_handler(config).await;
+    let (shutdown, metrics, addr) = start_fluent_handler(test_config()).await;
+    let port = addr.port();
 
     let tmp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let config_path = tmp_dir.path().join("fluent-bit.yaml");
@@ -349,9 +338,8 @@ async fn test_fluent_bit_forward_with_ack() {
         return;
     };
 
-    let port = random_port();
-    let config = test_config(port);
-    let (shutdown, metrics) = start_fluent_handler(config).await;
+    let (shutdown, metrics, addr) = start_fluent_handler(test_config()).await;
+    let port = addr.port();
 
     let tmp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let config_path = tmp_dir.path().join("fluent-bit.yaml");
@@ -410,14 +398,13 @@ async fn test_fluent_buffer_size_enforcement() {
     use tokio::io::AsyncWriteExt;
     use tokio::net::TcpStream;
 
-    let fluent_port = random_port();
-    let mut config = test_config(fluent_port);
+    let mut config = test_config();
     // Small limit to make the test fast and predictable
     config.fluent.max_message_size = 64 * 1024; // 64 KiB
 
-    let (shutdown, _metrics) = start_fluent_handler(config).await;
+    let (shutdown, _metrics, addr) = start_fluent_handler(config).await;
 
-    let mut stream = TcpStream::connect(("127.0.0.1", fluent_port))
+    let mut stream = TcpStream::connect(addr)
         .await
         .expect("connect to fluent listener");
 

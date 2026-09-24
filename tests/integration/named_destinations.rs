@@ -28,50 +28,13 @@ use dfe_receiver::config::{
 use dfe_receiver::pipeline::PipelineState;
 use scalo::memory::{MemoryGuard, MemoryGuardConfig, UsageSource};
 use scalo::transport::TransportReceiver;
-use scalo::transport::grpc::{GrpcConfig, GrpcTransport};
+use scalo::transport::grpc::GrpcTransport;
 use tokio_util::sync::CancellationToken;
-
-/// Allocate a free loopback port.
-fn random_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    let port = listener.local_addr().expect("local addr").port();
-    drop(listener);
-    port
-}
-
-/// Poll until the port accepts a TCP connection, or fail after 15s.
-async fn wait_for_port(port: u16) {
-    let addr = format!("127.0.0.1:{port}");
-    for _ in 0..300 {
-        if tokio::net::TcpStream::connect(&addr).await.is_ok() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("nothing listening on 127.0.0.1:{port} within 15s");
-}
 
 /// Start a scalo Push listener: what a transform, the archiver and the loader
 /// all expose on the direct transport.
 async fn start_listener() -> (String, GrpcTransport) {
-    // The port is free when picked but can be taken before the bind lands under
-    // parallel CI load, so retry on a fresh one.
-    let mut last_err = String::new();
-    for _ in 0..20 {
-        let port = random_port();
-        let config = GrpcConfig::server(&format!("127.0.0.1:{port}"));
-        match GrpcTransport::new(&config).await {
-            Ok(transport) => {
-                wait_for_port(port).await;
-                return (format!("http://127.0.0.1:{port}"), transport);
-            }
-            Err(e) => {
-                last_err = e.to_string();
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        }
-    }
-    panic!("listener failed to start after 20 attempts: {last_err}");
+    crate::common::grpc_destination().await
 }
 
 /// Collect up to `want` records, or give up after `secs`.
@@ -235,11 +198,12 @@ async fn a_destination_list_fans_the_record_out() {
 /// a deployment with no broker does not have.
 #[tokio::test]
 async fn an_unreachable_destination_holds_then_back_pressures_the_ingest() {
+    // Held for the whole test, so nothing can start listening on it.
+    let unreachable = crate::common::ClosedPort::loopback().expect("hold a closed port");
     let mut named = HashMap::new();
     named.insert(
         "loader".to_string(),
-        // Nothing is listening here.
-        grpc_destination(&format!("http://127.0.0.1:{}", random_port())),
+        grpc_destination(&format!("http://{}", unreachable.addr())),
     );
 
     let mut config = config_with(named, vec![]);

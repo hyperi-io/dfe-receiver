@@ -41,6 +41,7 @@ use crate::server::flow::rate_limit::PerSourceRateLimiter;
 use crate::server::ip_filter::IpFilter;
 use crate::server::netflow::decoder::NetflowDecoder;
 use crate::server::sflow::decoder::SflowDecoder;
+use crate::server::traits::BoundAddr;
 
 /// Generic UDP flow listener. Owns optional NetFlow and sFlow decoders; each
 /// incoming packet is autosensed and routed to the right one.
@@ -56,6 +57,7 @@ pub struct UdpFlowListener {
     ip_filter: Arc<IpFilter>,
     rate_limiter: Option<Arc<PerSourceRateLimiter>>,
     pressure_state: Arc<AtomicBool>,
+    bound: BoundAddr,
 }
 
 impl UdpFlowListener {
@@ -82,7 +84,15 @@ impl UdpFlowListener {
             ip_filter,
             rate_limiter,
             pressure_state: Arc::new(AtomicBool::new(false)),
+            bound: BoundAddr::default(),
         }
+    }
+
+    /// Publish the address this listener binds to `bound`.
+    #[must_use]
+    pub(crate) fn publishing_to(mut self, bound: BoundAddr) -> Self {
+        self.bound = bound;
+        self
     }
 
     /// Drive the listener until `shutdown` fires.
@@ -109,6 +119,7 @@ impl UdpFlowListener {
         let std_sock: std::net::UdpSocket = socket.into();
         let udp = UdpSocket::from_std(std_sock)
             .map_err(|e| Error::Server(format!("flow UdpSocket::from_std failed: {e}")))?;
+        self.bound.publish(&udp.local_addr());
 
         tracing::info!(addr = %self.bind_addr, "flow listener started");
 

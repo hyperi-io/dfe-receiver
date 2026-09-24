@@ -43,7 +43,7 @@ use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
 use crate::server::http::create_auth_state;
 use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
-use crate::server::traits::ProtocolHandler;
+use crate::server::traits::{BoundAddr, ProtocolHandler};
 
 use self::convert::{PrometheusRwMode, write_request_to_json};
 
@@ -54,6 +54,7 @@ pub struct PrometheusRwHandler {
     raw_capture: RawCapture,
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
+    bound: BoundAddr,
 }
 
 impl PrometheusRwHandler {
@@ -68,7 +69,14 @@ impl PrometheusRwHandler {
             raw_capture,
             pipeline,
             metrics,
+            bound: BoundAddr::default(),
         }
+    }
+
+    /// The address the listener bound, once [`ProtocolHandler::start`] binds it.
+    #[must_use]
+    pub fn bound_addr(&self) -> BoundAddr {
+        self.bound.clone()
     }
 }
 
@@ -89,6 +97,7 @@ impl ProtocolHandler for PrometheusRwHandler {
             self.pipeline.clone(),
             self.metrics.clone(),
             shutdown,
+            &self.bound,
         )
         .await
     }
@@ -117,6 +126,7 @@ async fn run_prometheus_rw_server(
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
     shutdown: CancellationToken,
+    bound: &BoundAddr,
 ) -> Result<()> {
     let auth_state = create_auth_state(&config.auth).await?;
     let mode = PrometheusRwMode::from_str(&config.mode);
@@ -165,6 +175,7 @@ async fn run_prometheus_rw_server(
     let listener = TcpListener::bind(addr)
         .await
         .map_err(|e| Error::Server(format!("Prometheus RW failed to bind: {e}")))?;
+    bound.publish(&listener.local_addr());
 
     // TLS setup (same dual-path pattern as Splunk HEC)
     let tls_provider = if config.tls.enabled && uses_secrets(&config.tls) {

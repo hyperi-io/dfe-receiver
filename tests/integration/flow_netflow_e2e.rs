@@ -31,7 +31,7 @@
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -96,23 +96,6 @@ fn noop_flow_metrics() -> FlowMetrics {
     }
 }
 
-/// A high UDP port the OS says is free, avoiding privilege requirements and
-/// the collisions a guessed port hits when tests run in parallel.
-fn random_udp_port() -> u16 {
-    let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind ephemeral udp port");
-    socket.local_addr().expect("local addr").port()
-}
-
-/// Wait until UDP port is bound by sending a probe and confirming no
-/// ConnectionRefused (UDP can't "connect" but a quick bind probe loop avoids
-/// races on busy runners). We just poll with a short sleep loop since UDP
-/// readiness is hard to observe externally.
-async fn wait_after_bind(_port: u16) {
-    // UDP bind is synchronous in the listener.run() but the spawn loop hasn't
-    // necessarily hit the recv_from yet; give it a moment.
-    tokio::time::sleep(Duration::from_millis(300)).await;
-}
-
 /// Build a valid NetFlow v5 datagram with one flow record (72 bytes total).
 /// Mirrors `src/server/netflow/tests/decode_v5.rs::build_v5_packet_with_one_flow`.
 fn build_netflow_v5_packet() -> Vec<u8> {
@@ -154,14 +137,10 @@ fn build_netflow_v5_packet() -> Vec<u8> {
 /// Construct a Config wired for Kafka delivery with a `key_value_use`
 /// source rule on `_source` so the flow envelope (`_source: "netflow"`)
 /// routes to topic `netflow_land`.
-fn flow_kafka_config(
-    kf: &crate::common::KafkaTestConfig,
-    flow_port: u16,
-    topic_suffix: &str,
-) -> Config {
+fn flow_kafka_config(kf: &crate::common::KafkaTestConfig, topic_suffix: &str) -> Config {
     let mut config = Config::default();
-    // Use a high random port for the HTTP server (still needed by orchestrator).
-    config.server.bind_address = format!("127.0.0.1:{}", random_udp_port());
+    // The HTTP server still needs a bind address, though this test never starts it.
+    config.server.bind_address = "127.0.0.1:0".to_string();
     config.server.auth.mode = "none".to_string();
 
     // Kafka destination
@@ -178,11 +157,11 @@ fn flow_kafka_config(
         source: None,
     }];
 
-    // Flow handler config -- unified mode, single port, NetFlow only.
+    // Flow handler config -- unified mode, single port 0, NetFlow only.
     config.flow.enabled = true;
     config.flow.experimental = false; // suppress WARN log noise
     config.flow.bind_address = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
-    config.flow.ports = vec![flow_port];
+    config.flow.ports = vec![0];
     // Smaller SO_RCVBUF -- system default may cap below 8MiB on some runners.
     config.flow.recv_buffer_bytes = 256 * 1024;
     // Disable sFlow on this listener (NetFlow-only).
@@ -215,8 +194,7 @@ async fn netflow_v5_end_to_end_to_kafka() {
     // ------------------------------------------------------------------
     // 3. Start dfe-receiver flow handler.
     // ------------------------------------------------------------------
-    let flow_port = random_udp_port();
-    let config = flow_kafka_config(&kf, flow_port, topic_suffix);
+    let config = flow_kafka_config(&kf, topic_suffix);
 
     let shutdown = CancellationToken::new();
     let pipeline = Arc::new(
@@ -233,11 +211,14 @@ async fn netflow_v5_end_to_end_to_kafka() {
     .expect("flow handler new");
 
     let handler_shutdown = shutdown.clone();
-    let handler_task = tokio::spawn(async move {
-        let _ = handler.start(handler_shutdown).await;
-    });
+    let bound = handler
+        .bound_addrs()
+        .into_iter()
+        .next()
+        .expect("one listener for the one configured port");
+    let mut handler_task = tokio::spawn(async move { handler.start(handler_shutdown).await });
 
-    wait_after_bind(flow_port).await;
+    let flow = crate::common::bound_addr("flow", &bound, &mut handler_task).await;
 
     // ------------------------------------------------------------------
     // 4. Send a NetFlow v5 packet via UDP.
@@ -245,7 +226,7 @@ async fn netflow_v5_end_to_end_to_kafka() {
     let sock = tokio::net::UdpSocket::bind("127.0.0.1:0")
         .await
         .expect("bind client UDP");
-    let target = SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), flow_port);
+    let target = flow;
 
     // Send a few packets -- one is plenty but a small burst makes the test
     // more robust against rare UDP loss on loopback.
@@ -425,8 +406,7 @@ async fn netflow_v9_end_to_end_to_kafka() {
     let consumer = kafka_consumer(&kf, &topic).expect("kafka consumer setup");
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let flow_port = random_udp_port();
-    let config = flow_kafka_config(&kf, flow_port, topic_suffix);
+    let config = flow_kafka_config(&kf, topic_suffix);
 
     let shutdown = CancellationToken::new();
     let pipeline = Arc::new(
@@ -442,10 +422,13 @@ async fn netflow_v9_end_to_end_to_kafka() {
     )
     .expect("flow handler new");
     let handler_shutdown = shutdown.clone();
-    let handler_task = tokio::spawn(async move {
-        let _ = handler.start(handler_shutdown).await;
-    });
-    wait_after_bind(flow_port).await;
+    let bound = handler
+        .bound_addrs()
+        .into_iter()
+        .next()
+        .expect("one listener for the one configured port");
+    let mut handler_task = tokio::spawn(async move { handler.start(handler_shutdown).await });
+    let flow = crate::common::bound_addr("flow", &bound, &mut handler_task).await;
 
     // Send template first, then data record. Both from the same client socket
     // so the source IP (127.0.0.1) is identical -- the decoder's per-exporter
@@ -453,7 +436,7 @@ async fn netflow_v9_end_to_end_to_kafka() {
     let sock = tokio::net::UdpSocket::bind("127.0.0.1:0")
         .await
         .expect("bind client UDP");
-    let target = SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), flow_port);
+    let target = flow;
     let (tpl, data) = build_v9_template_and_data();
     sock.send_to(&tpl, target).await.expect("udp send template");
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -503,8 +486,7 @@ async fn netflow_nsel_end_to_end_to_kafka() {
     let consumer = kafka_consumer(&kf, &topic).expect("kafka consumer setup");
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let flow_port = random_udp_port();
-    let config = flow_kafka_config(&kf, flow_port, topic_suffix);
+    let config = flow_kafka_config(&kf, topic_suffix);
 
     let shutdown = CancellationToken::new();
     let pipeline = Arc::new(
@@ -520,15 +502,18 @@ async fn netflow_nsel_end_to_end_to_kafka() {
     )
     .expect("flow handler new");
     let handler_shutdown = shutdown.clone();
-    let handler_task = tokio::spawn(async move {
-        let _ = handler.start(handler_shutdown).await;
-    });
-    wait_after_bind(flow_port).await;
+    let bound = handler
+        .bound_addrs()
+        .into_iter()
+        .next()
+        .expect("one listener for the one configured port");
+    let mut handler_task = tokio::spawn(async move { handler.start(handler_shutdown).await });
+    let flow = crate::common::bound_addr("flow", &bound, &mut handler_task).await;
 
     let sock = tokio::net::UdpSocket::bind("127.0.0.1:0")
         .await
         .expect("bind client UDP");
-    let target = SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), flow_port);
+    let target = flow;
     let (tpl, data) = build_nsel_template_and_data();
     sock.send_to(&tpl, target).await.expect("udp send template");
     tokio::time::sleep(Duration::from_millis(50)).await;

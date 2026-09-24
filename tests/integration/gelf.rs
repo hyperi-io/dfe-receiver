@@ -81,20 +81,12 @@ fn fluent_bit_binary_path() -> Option<&'static PathBuf> {
         .as_ref()
 }
 
-fn random_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    let port = listener.local_addr().expect("local addr").port();
-    drop(listener);
-    port
-}
-
-fn test_config(gelf_port: u16) -> Config {
+fn test_config() -> Config {
     let mut config = Config::default();
-    let http_port = random_port();
-    config.server.bind_address = format!("127.0.0.1:{http_port}");
+    config.server.bind_address = "127.0.0.1:0".to_string();
     config.server.auth.mode = "none".to_string();
     config.gelf.enabled = true;
-    config.gelf.bind_address = format!("127.0.0.1:{gelf_port}");
+    config.gelf.bind_address = "127.0.0.1:0".to_string();
     config.gelf.tls.enabled = false;
     // The loader on its memory transport: accepted, sent nowhere, no broker.
     config.destinations.default = "loader".into();
@@ -102,7 +94,7 @@ fn test_config(gelf_port: u16) -> Config {
     config
 }
 
-async fn start_gelf_handler(config: Config) -> (CancellationToken, Arc<Metrics>) {
+async fn start_gelf_handler(config: Config) -> (CancellationToken, Arc<Metrics>, u16) {
     let metrics = Arc::new(Metrics::default());
     let shutdown = CancellationToken::new();
     let pipeline = Arc::new(
@@ -120,14 +112,12 @@ async fn start_gelf_handler(config: Config) -> (CancellationToken, Arc<Metrics>)
         pipeline,
         metrics.clone(),
     );
+    let bound = handler.bound_addr();
 
     let handler_shutdown = shutdown.clone();
-    tokio::spawn(async move {
-        let _ = handler.start(handler_shutdown).await;
-    });
-
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    (shutdown, metrics)
+    let mut task = tokio::spawn(async move { handler.start(handler_shutdown).await });
+    let addr = crate::common::bound_addr("GELF", &bound, &mut task).await;
+    (shutdown, metrics, addr.port())
 }
 
 fn requests_total(metrics: &Metrics) -> u64 {
@@ -227,9 +217,7 @@ async fn test_fluent_bit_gelf_tcp_output() {
         return;
     };
 
-    let port = random_port();
-    let config = test_config(port);
-    let (shutdown, metrics) = start_gelf_handler(config).await;
+    let (shutdown, metrics, port) = start_gelf_handler(test_config()).await;
 
     let tmp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let config_path = tmp_dir.path().join("fluent-bit.yaml");
@@ -294,9 +282,7 @@ async fn test_fluent_bit_gelf_tcp_multiple_batches() {
         return;
     };
 
-    let port = random_port();
-    let config = test_config(port);
-    let (shutdown, metrics) = start_gelf_handler(config).await;
+    let (shutdown, metrics, port) = start_gelf_handler(test_config()).await;
 
     let tmp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let config_path = tmp_dir.path().join("fluent-bit.yaml");
@@ -355,9 +341,7 @@ async fn test_fluent_bit_gelf_tcp_with_custom_fields() {
         return;
     };
 
-    let port = random_port();
-    let config = test_config(port);
-    let (shutdown, metrics) = start_gelf_handler(config).await;
+    let (shutdown, metrics, port) = start_gelf_handler(test_config()).await;
 
     let tmp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let config_path = tmp_dir.path().join("fluent-bit.yaml");

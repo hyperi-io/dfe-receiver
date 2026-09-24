@@ -24,91 +24,37 @@ use std::time::Duration;
 use dfe_receiver::config::{Config, DestinationRef, SharedConfig};
 use dfe_receiver::metrics::Metrics;
 use dfe_receiver::pipeline::PipelineState;
-use dfe_receiver::server::http;
+use dfe_receiver::server::http::HttpHandler;
+use dfe_receiver::server::traits::ProtocolHandler;
 use scalo::transport::TransportReceiver;
-use scalo::transport::grpc::{GrpcConfig, GrpcTransport};
+use scalo::transport::grpc::GrpcTransport;
 use tokio_util::sync::CancellationToken;
 
-fn random_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    let port = listener.local_addr().expect("local addr").port();
-    drop(listener);
-    port
-}
-
-/// Poll the loopback port until it accepts a connection, up to `attempts`.
-async fn port_accepts(port: u16, attempts: u32) -> bool {
-    let addr = format!("127.0.0.1:{port}");
-    for _ in 0..attempts {
-        if tokio::net::TcpStream::connect(&addr).await.is_ok() {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    false
-}
-
-/// Stand up the mock loader, retrying when a picked port is taken before bind.
-async fn start_mock_loader() -> (String, GrpcTransport) {
-    let mut last_err = String::new();
-    for _ in 0..20 {
-        let port = random_port();
-        let config = GrpcConfig::server(&format!("127.0.0.1:{port}"));
-        match GrpcTransport::new(&config).await {
-            Ok(transport) if port_accepts(port, 300).await => {
-                return (format!("http://127.0.0.1:{port}"), transport);
-            }
-            Ok(_) => {
-                last_err = format!("port {port} never accepted");
-            }
-            Err(e) => {
-                last_err = e.to_string();
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        }
-    }
-    panic!("failed to start mock loader after 20 attempts: {last_err}");
-}
-
 /// Start the HTTP server routing every event to `loader_endpoint`.
-///
-/// A port picked by `random_port` can be taken again before the server binds
-/// it, so a port that never accepts is retried rather than failed.
 async fn start_receiver(loader_endpoint: &str) -> (String, CancellationToken) {
-    for _ in 0..20 {
-        let port = random_port();
+    let mut config = Config::default();
+    config.server.bind_address = "127.0.0.1:0".to_string();
+    config.destinations.default = DestinationRef::One("loader".to_string());
+    config.loader.transport = "grpc".to_string();
+    config.loader.grpc_endpoint = Some(loader_endpoint.to_string());
 
-        let mut config = Config::default();
-        config.server.bind_address = format!("127.0.0.1:{port}");
-        config.destinations.default = DestinationRef::One("loader".to_string());
-        config.loader.transport = "grpc".to_string();
-        config.loader.grpc_endpoint = Some(loader_endpoint.to_string());
+    let shutdown = CancellationToken::new();
+    let pipeline = Arc::new(
+        PipelineState::new(SharedConfig::new(config.clone()), CancellationToken::new())
+            .await
+            .expect("pipeline init"),
+    );
 
-        let shutdown = CancellationToken::new();
-        let pipeline = Arc::new(
-            PipelineState::new(SharedConfig::new(config.clone()), CancellationToken::new())
-                .await
-                .expect("pipeline init"),
-        );
-
-        let bind_addr = config.server.bind_address.clone();
-        let server_shutdown = shutdown.clone();
-        tokio::spawn(async move {
-            let _ = http::run_server(
-                &bind_addr,
-                pipeline,
-                Arc::new(Metrics::default()),
-                server_shutdown,
-            )
-            .await;
-        });
-
-        if port_accepts(port, 40).await {
-            return (format!("http://127.0.0.1:{port}"), shutdown);
-        }
-        shutdown.cancel();
-    }
-    panic!("receiver never accepted connections on any of 20 ports");
+    let handler = HttpHandler::new(
+        config.server.bind_address.clone(),
+        pipeline,
+        Arc::new(Metrics::default()),
+    );
+    let bound = handler.bound_addr();
+    let server_shutdown = shutdown.clone();
+    let mut task = tokio::spawn(async move { handler.start(server_shutdown).await });
+    let addr = crate::common::bound_addr("HTTP", &bound, &mut task).await;
+    (format!("http://{addr}"), shutdown)
 }
 
 /// Collect records from the mock loader until `expected` arrive or time runs out.
@@ -136,7 +82,7 @@ async fn post(url: &str, body: &'static str) -> reqwest::StatusCode {
 
 #[tokio::test]
 async fn a_posted_json_array_becomes_one_event_per_element() {
-    let (endpoint, loader) = start_mock_loader().await;
+    let (endpoint, loader) = crate::common::grpc_destination().await;
     let (url, shutdown) = start_receiver(&endpoint).await;
 
     let status = post(
@@ -165,7 +111,7 @@ async fn a_posted_ndjson_body_becomes_one_event_per_line() {
     // The deployment contract advertises NDJSON on this endpoint; unsplit it
     // fails validation whole and lands in the DLQ, so the client sees 202 and
     // no data.
-    let (endpoint, loader) = start_mock_loader().await;
+    let (endpoint, loader) = crate::common::grpc_destination().await;
     let (url, shutdown) = start_receiver(&endpoint).await;
 
     let status = post(
@@ -191,7 +137,7 @@ async fn a_posted_ndjson_body_becomes_one_event_per_line() {
 
 #[tokio::test]
 async fn a_posted_object_stays_a_single_event() {
-    let (endpoint, loader) = start_mock_loader().await;
+    let (endpoint, loader) = crate::common::grpc_destination().await;
     let (url, shutdown) = start_receiver(&endpoint).await;
 
     let status = post(&url, r#"{"event_category":"solo"}"#).await;

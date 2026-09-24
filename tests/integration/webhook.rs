@@ -26,7 +26,7 @@ use dfe_receiver::config::{
 };
 use dfe_receiver::metrics::Metrics;
 use dfe_receiver::pipeline::PipelineState;
-use dfe_receiver::server::http;
+use dfe_receiver::server::http::HttpHandler;
 use dfe_receiver::server::traits::ProtocolHandler;
 use dfe_receiver::server::webhook::WebhookHandler;
 use ring::hmac;
@@ -36,27 +36,6 @@ use tokio_util::sync::CancellationToken;
 
 const HMAC_SECRET: &str = "a-signing-secret-for-tests";
 const HEADER_SECRET: &str = "a-static-shared-secret";
-
-/// A port the OS says is free right now.
-fn random_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    let port = listener.local_addr().expect("local addr").port();
-    drop(listener);
-    port
-}
-
-/// Poll the loopback port until it accepts, or panic on the budget.
-async fn wait_for_port(port: u16) {
-    let addr = format!("127.0.0.1:{port}");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    while tokio::time::Instant::now() < deadline {
-        if tokio::net::TcpStream::connect(&addr).await.is_ok() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("port {port} never accepted connections within 30s");
-}
 
 /// Write a secret to a temp file and hand back the file (held open by the
 /// caller) and its `file:` source reference.
@@ -100,12 +79,12 @@ fn header_caller(name: &str, source: &str) -> WebhookCallerConfig {
 }
 
 /// A config with the webhook intake on its own listener, no broker.
-fn own_listener_config(port: u16, callers: Vec<WebhookCallerConfig>) -> Config {
+fn own_listener_config(callers: Vec<WebhookCallerConfig>) -> Config {
     let mut config = Config::default();
-    config.server.bind_address = format!("127.0.0.1:{}", random_port());
+    config.server.bind_address = "127.0.0.1:0".to_string();
     config.server.auth.mode = "none".to_string();
     config.webhook.enabled = true;
-    config.webhook.bind_address = Some(format!("127.0.0.1:{port}"));
+    config.webhook.bind_address = Some("127.0.0.1:0".to_string());
     config.webhook.callers = callers;
     // The loader on its memory transport: accepted, sent nowhere, no broker.
     config.destinations.default = "loader".into();
@@ -115,9 +94,9 @@ fn own_listener_config(port: u16, callers: Vec<WebhookCallerConfig>) -> Config {
 
 /// A config with the webhook routes on the shared ingest listener, which
 /// itself requires a bearer token the webhook callers do not carry.
-fn shared_listener_config(port: u16, callers: Vec<WebhookCallerConfig>) -> Config {
+fn shared_listener_config(callers: Vec<WebhookCallerConfig>) -> Config {
     let mut config = Config::default();
-    config.server.bind_address = format!("127.0.0.1:{port}");
+    config.server.bind_address = "127.0.0.1:0".to_string();
     config.server.auth.mode = "bearer".to_string();
     config.server.auth.bearer.tokens = vec!["ingest-token".to_string()];
     config.webhook.enabled = true;
@@ -150,70 +129,46 @@ async fn pipeline_for(config: &Config, guard: Option<Arc<MemoryGuard>>) -> Arc<P
 
 /// Start the webhook handler on its own listener.
 async fn start_own_listener(config: Config, guard: Option<Arc<MemoryGuard>>) -> Started {
-    let port: u16 = config
-        .webhook
-        .bind_address
-        .as_deref()
-        .unwrap()
-        .rsplit(':')
-        .next()
-        .unwrap()
-        .parse()
-        .unwrap();
     let metrics = Arc::new(Metrics::default());
     let shutdown = CancellationToken::new();
     let pipeline = pipeline_for(&config, guard).await;
 
     let handler = WebhookHandler::new(config, pipeline.clone(), metrics.clone());
     assert_eq!(handler.name(), "webhook");
+    let bound = handler.bound_addr();
     let handler_shutdown = shutdown.clone();
-    tokio::spawn(async move {
-        if let Err(e) = handler.start(handler_shutdown).await {
-            eprintln!("webhook handler exited with an error: {e}");
-        }
-    });
-    wait_for_port(port).await;
+    let mut task = tokio::spawn(async move { handler.start(handler_shutdown).await });
+    let addr = crate::common::bound_addr("webhook", &bound, &mut task).await;
 
     Started {
         shutdown,
         metrics,
         pipeline,
-        url: format!("http://127.0.0.1:{port}"),
+        url: format!("http://{addr}"),
     }
 }
 
 /// Start the main HTTP server with the webhook routes merged in.
 async fn start_shared_listener(config: Config) -> Started {
-    let port: u16 = config
-        .server
-        .bind_address
-        .rsplit(':')
-        .next()
-        .unwrap()
-        .parse()
-        .unwrap();
     let metrics = Arc::new(Metrics::default());
     let shutdown = CancellationToken::new();
     let pipeline = pipeline_for(&config, None).await;
 
-    let bind = config.server.bind_address.clone();
-    let server_pipeline = pipeline.clone();
-    let server_metrics = metrics.clone();
+    let handler = HttpHandler::new(
+        config.server.bind_address.clone(),
+        pipeline.clone(),
+        metrics.clone(),
+    );
+    let bound = handler.bound_addr();
     let server_shutdown = shutdown.clone();
-    tokio::spawn(async move {
-        if let Err(e) =
-            http::run_server(&bind, server_pipeline, server_metrics, server_shutdown).await
-        {
-            eprintln!("http server exited with an error: {e}");
-        }
-    });
-    wait_for_port(port).await;
+    let mut task = tokio::spawn(async move { handler.start(server_shutdown).await });
+    let addr = crate::common::bound_addr("HTTP", &bound, &mut task).await;
 
     Started {
         shutdown,
         metrics,
         pipeline,
-        url: format!("http://127.0.0.1:{port}"),
+        url: format!("http://{addr}"),
     }
 }
 
@@ -274,9 +229,8 @@ async fn post_signed(
 #[tokio::test]
 async fn a_signed_post_is_accepted_with_202() {
     let (_file, source) = secret_file(HMAC_SECRET);
-    let port = random_port();
     let started = start_own_listener(
-        own_listener_config(port, vec![hmac_caller("pager", &source)]),
+        own_listener_config(vec![hmac_caller("pager", &source)]),
         None,
     )
     .await;
@@ -300,9 +254,8 @@ async fn a_signed_post_is_accepted_with_202() {
 #[tokio::test]
 async fn a_bad_signature_is_401_invalid_signature() {
     let (_file, source) = secret_file(HMAC_SECRET);
-    let port = random_port();
     let started = start_own_listener(
-        own_listener_config(port, vec![hmac_caller("pager", &source)]),
+        own_listener_config(vec![hmac_caller("pager", &source)]),
         None,
     )
     .await;
@@ -327,9 +280,8 @@ async fn a_bad_signature_is_401_invalid_signature() {
 #[tokio::test]
 async fn a_missing_signature_is_401() {
     let (_file, source) = secret_file(HMAC_SECRET);
-    let port = random_port();
     let started = start_own_listener(
-        own_listener_config(port, vec![hmac_caller("pager", &source)]),
+        own_listener_config(vec![hmac_caller("pager", &source)]),
         None,
     )
     .await;
@@ -351,8 +303,7 @@ async fn a_missing_signature_is_401() {
 #[tokio::test]
 async fn a_replayed_request_outside_the_window_is_401_stale_signature() {
     let (_file, source) = secret_file(HMAC_SECRET);
-    let port = random_port();
-    let mut config = own_listener_config(port, vec![hmac_caller("pager", &source)]);
+    let mut config = own_listener_config(vec![hmac_caller("pager", &source)]);
     config.webhook.callers[0].auth.tolerance_secs = 60;
     let started = start_own_listener(config, None).await;
 
@@ -377,9 +328,8 @@ async fn a_replayed_request_outside_the_window_is_401_stale_signature() {
 #[tokio::test]
 async fn a_tampered_body_is_401() {
     let (_file, source) = secret_file(HMAC_SECRET);
-    let port = random_port();
     let started = start_own_listener(
-        own_listener_config(port, vec![hmac_caller("pager", &source)]),
+        own_listener_config(vec![hmac_caller("pager", &source)]),
         None,
     )
     .await;
@@ -406,9 +356,8 @@ async fn a_tampered_body_is_401() {
 #[tokio::test]
 async fn a_static_header_secret_is_accepted_and_a_wrong_one_refused() {
     let (_file, source) = secret_file(HEADER_SECRET);
-    let port = random_port();
     let started = start_own_listener(
-        own_listener_config(port, vec![header_caller("runzero", &source)]),
+        own_listener_config(vec![header_caller("runzero", &source)]),
         None,
     )
     .await;
@@ -452,12 +401,11 @@ async fn a_caller_secret_is_not_valid_for_another_caller() {
     // Two callers, two secrets: the path pins which secret is tried.
     let (_a, source_a) = secret_file("secret-for-a");
     let (_b, source_b) = secret_file("secret-for-b");
-    let port = random_port();
     let started = start_own_listener(
-        own_listener_config(
-            port,
-            vec![header_caller("a", &source_a), header_caller("b", &source_b)],
-        ),
+        own_listener_config(vec![
+            header_caller("a", &source_a),
+            header_caller("b", &source_b),
+        ]),
         None,
     )
     .await;
@@ -490,9 +438,8 @@ async fn a_caller_secret_is_not_valid_for_another_caller() {
 #[tokio::test]
 async fn an_unknown_caller_is_404() {
     let (_file, source) = secret_file(HMAC_SECRET);
-    let port = random_port();
     let started = start_own_listener(
-        own_listener_config(port, vec![hmac_caller("pager", &source)]),
+        own_listener_config(vec![hmac_caller("pager", &source)]),
         None,
     )
     .await;
@@ -515,8 +462,7 @@ async fn an_unknown_caller_is_404() {
 #[tokio::test]
 async fn an_oversize_body_is_413_and_counted() {
     let (_file, source) = secret_file(HMAC_SECRET);
-    let port = random_port();
-    let mut config = own_listener_config(port, vec![hmac_caller("pager", &source)]);
+    let mut config = own_listener_config(vec![hmac_caller("pager", &source)]);
     config.webhook.max_body_size = 256;
     let started = start_own_listener(config, None).await;
 
@@ -547,8 +493,7 @@ async fn an_oversize_body_is_413_and_counted() {
 #[tokio::test]
 async fn a_request_under_pressure_is_503_with_retry_after() {
     let (_file, source) = secret_file(HMAC_SECRET);
-    let port = random_port();
-    let mut config = own_listener_config(port, vec![hmac_caller("pager", &source)]);
+    let mut config = own_listener_config(vec![hmac_caller("pager", &source)]);
     config.buffer.memory_limit = 100;
     config.buffer.pressure_threshold = 0.8;
     let guard = Arc::new(MemoryGuard::with_usage_source(
@@ -593,8 +538,7 @@ async fn a_request_under_pressure_is_503_with_retry_after() {
 async fn readiness_is_not_probed_without_authentication() {
     // An unauthenticated client gets 401 whatever the pipeline's state.
     let (_file, source) = secret_file(HMAC_SECRET);
-    let port = random_port();
-    let mut config = own_listener_config(port, vec![hmac_caller("pager", &source)]);
+    let mut config = own_listener_config(vec![hmac_caller("pager", &source)]);
     config.buffer.memory_limit = 100;
     let guard = Arc::new(MemoryGuard::with_usage_source(
         MemoryGuardConfig {
@@ -628,10 +572,9 @@ async fn readiness_is_not_probed_without_authentication() {
 #[tokio::test]
 async fn an_array_body_is_fanned_out_when_declared() {
     let (_file, source) = secret_file(HMAC_SECRET);
-    let port = random_port();
     let mut caller = hmac_caller("bulk", &source);
     caller.body = WebhookBody::Array;
-    let started = start_own_listener(own_listener_config(port, vec![caller]), None).await;
+    let started = start_own_listener(own_listener_config(vec![caller]), None).await;
 
     let resp = post_signed(
         &started.url,
@@ -655,10 +598,9 @@ async fn an_array_body_is_fanned_out_when_declared() {
 #[tokio::test]
 async fn an_array_with_a_bad_element_is_400_as_a_whole() {
     let (_file, source) = secret_file(HMAC_SECRET);
-    let port = random_port();
     let mut caller = hmac_caller("bulk", &source);
     caller.body = WebhookBody::Array;
-    let started = start_own_listener(own_listener_config(port, vec![caller]), None).await;
+    let started = start_own_listener(own_listener_config(vec![caller]), None).await;
 
     let resp = post_signed(
         &started.url,
@@ -680,9 +622,8 @@ async fn an_array_with_a_bad_element_is_400_as_a_whole() {
 #[tokio::test]
 async fn a_record_that_is_not_an_object_is_400() {
     let (_file, source) = secret_file(HMAC_SECRET);
-    let port = random_port();
     let started = start_own_listener(
-        own_listener_config(port, vec![hmac_caller("pager", &source)]),
+        own_listener_config(vec![hmac_caller("pager", &source)]),
         None,
     )
     .await;
@@ -705,10 +646,9 @@ async fn a_record_that_is_not_an_object_is_400() {
 #[tokio::test]
 async fn a_filtered_out_record_is_dropped_and_still_202() {
     let (_file, source) = secret_file(HMAC_SECRET);
-    let port = random_port();
     let mut caller = hmac_caller("pager", &source);
     caller.filter = r#"severity == "high""#.to_string();
-    let started = start_own_listener(own_listener_config(port, vec![caller]), None).await;
+    let started = start_own_listener(own_listener_config(vec![caller]), None).await;
 
     let resp = post_signed(
         &started.url,
@@ -742,11 +682,9 @@ async fn on_the_shared_listener_the_caller_secret_is_the_only_credential_needed(
     // The ingest listener requires a bearer token; the webhook route on the
     // same port must not, and must still refuse a bad caller secret.
     let (_file, source) = secret_file(HEADER_SECRET);
-    let port = random_port();
-    let started = start_shared_listener(shared_listener_config(
-        port,
-        vec![header_caller("runzero", &source)],
-    ))
+    let started = start_shared_listener(shared_listener_config(vec![header_caller(
+        "runzero", &source,
+    )]))
     .await;
 
     let resp = client()
@@ -783,8 +721,7 @@ async fn on_the_shared_listener_the_caller_secret_is_the_only_credential_needed(
 #[tokio::test]
 async fn on_the_shared_listener_the_webhook_body_limit_is_its_own() {
     let (_file, source) = secret_file(HEADER_SECRET);
-    let port = random_port();
-    let mut config = shared_listener_config(port, vec![header_caller("runzero", &source)]);
+    let mut config = shared_listener_config(vec![header_caller("runzero", &source)]);
     config.webhook.max_body_size = 256;
     config.server.max_body_size = 1024 * 1024;
     let started = start_shared_listener(config).await;
@@ -822,8 +759,7 @@ async fn on_its_own_listener_a_denied_source_address_is_dropped_before_auth() {
     // The IP filter runs at accept, so a denied peer gets no HTTP response at
     // all and the handler never sees the request.
     let (_file, source) = secret_file(HMAC_SECRET);
-    let port = random_port();
-    let mut config = own_listener_config(port, vec![hmac_caller("pager", &source)]);
+    let mut config = own_listener_config(vec![hmac_caller("pager", &source)]);
     config.server.ip_filter.mode = "denylist".to_string();
     config.server.ip_filter.cidrs = vec!["127.0.0.1/32".to_string()];
     let started = start_own_listener(config, None).await;
@@ -859,8 +795,7 @@ async fn on_its_own_listener_an_exhausted_rate_limit_is_429_with_retry_after() {
     // No proxy header, as a product posting straight to the port sends none:
     // the limiter keys on the peer address the accept loop hands it.
     let (_file, source) = secret_file(HMAC_SECRET);
-    let port = random_port();
-    let mut config = own_listener_config(port, vec![hmac_caller("pager", &source)]);
+    let mut config = own_listener_config(vec![hmac_caller("pager", &source)]);
     config.server.rate_limit.enabled = true;
     config.server.rate_limit.requests_per_second = 1;
     config.server.rate_limit.burst = 1;
@@ -927,11 +862,10 @@ async fn on_its_own_listener_an_exhausted_rate_limit_is_429_with_retry_after() {
 
 #[tokio::test]
 async fn a_caller_whose_secret_cannot_be_read_refuses_to_start() {
-    let port = random_port();
-    let config = own_listener_config(
-        port,
-        vec![hmac_caller("pager", "file:/nonexistent/webhook-secret")],
-    );
+    let config = own_listener_config(vec![hmac_caller(
+        "pager",
+        "file:/nonexistent/webhook-secret",
+    )]);
     let pipeline = pipeline_for(&config, None).await;
     let handler = WebhookHandler::new(config, pipeline, Arc::new(Metrics::default()));
     let err = handler

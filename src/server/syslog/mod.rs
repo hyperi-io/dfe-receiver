@@ -36,7 +36,7 @@ use crate::error::{Error, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::PipelineState;
 use crate::server::ip_filter::IpFilter;
-use crate::server::traits::ProtocolHandler;
+use crate::server::traits::{BoundAddr, ProtocolHandler};
 use convert::syslog_to_json;
 use framing::SyslogFrameDecoder;
 
@@ -58,10 +58,12 @@ async fn run_udp(
     shutdown: CancellationToken,
     raw_capture: RawCapture,
     ip_filter: IpFilter,
+    bound: BoundAddr,
 ) -> Result<()> {
     let socket = UdpSocket::bind(bind_addr)
         .await
         .map_err(|e| Error::Server(format!("failed to bind syslog UDP socket: {e}")))?;
+    bound.publish(&socket.local_addr());
 
     info!(addr = %bind_addr, protocol = "udp", "Syslog UDP listener started");
 
@@ -201,10 +203,12 @@ async fn run_tcp(
     raw_capture: RawCapture,
     label: &str,
     ip_filter: IpFilter,
+    bound: BoundAddr,
 ) -> Result<()> {
     let listener = TcpListener::bind(bind_addr)
         .await
         .map_err(|e| Error::Server(format!("failed to bind syslog {label} listener: {e}")))?;
+    bound.publish(&listener.local_addr());
 
     let tls_enabled = tls_acceptor.is_some();
     info!(addr = %bind_addr, tls = tls_enabled, "Syslog {label} listener started");
@@ -284,6 +288,9 @@ pub struct SyslogHandler {
     raw_capture: RawCapture,
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
+    udp_bound: BoundAddr,
+    tcp_bound: BoundAddr,
+    tls_bound: BoundAddr,
 }
 
 impl SyslogHandler {
@@ -298,7 +305,28 @@ impl SyslogHandler {
             raw_capture,
             pipeline,
             metrics,
+            udp_bound: BoundAddr::default(),
+            tcp_bound: BoundAddr::default(),
+            tls_bound: BoundAddr::default(),
         }
+    }
+
+    /// The address the UDP listener bound, once [`ProtocolHandler::start`] binds it.
+    #[must_use]
+    pub fn udp_bound_addr(&self) -> BoundAddr {
+        self.udp_bound.clone()
+    }
+
+    /// The address the plain TCP listener bound, once [`ProtocolHandler::start`] binds it.
+    #[must_use]
+    pub fn tcp_bound_addr(&self) -> BoundAddr {
+        self.tcp_bound.clone()
+    }
+
+    /// The address the TLS listener bound, once [`ProtocolHandler::start`] binds it.
+    #[must_use]
+    pub fn tls_bound_addr(&self) -> BoundAddr {
+        self.tls_bound.clone()
     }
 }
 
@@ -340,6 +368,7 @@ impl ProtocolHandler for SyslogHandler {
             let metrics = self.metrics.clone();
             let udp_shutdown = shutdown.clone();
             let ip_filter = ip_filter.clone();
+            let bound = self.udp_bound.clone();
             tokio::spawn(async move {
                 if let Err(e) = run_udp(
                     udp_addr,
@@ -348,6 +377,7 @@ impl ProtocolHandler for SyslogHandler {
                     udp_shutdown,
                     raw_capture,
                     ip_filter,
+                    bound,
                 )
                 .await
                 {
@@ -362,6 +392,7 @@ impl ProtocolHandler for SyslogHandler {
             let metrics = self.metrics.clone();
             let tcp_shutdown = shutdown.clone();
             let ip_filter = ip_filter.clone();
+            let bound = self.tcp_bound.clone();
             tokio::spawn(async move {
                 if let Err(e) = run_tcp(
                     tcp_addr,
@@ -373,6 +404,7 @@ impl ProtocolHandler for SyslogHandler {
                     raw_capture,
                     "TCP",
                     ip_filter,
+                    bound,
                 )
                 .await
                 {
@@ -395,6 +427,7 @@ impl ProtocolHandler for SyslogHandler {
                 let pipeline = self.pipeline.clone();
                 let metrics = self.metrics.clone();
                 let tls_shutdown = shutdown.clone();
+                let bound = self.tls_bound.clone();
                 Some(tokio::spawn(async move {
                     if let Err(e) = run_tcp(
                         tls_addr,
@@ -406,6 +439,7 @@ impl ProtocolHandler for SyslogHandler {
                         raw_capture,
                         "TLS",
                         ip_filter,
+                        bound,
                     )
                     .await
                     {

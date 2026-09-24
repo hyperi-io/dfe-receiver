@@ -24,7 +24,8 @@ use std::time::Duration;
 use dfe_receiver::config::{Config, DestinationRef};
 use dfe_receiver::metrics::Metrics;
 use dfe_receiver::pipeline::Orchestrator;
-use dfe_receiver::server::http;
+use dfe_receiver::server::http::HttpHandler;
+use dfe_receiver::server::traits::ProtocolHandler;
 use scalo::transport::TransportReceiver;
 use scalo::transport::grpc::{GrpcConfig, GrpcTransport};
 use tokio_util::sync::CancellationToken;
@@ -36,61 +37,34 @@ const PER_PHASE: u64 = 20;
 /// buffer's circuit stays open 30s after it trips, then drains.
 const RECOVERY_BUDGET: Duration = Duration::from_secs(90);
 
-fn random_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    let port = listener.local_addr().expect("local addr").port();
-    drop(listener);
-    port
-}
-
-async fn port_accepts(port: u16, attempts: u32) -> bool {
-    let addr = format!("127.0.0.1:{port}");
-    for _ in 0..attempts {
-        if tokio::net::TcpStream::connect(&addr).await.is_ok() {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    false
-}
-
 /// Start the full receiver -- orchestrator drain tasks and HTTP ingest -- with
 /// every record routed to the gRPC destination at `loader_endpoint`.
 async fn start_receiver(loader_endpoint: &str) -> (String, CancellationToken) {
-    for _ in 0..20 {
-        let port = random_port();
+    let mut config = Config::default();
+    config.server.bind_address = "127.0.0.1:0".to_string();
+    config.destinations.default = DestinationRef::One("loader".to_string());
+    config.loader.transport = "grpc".to_string();
+    config.loader.grpc_endpoint = Some(loader_endpoint.to_string());
 
-        let mut config = Config::default();
-        config.server.bind_address = format!("127.0.0.1:{port}");
-        config.destinations.default = DestinationRef::One("loader".to_string());
-        config.loader.transport = "grpc".to_string();
-        config.loader.grpc_endpoint = Some(loader_endpoint.to_string());
+    let shutdown = CancellationToken::new();
+    let metrics = Arc::new(Metrics::default());
+    let orchestrator = Orchestrator::new(config.clone(), metrics.clone(), shutdown.clone())
+        .await
+        .expect("orchestrator init");
+    let pipeline = orchestrator.state();
+    orchestrator.start().expect("orchestrator start");
+    let drain_shutdown = shutdown.clone();
+    tokio::spawn(async move {
+        drain_shutdown.cancelled().await;
+        let _ = orchestrator.shutdown().await;
+    });
 
-        let shutdown = CancellationToken::new();
-        let metrics = Arc::new(Metrics::default());
-        let orchestrator = Orchestrator::new(config.clone(), metrics.clone(), shutdown.clone())
-            .await
-            .expect("orchestrator init");
-        let pipeline = orchestrator.state();
-        orchestrator.start().expect("orchestrator start");
-        let drain_shutdown = shutdown.clone();
-        tokio::spawn(async move {
-            drain_shutdown.cancelled().await;
-            let _ = orchestrator.shutdown().await;
-        });
-
-        let bind_addr = config.server.bind_address.clone();
-        let server_shutdown = shutdown.clone();
-        tokio::spawn(async move {
-            let _ = http::run_server(&bind_addr, pipeline, metrics, server_shutdown).await;
-        });
-
-        if port_accepts(port, 40).await {
-            return (format!("http://127.0.0.1:{port}"), shutdown);
-        }
-        shutdown.cancel();
-    }
-    panic!("receiver never accepted connections on any of 20 ports");
+    let handler = HttpHandler::new(config.server.bind_address.clone(), pipeline, metrics);
+    let bound = handler.bound_addr();
+    let server_shutdown = shutdown.clone();
+    let mut task = tokio::spawn(async move { handler.start(server_shutdown).await });
+    let addr = crate::common::bound_addr("HTTP", &bound, &mut task).await;
+    (format!("http://{addr}"), shutdown)
 }
 
 /// POST one record per id and return the ids answered 202.
@@ -121,9 +95,9 @@ fn record_id(payload: &[u8]) -> Option<u64> {
 
 #[tokio::test]
 async fn every_record_answered_202_arrives_after_a_destination_outage() {
-    // The destination's address is fixed up front, with nothing listening on it.
-    let port = random_port();
-    let endpoint = format!("http://127.0.0.1:{port}");
+    // The destination's address is fixed up front and held closed through the outage.
+    let closed = crate::common::ClosedPort::loopback().expect("hold the destination's port");
+    let endpoint = format!("http://{}", closed.addr());
     let (url, shutdown) = start_receiver(&endpoint).await;
 
     let during = post_ids(&url, 0..PER_PHASE).await;
@@ -132,7 +106,8 @@ async fn every_record_answered_202_arrives_after_a_destination_outage() {
         "no record was accepted while the destination was down, so nothing was held"
     );
 
-    let loader = GrpcTransport::new(&GrpcConfig::server(&format!("127.0.0.1:{port}")))
+    let destination = closed.release();
+    let loader = GrpcTransport::new(&GrpcConfig::server(&destination.to_string()))
         .await
         .expect("bring the destination up on its original address");
 

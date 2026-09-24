@@ -41,7 +41,7 @@ use crate::server::flow::rate_limit::PerSourceRateLimiter;
 use crate::server::ip_filter::IpFilter;
 use crate::server::netflow::decoder::NetflowDecoder;
 use crate::server::sflow::decoder::SflowDecoder;
-use crate::server::traits::ProtocolHandler;
+use crate::server::traits::{BoundAddr, ProtocolHandler};
 
 /// `ProtocolHandler` for the flow subsystem (NetFlow v5/v9, IPFIX, sFlow v5).
 pub struct FlowHandler {
@@ -53,6 +53,8 @@ pub struct FlowHandler {
     /// Pre-rendered bind address summary, returned by `bind_address()`.
     /// Stored as `String` because the trait returns `&str`.
     bind_address_summary: String,
+    /// One per configured port, in the order `bound_addrs` documents.
+    bound: Vec<BoundAddr>,
 }
 
 impl FlowHandler {
@@ -65,13 +67,29 @@ impl FlowHandler {
     ) -> Result<Self> {
         cfg.validate().map_err(Error::Config)?;
         let bind_address_summary = render_bind_summary(&cfg);
+        let listeners = cfg.split.as_ref().map_or(cfg.ports.len(), |split| {
+            split.netflow.ports.len() + split.sflow.ports.len()
+        });
+        // Each listener gets its own cell: cloning one `BoundAddr` would share it.
+        let bound = std::iter::repeat_with(BoundAddr::default)
+            .take(listeners)
+            .collect();
         Ok(Self {
             cfg,
             raw,
             metrics,
             pipeline,
             bind_address_summary,
+            bound,
         })
+    }
+
+    /// The address each listener bound, once [`ProtocolHandler::start`] binds
+    /// it: one per configured port in `ports` order, or in split mode the
+    /// NetFlow ports followed by the sFlow ports.
+    #[must_use]
+    pub fn bound_addrs(&self) -> Vec<BoundAddr> {
+        self.bound.clone()
     }
 
     /// True if neither unified nor split mode is active -- handler is a no-op.
@@ -134,7 +152,7 @@ impl FlowHandler {
         let listener_cfg = self.unified_listener_cfg();
 
         let mut handles = Vec::with_capacity(self.cfg.ports.len());
-        for port in &self.cfg.ports {
+        for (port, bound) in self.cfg.ports.iter().zip(&self.bound) {
             let bind_addr = SocketAddr::new(self.cfg.bind_address, *port);
             let netflow = if self.cfg.netflow.enabled {
                 Some(NetflowDecoder::new(
@@ -161,7 +179,8 @@ impl FlowHandler {
                 self.pipeline.clone(),
                 ip_filter.clone(),
                 rate_limiter.clone(),
-            );
+            )
+            .publishing_to(bound.clone());
             let l_shutdown = shutdown.clone();
             handles.push(tokio::spawn(async move {
                 if let Err(e) = listener.run(l_shutdown).await {
@@ -206,7 +225,7 @@ impl FlowHandler {
             if let Some(rl) = &rate_limiter {
                 rate_limiters.push(rl.clone());
             }
-            for port in &split.netflow.ports {
+            for (port, bound) in split.netflow.ports.iter().zip(&self.bound) {
                 let bind_addr = SocketAddr::new(split.netflow.bind_address, *port);
                 let listener = UdpFlowListener::new(
                     bind_addr,
@@ -222,7 +241,8 @@ impl FlowHandler {
                     self.pipeline.clone(),
                     ip_filter.clone(),
                     rate_limiter.clone(),
-                );
+                )
+                .publishing_to(bound.clone());
                 let l_shutdown = shutdown.clone();
                 handles.push(tokio::spawn(async move {
                     if let Err(e) = listener.run(l_shutdown).await {
@@ -248,7 +268,8 @@ impl FlowHandler {
             if let Some(rl) = &rate_limiter {
                 rate_limiters.push(rl.clone());
             }
-            for port in &split.sflow.ports {
+            let sflow_bound = self.bound.iter().skip(split.netflow.ports.len());
+            for (port, bound) in split.sflow.ports.iter().zip(sflow_bound) {
                 let bind_addr = SocketAddr::new(split.sflow.bind_address, *port);
                 let listener = UdpFlowListener::new(
                     bind_addr,
@@ -260,7 +281,8 @@ impl FlowHandler {
                     self.pipeline.clone(),
                     ip_filter.clone(),
                     rate_limiter.clone(),
-                );
+                )
+                .publishing_to(bound.clone());
                 let l_shutdown = shutdown.clone();
                 handles.push(tokio::spawn(async move {
                     if let Err(e) = listener.run(l_shutdown).await {
