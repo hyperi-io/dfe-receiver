@@ -3,6 +3,16 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.15.39](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.38...v1.15.39) (2026-09-24)
+
+### Bug Fixes
+
+* **deps:** sha2 0.11, netgauze 0.13, rust deps ([#143](https://github.com/hyperi-io/dfe-receiver/issues/143)) ([8ee4981](https://github.com/hyperi-io/dfe-receiver/commit/8ee498165fd8ca4fa85819bf55b8945a4454abd7))
+* **pipeline:** start the orchestrator before the listeners, not at shutdown ([#144](https://github.com/hyperi-io/dfe-receiver/issues/144)) ([602a5b4](https://github.com/hyperi-io/dfe-receiver/commit/602a5b41aa77fecfd2fad8f7de1b2a7937575c36)), closes [#132](https://github.com/hyperi-io/dfe-receiver/issues/132)
+* prove a 202 survives a gRPC outage ([#142](https://github.com/hyperi-io/dfe-receiver/issues/142)) ([dd0cd97](https://github.com/hyperi-io/dfe-receiver/commit/dd0cd976217c51c61b9b9ddf3d10696918a28ec3))
+* rebuild on scalo 2.12.9 ([#147](https://github.com/hyperi-io/dfe-receiver/issues/147)) ([90204b4](https://github.com/hyperi-io/dfe-receiver/commit/90204b4921f399b5a1cbb8064716873481a5456c))
+* stop one oversized record blocking the drain ([#146](https://github.com/hyperi-io/dfe-receiver/issues/146)) ([72d9624](https://github.com/hyperi-io/dfe-receiver/commit/72d96242f0c40c31c62fc5a88f9c4423761df38f))
+
 ## [1.15.37](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.36...v1.15.37) (2026-09-24)
 
 ### Bug Fixes
