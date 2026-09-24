@@ -29,7 +29,7 @@ use bytes::Bytes;
 use parking_lot::RwLock;
 use rdkafka::ClientContext;
 use rdkafka::config::ClientConfig;
-use rdkafka::error::KafkaError;
+use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 use rdkafka::message::Message;
 use rdkafka::producer::{BaseRecord, DeliveryResult, Producer, ProducerContext, ThreadedProducer};
 use rdkafka::util::Timeout;
@@ -289,6 +289,10 @@ impl Sink for KafkaSink {
             }
             Err((e, _)) => {
                 metrics::counter!("receiver_kafka_send_errors_total").increment(1);
+                // librdkafka refuses the same bytes on every retry, and the queue itself is fine.
+                if e.rdkafka_error_code() == Some(RDKafkaErrorCode::MessageSizeTooLarge) {
+                    return Err(Error::Rejected(format!("kafka refused the record: {e}")));
+                }
                 if scalo::logger::log_sampled(&KAFKA_ERRORS, 1000) {
                     let total = KAFKA_ERRORS.load(Ordering::Relaxed);
                     error!(error = %e, topic, total_errors = total, "Kafka send failed (1 in 1000)");
@@ -321,7 +325,6 @@ impl Sink for KafkaSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rdkafka::error::RDKafkaErrorCode;
 
     /// TEST-NET-1 (RFC 5737), reserved for documentation -- never routable.
     const UNROUTABLE_BROKER: &str = "192.0.2.1:9092";
@@ -425,6 +428,22 @@ mod tests {
             !sink.is_healthy(),
             "a queued record cleared a broker-side delivery failure"
         );
+    }
+
+    /// A record over `message.max.bytes` is refused for good at enqueue, and
+    /// the producer queue stays healthy: one oversized record says nothing
+    /// about the next.
+    #[tokio::test]
+    async fn a_record_over_the_size_ceiling_is_rejected() {
+        let sink = KafkaSink::new(&unroutable_config("60000")).unwrap();
+        let ceiling = scalo::transport::kafka::MESSAGE_MAX_BYTES as usize;
+
+        let result = sink
+            .send("events", Bytes::from(vec![b'x'; ceiling + 1]))
+            .await;
+
+        assert!(matches!(result, Err(Error::Rejected(_))), "got {result:?}");
+        assert!(sink.is_healthy());
     }
 
     /// The shutdown flush must not hold a runtime worker.

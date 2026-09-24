@@ -36,6 +36,8 @@ fn client_config(endpoint: &str, send_timeout_ms: Option<u64>) -> GrpcConfig {
 /// dfe-loader sink using DFE native gRPC transport.
 pub struct GrpcSink {
     transport: GrpcTransport,
+    /// The largest payload the transport will encode.
+    max_message_size: usize,
     healthy: AtomicBool,
 }
 
@@ -61,8 +63,26 @@ impl GrpcSink {
 
         Ok(Self {
             transport,
+            max_message_size: config.max_message_size,
             healthy: AtomicBool::new(true),
         })
+    }
+}
+
+/// The receiver's verdict on one Push result.
+///
+/// scalo's `Fatal` carries no gRPC status, so a refusal of this one record
+/// cannot be told from a destination refusing every record: it stays
+/// transient, queued and retried in order. `FilteredDlq` is scalo's verdict on
+/// the record itself, which a retry would only repeat, so it is rejected.
+pub(crate) fn push_outcome(result: SendResult) -> Result<()> {
+    match result {
+        SendResult::Ok => Ok(()),
+        SendResult::Backpressured => Err(Error::Transport("gRPC loader backpressured".into())),
+        SendResult::Fatal(e) => Err(Error::Transport(format!("gRPC loader send failed: {e}"))),
+        SendResult::FilteredDlq => Err(Error::Rejected(
+            "gRPC transport routed the record to a dead-letter queue".into(),
+        )),
     }
 }
 
@@ -77,22 +97,26 @@ impl Sink for GrpcSink {
         // (reqwest/tonic bodies are zero-copy from Bytes). The clone is a
         // refcount bump, not a payload copy.
         let bytes = payload.len();
-        match self.transport.send(topic, payload).await {
-            SendResult::Ok | SendResult::FilteredDlq => {
+        // scalo's single-record send reports an over-limit payload as backpressure.
+        if bytes > self.max_message_size {
+            return Err(Error::Rejected(format!(
+                "{bytes}-byte record exceeds the gRPC max_message_size of {}",
+                self.max_message_size
+            )));
+        }
+        let result = self.transport.send(topic, payload).await;
+        match &result {
+            SendResult::Ok => {
                 debug!(topic = %topic, bytes, "Sent to loader via gRPC");
                 self.healthy.store(true, Ordering::Relaxed);
-                Ok(())
-            }
-            SendResult::Backpressured => {
-                // Signal backpressure so buffer backend can handle
-                Err(Error::Transport("gRPC loader backpressured".into()))
             }
             SendResult::Fatal(e) => {
                 error!(error = %e, topic = %topic, "gRPC loader send failed");
                 self.healthy.store(false, Ordering::Relaxed);
-                Err(Error::Transport(format!("gRPC loader send failed: {e}")))
             }
+            SendResult::Backpressured | SendResult::FilteredDlq => {}
         }
+        push_outcome(result)
     }
 
     /// Flush pending messages.
@@ -130,6 +154,39 @@ mod tests {
         let default = GrpcConfig::client("http://loader:6000").send_timeout_ms;
         let config = client_config("http://loader:6000", None);
         assert_eq!(config.send_timeout_ms, default);
+    }
+
+    /// Only the record itself can prove a refusal permanent: a destination's
+    /// refusal stays transient, and scalo's per-record `FilteredDlq` is rejected.
+    #[test]
+    fn a_destination_refusal_stays_transient() {
+        use scalo::transport::TransportError;
+
+        assert!(push_outcome(SendResult::Ok).is_ok());
+        assert!(matches!(
+            push_outcome(SendResult::Backpressured),
+            Err(Error::Transport(_))
+        ));
+        assert!(matches!(
+            push_outcome(SendResult::Fatal(TransportError::Send("invalid".into()))),
+            Err(Error::Transport(_))
+        ));
+        assert!(matches!(
+            push_outcome(SendResult::FilteredDlq),
+            Err(Error::Rejected(_))
+        ));
+    }
+
+    /// scalo reports an over-limit single send as backpressure, which would
+    /// requeue a record that can never be sent.
+    #[tokio::test]
+    async fn a_record_over_the_message_size_limit_is_rejected() {
+        let limit = GrpcConfig::client("http://127.0.0.1:1").max_message_size;
+        let sink = GrpcSink::new("http://127.0.0.1:1", None).await.unwrap();
+
+        let result = sink.send("t", Bytes::from(vec![b'x'; limit + 1])).await;
+
+        assert!(matches!(result, Err(Error::Rejected(_))), "got {result:?}");
     }
 
     #[tokio::test]

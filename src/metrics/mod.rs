@@ -329,6 +329,12 @@ impl Metrics {
         }
     }
 
+    /// Get DLQ messages counter.
+    #[inline]
+    pub fn get_messages_dlq(&self) -> u64 {
+        self.messages_dlq.load(Ordering::Relaxed)
+    }
+
     /// Increment spilled messages counter.
     #[inline]
     pub fn add_messages_spilled(&self, count: u64) {
@@ -752,6 +758,10 @@ fn describe_receiver_metrics() {
     metrics::describe_counter!(
         "receiver_messages_drained_total",
         "Messages drained from spool"
+    );
+    metrics::describe_counter!(
+        "receiver_records_rejected_total",
+        "Records a destination refused for good, by outcome (dead_lettered or dropped)"
     );
 
     // Request latency

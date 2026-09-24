@@ -484,6 +484,7 @@ holds it.
 | `receiver_kafka_delivered_total` | Counter | Messages a broker acknowledged |
 | `receiver_kafka_delivery_failures_total` | Counter | Messages no broker took, by `reason` (librdkafka error code) |
 | `records_dlq_total` | Counter | Messages sent to DLQ (scalo emits this one) |
+| `receiver_records_rejected_total` | Counter | Records a destination can never take (over its size ceiling), on any sink, by `outcome`: `dead_lettered` or `dropped` when no DLQ is configured |
 
 ### Scaling Metrics
 
