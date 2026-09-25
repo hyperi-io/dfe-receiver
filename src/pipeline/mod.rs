@@ -35,7 +35,7 @@ use crate::buffer::{
 };
 use crate::config::{Config, SharedConfig};
 use crate::error::{Error, Result};
-use crate::metrics::Metrics;
+use crate::metrics::{Metrics, ValidationFailureReason};
 use crate::routing::{self, RouteResult, Router};
 use crate::server::traits::BoundAddr;
 use crate::sink::Sink;
@@ -573,14 +573,22 @@ impl PipelineState {
             ValidationResult::Valid => {
                 trace!(bytes = payload.len(), "Message validation passed");
             }
+            ValidationResult::NotJson(reason) => {
+                debug!(reason = %reason, bytes = payload.len(), "Message refused, not JSON");
+                security::input_validation_failure("json_validate", &reason, None);
+                self.count_validation_failure(ValidationFailureReason::InvalidJson);
+                return Err(Error::Validation(reason));
+            }
             ValidationResult::Dlq(reason) => {
                 debug!(reason = %reason, bytes = payload.len(), "Message validation failed, routing to DLQ");
                 security::input_validation_failure("json_validate", &reason, None);
+                self.count_validation_failure(ValidationFailureReason::MissingField);
                 return self.send_to_dlq(&payload, &reason).await;
             }
             ValidationResult::Reject(reason) => {
                 debug!(reason = %reason, bytes = payload.len(), "Message rejected by validator");
                 security::input_validation_failure("json_validate", &reason, None);
+                self.count_validation_failure(ValidationFailureReason::MissingField);
                 return Err(Error::Validation(reason));
             }
         }
@@ -678,15 +686,29 @@ impl PipelineState {
         match validation {
             ValidationResult::Valid if self.kafka_sink.is_none() && self.discards() => Ok(()),
             ValidationResult::Valid => self.send_to_kafka(topic, payload).await,
+            ValidationResult::NotJson(reason) => {
+                security::input_validation_failure("json_validate", &reason, None);
+                self.count_validation_failure(ValidationFailureReason::InvalidJson);
+                Err(Error::Validation(reason))
+            }
             ValidationResult::Dlq(reason) => {
                 debug!(reason = %reason, "Message validation failed, routing to DLQ");
                 security::input_validation_failure("json_validate", &reason, None);
+                self.count_validation_failure(ValidationFailureReason::MissingField);
                 self.send_to_dlq(&payload, &reason).await
             }
             ValidationResult::Reject(reason) => {
                 security::input_validation_failure("json_validate", &reason, None);
+                self.count_validation_failure(ValidationFailureReason::MissingField);
                 Err(Error::Validation(reason))
             }
+        }
+    }
+
+    /// Count a record the validator turned away, when the pipeline has metrics.
+    fn count_validation_failure(&self, reason: ValidationFailureReason) {
+        if let Some(ref metrics) = self.metrics {
+            metrics.inc_validation_failure(reason);
         }
     }
 
@@ -1180,11 +1202,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_pipeline_validation_reject() {
-        let state = test_state().await;
+        let mut config = test_config();
+        config.validation.required_fields = vec!["org_id".to_string()];
+        let state = test_state_with(config).await;
 
-        // Invalid JSON with dlq_on_invalid=true attempts DLQ routing, but no Kafka/DLQ
-        // sink is configured in test state -- expect config error from the fallback path
-        let result = state.process(Bytes::from("not json")).await;
+        // A record missing a required field with dlq_on_invalid=true attempts DLQ
+        // routing, but no Kafka/DLQ sink is configured in test state -- expect
+        // config error from the fallback path
+        let result = state.process(Bytes::from(r#"{"a":1}"#)).await;
         assert!(
             result.is_err(),
             "expected error without DLQ sink: {result:?}"
@@ -1194,6 +1219,38 @@ mod tests {
             err.contains("Kafka sink not configured"),
             "expected Kafka sink error, got: {err}"
         );
+    }
+
+    /// A body that is not JSON is refused for good and counted, never sent to
+    /// the DLQ, whatever `dlq_on_invalid` says.
+    #[tokio::test]
+    async fn a_body_that_is_not_json_is_refused_and_counted() {
+        let config = test_config();
+        assert!(config.validation.dlq_on_invalid, "the default dead-letters");
+        let metrics = Arc::new(Metrics::default());
+        let state = PipelineState::build(
+            SharedConfig::new(config),
+            CancellationToken::new(),
+            None,
+            None,
+            Some(Arc::clone(&metrics)),
+        )
+        .await
+        .unwrap();
+
+        // MessagePack for {"foo": 1}: DFE takes JSON only.
+        let msgpack = Bytes::from_static(&[0x81, 0xA3, b'f', b'o', b'o', 0x01]);
+        for body in [Bytes::from("not json"), msgpack] {
+            let err = state.process(body.clone()).await.expect_err("not JSON");
+            assert!(matches!(err, Error::Validation(_)), "{err}");
+            assert!(!err.is_retryable(), "a sender must not retry it");
+            let err = state
+                .process_to_topic(body, "t_land")
+                .await
+                .expect_err("not JSON");
+            assert!(matches!(err, Error::Validation(_)), "{err}");
+        }
+        assert_eq!(metrics.get_validation_failures_total(), 4);
     }
 
     #[tokio::test]
@@ -1564,14 +1621,17 @@ mod tests {
     /// A retryable failure stops the batch where it happened: the sender is
     /// told to resend, so taking the records behind it only adds duplicates.
     ///
-    /// The invalid record is routed to a DLQ topic with no broker configured,
-    /// which the receiver cannot serve now but could once the route works.
+    /// The record missing its required field is routed to a DLQ topic with no
+    /// broker configured, which the receiver cannot serve now but could once
+    /// the route works.
     #[tokio::test]
     async fn a_retryable_failure_stops_the_batch() {
-        let state = test_state().await;
+        let mut config = test_config();
+        config.validation.required_fields = vec!["ok".to_string()];
+        let state = test_state_with(config).await;
         let payloads = vec![
             Bytes::from(r#"{"ok":1}"#),
-            Bytes::from("not json"),
+            Bytes::from(r#"{"not_ok":1}"#),
             Bytes::from(r#"{"ok":2}"#),
         ];
 

@@ -167,6 +167,10 @@ server:
 
 Accepts JSON payloads for ingestion.
 
+JSON is the only payload format. MessagePack, supported in DFE/XDR 2.0 and 2.1, is deprecated in DFE 2.2 and no longer accepted: the JSON path (SIMD parsing with sonic-rs, zstd on the wire) is fast enough that MessagePack gave no CPU saving.
+
+Fluent Forward input (fluentd) is still accepted: it is converted to JSON at the receiver.
+
 ```bash
 curl -X POST http://localhost:8080/ingest \
   -H "Content-Type: application/json" \

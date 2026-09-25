@@ -88,26 +88,24 @@ fn nested_object(depth: usize) -> String {
     format!("{}1{}", "{\"a\":".repeat(depth), "}".repeat(depth))
 }
 
-/// The ingest listener on the loader's memory transport, answering a malformed
-/// record with 400 rather than routing it to a DLQ this config has none of.
-fn ingest_config() -> Config {
+/// The ingest listener on the loader's memory transport.
+pub(super) fn ingest_config() -> Config {
     let mut config = Config::default();
     config.server.bind_address = "127.0.0.1:0".to_string();
     config.server.auth.mode = "none".to_string();
     config.destinations.default = "loader".into();
     config.loader.transport = "memory".to_string();
-    config.validation.dlq_on_invalid = false;
     config
 }
 
-struct Started {
-    url: String,
-    metrics: Arc<Metrics>,
-    shutdown: CancellationToken,
+pub(super) struct Started {
+    pub(super) url: String,
+    pub(super) metrics: Arc<Metrics>,
+    pub(super) shutdown: CancellationToken,
 }
 
 /// Start the ingest listener over a pipeline that counts on `metrics`.
-async fn start_ingest(config: Config) -> Started {
+pub(super) async fn start_ingest(config: Config) -> Started {
     let metrics = Arc::new(Metrics::default());
     let shutdown = CancellationToken::new();
     let orchestrator = Orchestrator::new(config.clone(), metrics.clone(), shutdown.clone())
