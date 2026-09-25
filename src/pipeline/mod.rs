@@ -11,6 +11,7 @@
 //! Coordinates the flow of messages through validation, routing,
 //! and delivery to sinks with backpressure support.
 
+use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
@@ -70,6 +71,60 @@ impl<'a> MemoryLease<'a> {
 impl Drop for MemoryLease<'_> {
     fn drop(&mut self) {
         self.guard.release(self.bytes);
+    }
+}
+
+/// What the pipeline made of a batch of records, in the terms a listener
+/// needs to answer its sender honestly.
+///
+/// A batch stops at the first failure the sender should retry: the sender is
+/// told to resend the whole request, so taking the records behind it would
+/// only add duplicates. A record refused for good does not stop it.
+#[derive(Debug, Default)]
+#[must_use]
+pub struct BatchOutcome {
+    /// Records the pipeline took.
+    pub accepted: usize,
+    /// Records refused for good: the record itself is at fault.
+    pub rejected: usize,
+    /// The first refusal, for the answer's detail.
+    pub first_rejection: Option<Error>,
+    /// The failure that stopped the batch. The record it names and every one
+    /// after it were not taken.
+    pub unavailable: Option<Error>,
+}
+
+impl BatchOutcome {
+    /// Count one record's result. `Break` once a retryable failure stops the
+    /// batch.
+    pub fn record(&mut self, result: Result<()>) -> ControlFlow<()> {
+        match result {
+            Ok(()) => self.accepted += 1,
+            Err(e) if e.is_retryable() => {
+                self.unavailable = Some(e);
+                return ControlFlow::Break(());
+            }
+            Err(e) => {
+                self.rejected += 1;
+                self.first_rejection.get_or_insert(e);
+            }
+        }
+        ControlFlow::Continue(())
+    }
+
+    /// Records the pipeline settled, taken or refused for good. When the batch
+    /// stopped early, the records from this index on were not taken.
+    #[must_use]
+    pub fn settled(&self) -> usize {
+        self.accepted + self.rejected
+    }
+
+    /// The one error a single-error answer should report: the retryable one
+    /// first, since answering a partial failure as final loses the records
+    /// behind it.
+    #[must_use]
+    pub fn into_error(self) -> Option<Error> {
+        self.unavailable.or(self.first_rejection)
     }
 }
 
@@ -414,14 +469,13 @@ impl PipelineState {
     /// Process a batch of messages through the pipeline.
     ///
     /// Amortises overhead: single backpressure check, single memory tracking
-    /// update, and per-message process_inner() calls. Each message is processed
-    /// independently -- a failure in one does not stop the rest.
-    ///
-    /// Returns the count of successfully processed messages and the first error
-    /// (if any). Callers can use the success count for metrics.
-    pub async fn process_batch(&self, payloads: &[Bytes]) -> (usize, Option<Error>) {
+    /// update, and per-message process_inner() calls. A record refused for
+    /// good does not stop the rest; a retryable failure does, see
+    /// [`BatchOutcome`].
+    pub async fn process_batch(&self, payloads: &[Bytes]) -> BatchOutcome {
+        let mut outcome = BatchOutcome::default();
         if payloads.is_empty() {
-            return (0, None);
+            return outcome;
         }
 
         // Single backpressure check for the entire batch
@@ -429,10 +483,8 @@ impl PipelineState {
             if scalo::logger::log_state_change(&PRESSURE_LOGGED, true) {
                 warn!("Memory pressure HIGH -- backpressure active (batch)");
             }
-            return (
-                0,
-                Some(Error::Buffer("server under memory pressure".into())),
-            );
+            outcome.unavailable = Some(Error::Buffer("server under memory pressure".into()));
+            return outcome;
         }
         if scalo::logger::log_state_change(&PRESSURE_LOGGED, false) {
             info!("Memory pressure recovered");
@@ -442,21 +494,16 @@ impl PipelineState {
         let total_bytes: u64 = payloads.iter().map(|p| p.len() as u64).sum();
         let _lease = MemoryLease::acquire(&self.memory_guard, total_bytes);
 
-        let mut success_count = 0usize;
-        let mut first_error: Option<Error> = None;
-
         for payload in payloads {
-            match self.process_inner(payload.clone()).await {
-                Ok(()) => success_count += 1,
-                Err(e) => {
-                    if first_error.is_none() {
-                        first_error = Some(e);
-                    }
-                }
+            if outcome
+                .record(self.process_inner(payload.clone()).await)
+                .is_break()
+            {
+                break;
             }
         }
 
-        (success_count, first_error)
+        outcome
     }
 
     /// Check if enrichment (timestamp injection, source rules) is enabled.
@@ -1475,26 +1522,95 @@ mod tests {
             Bytes::from(r#"{"id":2}"#),
             Bytes::from(r#"{"id":3}"#),
         ];
-        let (success_count, first_err) = state.process_batch(&payloads).await;
-        assert_eq!(success_count, 3, "all 3 items should succeed");
-        assert!(first_err.is_none(), "no errors expected");
+        let outcome = state.process_batch(&payloads).await;
+        assert_eq!(outcome.accepted, 3, "all 3 items should succeed");
+        assert!(outcome.into_error().is_none(), "no errors expected");
     }
 
+    /// A record refused for good does not stop the records behind it, and the
+    /// batch reports the refusal.
     #[tokio::test]
-    async fn test_pipeline_batch_with_invalid_items() {
-        // Batch with mixed valid/invalid -- valid ones should still dispatch.
-        // process_batch returns (success_count, first_error). Invalid JSON
-        // with no DLQ sink triggers an error.
+    async fn a_rejected_record_does_not_stop_the_batch() {
+        let mut config = test_config();
+        config.validation.dlq_on_invalid = false;
+        let state = test_state_with(config).await;
+        let payloads = vec![
+            Bytes::from(r#"{"ok":1}"#),
+            Bytes::from("not json"),
+            Bytes::from(r#"{"ok":2}"#),
+        ];
+
+        let outcome = state.process_batch(&payloads).await;
+
+        assert_eq!(outcome.accepted, 2);
+        assert_eq!(outcome.rejected, 1);
+        assert!(outcome.unavailable.is_none(), "{:?}", outcome.unavailable);
+        assert!(
+            matches!(outcome.first_rejection, Some(Error::Validation(_))),
+            "{:?}",
+            outcome.first_rejection
+        );
+    }
+
+    /// A retryable failure stops the batch where it happened: the sender is
+    /// told to resend, so taking the records behind it only adds duplicates.
+    ///
+    /// The invalid record is routed to a DLQ topic with no broker configured,
+    /// which the receiver cannot serve now but could once the route works.
+    #[tokio::test]
+    async fn a_retryable_failure_stops_the_batch() {
         let state = test_state().await;
         let payloads = vec![
             Bytes::from(r#"{"ok":1}"#),
             Bytes::from("not json"),
             Bytes::from(r#"{"ok":2}"#),
         ];
-        let (success_count, first_err) = state.process_batch(&payloads).await;
-        // Valid items succeed; invalid item errors out
-        assert_eq!(success_count, 2, "2 valid items should succeed");
-        assert!(first_err.is_some(), "invalid item must produce error");
+
+        let outcome = state.process_batch(&payloads).await;
+
+        assert_eq!(outcome.accepted, 1, "the record before the failure");
+        assert_eq!(outcome.settled(), 1, "nothing after the failure is taken");
+        assert!(
+            outcome
+                .unavailable
+                .as_ref()
+                .is_some_and(Error::is_retryable),
+            "{:?}",
+            outcome.unavailable
+        );
+    }
+
+    /// Pressure refuses the whole batch before any record is taken.
+    #[tokio::test]
+    async fn pressure_refuses_the_whole_batch_as_retryable() {
+        let mut config = test_config();
+        config.buffer.memory_limit = 1000;
+        config.buffer.pressure_threshold = 0.8;
+        let state = test_state_on_reservations(config).await;
+        state.memory_guard().add_bytes(900);
+
+        let outcome = state.process_batch(&[Bytes::from(r#"{"a":1}"#)]).await;
+
+        assert_eq!(outcome.settled(), 0);
+        assert!(matches!(outcome.unavailable, Some(Error::Buffer(_))));
+    }
+
+    /// A single-error answer reports the retryable failure over an earlier
+    /// refusal, so the sender resends rather than dropping the batch.
+    #[test]
+    fn the_retryable_error_wins_the_single_error_answer() {
+        let mut outcome = BatchOutcome::default();
+        assert!(
+            outcome
+                .record(Err(Error::Validation("bad".into())))
+                .is_continue()
+        );
+        assert!(
+            outcome
+                .record(Err(Error::Transport("down".into())))
+                .is_break()
+        );
+        assert!(matches!(outcome.into_error(), Some(Error::Transport(_))));
     }
 
     #[tokio::test]

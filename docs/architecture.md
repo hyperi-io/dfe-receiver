@@ -112,6 +112,8 @@ precedence -- profile defaults, then `librdkafka_overrides`, then the sizing
 surface, which wins. It goes wrong quietly if scalo reorders or adds a key.
 scalo-rs#26 is the long-term fix.
 
+No listener answers success for a record the pipeline did not take: a sender that reads a false success discards the record, and nothing downstream can recover it. A failure is final only when the record itself is at fault -- malformed, over a destination's size ceiling, or sent without valid credentials. Anything else tells the sender to retry, in its own protocol's terms, and a batch stops at the first record not taken. The sender resends the whole request, so the records taken before it arrive twice: duplicates, never loss. Each listener's answer, and the protocol rule behind it, is in [DESIGN.md](DESIGN.md#what-a-sender-is-told).
+
 ## Buffering: memory by default, disk by choice
 
 The default backend is an in-memory buffer behind a circuit breaker, with no

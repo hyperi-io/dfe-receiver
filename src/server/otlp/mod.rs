@@ -27,12 +27,12 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::config::{OtlpConfig, RawCapture};
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, unavailable_response};
 use crate::metrics::Metrics;
-use crate::pipeline::PipelineState;
+use crate::pipeline::{BatchOutcome, PipelineState};
 use crate::server::auth::{AuthMode, AuthState, validate_bearer_auth};
 use crate::server::http::create_auth_state;
 use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
@@ -128,32 +128,80 @@ impl OtlpService {
         }
     }
 
-    /// Process converted payloads through the pipeline.
+    /// Process converted payloads through the pipeline and settle the gRPC
+    /// answer: `UNAVAILABLE` when a record could not be taken, `INVALID_ARGUMENT`
+    /// when every record was refused for good, and otherwise OK with any
+    /// refusals as a partial success.
     async fn process_payloads(
         &self,
         payloads: Vec<convert::ConvertedPayload>,
-    ) -> std::result::Result<(), Status> {
+    ) -> std::result::Result<Option<Rejected>, Status> {
         let total_bytes: u64 = payloads.iter().map(|p| p.json.len() as u64).sum();
         self.metrics.add_bytes_received("otlp", total_bytes);
 
-        let jsons: Vec<bytes::Bytes> = payloads.iter().map(|p| p.json.clone()).collect();
-        let (success, first_err) = self.pipeline.process_batch(&jsons).await;
-
-        if let Some(e) = first_err {
-            let failed = payloads.len() - success;
-            warn!(
-                success = success,
-                failed = failed,
-                error = %e,
-                "OTLP batch partially failed"
-            );
-            if success == 0 {
-                self.metrics.inc_requests_error("otlp");
-                return Err(Status::internal(e.to_string()));
-            }
+        let jsons: Vec<bytes::Bytes> = payloads.into_iter().map(|p| p.json).collect();
+        let outcome = self.pipeline.process_batch(&jsons).await;
+        let settled = settle(&self.metrics, jsons.len(), outcome);
+        match settled {
+            Settled::Taken(rejected) => Ok(rejected),
+            Settled::Unavailable => Err(Status::unavailable(OVERLOADED)),
+            Settled::AllRejected(message) => Err(Status::invalid_argument(message)),
         }
-        Ok(())
     }
+}
+
+/// Records of one export refused for good, reported as a partial success.
+#[derive(Debug)]
+struct Rejected {
+    count: i64,
+    message: String,
+}
+
+/// What an export came to, ahead of its wire answer.
+#[derive(Debug)]
+enum Settled {
+    /// Every record settled, some refused for good or none.
+    Taken(Option<Rejected>),
+    /// A record could not be taken, so the sender must retry the export.
+    Unavailable,
+    /// Every record was refused for good.
+    AllRejected(String),
+}
+
+/// The message on a retryable OTLP answer.
+const OVERLOADED: &str = "server is overloaded, retry later";
+
+/// Settle a batch outcome into an OTLP answer, counting the request.
+///
+/// The OTLP specification makes `UNAVAILABLE` / HTTP 503 retryable and
+/// `INTERNAL` / HTTP 500 final, and a client must not retry an export answered
+/// with a populated `partial_success`.
+fn settle(metrics: &Metrics, records: usize, outcome: BatchOutcome) -> Settled {
+    // Debug, not warn: the pipeline logs the pressure edge once, and a line
+    // per refused export would flood the log for as long as it lasts.
+    if let Some(e) = outcome.unavailable {
+        debug!(
+            records,
+            accepted = outcome.accepted,
+            error = %e,
+            "OTLP export not fully taken; answering retryable"
+        );
+        metrics.inc_requests_error("otlp");
+        metrics.record_backpressure();
+        return Settled::Unavailable;
+    }
+    let Some(e) = outcome.first_rejection else {
+        metrics.inc_requests_success("otlp");
+        return Settled::Taken(None);
+    };
+    metrics.inc_requests_error("otlp");
+    if outcome.accepted == 0 {
+        return Settled::AllRejected(e.public_message());
+    }
+    Settled::Taken(Some(Rejected {
+        count: i64::try_from(outcome.rejected).unwrap_or(i64::MAX),
+        message: e.public_message(),
+    }))
 }
 
 #[tonic::async_trait]
@@ -169,14 +217,8 @@ impl LogsService for OtlpService {
         let payloads = convert::convert_logs(&req, self.mode, self.raw_capture)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
-        self.process_payloads(payloads).await?;
-        self.metrics.inc_requests_success("otlp");
-
-        Ok(Response::new(
-            pb::collector::logs::v1::ExportLogsServiceResponse {
-                partial_success: None,
-            },
-        ))
+        let rejected = self.process_payloads(payloads).await?;
+        Ok(Response::new(logs_response(rejected)))
     }
 }
 
@@ -193,14 +235,8 @@ impl TraceService for OtlpService {
         let payloads = convert::convert_traces(&req, self.mode, self.raw_capture)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
-        self.process_payloads(payloads).await?;
-        self.metrics.inc_requests_success("otlp");
-
-        Ok(Response::new(
-            pb::collector::trace::v1::ExportTraceServiceResponse {
-                partial_success: None,
-            },
-        ))
+        let rejected = self.process_payloads(payloads).await?;
+        Ok(Response::new(traces_response(rejected)))
     }
 }
 
@@ -219,14 +255,45 @@ impl MetricsService for OtlpService {
         let payloads = convert::convert_metrics(&req, self.mode, self.raw_capture)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
-        self.process_payloads(payloads).await?;
-        self.metrics.inc_requests_success("otlp");
+        let rejected = self.process_payloads(payloads).await?;
+        Ok(Response::new(metrics_response(rejected)))
+    }
+}
 
-        Ok(Response::new(
-            pb::collector::metrics::v1::ExportMetricsServiceResponse {
-                partial_success: None,
-            },
-        ))
+/// A logs export response, with the refused log records as a partial success.
+fn logs_response(rejected: Option<Rejected>) -> pb::collector::logs::v1::ExportLogsServiceResponse {
+    pb::collector::logs::v1::ExportLogsServiceResponse {
+        partial_success: rejected.map(|r| pb::collector::logs::v1::ExportLogsPartialSuccess {
+            rejected_log_records: r.count,
+            error_message: r.message,
+        }),
+    }
+}
+
+/// A traces export response, with the refused spans as a partial success.
+fn traces_response(
+    rejected: Option<Rejected>,
+) -> pb::collector::trace::v1::ExportTraceServiceResponse {
+    pb::collector::trace::v1::ExportTraceServiceResponse {
+        partial_success: rejected.map(|r| pb::collector::trace::v1::ExportTracePartialSuccess {
+            rejected_spans: r.count,
+            error_message: r.message,
+        }),
+    }
+}
+
+/// A metrics export response, with the refused data points as a partial
+/// success.
+fn metrics_response(
+    rejected: Option<Rejected>,
+) -> pb::collector::metrics::v1::ExportMetricsServiceResponse {
+    pb::collector::metrics::v1::ExportMetricsServiceResponse {
+        partial_success: rejected.map(|r| {
+            pb::collector::metrics::v1::ExportMetricsPartialSuccess {
+                rejected_data_points: r.count,
+                error_message: r.message,
+            }
+        }),
     }
 }
 
@@ -379,7 +446,7 @@ async fn run_http_server(
     use axum::Router;
     use axum::body::Bytes;
     use axum::extract::State;
-    use axum::http::{HeaderMap, StatusCode};
+    use axum::http::HeaderMap;
     use axum::routing::post;
     use tokio::net::TcpListener;
 
@@ -415,7 +482,7 @@ async fn run_http_server(
         State(state): State<OtlpHttpState>,
         headers: HeaderMap,
         body: Bytes,
-    ) -> std::result::Result<StatusCode, Error> {
+    ) -> std::result::Result<axum::response::Response, Error> {
         state.metrics.inc_requests_total("otlp");
         state.metrics.add_bytes_received("otlp", body.len() as u64);
 
@@ -424,14 +491,7 @@ async fn run_http_server(
         )?;
 
         let payloads = convert::convert_logs(&request, state.mode, state.raw_capture)?;
-        let jsons: Vec<Bytes> = payloads.into_iter().map(|p| p.json).collect();
-        let (_, first_err) = state.pipeline.process_batch(&jsons).await;
-        if let Some(e) = first_err {
-            return Err(e);
-        }
-
-        state.metrics.inc_requests_success("otlp");
-        Ok(StatusCode::OK)
+        Ok(export_over_http(&state.pipeline, &state.metrics, payloads, logs_response).await)
     }
 
     // Handler for OTLP HTTP traces
@@ -439,7 +499,7 @@ async fn run_http_server(
         State(state): State<OtlpHttpState>,
         headers: HeaderMap,
         body: Bytes,
-    ) -> std::result::Result<StatusCode, Error> {
+    ) -> std::result::Result<axum::response::Response, Error> {
         state.metrics.inc_requests_total("otlp");
         state.metrics.add_bytes_received("otlp", body.len() as u64);
 
@@ -448,14 +508,7 @@ async fn run_http_server(
         )?;
 
         let payloads = convert::convert_traces(&request, state.mode, state.raw_capture)?;
-        let jsons: Vec<Bytes> = payloads.into_iter().map(|p| p.json).collect();
-        let (_, first_err) = state.pipeline.process_batch(&jsons).await;
-        if let Some(e) = first_err {
-            return Err(e);
-        }
-
-        state.metrics.inc_requests_success("otlp");
-        Ok(StatusCode::OK)
+        Ok(export_over_http(&state.pipeline, &state.metrics, payloads, traces_response).await)
     }
 
     // Handler for OTLP HTTP metrics
@@ -463,7 +516,7 @@ async fn run_http_server(
         State(state): State<OtlpHttpState>,
         headers: HeaderMap,
         body: Bytes,
-    ) -> std::result::Result<StatusCode, Error> {
+    ) -> std::result::Result<axum::response::Response, Error> {
         state.metrics.inc_requests_total("otlp");
         state.metrics.add_bytes_received("otlp", body.len() as u64);
 
@@ -472,14 +525,7 @@ async fn run_http_server(
         )?;
 
         let payloads = convert::convert_metrics(&request, state.mode, state.raw_capture)?;
-        let jsons: Vec<Bytes> = payloads.into_iter().map(|p| p.json).collect();
-        let (_, first_err) = state.pipeline.process_batch(&jsons).await;
-        if let Some(e) = first_err {
-            return Err(e);
-        }
-
-        state.metrics.inc_requests_success("otlp");
-        Ok(StatusCode::OK)
+        Ok(export_over_http(&state.pipeline, &state.metrics, payloads, metrics_response).await)
     }
 
     // `otlp.auth` and `otlp.tls` describe the OTLP receiver, not one half of
@@ -544,6 +590,36 @@ async fn run_http_server(
 
     info!("OTLP HTTP server stopped");
     Ok(())
+}
+
+/// Run an OTLP/HTTP export through the pipeline and answer it: 503 with
+/// `Retry-After` when a record could not be taken, 400 when every record was
+/// refused for good, otherwise 200 with the protobuf export response, carrying
+/// any refusals as a partial success.
+async fn export_over_http<R: prost::Message>(
+    pipeline: &PipelineState,
+    metrics: &Metrics,
+    payloads: Vec<convert::ConvertedPayload>,
+    response: fn(Option<Rejected>) -> R,
+) -> axum::response::Response {
+    use axum::http::{HeaderValue, StatusCode, header};
+    use axum::response::IntoResponse;
+
+    let jsons: Vec<bytes::Bytes> = payloads.into_iter().map(|p| p.json).collect();
+    let outcome = pipeline.process_batch(&jsons).await;
+    match settle(metrics, jsons.len(), outcome) {
+        Settled::Unavailable => unavailable_response(OVERLOADED),
+        Settled::AllRejected(message) => (StatusCode::BAD_REQUEST, message).into_response(),
+        Settled::Taken(rejected) => (
+            StatusCode::OK,
+            [(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/x-protobuf"),
+            )],
+            response(rejected).encode_to_vec(),
+        )
+            .into_response(),
+    }
 }
 
 /// Decode an OTLP HTTP request body (protobuf).

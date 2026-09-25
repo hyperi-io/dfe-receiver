@@ -181,11 +181,17 @@ curl -X POST http://localhost:8080/ingest \
   destination returns
 - `400 Bad Request` - Invalid JSON or validation failure
 - `401 Unauthorized` - Authentication failed
-- `503 Service Unavailable` - Under memory pressure, or a destination has been
-  unreachable long enough to fill the in-memory hold (the
+- `503 Service Unavailable` with `Retry-After: 5` - Under memory pressure, or a
+  destination has been unreachable long enough to fill the in-memory hold (the
   `buffer.pressure_threshold` share of `buffer.memory_limit`, or 1000 records
-  when no limit is set). Re-send the request: events of a batched request
-  accepted before the refusal then arrive twice, never zero times
+  when no limit is set), or the receiver cannot deliver the record for any
+  other reason that is not the record's own fault. Re-send the request: events
+  of a batched request accepted before the refusal then arrive twice, never
+  zero times
+
+Every listener follows the same rule in its own protocol: a record the
+receiver could not take is never answered as accepted. The per-listener
+answers are in [docs/DESIGN.md](docs/DESIGN.md#what-a-sender-is-told).
 
 ### POST /webhook/{caller}
 
@@ -224,16 +230,18 @@ never from the config file.
 
 **Response Codes:**
 
-- `202 Accepted` - Records queued (a filtered-out record still answers 202)
+- `202 Accepted` - Every record queued (a filtered-out record still answers 202)
 - `400 Bad Request` - Body shape does not match the caller's `body` setting,
   or an array element is not an object (the whole request is refused and
-  nothing is delivered)
+  nothing is delivered), or validation refused a record for good
 - `401 Unauthorized` - `{"error": "<reason>"}`: `missing_signature`,
   `invalid_signature`, `stale_signature`, `missing_auth_header`,
   `invalid_header_value`, ...
 - `404 Not Found` - No caller by that name
 - `413 Payload Too Large` - Over `webhook.max_body_size`
-- `503 Service Unavailable` - Under pressure, with `retry-after`
+- `503 Service Unavailable` - A record could not be taken (pressure, a full
+  hold, a destination down), with `retry-after`. Records of the same request
+  taken before it arrive again on the retry
 
 ### GET /livez
 
@@ -290,6 +298,9 @@ Key metrics:
 - `receiver_kafka_sends_total` - Messages librdkafka queued
 - `receiver_kafka_delivered_total` - Messages a broker acknowledged
 - `receiver_kafka_delivery_failures_total` - Messages no broker took, by reason
+- `receiver_records_dropped_total` - Records dropped with no way to tell the
+  sender (UDP syslog, a record refused on an acknowledgement-only protocol, a
+  held record at shutdown), by transport and reason
 - `receiver_scaling_pressure` - Scaling pressure for autoscaling (0-100)
 
 ## Architecture

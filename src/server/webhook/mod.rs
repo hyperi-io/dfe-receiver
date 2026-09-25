@@ -45,9 +45,9 @@ use tower_http::timeout::TimeoutLayer;
 use tracing::{debug, info};
 
 use crate::config::{Config, WebhookBody, WebhookCallerConfig, WebhookConfig};
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, unavailable_response};
 use crate::metrics::Metrics;
-use crate::pipeline::PipelineState;
+use crate::pipeline::{BatchOutcome, PipelineState};
 use crate::server::http::split_json_array;
 use crate::server::ip_filter::IpFilter;
 use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
@@ -410,12 +410,7 @@ async fn webhook_handler(
         debug!(transport = TRANSPORT, caller = %caller.name, "webhook request rejected -- pipeline not ready");
         state.metrics.inc_requests_error(TRANSPORT);
         state.metrics.record_backpressure();
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            [("retry-after", "5")],
-            "server is overloaded",
-        )
-            .into_response();
+        return unavailable_response("server is overloaded");
     }
 
     let records = match caller.body {
@@ -446,16 +441,11 @@ async fn webhook_handler(
     };
 
     let start = std::time::Instant::now();
-    let mut accepted = 0usize;
-    let mut first_error: Option<Error> = None;
+    let mut outcome = BatchOutcome::default();
     for record in records {
-        match state.pipeline.process_to_topic(record, &caller.topic).await {
-            Ok(()) => accepted += 1,
-            Err(e) => {
-                if first_error.is_none() {
-                    first_error = Some(e);
-                }
-            }
+        let result = state.pipeline.process_to_topic(record, &caller.topic).await;
+        if outcome.record(result).is_break() {
+            break;
         }
     }
     let elapsed = start.elapsed();
@@ -463,33 +453,41 @@ async fn webhook_handler(
         .metrics
         .record_request_duration(TRANSPORT, elapsed.as_secs_f64());
 
-    match first_error {
-        // A partial failure still answers 202: the records that landed are
-        // not retracted, and a retry would duplicate them.
-        Some(e) if accepted == 0 => {
-            debug!(
-                transport = TRANSPORT,
-                caller = %caller.name,
-                error = %e,
-                "webhook request failed"
-            );
-            state.metrics.inc_requests_error(TRANSPORT);
-            e.into_response()
-        }
-        first_error => {
-            debug!(
-                transport = TRANSPORT,
-                caller = %caller.name,
-                accepted,
-                dropped,
-                failed = first_error.is_some(),
-                duration_us = elapsed.as_micros(),
-                "webhook request accepted"
-            );
-            state.metrics.inc_requests_success(TRANSPORT);
-            StatusCode::ACCEPTED.into_response()
-        }
+    // A record not taken answers 503 even when others landed: the retry
+    // duplicates those, where a 202 would lose the rest.
+    if let Some(e) = outcome.unavailable {
+        debug!(
+            transport = TRANSPORT,
+            caller = %caller.name,
+            accepted = outcome.accepted,
+            error = %e,
+            "webhook request not fully taken"
+        );
+        state.metrics.inc_requests_error(TRANSPORT);
+        state.metrics.record_backpressure();
+        return unavailable_response("server is overloaded");
     }
+    if let Some(e) = outcome.first_rejection {
+        debug!(
+            transport = TRANSPORT,
+            caller = %caller.name,
+            rejected = outcome.rejected,
+            error = %e,
+            "webhook request carried records refused for good"
+        );
+        state.metrics.inc_requests_error(TRANSPORT);
+        return e.into_response();
+    }
+    debug!(
+        transport = TRANSPORT,
+        caller = %caller.name,
+        accepted = outcome.accepted,
+        dropped,
+        duration_us = elapsed.as_micros(),
+        "webhook request accepted"
+    );
+    state.metrics.inc_requests_success(TRANSPORT);
+    StatusCode::ACCEPTED.into_response()
 }
 
 fn now_millis() -> u128 {

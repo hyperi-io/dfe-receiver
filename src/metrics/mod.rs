@@ -62,6 +62,29 @@ pub enum ValidationFailureReason {
     MissingField,
 }
 
+/// Why a record was dropped with no way to tell its sender.
+#[derive(Debug, Clone, Copy)]
+pub enum DropReason {
+    /// The pipeline could not take it, on a transport with no answer to carry
+    /// a retry (UDP).
+    Unavailable,
+    /// The pipeline refused it for good, on a transport whose only answer is
+    /// an acknowledgement or nothing.
+    Rejected,
+    /// Shutdown came while the record was held for a retry.
+    Shutdown,
+}
+
+impl DropReason {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Unavailable => "unavailable",
+            Self::Rejected => "rejected",
+            Self::Shutdown => "shutdown",
+        }
+    }
+}
+
 /// Metrics collector for dfe-receiver.
 ///
 /// Wraps scalo metric groups (`AppMetrics`, `BufferMetrics`, etc.) plus
@@ -77,6 +100,7 @@ pub struct Metrics {
     messages_dlq: AtomicU64,
     messages_spilled: AtomicU64,
     messages_drained: AtomicU64,
+    records_dropped: AtomicU64,
 
     // Security counters (atomics for test getter access)
     auth_failures_total: AtomicU64,
@@ -156,6 +180,7 @@ impl Metrics {
             messages_dlq: AtomicU64::new(0),
             messages_spilled: AtomicU64::new(0),
             messages_drained: AtomicU64::new(0),
+            records_dropped: AtomicU64::new(0),
             auth_failures_total: AtomicU64::new(0),
             auth_failures_missing_header: AtomicU64::new(0),
             auth_failures_invalid_token: AtomicU64::new(0),
@@ -294,6 +319,28 @@ impl Metrics {
         if let Some(ref dfe) = self.dfe {
             dfe.validation_failure(RlValidationReason::EncodingError);
         }
+    }
+
+    /// Count records dropped with no way to tell the sender, by transport and
+    /// reason.
+    #[inline]
+    pub fn add_records_dropped(&self, transport: &str, reason: DropReason, count: u64) {
+        if count == 0 {
+            return;
+        }
+        self.records_dropped.fetch_add(count, Ordering::Relaxed);
+        metrics::counter!(
+            "receiver_records_dropped_total",
+            "transport" => transport.to_string(),
+            "reason" => reason.label()
+        )
+        .increment(count);
+    }
+
+    /// Get the dropped-records count, across every transport and reason.
+    #[inline]
+    pub fn get_records_dropped(&self) -> u64 {
+        self.records_dropped.load(Ordering::Relaxed)
     }
 
     /// Add bytes received.
@@ -763,6 +810,10 @@ fn describe_receiver_metrics() {
         "receiver_records_rejected_total",
         "Records a destination refused for good, by outcome (dead_lettered or dropped)"
     );
+    metrics::describe_counter!(
+        "receiver_records_dropped_total",
+        "Records dropped with no way to tell the sender, by transport and reason"
+    );
 
     // Request latency
     metrics::describe_histogram!(
@@ -913,6 +964,17 @@ mod tests {
         assert_eq!(metrics.get_auth_failures_total(), 2);
         assert_eq!(metrics.get_validation_failures_total(), 1);
         assert_eq!(metrics.get_tls_handshake_failures_total(), 1);
+    }
+
+    #[test]
+    fn dropped_records_sum_across_transports_and_reasons() {
+        let metrics = Metrics::default();
+
+        metrics.add_records_dropped("syslog", DropReason::Unavailable, 2);
+        metrics.add_records_dropped("fluent", DropReason::Rejected, 1);
+        metrics.add_records_dropped("gelf", DropReason::Shutdown, 0);
+
+        assert_eq!(metrics.get_records_dropped(), 3);
     }
 
     #[test]

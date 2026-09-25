@@ -33,8 +33,9 @@ static SYSLOG_UDP_WARN: AtomicU64 = AtomicU64::new(0);
 
 use crate::config::{RawCapture, SyslogConfig};
 use crate::error::{Error, Result};
-use crate::metrics::Metrics;
+use crate::metrics::{DropReason, Metrics};
 use crate::pipeline::PipelineState;
+use crate::server::hold::hold_until_settled;
 use crate::server::ip_filter::IpFilter;
 use crate::server::traits::{BoundAddr, Listeners, ProtocolHandler};
 use convert::syslog_to_json;
@@ -110,6 +111,13 @@ async fn run_udp(
                         if let Err(e) = pipeline.process(payload).await {
                             debug!(peer = %peer_addr, error = %e, "Failed to process syslog UDP event");
                             metrics.inc_requests_error("syslog");
+                            // A datagram has no answer to carry a retry, so the record is gone.
+                            let reason = if e.is_retryable() {
+                                DropReason::Unavailable
+                            } else {
+                                DropReason::Rejected
+                            };
+                            metrics.add_records_dropped("syslog", reason, 1);
                         } else {
                             metrics.inc_requests_success("syslog");
                         }
@@ -132,6 +140,9 @@ async fn run_udp(
 // ---------------------------------------------------------------------------
 
 /// Handle a single TCP syslog connection using the framing codec.
+///
+/// A frame the pipeline cannot take is held, and the socket is not read,
+/// until it can: RFC 6587 has no acknowledgement to ask the sender to retry.
 async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
     stream: S,
     pipeline: Arc<PipelineState>,
@@ -159,11 +170,10 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
 
                         match syslog_to_json(&raw, raw_capture) {
                             Ok(payload) => {
-                                if let Err(e) = pipeline.process(payload).await {
-                                    debug!(peer = %peer_addr, error = %e, "Failed to process syslog TCP event");
-                                    metrics.inc_requests_error("syslog");
-                                } else {
-                                    metrics.inc_requests_success("syslog");
+                                let held = [payload];
+                                if !hold_until_settled(&pipeline, &held, &metrics, "syslog", &shutdown).await {
+                                    debug!(peer = %peer_addr, "Syslog TCP connection closing (shutdown during a hold)");
+                                    break;
                                 }
                             }
                             Err(e) => {
@@ -458,5 +468,65 @@ mod tests {
         assert_eq!(config.tls_bind_address, "0.0.0.0:6514");
         assert_eq!(config.max_message_size, 64 * 1024);
         assert!(!config.tls.enabled);
+    }
+
+    /// A datagram the pipeline cannot take is counted as dropped: UDP has no
+    /// answer to carry a retry, so the counter is the only trace of it.
+    #[tokio::test]
+    async fn a_datagram_the_pipeline_cannot_take_is_counted_as_dropped() {
+        use scalo::memory::{MemoryGuard, MemoryGuardConfig, UsageSource};
+
+        use crate::config::{Config, SharedConfig};
+
+        let mut config = Config::default();
+        config.destinations.default = "loader".into();
+        config.loader.transport = "memory".to_string();
+        let guard = MemoryGuard::with_usage_source(
+            MemoryGuardConfig {
+                limit_bytes: 1_000_000,
+                pressure_threshold: 0.8,
+                ..Default::default()
+            },
+            UsageSource::Reservations,
+        );
+        guard.add_bytes(1_000_000);
+        let pipeline = Arc::new(
+            PipelineState::with_governor(
+                SharedConfig::new(config.clone()),
+                CancellationToken::new(),
+                None,
+                Some(Arc::new(guard)),
+            )
+            .await
+            .unwrap(),
+        );
+        let metrics = Arc::new(Metrics::default());
+        let bound = BoundAddr::default();
+        let shutdown = CancellationToken::new();
+        let listener = tokio::spawn(run_udp(
+            "127.0.0.1:0".parse().unwrap(),
+            pipeline,
+            Arc::clone(&metrics),
+            shutdown.clone(),
+            RawCapture::OFF,
+            IpFilter::from_config(&config.server.ip_filter),
+            bound.clone(),
+        ));
+        let addr = timeout(Duration::from_secs(5), bound.wait()).await.unwrap();
+
+        let sender = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        sender
+            .send_to(b"<14>Sep 25 10:00:00 host app: not taken", addr)
+            .unwrap();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while metrics.get_records_dropped() == 0 && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        shutdown.cancel();
+        listener.await.unwrap().unwrap();
+
+        assert_eq!(metrics.get_records_dropped(), 1);
+        assert_eq!(metrics.get_requests_success(), 0);
     }
 }
