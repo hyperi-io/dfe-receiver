@@ -11,6 +11,16 @@ server:
   request_timeout_ms: 30000
   max_concurrent_requests: 10000  # max in-flight requests; 0 = unlimited
 
+  # Answer a request only once every destination confirmed its records: a
+  # Kafka delivery report, a gRPC destination's answer, or a DLQ write. The
+  # answer is held up to 25s, short of request_timeout_ms; a record not
+  # confirmed in time gets 503 + Retry-After, and the retry can duplicate one a
+  # broker wrote late. false answers once the record is queued. grpc, otlp,
+  # lumberjack, splunk_hec, prometheus_rw, fluent and webhook carry the same
+  # key; syslog, gelf and flow have no answer to hold.
+  acknowledgements:
+    enabled: true
+
   # Per-IP rate limiting (GCRA algorithm via tower-governor).
   #
   # Applies to every HTTP listener: /ingest, the webhook intake, splunk_hec,
@@ -84,6 +94,9 @@ server:
 grpc:
   enabled: false
   bind_address: "0.0.0.0:6000"
+  max_message_size: 16777216  # 16 MiB, the largest push decoded
+  acknowledgements:
+    enabled: true
 
   # gRPC TLS (same options as HTTP TLS)
   tls:
@@ -116,6 +129,8 @@ grpc:
 lumberjack:
   enabled: false
   bind_address: "0.0.0.0:5044"
+  acknowledgements:
+    enabled: true  # a window's ACK waits for its events to be confirmed
 
   # TLS (recommended -- Beats clients typically expect TLS)
   tls:
@@ -141,6 +156,8 @@ splunk_hec:
   bind_address: "0.0.0.0:8088"
   max_body_size: 10485760  # 10MB
   request_timeout_ms: 30000
+  acknowledgements:
+    enabled: true
 
   # TLS (same options as HTTP TLS)
   tls:
@@ -200,6 +217,8 @@ prometheus_rw:
   mode: "native"
   max_body_size: 10485760  # 10MB
   request_timeout_ms: 30000
+  acknowledgements:
+    enabled: true
 
   # TLS (same options as HTTP TLS)
   tls:
@@ -239,7 +258,9 @@ webhook:
   enabled: false
   # bind_address: "0.0.0.0:8090"   # unset = share the ingest listener
   max_body_size: 1048576           # 1 MiB; alerts are small, bulk goes to /ingest
-  request_timeout_ms: 10000
+  request_timeout_ms: 10000        # the hold is 9s under it
+  acknowledgements:
+    enabled: true
   # tls: (own listener only; same keys as server.tls)
   callers: []
   # callers:
@@ -280,6 +301,8 @@ fluent:
   enabled: false
   bind_address: "0.0.0.0:24224"
   max_message_size: 33554432  # 32MB
+  acknowledgements:
+    enabled: true  # a chunk's ack waits for its records to be confirmed
 
   tls:
     enabled: false
@@ -471,8 +494,9 @@ loader:
   address: "dfe-loader:6000"
   transport: "kafka"
   # Per-RPC deadline for the gRPC client, so a loader that stops answering
-  # cannot hold a sender task open.
-  timeout_ms: 5000
+  # cannot hold a sender task open. Under the 25s hold, so a held answer
+  # settles before its sender gives up.
+  timeout_ms: 20000
   # grpc_endpoint: "http://dfe-loader:6000"  # when transport=grpc (defaults to http://{address})
 
 buffer:

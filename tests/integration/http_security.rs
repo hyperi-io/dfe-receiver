@@ -213,7 +213,7 @@ async fn test_auth_required_no_header() {
     let mut config = test_config(10_000, 30_000, "header");
     config.server.auth.accepted_headers = vec![AcceptedHeader {
         name: "x-api-key".to_string(),
-        values: vec!["secret-key".to_string()],
+        values: vec!["secret-key".into()],
     }];
 
     let (url, shutdown) = start_test_server(config).await;
@@ -244,7 +244,7 @@ async fn test_auth_wrong_header_value() {
     let mut config = test_config(10_000, 30_000, "header");
     config.server.auth.accepted_headers = vec![AcceptedHeader {
         name: "x-api-key".to_string(),
-        values: vec!["secret-key".to_string()],
+        values: vec!["secret-key".into()],
     }];
 
     let (url, shutdown) = start_test_server(config).await;
@@ -276,7 +276,7 @@ async fn test_auth_correct_header() {
     let mut config = test_config(10_000, 30_000, "header");
     config.server.auth.accepted_headers = vec![AcceptedHeader {
         name: "x-api-key".to_string(),
-        values: vec!["secret-key".to_string()],
+        values: vec!["secret-key".into()],
     }];
 
     let (url, shutdown) = start_test_server(config).await;
@@ -306,7 +306,7 @@ async fn test_auth_correct_header() {
 async fn test_bearer_auth_valid_token() {
     let mut config = test_config(10_000, 30_000, "bearer");
     config.server.auth.bearer = BearerConfig {
-        tokens: vec!["valid-token-123".to_string()],
+        tokens: vec!["valid-token-123".into()],
         secret_source: None,
         refresh_interval_secs: 300,
     };
@@ -341,7 +341,7 @@ async fn test_bearer_auth_valid_token() {
 async fn test_bearer_auth_invalid_token() {
     let mut config = test_config(10_000, 30_000, "bearer");
     config.server.auth.bearer = BearerConfig {
-        tokens: vec!["valid-token-123".to_string()],
+        tokens: vec!["valid-token-123".into()],
         secret_source: None,
         refresh_interval_secs: 300,
     };
@@ -381,7 +381,7 @@ async fn test_bearer_auth_invalid_token() {
 async fn test_probe_paths_answer_with_bearer_auth_enabled() {
     let mut config = test_config(10_000, 30_000, "bearer");
     config.server.auth.bearer = BearerConfig {
-        tokens: vec!["valid-token-123".to_string()],
+        tokens: vec!["valid-token-123".into()],
         secret_source: None,
         refresh_interval_secs: 300,
     };

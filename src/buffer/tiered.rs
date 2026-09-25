@@ -118,11 +118,11 @@ pub struct InMemoryBuffer<S: Sink> {
 
 impl<S: Sink + Send + Sync + 'static> InMemoryBuffer<S> {
     /// Create a new tiered sink that drops what the primary refuses for good.
-    pub fn new(primary: S, config: &BufferConfig) -> Self {
+    pub fn new(primary: Arc<S>, config: &BufferConfig) -> Self {
         let bound = config.queue_bound();
         debug!(?bound, "In-memory buffer bound");
         Self {
-            primary: Arc::new(primary),
+            primary,
             spill_queue: Mutex::new(SpillQueue::default()),
             bound,
             // Use scalo CircuitBreaker with proper half-open state
@@ -145,6 +145,19 @@ impl<S: Sink + Send + Sync + 'static> InMemoryBuffer<S> {
         let state = self.circuit.state().await;
         // Allow traffic when closed or half-open (probe request)
         matches!(state, CircuitState::Closed | CircuitState::HalfOpen)
+    }
+
+    /// Queue every payload for later delivery, stopping at a full queue. The
+    /// ones queued before it stay queued, so a retry duplicates them.
+    fn queue_all(&self, topic: &str, payloads: &[Bytes]) -> Result<()> {
+        for payload in payloads {
+            if !self.queue_message(topic.to_string(), payload.clone()) {
+                return Err(Error::Transport(
+                    "in-memory queue full, backpressure".into(),
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Queue a message for later delivery. Returns false if queue is full.
@@ -197,10 +210,12 @@ impl<S: Sink + Send + Sync + 'static> InMemoryBuffer<S> {
                     drained += 1;
                     self.circuit.record_success().await;
                 }
-                // Requeued, a record refused for good would hold up every record behind it.
+                // Requeued, a record refused for good would hold up every record
+                // behind it; its sender was answered when it was queued.
                 Err(Error::Rejected(reason)) => {
                     rejected += 1;
-                    self.rejects
+                    let _ = self
+                        .rejects
                         .dispose(&msg.topic, &msg.payload, &reason)
                         .await;
                 }
@@ -307,12 +322,7 @@ impl<S: Sink + Send + Sync + 'static> Sink for InMemoryBuffer<S> {
     async fn send(&self, topic: &str, payload: Bytes) -> Result<()> {
         // Fast path: if circuit is open, queue immediately
         if !self.should_use_hot_path().await {
-            if !self.queue_message(topic.to_string(), payload) {
-                return Err(Error::Transport(
-                    "in-memory queue full, backpressure".into(),
-                ));
-            }
-            return Ok(());
+            return self.queue_all(topic, std::slice::from_ref(&payload));
         }
 
         // Try primary sink
@@ -322,41 +332,64 @@ impl<S: Sink + Send + Sync + 'static> Sink for InMemoryBuffer<S> {
                 Ok(())
             }
             // Queued, a record refused for good would hold up every record behind it.
-            Err(Error::Rejected(reason)) => {
-                self.rejects.dispose(topic, &payload, &reason).await;
+            Err(Error::Rejected(reason)) => self
+                .rejects
+                .dispose(topic, &payload, &reason)
+                .await
+                .answer(),
+            Err(e) => {
+                self.circuit.record_failure().await;
+                debug!(error = %e, topic = topic, "Primary send failed, queuing");
+                self.queue_all(topic, std::slice::from_ref(&payload))
+            }
+        }
+    }
+
+    /// Send the payloads to the primary together, queuing them all on a
+    /// failure.
+    async fn send_batch(&self, topic: &str, payloads: &[Bytes]) -> Result<()> {
+        if !self.should_use_hot_path().await {
+            return self.queue_all(topic, payloads);
+        }
+        match self.primary.send_batch(topic, payloads).await {
+            Ok(()) => {
+                self.circuit.record_success().await;
                 Ok(())
             }
             Err(e) => {
                 self.circuit.record_failure().await;
-                debug!(error = %e, topic = topic, "Primary send failed, queuing");
-                if !self.queue_message(topic.to_string(), payload) {
-                    return Err(Error::Transport(
-                        "in-memory queue full, backpressure".into(),
-                    ));
-                }
-                Ok(())
+                debug!(error = %e, records = payloads.len(), "Primary batch send failed, queuing");
+                self.queue_all(topic, payloads)
             }
         }
     }
 
-    /// Flush the sink and drain queued messages.
-    async fn flush(&self) -> Result<()> {
-        // Flush primary
-        if let Err(e) = self.primary.flush().await {
-            debug!(error = %e, "Primary flush failed");
-        }
+    /// Why the primary refuses `payload` for good.
+    fn refuses(&self, payload: &Bytes) -> Option<String> {
+        self.primary.refuses(payload)
+    }
 
+    /// Drain queued messages into the primary, then flush the primary, so the
+    /// records drained last are flushed too.
+    async fn flush(&self) -> Result<()> {
         // try_drain moves at most DRAIN_BATCH per call, so one call leaves the
         // rest of the queue behind.
         self.drain_until_idle().await;
 
+        if let Err(e) = self.primary.flush().await {
+            debug!(error = %e, "Primary flush failed");
+        }
+
         Ok(())
     }
 
-    /// Check if the sink is healthy.
+    /// Healthy while the primary is up and the queue can still take a record.
+    ///
+    /// A primary whose broker refuses every record can still take them into
+    /// its own queue, so the spill queue stays empty: counting its room as
+    /// health would keep answering success for records nothing will deliver.
     fn is_healthy(&self) -> bool {
-        // Healthy while the primary is up, or the queue can still take a record.
-        self.primary.is_healthy() || !self.spill_queue.lock().is_full(self.bound)
+        self.primary.is_healthy() && !self.spill_queue.lock().is_full(self.bound)
     }
 }
 
@@ -415,7 +448,7 @@ mod tests {
     #[tokio::test]
     async fn test_tiered_sink_success() {
         let primary = TestSink::new(0); // Always succeed
-        let tiered = InMemoryBuffer::new(primary, &test_config());
+        let tiered = InMemoryBuffer::new(Arc::new(primary), &test_config());
 
         let result = tiered.send("test", Bytes::from("data")).await;
         assert!(result.is_ok());
@@ -427,7 +460,7 @@ mod tests {
     #[tokio::test]
     async fn test_tiered_sink_failure_queues() {
         let primary = TestSink::new(100); // Always fail
-        let tiered = InMemoryBuffer::new(primary, &test_config());
+        let tiered = InMemoryBuffer::new(Arc::new(primary), &test_config());
 
         let result = tiered.send("test", Bytes::from("data")).await;
         assert!(result.is_ok()); // Should return Ok (queued)
@@ -441,7 +474,7 @@ mod tests {
     async fn test_tiered_sink_circuit_breaker() {
         let primary = TestSink::new(100); // Always fail
         let config = test_config();
-        let tiered = InMemoryBuffer::new(primary, &config);
+        let tiered = InMemoryBuffer::new(Arc::new(primary), &config);
 
         // Send enough to trip circuit breaker (threshold is 5)
         for _ in 0..6 {
@@ -456,7 +489,7 @@ mod tests {
     /// Fill a buffer whose primary always fails, and return how many records it
     /// took before it refused.
     async fn fill_until_refused(config: &BufferConfig, limit: usize) -> usize {
-        let buffer = InMemoryBuffer::new(TestSink::new(usize::MAX), config);
+        let buffer = InMemoryBuffer::new(Arc::new(TestSink::new(usize::MAX)), config);
         for held in 0..limit {
             if buffer.send("t", Bytes::from("123456789")).await.is_err() {
                 return held;
@@ -530,9 +563,9 @@ mod tests {
     #[tokio::test]
     async fn a_failed_drain_keeps_the_records_behind_it() {
         let buffer = InMemoryBuffer::new(
-            CapSink {
+            Arc::new(CapSink {
                 remaining: AtomicUsize::new(0),
-            },
+            }),
             &test_config(),
         );
 
@@ -552,16 +585,19 @@ mod tests {
         );
     }
 
-    /// Sink that refuses until `accept` is set, and counts its flushes.
+    /// Sink that refuses until `accept` is set, counts its flushes, and counts
+    /// the records it took since the last flush.
     struct FlakySink {
         accept: AtomicBool,
         flushes: AtomicUsize,
+        taken_since_flush: AtomicUsize,
     }
 
     #[async_trait]
     impl Sink for FlakySink {
         async fn send(&self, _topic: &str, _payload: Bytes) -> Result<()> {
             if self.accept.load(Ordering::Relaxed) {
+                self.taken_since_flush.fetch_add(1, Ordering::Relaxed);
                 Ok(())
             } else {
                 Err(Error::Transport("refusing".into()))
@@ -570,6 +606,7 @@ mod tests {
 
         async fn flush(&self) -> Result<()> {
             self.flushes.fetch_add(1, Ordering::Relaxed);
+            self.taken_since_flush.store(0, Ordering::Relaxed);
             Ok(())
         }
 
@@ -582,10 +619,11 @@ mod tests {
     /// that queued them.
     async fn buffer_with_a_full_queue(queued: usize) -> InMemoryBuffer<FlakySink> {
         let buffer = InMemoryBuffer::new(
-            FlakySink {
+            Arc::new(FlakySink {
                 accept: AtomicBool::new(false),
                 flushes: AtomicUsize::new(0),
-            },
+                taken_since_flush: AtomicUsize::new(0),
+            }),
             &test_config(),
         );
 
@@ -633,6 +671,59 @@ mod tests {
 
         buffer.flush().await.unwrap();
         assert_eq!(buffer.primary.flushes.load(Ordering::Relaxed), 1);
+    }
+
+    /// The shutdown flush drains the queue into the primary first, then
+    /// flushes the primary, so the records drained last are flushed too.
+    #[tokio::test]
+    async fn the_flush_follows_the_drain() {
+        let buffer = buffer_with_a_full_queue(DRAIN_BATCH + 1).await;
+
+        buffer.flush().await.unwrap();
+
+        assert_eq!(buffer.stats().await.queue_size, 0);
+        assert_eq!(buffer.primary.flushes.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            buffer.primary.taken_since_flush.load(Ordering::Relaxed),
+            0,
+            "records reached the primary after its flush, so nothing flushed them"
+        );
+    }
+
+    /// A primary that is down makes the buffer unhealthy with room left in
+    /// the queue, so admission stops answering success for records nothing
+    /// will deliver.
+    #[tokio::test]
+    async fn a_down_primary_is_unhealthy_however_much_room_the_queue_has() {
+        let buffer = InMemoryBuffer::new(Arc::new(RefusingSink::down()), &test_config());
+        assert_eq!(buffer.stats().await.queue_size, 0);
+        assert!(!buffer.is_healthy());
+
+        buffer.primary.up.store(true, Ordering::Relaxed);
+        assert!(buffer.is_healthy());
+    }
+
+    /// A batch the primary fails goes into the queue whole, and a full queue
+    /// refuses the batch.
+    #[tokio::test]
+    async fn a_failed_batch_is_queued_whole() {
+        let buffer = InMemoryBuffer::new(Arc::new(RefusingSink::down()), &test_config());
+        let batch = [Bytes::from_static(b"one"), Bytes::from_static(b"two")];
+
+        buffer.send_batch("t", &batch).await.unwrap();
+
+        assert_eq!(buffer.stats().await.queue_size, 2);
+
+        let full = InMemoryBuffer::new(
+            Arc::new(RefusingSink::down()),
+            // Room for one 4-byte record ("t" plus a 3-byte payload), not two.
+            &BufferConfig {
+                memory_limit: 5,
+                pressure_threshold: 1.0,
+                ..Default::default()
+            },
+        );
+        assert!(full.send_batch("t", &batch).await.is_err());
     }
 
     /// Sink that is down until `up` is set, then refuses a `bad` payload for
@@ -693,7 +784,7 @@ mod tests {
     /// Queue `payloads` against a destination that is down, then bring it up
     /// and close the circuit the outage opened.
     async fn queued_behind_an_outage(payloads: &[&'static str]) -> InMemoryBuffer<RefusingSink> {
-        let buffer = InMemoryBuffer::new(RefusingSink::down(), &test_config());
+        let buffer = InMemoryBuffer::new(Arc::new(RefusingSink::down()), &test_config());
         for payload in payloads {
             buffer
                 .send("t", Bytes::from_static(payload.as_bytes()))
@@ -795,7 +886,7 @@ mod tests {
     /// A record refused on the direct path never enters the queue.
     #[tokio::test]
     async fn a_record_rejected_on_the_direct_path_is_not_queued() {
-        let buffer = InMemoryBuffer::new(RefusingSink::down(), &test_config());
+        let buffer = InMemoryBuffer::new(Arc::new(RefusingSink::down()), &test_config());
         buffer.primary.up.store(true, Ordering::Relaxed);
 
         buffer.send("t", Bytes::from_static(b"bad")).await.unwrap();
@@ -807,7 +898,7 @@ mod tests {
     #[tokio::test]
     async fn test_tiered_sink_drain() {
         let primary = TestSink::new(3); // Fail first 3, then succeed
-        let tiered = InMemoryBuffer::new(primary, &test_config());
+        let tiered = InMemoryBuffer::new(Arc::new(primary), &test_config());
 
         // First 3 will fail and queue
         for _ in 0..3 {
@@ -825,7 +916,7 @@ mod tests {
     #[tokio::test]
     async fn test_stats() {
         let primary = TestSink::new(0);
-        let tiered = InMemoryBuffer::new(primary, &test_config());
+        let tiered = InMemoryBuffer::new(Arc::new(primary), &test_config());
 
         let stats = tiered.stats().await;
         assert!(!stats.circuit_open());

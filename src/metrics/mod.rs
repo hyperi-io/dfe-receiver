@@ -807,7 +807,7 @@ fn describe_receiver_metrics() {
     );
     metrics::describe_counter!(
         "receiver_records_rejected_total",
-        "Records a destination refused for good, by outcome (dead_lettered or dropped)"
+        "Records a destination refused for good, by outcome (dead_lettered, dropped or dlq_refused)"
     );
     metrics::describe_counter!(
         "receiver_records_dropped_total",
@@ -841,7 +841,7 @@ fn describe_receiver_metrics() {
     );
     metrics::describe_counter!(
         "receiver_kafka_delivery_failures_total",
-        "Records no broker took after the sender was answered, by librdkafka error code"
+        "Records no broker confirmed, by librdkafka error code; a timed-out record may still have been written"
     );
 
     // EPS

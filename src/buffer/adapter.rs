@@ -41,6 +41,11 @@ impl<S: ReceiverSink + 'static> ScaloSinkAdapter<S> {
     pub fn new(inner: Arc<S>, rejects: Rejects) -> Self {
         Self { inner, rejects }
     }
+
+    /// The receiver sink this adapter sends through.
+    pub fn inner(&self) -> &Arc<S> {
+        &self.inner
+    }
 }
 
 impl<S: ReceiverSink + 'static> TransportBase for ScaloSinkAdapter<S> {
@@ -66,7 +71,7 @@ impl<S: ReceiverSink + 'static> TransportSender for ScaloSinkAdapter<S> {
             // Spilled, a record refused for good would be replayed forever
             // ahead of everything behind it on disk.
             Err(Error::Rejected(reason)) => {
-                self.rejects.dispose(key, &payload, &reason).await;
+                let _ = self.rejects.dispose(key, &payload, &reason).await;
                 SendResult::Ok
             }
             // Transient: surface as Backpressured so the TieredSink spills to

@@ -43,6 +43,9 @@
           "include_common_header": true,
           "header_name": "",
           "header_values": []
+        },
+        "acknowledgements": {
+          "enabled": true
         }
       }
     },
@@ -74,6 +77,10 @@
           "include_common_header": true,
           "header_name": "",
           "header_values": []
+        },
+        "max_message_size": 16777216,
+        "acknowledgements": {
+          "enabled": true
         }
       }
     },
@@ -112,6 +119,10 @@
           "enabled": null,
           "max_bytes": null,
           "on_oversize": null
+        },
+        "max_message_size": 16777216,
+        "acknowledgements": {
+          "enabled": true
         }
       }
     },
@@ -143,6 +154,9 @@
           "include_common_header": true,
           "header_name": "",
           "header_values": []
+        },
+        "acknowledgements": {
+          "enabled": true
         }
       }
     },
@@ -181,6 +195,9 @@
           "enabled": null,
           "max_bytes": null,
           "on_oversize": null
+        },
+        "acknowledgements": {
+          "enabled": true
         }
       }
     },
@@ -259,6 +276,9 @@
           "enabled": null,
           "max_bytes": null,
           "on_oversize": null
+        },
+        "acknowledgements": {
+          "enabled": true
         }
       }
     },
@@ -284,6 +304,9 @@
           "enabled": null,
           "max_bytes": null,
           "on_oversize": null
+        },
+        "acknowledgements": {
+          "enabled": true
         }
       }
     },
@@ -376,7 +399,10 @@
           "ca_secret": null,
           "refresh_interval_secs": 3600
         },
-        "callers": []
+        "callers": [],
+        "acknowledgements": {
+          "enabled": true
+        }
       }
     },
     "raw_capture": {
@@ -458,7 +484,7 @@
       "default": {
         "address": "dfe-loader:6000",
         "transport": "kafka",
-        "timeout_ms": 5000,
+        "timeout_ms": 20000,
         "grpc_endpoint": null
       }
     },
@@ -594,6 +620,13 @@
             "include_common_header": true,
             "header_name": "",
             "header_values": []
+          }
+        },
+        "acknowledgements": {
+          "description": "Answer `/ingest` only once every destination confirmed the records\n(default on). Off answers once they are queued.",
+          "$ref": "#/$defs/AcknowledgementsConfig",
+          "default": {
+            "enabled": true
           }
         }
       }
@@ -753,7 +786,9 @@
           "description": "Legacy: Allowed header values for single header.\nDeprecated: Use `accepted_headers` instead.",
           "type": "array",
           "items": {
-            "type": "string"
+            "type": "string",
+            "x-dfe-secret": true,
+            "writeOnly": true
           },
           "default": []
         }
@@ -771,7 +806,9 @@
           "description": "Allowed values for this header.\nIf empty, any non-empty value is accepted.",
           "type": "array",
           "items": {
-            "type": "string"
+            "type": "string",
+            "x-dfe-secret": true,
+            "writeOnly": true
           },
           "default": []
         }
@@ -788,7 +825,9 @@
           "description": "Static tokens (for dev/simple deployments).\nIn production, use `secret_source` instead.",
           "type": "array",
           "items": {
-            "type": "string"
+            "type": "string",
+            "x-dfe-secret": true,
+            "writeOnly": true
           },
           "default": []
         },
@@ -806,6 +845,17 @@
           "format": "uint64",
           "minimum": 0,
           "default": 300
+        }
+      }
+    },
+    "AcknowledgementsConfig": {
+      "description": "The `acknowledgements` section of an ack-capable transport.\n\nWith `enabled: true` (the default) a source releases its acknowledgement --\na Kafka offset commit, a gRPC or HTTP response -- only once every piece of\nwork built from the record has been delivered, dead-lettered with the DLQ's\nconfirmation, or dropped by policy. A failed delivery withholds it, so the\nrecord is delivered again: duplicates are possible, loss is not.\n\nWith `enabled: false` the source acknowledges at receipt, before the record\nis processed: a crash or a failed delivery loses what was acknowledged.\n\n```yaml\nkafka:\n  acknowledgements:\n    enabled: true\n```",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Hold the source acknowledgement until every piece is delivered.",
+          "type": "boolean",
+          "default": true
         }
       }
     },
@@ -852,6 +902,20 @@
             "include_common_header": true,
             "header_name": "",
             "header_values": []
+          }
+        },
+        "max_message_size": {
+          "description": "Largest decoded push the server takes, in bytes.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "default": 16777216
+        },
+        "acknowledgements": {
+          "description": "Answer a push only once every destination confirmed its events\n(default on). Off answers once they are queued.",
+          "$ref": "#/$defs/AcknowledgementsConfig",
+          "default": {
+            "enabled": true
           }
         }
       }
@@ -918,6 +982,20 @@
             "enabled": null,
             "max_bytes": null,
             "on_oversize": null
+          }
+        },
+        "max_message_size": {
+          "description": "Largest decoded export the gRPC endpoint takes, in bytes.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "default": 16777216
+        },
+        "acknowledgements": {
+          "description": "Answer an export, on either endpoint, only once every destination\nconfirmed its records (default on). Off answers once they are queued.",
+          "$ref": "#/$defs/AcknowledgementsConfig",
+          "default": {
+            "enabled": true
           }
         }
       }
@@ -1017,6 +1095,13 @@
             "header_name": "",
             "header_values": []
           }
+        },
+        "acknowledgements": {
+          "description": "Acknowledge a window only once every destination confirmed its events\n(default on). Off acknowledges once they are queued.",
+          "$ref": "#/$defs/AcknowledgementsConfig",
+          "default": {
+            "enabled": true
+          }
         }
       }
     },
@@ -1086,6 +1171,13 @@
             "enabled": null,
             "max_bytes": null,
             "on_oversize": null
+          }
+        },
+        "acknowledgements": {
+          "description": "Answer a request only once every destination confirmed its events\n(default on). Off answers once they are queued.",
+          "$ref": "#/$defs/AcknowledgementsConfig",
+          "default": {
+            "enabled": true
           }
         }
       }
@@ -1235,6 +1327,13 @@
             "max_bytes": null,
             "on_oversize": null
           }
+        },
+        "acknowledgements": {
+          "description": "Answer a write only once every destination confirmed its samples\n(default on). Off answers once they are queued.",
+          "$ref": "#/$defs/AcknowledgementsConfig",
+          "default": {
+            "enabled": true
+          }
         }
       }
     },
@@ -1281,6 +1380,13 @@
             "enabled": null,
             "max_bytes": null,
             "on_oversize": null
+          }
+        },
+        "acknowledgements": {
+          "description": "Acknowledge a chunk, or read past a message without one, only once\nevery destination confirmed its records (default on). Off does so once\nthey are queued.",
+          "$ref": "#/$defs/AcknowledgementsConfig",
+          "default": {
+            "enabled": true
           }
         }
       }
@@ -1685,6 +1791,13 @@
             "$ref": "#/$defs/WebhookCallerConfig"
           },
           "default": []
+        },
+        "acknowledgements": {
+          "description": "Answer a request only once Kafka confirmed its records (default on).\nOff answers once they are queued.",
+          "$ref": "#/$defs/AcknowledgementsConfig",
+          "default": {
+            "enabled": true
+          }
         }
       }
     },
@@ -2258,11 +2371,11 @@
           "default": "kafka"
         },
         "timeout_ms": {
-          "description": "Per-RPC deadline for the gRPC loader client, in milliseconds (0 = none).",
+          "description": "Per-RPC deadline for the gRPC loader client, in milliseconds (0 = none).\nThe default sits inside the hold a listener gives its sender.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0,
-          "default": 5000
+          "default": 20000
         },
         "grpc_endpoint": {
           "description": "gRPC endpoint URI for loader (only used when transport = \"grpc\").\nDefaults to http://{address} if not set.",
@@ -2304,7 +2417,7 @@
       }
     },
     "SpilloverConfig": {
-      "description": "Disk spillover configuration (opt-in, default disabled).\n\nWhen enabled, failed sends are spilled to disk via scalo's TieredSink\ninstead of being held in an in-memory queue. This provides crash-resilient\nbuffering at the cost of disk I/O on the failure path.",
+      "description": "Disk spillover configuration (opt-in, default disabled).\n\nWhen enabled, failed sends are spilled to disk via scalo's TieredSink\ninstead of being held in an in-memory queue. This provides crash-resilient\nbuffering at the cost of disk I/O on the failure path.\n\nOnly records a listener answers at enqueue are spooled. With every enabled\nlistener holding its answer (`acknowledgements.enabled`, the default) no\nspool is opened: the sender keeps its copy until a destination confirms it.",
       "type": "object",
       "properties": {
         "enabled": {
@@ -2313,7 +2426,7 @@
           "default": false
         },
         "path": {
-          "description": "Directory for spool files.",
+          "description": "Directory for spool files. The bus spools under `kafka/` and each gRPC\ndestination under `grpc/<name>/`, since two sinks cannot share a spool.",
           "type": "string",
           "default": "/var/spool/dfe-receiver"
         },

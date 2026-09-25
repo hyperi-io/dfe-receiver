@@ -198,6 +198,34 @@ async fn test_grpc_push_accepts_gzip() {
     assert_eq!(received.len(), 1);
 }
 
+/// A 10 MiB push is taken: the gRPC listener decodes up to
+/// `grpc.max_message_size` (16 MiB), past tonic's own 4 MiB default.
+#[tokio::test]
+async fn test_grpc_push_takes_ten_mebibytes() {
+    let (loader_endpoint, loader) = crate::common::grpc_destination().await;
+
+    let mut config = Config::default();
+    config.grpc.enabled = true;
+    config.grpc.bind_address = "127.0.0.1:0".to_string();
+    config.destinations.default = "loader".into();
+    config.loader.transport = "grpc".to_string();
+    config.loader.grpc_endpoint = Some(loader_endpoint);
+    config.routing.dlq.enabled = false;
+
+    let (addr, shutdown) = start_receiver_grpc(config).await;
+
+    let mut record = fetcher_record("main");
+    record["blob"] = serde_json::Value::String("x".repeat(10 * 1024 * 1024));
+    let client =
+        VectorCompatClient::connect_lazy(&format!("http://{addr}")).expect("vector client");
+    let result = client.send_events(&[record]).await;
+    let received = drain_loader(&loader, 1).await;
+    shutdown.cancel();
+
+    result.expect("a 10 MiB push_events must be taken");
+    assert_eq!(received.len(), 1);
+}
+
 /// A receiver-based source reaches the loader with `_source` written in.
 ///
 /// The loader route computes no topic, so the matched rule is only recoverable

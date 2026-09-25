@@ -18,10 +18,12 @@
 //! returns once the record is QUEUED; whether a broker ever took it arrives
 //! later on the delivery report, which is where
 //! `receiver_kafka_delivery_failures_total` and the sink's health flag come
-//! from. Enqueue counters and the per-send duration histogram stay on `send`.
+//! from. [`KafkaSink::send_held`] carries a piece of a held request with the
+//! record, and the report settles it. Enqueue counters and the per-send
+//! duration histogram stay on the enqueue.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -35,11 +37,16 @@ use rdkafka::producer::{BaseRecord, DeliveryResult, Producer, ProducerContext, T
 use rdkafka::util::Timeout;
 use rustc_hash::FxHashSet;
 use scalo::transport::kafka::PRODUCER_HIGH_THROUGHPUT;
-use tracing::{debug, error, info, trace};
+use scalo::transport::{DeliveryStatus, PieceFinalizer};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::config::KafkaConfig;
 use crate::error::{Error, Result};
-use crate::sink::Sink;
+use crate::sink::{FailureLatch, SINK_RETRY_AFTER, Sink};
+
+/// librdkafka's delivery opaque: the held request's piece the report settles,
+/// or none for a record answered at enqueue.
+type Settlement = Box<Option<PieceFinalizer>>;
 
 /// How long the shutdown flush gives librdkafka to drain.
 const FLUSH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -47,16 +54,16 @@ const FLUSH_TIMEOUT: Duration = Duration::from_secs(30);
 /// Sampled counter for Kafka enqueue errors (log 1 in 1000).
 static KAFKA_ERRORS: AtomicU64 = AtomicU64::new(0);
 
-/// What the broker did with records the sink has already answered for.
+/// What the broker did with the records the sink queued.
 ///
 /// Written by [`DeliveryObserver`] on librdkafka's own polling thread, read by
 /// [`KafkaSink::is_healthy`].
 struct DeliveryState {
-    /// False from the moment a delivery report comes back failed, true again on
-    /// the next successful one. Kept apart from the enqueue flag because a
-    /// queue that still accepts records would otherwise mask a broker that
-    /// refuses every one of them.
-    delivering: AtomicBool,
+    /// Tripped by a failed delivery report, cleared by the next successful
+    /// one. Kept apart from the enqueue latch because a queue that still
+    /// accepts records would otherwise mask a broker that refuses every one of
+    /// them.
+    failures: FailureLatch,
 
     /// Topics whose first delivery failure has been logged. A refusing broker
     /// reports per record, so the log gets one line per topic and the counters
@@ -72,7 +79,7 @@ struct DeliveryState {
 impl DeliveryState {
     fn new() -> Self {
         Self {
-            delivering: AtomicBool::new(true),
+            failures: FailureLatch::default(),
             logged: RwLock::new(FxHashSet::default()),
             awaiting_report: AtomicU64::new(0),
         }
@@ -97,23 +104,24 @@ impl DeliveryObserver {
     /// A broker took the record.
     fn delivered(&self) {
         metrics::counter!("receiver_kafka_delivered_total").increment(1);
-        self.state.delivering.store(true, Ordering::Relaxed);
+        self.state.failures.clear();
     }
 
-    /// No broker took the record, and the sender was told otherwise long ago.
+    /// No broker confirmed the record. A message timeout can expire while a
+    /// produce request is in flight, so a broker may still have appended it.
     fn failed(&self, topic: &str, err: &KafkaError) {
         metrics::counter!(
             "receiver_kafka_delivery_failures_total",
             "reason" => failure_reason(err)
         )
         .increment(1);
-        self.state.delivering.store(false, Ordering::Relaxed);
+        self.state.failures.trip();
         if self.state.first_failure_on(topic) {
             error!(
                 topic,
                 error = %err,
-                "Kafka delivery failed -- the broker did not take a record the \
-                 receiver had already accepted (first failure on this topic)"
+                "Kafka delivery failed -- no broker confirmed a record \
+                 (first failure on this topic)"
             );
         }
     }
@@ -122,12 +130,21 @@ impl DeliveryObserver {
 impl ClientContext for DeliveryObserver {}
 
 impl ProducerContext for DeliveryObserver {
-    type DeliveryOpaque = ();
+    type DeliveryOpaque = Settlement;
 
-    fn delivery(&self, result: &DeliveryResult<'_>, (): Self::DeliveryOpaque) {
-        match result {
-            Ok(_) => self.delivered(),
-            Err((err, msg)) => self.failed(msg.topic(), err),
+    fn delivery(&self, result: &DeliveryResult<'_>, settlement: Self::DeliveryOpaque) {
+        let status = match result {
+            Ok(_) => {
+                self.delivered();
+                DeliveryStatus::Delivered
+            }
+            Err((err, msg)) => {
+                self.failed(msg.topic(), err);
+                DeliveryStatus::Errored
+            }
+        };
+        if let Some(piece) = *settlement {
+            piece.report(status);
         }
         self.state.awaiting_report.fetch_sub(1, Ordering::Relaxed);
     }
@@ -151,7 +168,13 @@ fn failure_reason(err: &KafkaError) -> String {
 /// operator's `librdkafka_overrides`, then the sizing surface, which wins. Keep
 /// it in step -- a different order runs different batching, compression and ack
 /// settings than the rest of the platform.
-fn producer_client_config(config: &scalo::transport::KafkaConfig) -> ClientConfig {
+///
+/// `message_timeout` sets `message.timeout.ms` among the profile defaults, so
+/// an operator's override still wins.
+fn producer_client_config(
+    config: &scalo::transport::KafkaConfig,
+    message_timeout: Option<Duration>,
+) -> ClientConfig {
     let mut client = ClientConfig::new();
 
     client.set("bootstrap.servers", config.brokers.join(","));
@@ -184,6 +207,9 @@ fn producer_client_config(config: &scalo::transport::KafkaConfig) -> ClientConfi
     for (key, value) in PRODUCER_HIGH_THROUGHPUT {
         client.set(*key, *value);
     }
+    if let Some(timeout) = message_timeout {
+        client.set(MESSAGE_TIMEOUT_KEY, timeout.as_millis().to_string());
+    }
     for (key, value) in &config.librdkafka_overrides {
         client.set(key, value);
     }
@@ -194,28 +220,50 @@ fn producer_client_config(config: &scalo::transport::KafkaConfig) -> ClientConfi
     client
 }
 
+/// The librdkafka key bounding how long a record may wait for its broker.
+const MESSAGE_TIMEOUT_KEY: &str = "message.timeout.ms";
+
 /// Kafka sink backed by a `ThreadedProducer` and its delivery reports.
 pub struct KafkaSink {
     producer: ThreadedProducer<DeliveryObserver>,
     delivery: Arc<DeliveryState>,
 
-    /// False when librdkafka refuses to take a record into its queue, true
-    /// again on the next accepted enqueue.
-    queueing: AtomicBool,
+    /// Tripped when librdkafka refuses to take a record into its queue,
+    /// cleared by the next accepted enqueue.
+    refusing: FailureLatch,
 }
 
 impl KafkaSink {
     /// Create a new Kafka sink.
-    pub fn new(config: &KafkaConfig) -> Result<Self> {
+    ///
+    /// `held_message_timeout` is the `message.timeout.ms` to run with while
+    /// some listener holds its answer for a delivery report, unless the
+    /// operator set one: a request whose hold ran out is resent, and a first
+    /// copy still queued past it would reach the broker as well.
+    pub fn new(config: &KafkaConfig, held_message_timeout: Option<Duration>) -> Result<Self> {
         let scalo_config = config.to_scalo_kafka_config_for_producer();
         let delivery = Arc::new(DeliveryState::new());
         let observer = DeliveryObserver {
             state: Arc::clone(&delivery),
         };
 
-        let producer: ThreadedProducer<DeliveryObserver> = producer_client_config(&scalo_config)
-            .create_with_context(observer)
-            .map_err(|e| Error::Transport(format!("failed to create Kafka producer: {e}")))?;
+        if let Some(held) = held_message_timeout
+            && let Some(set) = scalo_config.librdkafka_overrides.get(MESSAGE_TIMEOUT_KEY)
+            && set.parse::<u128>().is_ok_and(|ms| ms >= held.as_millis())
+        {
+            warn!(
+                message_timeout_ms = %set,
+                held_ms = held.as_millis(),
+                "kafka.librdkafka_overrides sets message.timeout.ms past the time a \
+                 listener holds its answer, so a request can be answered unavailable \
+                 while its record is still queued and later lands twice"
+            );
+        }
+
+        let producer: ThreadedProducer<DeliveryObserver> =
+            producer_client_config(&scalo_config, held_message_timeout)
+                .create_with_context(observer)
+                .map_err(|e| Error::Transport(format!("failed to create Kafka producer: {e}")))?;
 
         info!(
             brokers = ?config.brokers,
@@ -226,8 +274,85 @@ impl KafkaSink {
         Ok(Self {
             producer,
             delivery,
-            queueing: AtomicBool::new(true),
+            refusing: FailureLatch::default(),
         })
+    }
+
+    /// Queue a record whose delivery report settles `piece`.
+    ///
+    /// # Errors
+    ///
+    /// The enqueue error, with the piece when librdkafka handed it back, so the
+    /// caller settles a record refused for good elsewhere. A piece dropped
+    /// unreported counts as `Errored`.
+    pub fn send_held(
+        &self,
+        topic: &str,
+        payload: &Bytes,
+        piece: PieceFinalizer,
+    ) -> std::result::Result<(), (Error, Option<PieceFinalizer>)> {
+        self.enqueue(topic, payload, Box::new(Some(piece)))
+            .map_err(|(e, settlement)| (e, *settlement))
+    }
+
+    /// Hand one record to librdkafka's queue, with the piece its report
+    /// settles.
+    fn enqueue(
+        &self,
+        topic: &str,
+        payload: &Bytes,
+        settlement: Settlement,
+    ) -> std::result::Result<(), (Error, Settlement)> {
+        let start = Instant::now();
+        let bytes = payload.len() as u64;
+
+        trace!(topic, bytes, "Kafka produce enqueue");
+
+        let record: BaseRecord<'_, (), [u8], Settlement> =
+            BaseRecord::with_opaque_to(topic, settlement).payload(payload.as_ref());
+        // Counted before the enqueue, since the report can land before `send` returns.
+        self.delivery
+            .awaiting_report
+            .fetch_add(1, Ordering::Relaxed);
+        match self.producer.send(record) {
+            Ok(()) => {
+                let elapsed = start.elapsed();
+                metrics::histogram!("receiver_kafka_send_duration_seconds")
+                    .record(elapsed.as_secs_f64());
+                metrics::counter!("receiver_kafka_sends_total").increment(1);
+                metrics::counter!("receiver_kafka_bytes_sent_total").increment(bytes);
+                debug!(
+                    topic,
+                    bytes,
+                    duration_us = elapsed.as_micros(),
+                    "Kafka message enqueued"
+                );
+                self.refusing.clear();
+                Ok(())
+            }
+            Err((e, record)) => {
+                self.delivery
+                    .awaiting_report
+                    .fetch_sub(1, Ordering::Relaxed);
+                metrics::counter!("receiver_kafka_send_errors_total").increment(1);
+                // librdkafka refuses the same bytes on every retry, and the queue itself is fine.
+                if e.rdkafka_error_code() == Some(RDKafkaErrorCode::MessageSizeTooLarge) {
+                    return Err((
+                        Error::Rejected(format!("kafka refused the record: {e}")),
+                        record.delivery_opaque,
+                    ));
+                }
+                if scalo::logger::log_sampled(&KAFKA_ERRORS, 1000) {
+                    let total = KAFKA_ERRORS.load(Ordering::Relaxed);
+                    error!(error = %e, topic, total_errors = total, "Kafka send failed (1 in 1000)");
+                }
+                self.refusing.trip();
+                Err((
+                    Error::Transport(format!("kafka send failed: {e}")),
+                    record.delivery_opaque,
+                ))
+            }
+        }
     }
 
     /// [`Sink::flush`] with the timeout as a parameter.
@@ -256,7 +381,7 @@ impl KafkaSink {
 
         if remaining > 0 {
             error!(remaining, "Kafka flush timed out with messages in flight");
-            self.delivery.delivering.store(false, Ordering::Relaxed);
+            self.delivery.failures.trip();
             return Err(Error::Transport(format!(
                 "kafka flush timed out with {remaining} messages still in flight -- \
                  they are lost on exit"
@@ -274,49 +399,8 @@ impl Sink for KafkaSink {
     /// is not delivery: `DeliveryObserver` reports what a broker made of it
     /// later.
     async fn send(&self, topic: &str, payload: Bytes) -> Result<()> {
-        let start = Instant::now();
-        let bytes = payload.len() as u64;
-
-        trace!(topic, bytes, "Kafka produce enqueue");
-
-        let record: BaseRecord<'_, (), [u8]> = BaseRecord::to(topic).payload(payload.as_ref());
-        // Counted before the enqueue, since the report can land before `send` returns.
-        self.delivery
-            .awaiting_report
-            .fetch_add(1, Ordering::Relaxed);
-        match self.producer.send(record) {
-            Ok(()) => {
-                let elapsed = start.elapsed();
-                let elapsed_secs = elapsed.as_secs_f64();
-                metrics::histogram!("receiver_kafka_send_duration_seconds").record(elapsed_secs);
-                metrics::counter!("receiver_kafka_sends_total").increment(1);
-                metrics::counter!("receiver_kafka_bytes_sent_total").increment(bytes);
-                debug!(
-                    topic,
-                    bytes,
-                    duration_us = elapsed.as_micros(),
-                    "Kafka message enqueued"
-                );
-                self.queueing.store(true, Ordering::Relaxed);
-                Ok(())
-            }
-            Err((e, _)) => {
-                self.delivery
-                    .awaiting_report
-                    .fetch_sub(1, Ordering::Relaxed);
-                metrics::counter!("receiver_kafka_send_errors_total").increment(1);
-                // librdkafka refuses the same bytes on every retry, and the queue itself is fine.
-                if e.rdkafka_error_code() == Some(RDKafkaErrorCode::MessageSizeTooLarge) {
-                    return Err(Error::Rejected(format!("kafka refused the record: {e}")));
-                }
-                if scalo::logger::log_sampled(&KAFKA_ERRORS, 1000) {
-                    let total = KAFKA_ERRORS.load(Ordering::Relaxed);
-                    error!(error = %e, topic, total_errors = total, "Kafka send failed (1 in 1000)");
-                }
-                self.queueing.store(false, Ordering::Relaxed);
-                Err(Error::Transport(format!("kafka send failed: {e}")))
-            }
-        }
+        self.enqueue(topic, &payload, Box::new(None))
+            .map_err(|(e, _)| e)
     }
 
     /// Flush queued records, then report what librdkafka could not deliver.
@@ -329,12 +413,13 @@ impl Sink for KafkaSink {
         self.flush_within(FLUSH_TIMEOUT).await
     }
 
-    /// Healthy while librdkafka takes records AND a broker delivers them.
+    /// Healthy while librdkafka takes records AND a broker delivers them, and
+    /// again [`SINK_RETRY_AFTER`] after a failure, so traffic tries it.
     ///
-    /// Two flags rather than one: an accepted enqueue says nothing about the
+    /// Two latches rather than one: an accepted enqueue says nothing about the
     /// broker, so it must not clear a delivery failure.
     fn is_healthy(&self) -> bool {
-        self.queueing.load(Ordering::Relaxed) && self.delivery.delivering.load(Ordering::Relaxed)
+        self.refusing.admits(SINK_RETRY_AFTER) && self.delivery.failures.admits(SINK_RETRY_AFTER)
     }
 }
 
@@ -379,8 +464,88 @@ mod tests {
             "the profile no longer sets a stats interval, so this test proves nothing"
         );
         let scalo_config = KafkaConfig::default().to_scalo_kafka_config_for_producer();
-        let client = producer_client_config(&scalo_config);
+        let client = producer_client_config(&scalo_config, None);
         assert_eq!(client.get("statistics.interval.ms"), Some("0"));
+    }
+
+    /// Holding answers bounds how long a record waits for its broker, and an
+    /// operator's own setting still wins.
+    #[test]
+    fn a_held_message_timeout_applies_unless_the_operator_set_one() {
+        let held = Some(Duration::from_secs(20));
+        let scalo_config = KafkaConfig::default().to_scalo_kafka_config_for_producer();
+        assert_eq!(
+            producer_client_config(&scalo_config, None).get(MESSAGE_TIMEOUT_KEY),
+            None,
+            "answers at enqueue keep librdkafka's own timeout"
+        );
+        assert_eq!(
+            producer_client_config(&scalo_config, held).get(MESSAGE_TIMEOUT_KEY),
+            Some("20000")
+        );
+
+        let overridden = unroutable_config("5000").to_scalo_kafka_config_for_producer();
+        assert_eq!(
+            producer_client_config(&overridden, held).get(MESSAGE_TIMEOUT_KEY),
+            Some("5000")
+        );
+    }
+
+    fn held_ticket() -> (
+        scalo::transport::ack::Tickets,
+        scalo::transport::ack::Ticket,
+    ) {
+        let tickets = scalo::transport::ack::Tickets::new("test", 1 << 20);
+        let ticket = tickets
+            .admit(2, std::time::Instant::now() + Duration::from_secs(30))
+            .expect("admitted");
+        (tickets, ticket)
+    }
+
+    /// A record no broker confirms settles its held request `Errored`.
+    ///
+    /// No broker and no Docker: `message.timeout.ms` expires locally against an
+    /// unroutable address, and the failed report reaches the request.
+    #[tokio::test]
+    async fn a_delivery_failure_reaches_the_held_request() {
+        let sink = KafkaSink::new(&unroutable_config("1000"), None).unwrap();
+        let (_tickets, ticket) = held_ticket();
+
+        sink.send_held("stranded", &Bytes::from_static(b"{}"), ticket.piece())
+            .unwrap_or_else(|(e, _)| panic!("librdkafka queues locally: {e}"));
+
+        let outcome = tokio::time::timeout(Duration::from_secs(20), ticket.outcome())
+            .await
+            .expect("the report arrives once the message timeout expires");
+        assert_eq!(
+            outcome,
+            scalo::transport::ack::TicketOutcome::Errored,
+            "a record no broker confirmed must not answer success"
+        );
+    }
+
+    /// A record refused at enqueue hands its piece back, so the caller can
+    /// dead-letter it rather than fail the whole request.
+    #[tokio::test]
+    async fn a_record_refused_at_enqueue_hands_its_piece_back() {
+        let sink = KafkaSink::new(&unroutable_config("60000"), None).unwrap();
+        let (_tickets, ticket) = held_ticket();
+        let ceiling = scalo::transport::kafka::MESSAGE_MAX_BYTES as usize;
+
+        let refused = sink.send_held(
+            "events",
+            &Bytes::from(vec![b'x'; ceiling + 1]),
+            ticket.piece(),
+        );
+
+        let Err((Error::Rejected(_), Some(piece))) = refused else {
+            panic!("expected a refusal with its piece, got {refused:?}");
+        };
+        piece.report(DeliveryStatus::Rejected);
+        assert_eq!(
+            ticket.outcome().await,
+            scalo::transport::ack::TicketOutcome::Rejected
+        );
     }
 
     #[test]
@@ -406,10 +571,10 @@ mod tests {
         };
 
         observer.failed("events", &timed_out());
-        assert!(!state.delivering.load(Ordering::Relaxed));
+        assert!(state.failures.is_tripped());
 
         observer.delivered();
-        assert!(state.delivering.load(Ordering::Relaxed));
+        assert!(!state.failures.is_tripped());
     }
 
     /// A record no broker ever takes has to reach the sink's health flag.
@@ -419,7 +584,7 @@ mod tests {
     /// its own error code, not a hand-built one.
     #[tokio::test]
     async fn a_broker_that_never_takes_a_record_makes_the_sink_unhealthy() {
-        let sink = KafkaSink::new(&unroutable_config("1000")).unwrap();
+        let sink = KafkaSink::new(&unroutable_config("1000"), None).unwrap();
         sink.send("stranded", Bytes::from_static(b"{}"))
             .await
             .expect("librdkafka queues locally regardless of broker reachability");
@@ -448,8 +613,8 @@ mod tests {
     /// healthy for as long as the local queue had room.
     #[tokio::test]
     async fn an_accepted_enqueue_does_not_clear_a_delivery_failure() {
-        let sink = KafkaSink::new(&unroutable_config("60000")).unwrap();
-        sink.delivery.delivering.store(false, Ordering::Relaxed);
+        let sink = KafkaSink::new(&unroutable_config("60000"), None).unwrap();
+        sink.delivery.failures.trip();
 
         sink.send("stranded", Bytes::from_static(b"{}"))
             .await
@@ -466,7 +631,7 @@ mod tests {
     /// about the next.
     #[tokio::test]
     async fn a_record_over_the_size_ceiling_is_rejected() {
-        let sink = KafkaSink::new(&unroutable_config("60000")).unwrap();
+        let sink = KafkaSink::new(&unroutable_config("60000"), None).unwrap();
         let ceiling = scalo::transport::kafka::MESSAGE_MAX_BYTES as usize;
 
         let result = sink
@@ -481,7 +646,7 @@ mod tests {
     /// count as in flight at the shutdown flush.
     #[tokio::test]
     async fn a_refused_record_leaves_nothing_in_flight() {
-        let sink = KafkaSink::new(&unroutable_config("60000")).unwrap();
+        let sink = KafkaSink::new(&unroutable_config("60000"), None).unwrap();
         let ceiling = scalo::transport::kafka::MESSAGE_MAX_BYTES as usize;
         let refused = sink
             .send("events", Bytes::from(vec![b'x'; ceiling + 1]))
@@ -512,7 +677,7 @@ mod tests {
         config
             .librdkafka_overrides
             .insert("statistics.interval.ms".to_string(), "200".to_string());
-        let sink = KafkaSink::new(&config).unwrap();
+        let sink = KafkaSink::new(&config, None).unwrap();
         sink.send("stranded", Bytes::from_static(b"{}"))
             .await
             .expect("librdkafka queues locally regardless of broker reachability");
@@ -555,7 +720,7 @@ mod tests {
     /// listeners and the metrics server.
     #[tokio::test(flavor = "current_thread")]
     async fn flush_leaves_the_runtime_worker_free() {
-        let sink = KafkaSink::new(&unroutable_config("60000")).unwrap();
+        let sink = KafkaSink::new(&unroutable_config("60000"), None).unwrap();
         sink.send("stranded", Bytes::from_static(b"{}"))
             .await
             .expect("librdkafka queues locally regardless of broker reachability");

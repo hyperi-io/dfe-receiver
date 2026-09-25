@@ -32,7 +32,7 @@ use crate::test_name;
 /// Build a KafkaSink pointed at the given test backend config.
 fn make_sink(kf: &crate::common::KafkaTestConfig) -> KafkaSink {
     let cfg = kf.to_receiver_kafka_config();
-    KafkaSink::new(&cfg).expect("KafkaSink creation failed")
+    KafkaSink::new(&cfg, None).expect("KafkaSink creation failed")
 }
 
 #[tokio::test]
@@ -242,7 +242,7 @@ async fn test_kafka_sink_flush_timeout_is_an_error_not_a_clean_shutdown() {
         brokers: vec!["192.0.2.1:9092".to_string()],
         ..KafkaConfig::default()
     };
-    let sink = KafkaSink::new(&cfg).expect("producer construction is local-only");
+    let sink = KafkaSink::new(&cfg, None).expect("producer construction is local-only");
 
     sink.send("unreachable-topic", Bytes::from(r#"{"stranded":true}"#))
         .await

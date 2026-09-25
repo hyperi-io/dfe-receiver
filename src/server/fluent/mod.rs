@@ -29,7 +29,7 @@ use tracing::{debug, error, info, warn};
 use crate::config::{FluentConfig, RawCapture};
 use crate::error::{Error, Result};
 use crate::metrics::{DropReason, Metrics};
-use crate::pipeline::PipelineState;
+use crate::pipeline::{Acks, PipelineState};
 use crate::server::hold::hold_until_settled;
 use crate::server::ip_filter::IpFilter;
 use crate::server::traits::{BoundAddr, ProtocolHandler};
@@ -63,14 +63,17 @@ async fn send_ack<S: AsyncWrite + Unpin>(stream: &mut S, chunk: &str, peer_addr:
 /// processes through the pipeline.
 ///
 /// A message carrying the `chunk` option is acknowledged only once the
-/// pipeline has settled every record in it. One it could not take gets no
-/// ack and the connection closes, which the Forward protocol's senders read as
-/// "resend the chunk". A message without `chunk` has no ack to withhold, so it
-/// is held, and the socket not read, until the pipeline takes it.
+/// pipeline has settled every record in it, and, with `acks` holding, every
+/// destination confirmed them. One it could not take gets no ack and the
+/// connection closes, which the Forward protocol's senders read as "resend the
+/// chunk". A message without `chunk` has no ack to withhold, so it is held, and
+/// the socket not read, until the pipeline takes it.
+#[allow(clippy::too_many_arguments)]
 async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
     mut stream: S,
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
+    acks: Acks,
     shutdown: CancellationToken,
     peer_addr: SocketAddr,
     max_buffer_size: usize,
@@ -132,7 +135,7 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
 
                     match (fluent_to_json(&msg, raw_capture), chunk_id.as_deref()) {
                         (Ok(payloads), Some(chunk)) => {
-                            let outcome = pipeline.process_batch(&payloads).await;
+                            let outcome = pipeline.process_batch_acked(&payloads, &acks, None).await;
                             if let Some(e) = outcome.unavailable {
                                 // No ack is the Forward protocol's retry signal; closing makes the
                                 // sender see it now rather than at its ack timeout.
@@ -152,7 +155,7 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
                             send_ack(&mut stream, chunk, peer_addr).await;
                         }
                         (Ok(payloads), None) => {
-                            if !hold_until_settled(&pipeline, &payloads, &metrics, "fluent", &shutdown).await {
+                            if !hold_until_settled(&pipeline, &payloads, &metrics, "fluent", &shutdown, &acks).await {
                                 debug!(peer = %peer_addr, "Fluent Forward connection closing (shutdown during a hold)");
                                 return;
                             }
@@ -185,6 +188,7 @@ async fn run_tcp(
     bind_addr: SocketAddr,
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
+    acks: Acks,
     shutdown: CancellationToken,
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
     max_buffer_size: usize,
@@ -223,6 +227,7 @@ async fn run_tcp(
 
                 let pipeline = pipeline.clone();
                 let metrics = metrics.clone();
+                let acks = acks.clone();
                 let conn_shutdown = shutdown.clone();
 
                 if let Some(ref acceptor) = tls_acceptor {
@@ -244,14 +249,14 @@ async fn run_tcp(
                         };
 
                         handle_tcp_connection(
-                            tls_stream, pipeline, metrics, conn_shutdown, peer_addr,
+                            tls_stream, pipeline, metrics, acks, conn_shutdown, peer_addr,
                             max_buffer_size, raw_capture,
                         ).await;
                     });
                 } else {
                     tokio::spawn(async move {
                         handle_tcp_connection(
-                            stream, pipeline, metrics, conn_shutdown, peer_addr,
+                            stream, pipeline, metrics, acks, conn_shutdown, peer_addr,
                             max_buffer_size, raw_capture,
                         ).await;
                     });
@@ -332,10 +337,15 @@ impl ProtocolHandler for FluentHandler {
         // handshake are the whole admission surface on this port.
         let ip_filter = IpFilter::from_config(&self.pipeline.config().server.ip_filter);
 
+        let acks = self
+            .pipeline
+            .acks("fluent", self.config.acknowledgements, None);
+
         run_tcp(
             addr,
             self.pipeline.clone(),
             self.metrics.clone(),
+            acks,
             shutdown,
             tls_acceptor,
             self.config.max_message_size,

@@ -14,7 +14,7 @@ pub mod adapter;
 pub mod rejects;
 pub mod tiered;
 
-pub use rejects::Rejects;
+pub use rejects::{Disposal, Rejects};
 pub use tiered::{InMemoryBuffer, InMemoryBufferStats};
 // Re-export CircuitState from scalo for convenience
 pub use scalo::tiered_sink::CircuitState;
@@ -62,10 +62,32 @@ impl<S: ReceiverSink + 'static> ReceiverSink for SinkBackend<S> {
         }
     }
 
+    async fn send_batch(&self, topic: &str, payloads: &[Bytes]) -> crate::error::Result<()> {
+        match self {
+            SinkBackend::InMemory(buf) => buf.send_batch(topic, payloads).await,
+            // TieredSink decides hot path or spool per record.
+            SinkBackend::Tiered(_) => {
+                for payload in payloads {
+                    self.send(topic, payload.clone()).await?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn refuses(&self, payload: &Bytes) -> Option<String> {
+        match self {
+            SinkBackend::InMemory(buf) => buf.refuses(payload),
+            SinkBackend::Tiered(tiered) => tiered.inner().inner().refuses(payload),
+        }
+    }
+
+    /// Flush the buffer into the primary, then the primary. The spool keeps
+    /// what it holds for the next start.
     async fn flush(&self) -> crate::error::Result<()> {
         match self {
             SinkBackend::InMemory(buf) => buf.flush().await,
-            SinkBackend::Tiered(_) => Ok(()), // scalo handles drain internally
+            SinkBackend::Tiered(tiered) => tiered.inner().inner().flush().await,
         }
     }
 
@@ -139,3 +161,51 @@ impl<S: ReceiverSink + 'static> SinkBackend<S> {
 // Re-export MemoryGuard from scalo as the memory tracker.
 // Replaces the bespoke BufferManager — same API, cgroup-aware auto-detection.
 pub use scalo::memory::{MemoryGuard, MemoryGuardConfig, MemoryPressure};
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    /// Counts the flushes that reach it.
+    #[derive(Default)]
+    struct Flushes(AtomicUsize);
+
+    #[async_trait]
+    impl ReceiverSink for Flushes {
+        async fn send(&self, _topic: &str, _payload: Bytes) -> crate::error::Result<()> {
+            Ok(())
+        }
+
+        async fn flush(&self) -> crate::error::Result<()> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn is_healthy(&self) -> bool {
+            true
+        }
+    }
+
+    /// The spool keeps its records across a restart; the producer's queue
+    /// drains only through the primary's flush.
+    #[tokio::test]
+    async fn a_spilling_backend_flushes_its_primary() {
+        let dir = tempfile::tempdir().expect("spool dir");
+        let primary = Arc::new(Flushes::default());
+        let tiered = scalo::tiered_sink::TieredSink::new(
+            adapter::ScaloSinkAdapter::new(Arc::clone(&primary), Rejects::default()),
+            scalo::tiered_sink::TieredSinkConfig::new(dir.path().join("spool")),
+        )
+        .await
+        .expect("tiered sink");
+        let backend = SinkBackend::Tiered(tiered);
+
+        backend.flush().await.expect("flush");
+        assert_eq!(primary.0.load(Ordering::SeqCst), 1);
+        if let SinkBackend::Tiered(tiered) = backend {
+            tiered.shutdown().await;
+        }
+    }
+}

@@ -42,7 +42,8 @@ Syslog, Fluent Forward, GELF, Prometheus Remote Write, Webhook, Flow [NetFlow
 - Normalises all protocol data to JSON
 - Validates JSON format and optional required fields
 - Routes to Kafka topics based on configurable field extraction rules
-- Buffers in-memory with backpressure via CircuitBreaker by default; disk spillover is opt-in (`buffer.spillover.enabled`)
+- Answers a sender only once every destination confirmed its records (`acknowledgements.enabled`, default on per listener)
+- A listener that answers at enqueue (acknowledgements off, or syslog, GELF and flow) buffers in memory behind a CircuitBreaker; disk spillover is opt-in (`buffer.spillover.enabled`)
 - Supports header auth, bearer tokens, and mTLS authentication
 
 ## Quick Start
@@ -176,18 +177,16 @@ curl -X POST http://localhost:8080/ingest \
 
 **Response Codes:**
 
-- `202 Accepted` - Message queued for delivery. While a destination is
-  unreachable the receiver holds the record in memory and re-sends it when the
-  destination returns
+- `202 Accepted` - Every destination confirmed the request's records. With
+  `server.acknowledgements.enabled: false` it means queued, and the receiver
+  holds the record in memory until an unreachable destination returns
 - `400 Bad Request` - Invalid JSON or validation failure
 - `401 Unauthorized` - Authentication failed
-- `503 Service Unavailable` with `Retry-After: 5` - Under memory pressure, or a
-  destination has been unreachable long enough to fill the in-memory hold (the
-  `buffer.pressure_threshold` share of `buffer.memory_limit`, or 1000 records
-  when no limit is set), or the receiver cannot deliver the record for any
-  other reason that is not the record's own fault. Re-send the request: events
-  of a batched request accepted before the refusal then arrive twice, never
-  zero times
+- `503 Service Unavailable` with `Retry-After: 5` - The records were not
+  confirmed within the hold (25 s), or the receiver is under memory pressure,
+  or it cannot take the record for any other reason that is not the record's
+  own fault. Not confirmed does not mean not written: re-send the request, and
+  a record a broker took late arrives twice, never zero times
 
 Every listener follows the same rule in its own protocol: a record the
 receiver could not take is never answered as accepted. The per-listener
@@ -230,7 +229,8 @@ never from the config file.
 
 **Response Codes:**
 
-- `202 Accepted` - Every record queued (a filtered-out record still answers 202)
+- `202 Accepted` - Every record confirmed, or queued with
+  `webhook.acknowledgements.enabled: false` (a filtered-out record still answers 202)
 - `400 Bad Request` - Body shape does not match the caller's `body` setting,
   or an array element is not an object (the whole request is refused and
   nothing is delivered), or validation refused a record for good
@@ -239,9 +239,9 @@ never from the config file.
   `invalid_header_value`, ...
 - `404 Not Found` - No caller by that name
 - `413 Payload Too Large` - Over `webhook.max_body_size`
-- `503 Service Unavailable` - A record could not be taken (pressure, a full
-  hold, a destination down), with `retry-after`. Records of the same request
-  taken before it arrive again on the retry
+- `503 Service Unavailable` - A record was not confirmed or could not be taken
+  (pressure, a full hold, a destination down), with `retry-after`. Records of
+  the same request already written arrive again on the retry
 
 ### GET /livez
 
@@ -297,7 +297,9 @@ Key metrics:
 - `receiver_bytes_received_total` - Total bytes ingested
 - `receiver_kafka_sends_total` - Messages librdkafka queued
 - `receiver_kafka_delivered_total` - Messages a broker acknowledged
-- `receiver_kafka_delivery_failures_total` - Messages no broker took, by reason
+- `receiver_kafka_delivery_failures_total` - Messages no broker confirmed, by
+  reason; a timed-out message may still have been written
+- `pipeline_delivery_guarantee` - What each listener's answer promises, and why
 - `receiver_records_dropped_total` - Records dropped with no way to tell the
   sender (UDP syslog, a record refused on an acknowledgement-only protocol, a
   held record at shutdown), by transport and reason
@@ -316,7 +318,7 @@ flowchart TB
     H -->|"bytes::Bytes (normalised JSON)"| AUTH["Auth middleware<br/>header / bearer / mTLS"]
     AUTH --> VAL["JSON validation<br/>sonic-rs SIMD, optional field checks"]
     VAL --> RT["Router<br/>zero-copy field extract -> topic name"]
-    RT --> TS["SinkBackend<br/>in-memory buffer + CircuitBreaker (default)<br/>or scalo TieredSink + disk spool (opt-in)"]
+    RT --> TS["Sink<br/>held answers: sent direct, answered on confirmation<br/>answers at enqueue: in-memory buffer + CircuitBreaker<br/>or scalo TieredSink + disk spool (opt-in)"]
     TS --> KAFKA[("Kafka topics<br/>librdkafka, batched / LZ4")]
     TS --> GRPC["Push listeners<br/>dfe-loader, transforms, archiver"]
     RT -. unmatched .-> DEF["main_land topic"]
@@ -406,10 +408,11 @@ dfe-loader), and `chart/` here is NOT what deploys it.
 
 | Path | What is in it |
 |---|---|
-| `src/main.rs` | CLI, config load, the `--emit-*` generators, the startup order #132 is about |
+| `src/main.rs` | CLI, config load, the `--emit-*` generators, the startup order |
 | `src/server/` | One directory per handler, plus `traits.rs` (the `ProtocolHandler` boundary), auth, TLS, IP filter. `mod.rs:125` registers them |
 | `src/pipeline/`, `routing/`, `validation/` | The shared core path every handler feeds |
-| `src/buffer/` | `SinkBackend`: in-memory default, or scalo `TieredSink` with a disk spool |
+| `src/pipeline/acks.rs` | The held answer: admission, hold budget, next-hop deadline |
+| `src/buffer/` | `SinkBackend` for answers at enqueue: in-memory, or scalo `TieredSink` with a disk spool |
 | `src/sink/` | `kafka/`, `grpc/`, `file/`. Kafka owns its producer so delivery reports are visible |
 | `src/config/mod.rs`, `src/deployment.rs` | `Config::validate()`, and the contract plus its drift guards |
 | `chart/`, `proto/` | Generated or vendored. Do not hand-edit |
@@ -441,9 +444,8 @@ not the shipped one.
 | Hand-edit `chart/` or `Dockerfile` | `--emit-helm` / `--emit-dockerfile` | Generated from `src/deployment.rs`, with tests asserting they match |
 | Bump scalo and stop | Bump, regenerate, commit the diff | The generator is in scalo, so the drift guard fails by design |
 | Change `Config::validate()` alone | Update dfe-engine's mirror | It hand-copies this validation, nothing compares them, and they have drifted |
-| Read 202 as delivered | Compare `kafka_sends_total` with `kafka_delivered_total` | 202 is answered at enqueue. Pre-#110 a broker refusal was silent loss |
-| Hunt for `receiver_scaling_pressure` | Read #132 | The orchestrator starts at SIGTERM, so the loop setting it never runs while serving |
-| Enable `buffer.spillover` for a safe shutdown | Read #130 | On the tiered path `flush` never reaches the inner sink |
+| Read 202 as delivered on a listener with acknowledgements off | Compare `kafka_sends_total` with `kafka_delivered_total` | That 202 is answered at enqueue |
+| Read a 503 as "not written" | Expect the retry to duplicate | The hold can expire while a broker is writing the record |
 | Set `VAULT_*` on the test OpenBao | Set `BAO_*` | `VAULT_` is ignored, a random root token is minted, everything 403s silently |
 
 ### Where this sits

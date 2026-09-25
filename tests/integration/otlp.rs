@@ -265,6 +265,31 @@ async fn test_otlp_grpc_logs() {
     otlp.shutdown.cancel();
 }
 
+/// A 10 MiB export is taken: the gRPC endpoint decodes up to
+/// `otlp.max_message_size` (16 MiB), past tonic's own 4 MiB default.
+#[tokio::test]
+async fn test_otlp_grpc_takes_a_ten_mebibyte_export() {
+    use pb::collector::logs::v1::logs_service_client::LogsServiceClient;
+    use pb::common::v1::{AnyValue, any_value};
+
+    let otlp = start_otlp_handler(test_config()).await;
+    let mut request = build_logs_request();
+    request.resource_logs[0].scope_logs[0].log_records[0].body = Some(AnyValue {
+        value: Some(any_value::Value::StringValue("x".repeat(10 * 1024 * 1024))),
+    });
+
+    let mut client = LogsServiceClient::connect(format!("http://{}", otlp.grpc))
+        .await
+        .expect("Failed to connect to OTLP gRPC");
+    let response = client.export(request).await;
+    otlp.shutdown.cancel();
+
+    assert!(
+        response.is_ok(),
+        "a 10 MiB export was refused: {response:?}"
+    );
+}
+
 /// Test sending traces via OTLP gRPC.
 #[tokio::test]
 async fn test_otlp_grpc_traces() {
@@ -528,7 +553,7 @@ async fn test_otlp_bytes_received_tracked() {
 fn bearer_config() -> Config {
     let mut config = test_config();
     config.otlp.auth.mode = "bearer".to_string();
-    config.otlp.auth.bearer.tokens = vec!["otlp-secret".to_string()];
+    config.otlp.auth.bearer.tokens = vec!["otlp-secret".into()];
     config
 }
 

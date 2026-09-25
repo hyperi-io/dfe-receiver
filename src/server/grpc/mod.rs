@@ -29,7 +29,8 @@ use tracing::{debug, info, trace};
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
-use crate::pipeline::{BatchOutcome, PipelineState};
+use crate::pipeline::acks::sender_deadline;
+use crate::pipeline::{Acks, BatchOutcome, PipelineState};
 use crate::server::auth::{AuthMode, AuthState, validate_bearer_auth};
 use crate::server::http::create_auth_state;
 use crate::server::traits::{BoundAddr, ProtocolHandler};
@@ -52,12 +53,17 @@ use pb::vector::{HealthCheckRequest, HealthCheckResponse, PushEventsRequest, Pus
 pub struct VectorService {
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
+    acks: Acks,
 }
 
 impl VectorService {
-    /// Create a new Vector service.
-    pub fn new(pipeline: Arc<PipelineState>, metrics: Arc<Metrics>) -> Self {
-        Self { pipeline, metrics }
+    /// Create a new Vector service, answering as `acks` says.
+    pub fn new(pipeline: Arc<PipelineState>, metrics: Arc<Metrics>, acks: Acks) -> Self {
+        Self {
+            pipeline,
+            metrics,
+            acks,
+        }
     }
 }
 
@@ -69,6 +75,9 @@ impl Vector for VectorService {
     /// and processes through the pipeline. An event the pipeline could not
     /// take answers `UNAVAILABLE`, which the peer retries; one refused for good
     /// answers `INVALID_ARGUMENT`, which it does not.
+    ///
+    /// With `grpc.acknowledgements` on, OK waits until every destination
+    /// confirmed the events, within the peer's own `grpc-timeout`.
     async fn push_events(
         &self,
         request: Request<PushEventsRequest>,
@@ -85,6 +94,7 @@ impl Vector for VectorService {
             return Err(Status::unavailable(OVERLOADED));
         }
 
+        let deadline = sender_deadline(request.metadata());
         let req = request.into_inner();
         let event_count = req.events.len();
         debug!(
@@ -96,9 +106,11 @@ impl Vector for VectorService {
         self.metrics.inc_requests_total("grpc");
 
         let start = std::time::Instant::now();
-        let mut outcome = BatchOutcome::default();
+        // An event that does not convert is refused for good, and the rest go on.
+        let mut refused = BatchOutcome::default();
+        let mut jsons = Vec::with_capacity(event_count);
         for event in &req.events {
-            let result = match convert::event_wrapper_to_json(event) {
+            match convert::event_wrapper_to_json(event) {
                 Ok(json_bytes) => {
                     trace!(
                         transport = "grpc",
@@ -107,14 +119,20 @@ impl Vector for VectorService {
                     );
                     self.metrics
                         .add_bytes_received("grpc", json_bytes.len() as u64);
-                    self.pipeline.process(json_bytes).await
+                    jsons.push(json_bytes);
                 }
-                Err(e) => Err(e),
-            };
-            if outcome.record(result).is_break() {
-                break;
+                Err(e) => {
+                    let _ = refused.record(Err(e));
+                }
             }
         }
+        let mut outcome = self
+            .pipeline
+            .process_batch_acked(&jsons, &self.acks, deadline)
+            .await;
+        outcome.rejected += refused.rejected;
+        outcome.first_rejection = outcome.first_rejection.or(refused.first_rejection);
+        outcome.unavailable = outcome.unavailable.or(refused.unavailable);
 
         let elapsed = start.elapsed();
         self.metrics
@@ -298,7 +316,8 @@ async fn serve(
         .parse()
         .map_err(|e| Error::Config(format!("invalid gRPC bind address: {e}")))?;
 
-    let service = VectorService::new(pipeline, metrics);
+    let acks = pipeline.acks("grpc", config.grpc.acknowledgements, None);
+    let service = VectorService::new(pipeline, metrics, acks);
 
     // Build TLS config if enabled
     let tls_config = if config.grpc.tls.enabled {
@@ -321,7 +340,8 @@ async fn serve(
     // unconditionally, and a server without the encoding enabled rejects the RPC.
     let vector_server = VectorServer::new(service)
         .accept_compressed(tonic::codec::CompressionEncoding::Gzip)
-        .send_compressed(tonic::codec::CompressionEncoding::Gzip);
+        .send_compressed(tonic::codec::CompressionEncoding::Gzip)
+        .max_decoding_message_size(config.grpc.max_message_size);
 
     let router = if let Some(auth) = auth_state {
         let interceptor = make_auth_interceptor(auth);

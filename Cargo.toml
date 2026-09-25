@@ -21,8 +21,9 @@ path = "src/lib.rs"
 doctest = false
 
 [dependencies]
-# scalo shared library (crates.io)
-scalo = { version = ">=2.12.8, <3", features = [
+# scalo shared library (crates.io). The floor admits the unreleased git build the
+# [patch.crates-io] entry below points at; it returns to >=2.13.0 with the patch.
+scalo = { version = ">=2.12.0, <3", features = [
     "config",
     "config-reload",
     "config-schema",
@@ -196,7 +197,7 @@ sha2 = ">=0.11.0, <0.12"
 # transport-grpc-vector-compat is test-only: it gives VectorCompatClient, the
 # same PushEvents client dfe-fetcher and Vector use, so the gRPC ingest path can
 # be driven in-process. Dev-dep features do not reach a release build.
-scalo = { version = ">=2.12.8, <3", features = [
+scalo = { version = ">=2.12.0, <3", features = [
     "deployment-test-support",
     "transport-grpc-vector-compat",
 ] }
@@ -211,6 +212,12 @@ jemalloc = ["dep:tikv-jemallocator"]
 # ["pgo-driver"]` so hyperi-ci's binary-detection skips it on default
 # builds (hyperi-ci >= v1.9.2 respects required-features).
 pgo-driver = ["dep:reqwest"]
+
+[patch.crates-io]
+# Temporary: the source acknowledgement API (scalo::transport::ack) until scalo
+# 2.13.0 is on crates.io. Removed, with the floors above raised to >=2.13.0,
+# before this branch merges.
+scalo = { git = "https://github.com/hyperi-io/scalo-rs", branch = "fix/grpc-held-acks-armed" }
 
 [profile.release]
 lto = "thin"

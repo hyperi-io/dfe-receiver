@@ -36,6 +36,7 @@ use dfe_receiver::server::gelf::GelfHandler;
 use dfe_receiver::server::otlp::OtlpHandler;
 use dfe_receiver::server::syslog::SyslogHandler;
 use dfe_receiver::server::traits::ProtocolHandler;
+use scalo::transport::AcknowledgementsConfig;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -486,6 +487,8 @@ async fn the_ingest_readyz_passes_with_an_unhealthy_sink() {
     config.server.bind_address = http.to_string();
     config.loader.transport = "grpc".to_string();
     config.loader.grpc_endpoint = Some(format!("http://{}", destination.addr()));
+    // A spool opens only for a listener that answers at enqueue.
+    config.server.acknowledgements = AcknowledgementsConfig::new(false);
     // A usage ceiling no real filesystem is under reports the spool full, so the
     // destination's sink reads unhealthy on the first disk poll.
     config.buffer.spillover = SpilloverConfig {

@@ -31,6 +31,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use parking_lot::RwLock;
 use ring::digest;
+use scalo::SensitiveString;
 use scalo::logger::security;
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
@@ -141,8 +142,8 @@ pub struct BearerTokenProvider {
 
 impl BearerTokenProvider {
     /// Create a new bearer token provider with static tokens.
-    pub fn new(tokens: &[String]) -> Self {
-        let hash_set: HashSet<TokenHash> = tokens.iter().map(|t| hash_token(t)).collect();
+    pub fn new(tokens: &[SensitiveString]) -> Self {
+        let hash_set: HashSet<TokenHash> = tokens.iter().map(|t| hash_token(t.expose())).collect();
         let (shutdown_tx, _) = broadcast::channel(1);
 
         Self {
@@ -256,8 +257,8 @@ impl BearerTokenProvider {
     }
 
     /// Update tokens (for rotation callbacks).
-    pub fn update_tokens(&self, tokens: &[String]) {
-        let hash_set: HashSet<TokenHash> = tokens.iter().map(|t| hash_token(t)).collect();
+    pub fn update_tokens(&self, tokens: &[SensitiveString]) {
+        let hash_set: HashSet<TokenHash> = tokens.iter().map(|t| hash_token(t.expose())).collect();
         let count = hash_set.len();
         info!(count, "Bearer tokens updated");
         *self.token_hashes.write() = hash_set;
@@ -507,8 +508,14 @@ pub fn validate_header_auth(
                 return None;
             }
 
-            // Check if value is in allowed list
-            if accepted_header.values.contains(&header_value.to_string()) {
+            // Compared as SHA-256 hashes, as bearer tokens are, so the time taken
+            // says nothing about how much of a secret value matched.
+            let offered = hash_token(header_value);
+            if accepted_header
+                .values
+                .iter()
+                .any(|allowed| hash_token(allowed.expose()) == offered)
+            {
                 debug!(header = %accepted_header.name, "Auth header accepted");
                 return None;
             }
@@ -540,7 +547,7 @@ mod tests {
             mode: "header".to_string(),
             accepted_headers: vec![AcceptedHeader {
                 name: "x-api-key".to_string(),
-                values: vec!["valid-key".to_string(), "another-key".to_string()],
+                values: vec!["valid-key".into(), "another-key".into()],
             }],
             bearer: BearerConfig::default(),
             include_common_header: false,
@@ -555,11 +562,11 @@ mod tests {
             accepted_headers: vec![
                 AcceptedHeader {
                     name: "x-api-key".to_string(),
-                    values: vec!["api-secret".to_string()],
+                    values: vec!["api-secret".into()],
                 },
                 AcceptedHeader {
                     name: "authorization".to_string(),
-                    values: vec!["Bearer token123".to_string()],
+                    values: vec!["Bearer token123".into()],
                 },
                 AcceptedHeader {
                     name: "x-custom-auth".to_string(),
@@ -578,7 +585,7 @@ mod tests {
             mode: "bearer".to_string(),
             accepted_headers: vec![],
             bearer: BearerConfig {
-                tokens: vec!["secret-token-1".to_string(), "secret-token-2".to_string()],
+                tokens: vec!["secret-token-1".into(), "secret-token-2".into()],
                 secret_source: None,
                 refresh_interval_secs: 300,
             },
@@ -716,7 +723,7 @@ mod tests {
             bearer: BearerConfig::default(),
             include_common_header: false,
             header_name: "x-legacy-header".to_string(),
-            header_values: vec!["legacy-value".to_string()],
+            header_values: vec!["legacy-value".into()],
         };
 
         let mut headers = HeaderMap::new();
@@ -731,12 +738,12 @@ mod tests {
             mode: "header".to_string(),
             accepted_headers: vec![AcceptedHeader {
                 name: "x-new-header".to_string(),
-                values: vec!["new-value".to_string()],
+                values: vec!["new-value".into()],
             }],
             bearer: BearerConfig::default(),
             include_common_header: false,
             header_name: "x-legacy-header".to_string(),
-            header_values: vec!["legacy-value".to_string()],
+            header_values: vec!["legacy-value".into()],
         };
 
         let effective = config.effective_headers();
@@ -755,7 +762,7 @@ mod tests {
 
     #[test]
     fn test_bearer_provider_new() {
-        let tokens = vec!["token1".to_string(), "token2".to_string()];
+        let tokens: Vec<SensitiveString> = vec!["token1".into(), "token2".into()];
         let provider = BearerTokenProvider::new(&tokens);
 
         assert_eq!(provider.token_count(), 2);
@@ -766,11 +773,11 @@ mod tests {
 
     #[test]
     fn test_bearer_provider_update_tokens() {
-        let provider = BearerTokenProvider::new(&["old-token".to_string()]);
+        let provider = BearerTokenProvider::new(&["old-token".into()]);
         assert!(provider.is_valid("old-token"));
         assert!(!provider.is_valid("new-token"));
 
-        provider.update_tokens(&["new-token".to_string()]);
+        provider.update_tokens(&["new-token".into()]);
         assert!(!provider.is_valid("old-token"));
         assert!(provider.is_valid("new-token"));
     }
@@ -886,11 +893,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_bearer_token_update() {
-        let provider = BearerTokenProvider::new(&["old_token".to_string()]);
+        let provider = BearerTokenProvider::new(&["old_token".into()]);
         assert!(provider.is_valid("old_token"));
         assert!(!provider.is_valid("new_token"));
 
-        provider.update_tokens(&["new_token".to_string()]);
+        provider.update_tokens(&["new_token".into()]);
         assert!(provider.is_valid("new_token"));
         assert!(!provider.is_valid("old_token"));
     }
@@ -903,12 +910,12 @@ mod tests {
         let shared = SharedConfig::new(config);
 
         // Simulate initial token load
-        let provider = BearerTokenProvider::new(&["initial".to_string()]);
+        let provider = BearerTokenProvider::new(&["initial".into()]);
         assert!(provider.is_valid("initial"));
 
         // Simulate what the reload watcher does on config change
         let new_config = shared.get();
-        let new_tokens = vec!["rotated".to_string()];
+        let new_tokens: Vec<SensitiveString> = vec!["rotated".into()];
         provider.update_tokens(&new_tokens);
         assert!(provider.is_valid("rotated"));
         assert!(!provider.is_valid("initial"));
@@ -924,7 +931,7 @@ mod tests {
         let effective = config.effective_headers();
         assert_eq!(effective.len(), 1);
         assert_eq!(effective[0].name, "x-hyperi-agent");
-        assert_eq!(effective[0].values, vec!["1.0"]);
+        assert_eq!(effective[0].values, vec![SensitiveString::new("1.0")]);
     }
 
     #[test]
@@ -943,14 +950,14 @@ mod tests {
             include_common_header: true,
             accepted_headers: vec![AcceptedHeader {
                 name: "x-hyperi-agent".to_string(),
-                values: vec!["2.0".to_string()],
+                values: vec!["2.0".into()],
             }],
             ..AuthConfig::default()
         };
         let effective = config.effective_headers();
         // Should not add a second x-hyperi-agent
         assert_eq!(effective.len(), 1);
-        assert_eq!(effective[0].values, vec!["2.0"]);
+        assert_eq!(effective[0].values, vec![SensitiveString::new("2.0")]);
     }
 
     // ---------------------------------------------------------------------
@@ -1000,7 +1007,7 @@ mod tests {
         // With hash-based lookup, the timing of validation should not
         // depend on how many characters of the token match a stored one.
         // This is a structural test: verify plaintext is never compared.
-        let provider = BearerTokenProvider::new(&["aaaaaaaaaaaaaaaaaaaa".to_string()]);
+        let provider = BearerTokenProvider::new(&["aaaaaaaaaaaaaaaaaaaa".into()]);
 
         // These tokens all share a prefix with the valid token but
         // must all be rejected in uniform time (hash lookup).
@@ -1021,11 +1028,11 @@ mod tests {
     #[test]
     fn test_bearer_provider_duplicate_tokens_deduped() {
         // Multiple identical tokens should collapse into one hash entry
-        let tokens = vec![
-            "same".to_string(),
-            "same".to_string(),
-            "same".to_string(),
-            "different".to_string(),
+        let tokens: Vec<SensitiveString> = vec![
+            "same".into(),
+            "same".into(),
+            "same".into(),
+            "different".into(),
         ];
         let provider = BearerTokenProvider::new(&tokens);
         assert_eq!(provider.token_count(), 2);
@@ -1036,18 +1043,17 @@ mod tests {
     #[test]
     fn test_bearer_provider_empty_token_never_valid() {
         // Empty token must never authenticate (common injection/misconfig)
-        let provider = BearerTokenProvider::new(&["real-token".to_string()]);
+        let provider = BearerTokenProvider::new(&["real-token".into()]);
         assert!(!provider.is_valid(""));
     }
 
     #[test]
     fn test_bearer_provider_update_clears_old_tokens() {
         // Rotation must fully replace prior set (no leakage of old tokens)
-        let provider =
-            BearerTokenProvider::new(&["a".to_string(), "b".to_string(), "c".to_string()]);
+        let provider = BearerTokenProvider::new(&["a".into(), "b".into(), "c".into()]);
         assert_eq!(provider.token_count(), 3);
 
-        provider.update_tokens(&["d".to_string()]);
+        provider.update_tokens(&["d".into()]);
         assert_eq!(provider.token_count(), 1);
         assert!(!provider.is_valid("a"));
         assert!(!provider.is_valid("b"));

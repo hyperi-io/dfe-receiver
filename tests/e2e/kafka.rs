@@ -243,7 +243,7 @@ async fn test_receiver_kafka_sink() {
     let config = kf.to_receiver_kafka_config();
 
     let topic = test_topic("sink");
-    let sink = KafkaSink::new(&config).expect("Failed to create KafkaSink");
+    let sink = KafkaSink::new(&config, None).expect("Failed to create KafkaSink");
 
     // Send messages through the sink
     for i in 0..10 {

@@ -583,7 +583,7 @@ async fn test_vector_http_bearer_auth() {
     let mut config = test_config();
     config.server.auth.mode = "bearer".to_string();
     config.server.auth.bearer = BearerConfig {
-        tokens: vec!["vector-test-token-42".to_string()],
+        tokens: vec!["vector-test-token-42".into()],
         secret_source: None,
         refresh_interval_secs: 300,
     };

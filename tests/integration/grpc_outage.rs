@@ -10,8 +10,10 @@
 //!
 //! Every record the HTTP ingest answers 202 for must reach the destination
 //! once it returns, including records accepted while it was down and records
-//! accepted after it came back. The destination is scalo's own `GrpcTransport`
-//! in server mode, standing in for dfe-loader in-process.
+//! accepted after it came back. Answered at enqueue, the buffer carries the
+//! outage; held, no record is answered 202 until the destination took it. The
+//! destination is scalo's own `GrpcTransport` in server mode, standing in for
+//! dfe-loader in-process.
 
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
@@ -26,8 +28,8 @@ use dfe_receiver::metrics::Metrics;
 use dfe_receiver::pipeline::Orchestrator;
 use dfe_receiver::server::http::HttpHandler;
 use dfe_receiver::server::traits::ProtocolHandler;
-use scalo::transport::TransportReceiver;
 use scalo::transport::grpc::{GrpcConfig, GrpcTransport};
+use scalo::transport::{AcknowledgementsConfig, TransportReceiver};
 use tokio_util::sync::CancellationToken;
 
 /// Records sent in each phase of the outage.
@@ -39,9 +41,10 @@ const RECOVERY_BUDGET: Duration = Duration::from_secs(90);
 
 /// Start the full receiver -- orchestrator drain tasks and HTTP ingest -- with
 /// every record routed to the gRPC destination at `loader_endpoint`.
-async fn start_receiver(loader_endpoint: &str) -> (String, CancellationToken) {
+async fn start_receiver(loader_endpoint: &str, held: bool) -> (String, CancellationToken) {
     let mut config = Config::default();
     config.server.bind_address = "127.0.0.1:0".to_string();
+    config.server.acknowledgements = AcknowledgementsConfig::new(held);
     config.destinations.default = DestinationRef::One("loader".to_string());
     config.loader.transport = "grpc".to_string();
     config.loader.grpc_endpoint = Some(loader_endpoint.to_string());
@@ -68,7 +71,7 @@ async fn start_receiver(loader_endpoint: &str) -> (String, CancellationToken) {
 }
 
 /// POST one record per id and return the ids answered 202.
-async fn post_ids(url: &str, ids: std::ops::Range<u64>) -> BTreeSet<u64> {
+async fn post_ids(url: &str, ids: impl IntoIterator<Item = u64>) -> BTreeSet<u64> {
     let client = reqwest::Client::new();
     let mut accepted = BTreeSet::new();
     for id in ids {
@@ -98,7 +101,7 @@ async fn every_record_answered_202_arrives_after_a_destination_outage() {
     // The destination's address is fixed up front and held closed through the outage.
     let closed = crate::common::ClosedPort::loopback().expect("hold the destination's port");
     let endpoint = format!("http://{}", closed.addr());
-    let (url, shutdown) = start_receiver(&endpoint).await;
+    let (url, shutdown) = start_receiver(&endpoint, false).await;
 
     let during = post_ids(&url, 0..PER_PHASE).await;
     assert!(
@@ -132,5 +135,53 @@ async fn every_record_answered_202_arrives_after_a_destination_outage() {
         accepted.len(),
         during.len(),
         after.len()
+    );
+}
+
+#[tokio::test]
+async fn a_held_answer_is_202_only_once_the_destination_took_the_record() {
+    let closed = crate::common::ClosedPort::loopback().expect("hold the destination's port");
+    let endpoint = format!("http://{}", closed.addr());
+    let (url, shutdown) = start_receiver(&endpoint, true).await;
+
+    let during = post_ids(&url, 0..PER_PHASE).await;
+    assert!(
+        during.is_empty(),
+        "answered 202 while the destination was down: {during:?}"
+    );
+
+    let destination = closed.release();
+    let loader = GrpcTransport::new(&GrpcConfig::server(&destination.to_string()))
+        .await
+        .expect("bring the destination up on its original address");
+
+    // The sender retries each record until it is answered 202.
+    let deadline = tokio::time::Instant::now() + RECOVERY_BUDGET;
+    let mut accepted = BTreeSet::new();
+    while accepted.len() < PER_PHASE as usize && tokio::time::Instant::now() < deadline {
+        let missing: Vec<u64> = (0..PER_PHASE).filter(|id| !accepted.contains(id)).collect();
+        accepted.extend(post_ids(&url, missing).await);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(
+        accepted.len(),
+        PER_PHASE as usize,
+        "the destination returned but only {accepted:?} were answered 202"
+    );
+
+    // A held 202 means the destination already had the record.
+    let mut received = BTreeSet::new();
+    while let Ok(batch) = loader.recv(100).await {
+        if batch.records.is_empty() {
+            break;
+        }
+        received.extend(batch.records.iter().filter_map(|r| record_id(&r.payload)));
+    }
+    shutdown.cancel();
+
+    let missing: Vec<u64> = accepted.difference(&received).copied().collect();
+    assert!(
+        missing.is_empty(),
+        "answered 202 before the destination had {missing:?}"
     );
 }

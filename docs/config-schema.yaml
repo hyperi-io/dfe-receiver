@@ -38,6 +38,8 @@ properties:
         include_common_header: true
         header_name: ''
         header_values: []
+      acknowledgements:
+        enabled: true
   grpc:
     description: gRPC server configuration.
     $ref: '#/$defs/GrpcConfig'
@@ -64,6 +66,9 @@ properties:
         include_common_header: true
         header_name: ''
         header_values: []
+      max_message_size: 16777216
+      acknowledgements:
+        enabled: true
   otlp:
     description: OTLP receiver configuration.
     $ref: '#/$defs/OtlpConfig'
@@ -96,6 +101,9 @@ properties:
         enabled: null
         max_bytes: null
         on_oversize: null
+      max_message_size: 16777216
+      acknowledgements:
+        enabled: true
   lumberjack:
     description: Lumberjack v2 (Beats) receiver configuration.
     $ref: '#/$defs/LumberjackConfig'
@@ -122,6 +130,8 @@ properties:
         include_common_header: true
         header_name: ''
         header_values: []
+      acknowledgements:
+        enabled: true
   splunk_hec:
     description: Splunk HEC receiver configuration.
     $ref: '#/$defs/SplunkHecConfig'
@@ -154,6 +164,8 @@ properties:
         enabled: null
         max_bytes: null
         on_oversize: null
+      acknowledgements:
+        enabled: true
   syslog:
     description: Syslog receiver configuration.
     $ref: '#/$defs/SyslogConfig'
@@ -220,6 +232,8 @@ properties:
         enabled: null
         max_bytes: null
         on_oversize: null
+      acknowledgements:
+        enabled: true
   fluent:
     description: Fluent Forward protocol receiver configuration.
     $ref: '#/$defs/FluentConfig'
@@ -241,6 +255,8 @@ properties:
         enabled: null
         max_bytes: null
         on_oversize: null
+      acknowledgements:
+        enabled: true
   gelf:
     description: GELF receiver configuration.
     $ref: '#/$defs/GelfConfig'
@@ -317,6 +333,8 @@ properties:
         ca_secret: null
         refresh_interval_secs: 3600
       callers: []
+      acknowledgements:
+        enabled: true
   raw_capture:
     description: |-
       Common raw-payload capture default, inherited by every transport that
@@ -385,7 +403,7 @@ properties:
     default:
       address: dfe-loader:6000
       transport: kafka
-      timeout_ms: 5000
+      timeout_ms: 20000
       grpc_endpoint: null
   buffer:
     description: Buffer and memory configuration.
@@ -501,6 +519,13 @@ $defs:
           include_common_header: true
           header_name: ''
           header_values: []
+      acknowledgements:
+        description: |-
+          Answer `/ingest` only once every destination confirmed the records
+          (default on). Off answers once they are queued.
+        $ref: '#/$defs/AcknowledgementsConfig'
+        default:
+          enabled: true
   RateLimitConfig:
     description: |-
       Per-IP rate limiting configuration using GCRA (token bucket variant).
@@ -673,6 +698,8 @@ $defs:
         type: array
         items:
           type: string
+          x-dfe-secret: true
+          writeOnly: true
         default: []
   AcceptedHeader:
     description: Defines an accepted authentication header.
@@ -688,6 +715,8 @@ $defs:
         type: array
         items:
           type: string
+          x-dfe-secret: true
+          writeOnly: true
         default: []
     required:
     - name
@@ -702,6 +731,8 @@ $defs:
         type: array
         items:
           type: string
+          x-dfe-secret: true
+          writeOnly: true
         default: []
       secret_source:
         description: |-
@@ -719,6 +750,30 @@ $defs:
         format: uint64
         minimum: 0
         default: 300
+  AcknowledgementsConfig:
+    description: |-
+      The `acknowledgements` section of an ack-capable transport.
+
+      With `enabled: true` (the default) a source releases its acknowledgement --
+      a Kafka offset commit, a gRPC or HTTP response -- only once every piece of
+      work built from the record has been delivered, dead-lettered with the DLQ's
+      confirmation, or dropped by policy. A failed delivery withholds it, so the
+      record is delivered again: duplicates are possible, loss is not.
+
+      With `enabled: false` the source acknowledges at receipt, before the record
+      is processed: a crash or a failed delivery loses what was acknowledged.
+
+      ```yaml
+      kafka:
+        acknowledgements:
+          enabled: true
+      ```
+    type: object
+    properties:
+      enabled:
+        description: Hold the source acknowledgement until every piece is delivered.
+        type: boolean
+        default: true
   GrpcConfig:
     description: gRPC server configuration.
     type: object
@@ -757,6 +812,19 @@ $defs:
           include_common_header: true
           header_name: ''
           header_values: []
+      max_message_size:
+        description: Largest decoded push the server takes, in bytes.
+        type: integer
+        format: uint
+        minimum: 0
+        default: 16777216
+      acknowledgements:
+        description: |-
+          Answer a push only once every destination confirmed its events
+          (default on). Off answers once they are queued.
+        $ref: '#/$defs/AcknowledgementsConfig'
+        default:
+          enabled: true
   OtlpConfig:
     description: OTLP (OpenTelemetry Protocol) receiver configuration.
     type: object
@@ -820,6 +888,19 @@ $defs:
           enabled: null
           max_bytes: null
           on_oversize: null
+      max_message_size:
+        description: Largest decoded export the gRPC endpoint takes, in bytes.
+        type: integer
+        format: uint
+        minimum: 0
+        default: 16777216
+      acknowledgements:
+        description: |-
+          Answer an export, on either endpoint, only once every destination
+          confirmed its records (default on). Off answers once they are queued.
+        $ref: '#/$defs/AcknowledgementsConfig'
+        default:
+          enabled: true
   RawCaptureConfig:
     description: |-
       Raw-capture settings as written in config, at either cascade level.
@@ -898,6 +979,13 @@ $defs:
           include_common_header: true
           header_name: ''
           header_values: []
+      acknowledgements:
+        description: |-
+          Acknowledge a window only once every destination confirmed its events
+          (default on). Off acknowledges once they are queued.
+        $ref: '#/$defs/AcknowledgementsConfig'
+        default:
+          enabled: true
   SplunkHecConfig:
     description: |-
       Splunk HEC (HTTP Event Collector) receiver configuration.
@@ -964,6 +1052,13 @@ $defs:
           enabled: null
           max_bytes: null
           on_oversize: null
+      acknowledgements:
+        description: |-
+          Answer a request only once every destination confirmed its events
+          (default on). Off answers once they are queued.
+        $ref: '#/$defs/AcknowledgementsConfig'
+        default:
+          enabled: true
   SyslogConfig:
     description: |-
       Syslog receiver configuration (RFC 5424 + RFC 3164).
@@ -1101,6 +1196,13 @@ $defs:
           enabled: null
           max_bytes: null
           on_oversize: null
+      acknowledgements:
+        description: |-
+          Answer a write only once every destination confirmed its samples
+          (default on). Off answers once they are queued.
+        $ref: '#/$defs/AcknowledgementsConfig'
+        default:
+          enabled: true
   FluentConfig:
     description: |-
       Fluent Forward protocol configuration.
@@ -1152,6 +1254,14 @@ $defs:
           enabled: null
           max_bytes: null
           on_oversize: null
+      acknowledgements:
+        description: |-
+          Acknowledge a chunk, or read past a message without one, only once
+          every destination confirmed its records (default on). Off does so once
+          they are queued.
+        $ref: '#/$defs/AcknowledgementsConfig'
+        default:
+          enabled: true
   GelfConfig:
     description: |-
       GELF (Graylog Extended Log Format) receiver configuration.
@@ -1494,6 +1604,13 @@ $defs:
         items:
           $ref: '#/$defs/WebhookCallerConfig'
         default: []
+      acknowledgements:
+        description: |-
+          Answer a request only once Kafka confirmed its records (default on).
+          Off answers once they are queued.
+        $ref: '#/$defs/AcknowledgementsConfig'
+        default:
+          enabled: true
   WebhookCallerConfig:
     description: 'One webhook caller: a product identity, its secret, its topic.'
     type: object
@@ -1986,11 +2103,13 @@ $defs:
         type: string
         default: kafka
       timeout_ms:
-        description: Per-RPC deadline for the gRPC loader client, in milliseconds (0 = none).
+        description: |-
+          Per-RPC deadline for the gRPC loader client, in milliseconds (0 = none).
+          The default sits inside the hold a listener gives its sender.
         type: integer
         format: uint64
         minimum: 0
-        default: 5000
+        default: 20000
       grpc_endpoint:
         description: |-
           gRPC endpoint URI for loader (only used when transport = "grpc").
@@ -2046,6 +2165,10 @@ $defs:
       When enabled, failed sends are spilled to disk via scalo's TieredSink
       instead of being held in an in-memory queue. This provides crash-resilient
       buffering at the cost of disk I/O on the failure path.
+
+      Only records a listener answers at enqueue are spooled. With every enabled
+      listener holding its answer (`acknowledgements.enabled`, the default) no
+      spool is opened: the sender keeps its copy until a destination confirms it.
     type: object
     properties:
       enabled:
@@ -2053,7 +2176,9 @@ $defs:
         type: boolean
         default: false
       path:
-        description: Directory for spool files.
+        description: |-
+          Directory for spool files. The bus spools under `kafka/` and each gRPC
+          destination under `grpc/<name>/`, since two sinks cannot share a spool.
         type: string
         default: /var/spool/dfe-receiver
       max_usage_percent:

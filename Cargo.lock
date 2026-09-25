@@ -4062,9 +4062,8 @@ dependencies = [
 
 [[package]]
 name = "scalo"
-version = "2.12.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92684375e5d05b039885743081182efc1c5d491de5c1f542690b66a48a1e3d33"
+version = "2.12.0"
+source = "git+https://github.com/hyperi-io/scalo-rs?branch=fix%2Fgrpc-held-acks-armed#d09b7be3ec2b99d0aacdaa146c91470c6938da2e"
 dependencies = [
  "aes-gcm",
  "axum",
@@ -4081,6 +4080,7 @@ dependencies = [
  "file-rotate",
  "governor",
  "hkdf",
+ "hyper-util",
  "libc",
  "lz4_flex",
  "memchr",

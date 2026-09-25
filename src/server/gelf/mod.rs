@@ -29,7 +29,7 @@ use tracing::{debug, error, info, warn};
 use crate::config::{GelfConfig, RawCapture};
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
-use crate::pipeline::PipelineState;
+use crate::pipeline::{Acks, PipelineState};
 use crate::server::hold::hold_until_settled;
 use crate::server::ip_filter::IpFilter;
 use crate::server::traits::{BoundAddr, ProtocolHandler};
@@ -141,7 +141,7 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
                         match gelf_to_json(&raw, raw_capture) {
                             Ok(payload) => {
                                 let held = [payload];
-                                if !hold_until_settled(&pipeline, &held, &metrics, "gelf", &shutdown).await {
+                                if !hold_until_settled(&pipeline, &held, &metrics, "gelf", &shutdown, &Acks::at_enqueue()).await {
                                     debug!(peer = %peer_addr, "GELF TCP connection closing (shutdown during a hold)");
                                     break;
                                 }

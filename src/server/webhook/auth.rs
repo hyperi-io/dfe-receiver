@@ -567,7 +567,7 @@ mod tests {
     }
 
     fn header_verifier(header: &str) -> HeaderVerifier {
-        let provider = Arc::new(BearerTokenProvider::new(&["shared-secret".to_string()]));
+        let provider = Arc::new(BearerTokenProvider::new(&["shared-secret".into()]));
         HeaderVerifier::new("test", header, provider).unwrap()
     }
 

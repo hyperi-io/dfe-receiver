@@ -10,30 +10,38 @@
 //!
 //! Coordinates the flow of messages through validation, routing,
 //! and delivery to sinks with backpressure support.
+//!
+//! A listener that holds its answer ([`acks`]) sends straight to each
+//! destination's sink and answers from what the destinations confirmed. One
+//! that answers at enqueue sends through the buffer in front of the sink.
+
+pub mod acks;
 
 use std::ops::ControlFlow;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use bytes::Bytes;
 use parking_lot::RwLock;
-use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
-
-/// State-change flag for memory pressure log deduplication.
-static PRESSURE_LOGGED: AtomicBool = AtomicBool::new(false);
-
+use rustc_hash::{FxHashMap, FxHashSet};
 use scalo::UnifiedPressure;
 use scalo::dlq::{Dlq, DlqEntry};
 use scalo::logger::security;
+use scalo::transport::AcknowledgementsConfig;
+use scalo::transport::DeliveryStatus;
+use scalo::transport::ack::Ticket;
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, error, info, trace, warn};
 
-use rustc_hash::FxHashMap;
+pub use acks::Acks;
 
 use crate::buffer::{
-    InMemoryBuffer, MemoryGuard, MemoryGuardConfig, MemoryPressure, Rejects, SinkBackend,
+    InMemoryBuffer, InMemoryBufferStats, MemoryGuard, MemoryGuardConfig, MemoryPressure, Rejects,
+    SinkBackend,
 };
-use crate::config::{Config, SharedConfig};
+use crate::config::{BufferConfig, Config, SharedConfig};
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
 use crate::routing::{self, RouteResult, Router};
@@ -44,8 +52,11 @@ use crate::sink::grpc::GrpcSink;
 use crate::sink::kafka::KafkaSink;
 use crate::validation::{ValidationResult, Validator};
 
-// Trace-level logging imports (only used for per-message tracing)
-use tracing::trace;
+/// State-change flag for memory pressure log deduplication.
+static PRESSURE_LOGGED: AtomicBool = AtomicBool::new(false);
+
+/// The bus's spool directory under `buffer.spillover.path`.
+const BUS_SPOOL: &str = "kafka";
 
 /// Tracked bytes released on drop, so a cancelled request cannot leak them.
 ///
@@ -126,23 +137,126 @@ impl BatchOutcome {
     pub fn into_error(self) -> Option<Error> {
         self.unavailable.or(self.first_rejection)
     }
+
+    /// Mark the whole batch for a resend: no record in it counts as settled,
+    /// so a caller re-offering what was not settled re-offers all of it.
+    fn retry_all(&mut self, error: Error) {
+        self.accepted = 0;
+        self.rejected = 0;
+        self.first_rejection = None;
+        self.unavailable = Some(error);
+    }
+}
+
+/// One destination's sink, and the buffer in front of it where some listener
+/// answers at enqueue.
+struct Delivery<S: Sink + 'static> {
+    /// A held answer sends here directly: nothing buffers or spools a record
+    /// whose sender still keeps its copy.
+    primary: Arc<S>,
+    /// An at-enqueue answer sends here. `None` when every enabled listener
+    /// holds its answer, so no buffer or spool is built at all.
+    queued: Option<Arc<SinkBackend<S>>>,
+}
+
+impl<S: Sink + 'static> Delivery<S> {
+    /// The sink, with a buffer in front of it when `queued` and its spool,
+    /// with spillover on, at `spool` under the spillover path.
+    async fn build(
+        primary: S,
+        spool: &Path,
+        buffer: &BufferConfig,
+        rejects: Rejects,
+        queued: bool,
+    ) -> Result<Self> {
+        let primary = Arc::new(primary);
+        let queued = if queued {
+            Some(Arc::new(
+                build_sink_backend(Arc::clone(&primary), spool, buffer, rejects).await?,
+            ))
+        } else {
+            None
+        };
+        Ok(Self { primary, queued })
+    }
+
+    /// The sink an at-enqueue answer sends through.
+    fn at_enqueue(&self) -> &dyn Sink {
+        match &self.queued {
+            Some(queued) => queued.as_ref(),
+            None => self.primary.as_ref(),
+        }
+    }
+
+    fn is_healthy(&self) -> bool {
+        self.at_enqueue().is_healthy()
+    }
+
+    async fn stats(&self) -> Option<InMemoryBufferStats> {
+        match &self.queued {
+            Some(queued) => Some(queued.stats().await),
+            None => None,
+        }
+    }
+
+    /// Start the buffer's drain, where there is a buffer.
+    fn start(&self, shutdown: CancellationToken) {
+        if let Some(queued) = &self.queued {
+            Arc::clone(queued).start_drain_task(shutdown);
+        }
+    }
+
+    async fn flush(&self) -> Result<()> {
+        self.at_enqueue().flush().await
+    }
 }
 
 /// What a named destination resolves to.
 ///
-/// The name is the routing decision; this is the delivery. Every variant keeps
-/// the receiver's own buffer/spillover semantics in front of it, so a
-/// destination that stops accepting back-pressures the HTTP ingest rather than
-/// spilling records to a DLQ a brokerless deployment does not have.
+/// The name is the routing decision; this is the delivery. A destination that
+/// stops accepting back-pressures the ingest rather than spilling records to a
+/// DLQ a brokerless deployment does not have.
 enum DestinationSink {
     /// The bus, using the topic the record's source resolves to, or a topic
     /// fixed by the destination.
     Bus { topic: Option<Arc<str>> },
     /// A scalo Push listener -- a transform, the loader, the archiver.
-    Grpc(Arc<SinkBackend<GrpcSink>>),
+    Grpc(Delivery<GrpcSink>),
     /// `loader.transport: memory` -- no transport, so the record is accepted
     /// and goes nowhere.
     Discard,
+}
+
+/// Where a batch's records go.
+#[derive(Clone, Copy)]
+enum Target<'a> {
+    /// Enriched and routed to the destinations the routing rules pick.
+    Routed,
+    /// Sent to this Kafka topic, which the listener chose.
+    Topic(&'a str),
+}
+
+/// One request's sends: the ticket its answer is held on, and the records
+/// bound for each gRPC destination, sent together once the request is routed.
+struct Dispatch<'t> {
+    ticket: Option<&'t Ticket>,
+    grpc: Vec<(Arc<str>, Vec<Bytes>)>,
+}
+
+impl<'t> Dispatch<'t> {
+    fn new(ticket: Option<&'t Ticket>) -> Self {
+        Self {
+            ticket,
+            grpc: Vec::new(),
+        }
+    }
+
+    fn push_grpc(&mut self, name: &Arc<str>, payload: Bytes) {
+        match self.grpc.iter_mut().find(|(n, _)| n == name) {
+            Some((_, payloads)) => payloads.push(payload),
+            None => self.grpc.push((Arc::clone(name), vec![payload])),
+        }
+    }
 }
 
 /// Shared pipeline state accessible from handlers.
@@ -150,7 +264,7 @@ pub struct PipelineState {
     shared_config: SharedConfig,
     validator: RwLock<Validator>,
     router: RwLock<Router>,
-    kafka_sink: Option<Arc<SinkBackend<KafkaSink>>>,
+    kafka: Option<Delivery<KafkaSink>>,
     /// The named destination set: name -> sink. Built once at startup, since
     /// the endpoints are connections and a chart rolls the pod on any config
     /// change.
@@ -167,6 +281,8 @@ pub struct PipelineState {
     /// check (byte-identical to pre-governor behaviour).
     pressure: Option<Arc<UnifiedPressure>>,
     dlq: Option<Arc<Dlq>>,
+    /// Where a record a destination refuses for good goes.
+    rejects: Rejects,
     /// The listeners readiness waits on, `None` until the server declares them.
     listeners: RwLock<Option<Vec<BoundAddr>>>,
 }
@@ -277,14 +393,26 @@ impl PipelineState {
         // Records a destination refuses for good go to the same DLQ.
         let rejects = Rejects::new(dlq.clone(), metrics);
 
-        // Initialise Kafka sink with buffer wrapper if brokers configured
-        let kafka_sink = if !config.kafka.brokers.is_empty() {
-            let primary = KafkaSink::new(&config.kafka)?;
-            Some(Arc::new(
-                build_sink_backend(primary, &config.buffer, rejects.clone()).await?,
-            ))
-        } else {
+        // A buffer, and its spool, only serve a listener that answers at
+        // enqueue; a held answer sends past them.
+        let at_enqueue = config.answers_at_enqueue();
+        let held_message_timeout = config.holds_answers().then_some(acks::HELD_MESSAGE_TIMEOUT);
+        info!(
+            holds_answers = config.holds_answers(),
+            answers_at_enqueue = at_enqueue,
+            "Listener acknowledgements resolved"
+        );
+
+        let mut spools = FxHashSet::default();
+        let kafka = if config.kafka.brokers.is_empty() {
             None
+        } else {
+            let primary = KafkaSink::new(&config.kafka, held_message_timeout)?;
+            let spool = claim_spool(&mut spools, PathBuf::from(BUS_SPOOL))?;
+            Some(
+                Delivery::build(primary, &spool, &config.buffer, rejects.clone(), at_enqueue)
+                    .await?,
+            )
         };
 
         // Build the named destination set: one sink per destination the config
@@ -297,14 +425,25 @@ impl PipelineState {
             let sink = match destinations_config.named.get(name) {
                 Some(spec) => match (&spec.grpc, &spec.kafka) {
                     (Some(grpc), _) => {
-                        // loader.timeout_ms bounds the loader's own Push RPC; a
+                        // loader.timeout_ms bounds the loader's own RPC; a
                         // declared destination has no timeout key of its own.
-                        let deadline = (name == crate::config::LOADER_DESTINATION)
-                            .then_some(config.loader.timeout_ms);
-                        let primary = GrpcSink::new(&grpc.endpoint, deadline).await?;
-                        DestinationSink::Grpc(Arc::new(
-                            build_sink_backend(primary, &config.buffer, rejects.clone()).await?,
-                        ))
+                        let deadline = if name == crate::config::LOADER_DESTINATION {
+                            config.loader.timeout_ms
+                        } else {
+                            acks::NEXT_HOP_DEADLINE_MS
+                        };
+                        let primary = GrpcSink::new(&grpc.endpoint, Some(deadline)).await?;
+                        let spool = claim_spool(&mut spools, grpc_spool(name))?;
+                        DestinationSink::Grpc(
+                            Delivery::build(
+                                primary,
+                                &spool,
+                                &config.buffer,
+                                rejects.clone(),
+                                at_enqueue,
+                            )
+                            .await?,
+                        )
                     }
                     (None, Some(bus)) => DestinationSink::Bus {
                         topic: bus.topic.as_deref().map(Arc::from),
@@ -339,12 +478,13 @@ impl PipelineState {
             shared_config,
             validator: RwLock::new(validator),
             router: RwLock::new(router),
-            kafka_sink,
+            kafka,
             destinations,
             file_sink,
             memory_guard,
             pressure,
             dlq,
+            rejects,
             listeners: RwLock::new(None),
         })
     }
@@ -359,6 +499,23 @@ impl PipelineState {
         self.shared_config.clone()
     }
 
+    /// The acknowledgement setting of listener `transport`, holding at most a
+    /// quarter of the memory limit unanswered.
+    #[must_use]
+    pub fn acks(
+        &self,
+        transport: &'static str,
+        config: AcknowledgementsConfig,
+        request_timeout: Option<Duration>,
+    ) -> Acks {
+        Acks::new(
+            transport,
+            config,
+            request_timeout,
+            acks::max_held_bytes(self.memory_guard.limit_bytes()),
+        )
+    }
+
     /// Admission check for a request: shed with 503 when this is false.
     ///
     /// Consults sink health as well as pressure, because accepting a record
@@ -371,7 +528,7 @@ impl PipelineState {
         }
 
         // Check sink health
-        if let Some(ref kafka) = self.kafka_sink
+        if let Some(ref kafka) = self.kafka
             && !kafka.is_healthy()
         {
             return false;
@@ -443,66 +600,141 @@ impl PipelineState {
         self.under_pressure()
     }
 
-    /// Process a message through the pipeline.
-    ///
-    /// This is a HOT PATH function.
-    #[inline]
-    pub async fn process(&self, payload: Bytes) -> Result<()> {
-        // Check for backpressure
+    /// The inbound brake: refuse a request while the pipeline is under
+    /// pressure, logging the edge in each direction once.
+    fn brake(&self) -> Result<()> {
         if self.should_apply_backpressure() {
             if scalo::logger::log_state_change(&PRESSURE_LOGGED, true) {
                 warn!("Memory pressure HIGH -- backpressure active");
             }
             return Err(Error::Buffer("server under memory pressure".into()));
         }
-        // Log recovery when pressure drops
         if scalo::logger::log_state_change(&PRESSURE_LOGGED, false) {
             info!("Memory pressure recovered");
         }
+        Ok(())
+    }
+
+    /// Process a message through the pipeline, answered at enqueue.
+    ///
+    /// This is a HOT PATH function.
+    #[inline]
+    pub async fn process(&self, payload: Bytes) -> Result<()> {
+        self.brake()?;
 
         // Tracked for the life of this future.
         let _lease = MemoryLease::acquire(&self.memory_guard, payload.len() as u64);
 
-        self.process_inner(payload).await
+        let mut dispatch = Dispatch::new(None);
+        self.process_inner(payload, Target::Routed, &mut dispatch)
+            .await?;
+        self.send_grpc(dispatch).await
     }
 
-    /// Process a batch of messages through the pipeline.
+    /// Process a batch of messages, answered at enqueue.
     ///
     /// Amortises overhead: single backpressure check, single memory tracking
     /// update, and per-message process_inner() calls. A record refused for
     /// good does not stop the rest; a retryable failure does, see
     /// [`BatchOutcome`].
     pub async fn process_batch(&self, payloads: &[Bytes]) -> BatchOutcome {
+        self.run(payloads, Target::Routed, None).await
+    }
+
+    /// Process a batch for a listener with the setting `acks`, whose sender
+    /// allows `sender_deadline`.
+    ///
+    /// Holding, the outcome counts every record taken only once every
+    /// destination confirmed it; anything short of that is a resend of the
+    /// whole batch.
+    pub async fn process_batch_acked(
+        &self,
+        payloads: &[Bytes],
+        acks: &Acks,
+        sender_deadline: Option<Duration>,
+    ) -> BatchOutcome {
+        self.run(payloads, Target::Routed, Some((acks, sender_deadline)))
+            .await
+    }
+
+    /// [`process_batch_acked`](Self::process_batch_acked) to a Kafka topic
+    /// the listener chose, with no routing or enrichment. On the test-only
+    /// memory transport (`loader.transport: memory`, refused at startup) there
+    /// is no broker and a valid record is accepted and dropped.
+    pub async fn process_batch_to_topic(
+        &self,
+        payloads: &[Bytes],
+        topic: &str,
+        acks: &Acks,
+    ) -> BatchOutcome {
+        self.run(payloads, Target::Topic(topic), Some((acks, None)))
+            .await
+    }
+
+    /// Run a batch to `target`, held on a ticket when `hold` admits one.
+    async fn run(
+        &self,
+        payloads: &[Bytes],
+        target: Target<'_>,
+        hold: Option<(&Acks, Option<Duration>)>,
+    ) -> BatchOutcome {
         let mut outcome = BatchOutcome::default();
         if payloads.is_empty() {
             return outcome;
         }
-
-        // Single backpressure check for the entire batch
-        if self.should_apply_backpressure() {
-            if scalo::logger::log_state_change(&PRESSURE_LOGGED, true) {
-                warn!("Memory pressure HIGH -- backpressure active (batch)");
-            }
-            outcome.unavailable = Some(Error::Buffer("server under memory pressure".into()));
+        if let Err(e) = self.brake() {
+            outcome.unavailable = Some(e);
             return outcome;
         }
-        if scalo::logger::log_state_change(&PRESSURE_LOGGED, false) {
-            info!("Memory pressure recovered");
-        }
 
-        // One lease for the whole batch, held across every message.
+        // One lease for the whole batch, held until its answer.
         let total_bytes: u64 = payloads.iter().map(|p| p.len() as u64).sum();
         let _lease = MemoryLease::acquire(&self.memory_guard, total_bytes);
 
+        let ticket = match hold.and_then(|(acks, deadline)| acks.admit(total_bytes, deadline)) {
+            None => None,
+            Some(Ok(ticket)) => Some(ticket),
+            Some(Err(refused)) => {
+                outcome.unavailable = Some(Error::Buffer(format!(
+                    "held answers refused a request: {refused}"
+                )));
+                return outcome;
+            }
+        };
+
+        let mut dispatch = Dispatch::new(ticket.as_ref());
         for payload in payloads {
-            if outcome
-                .record(self.process_inner(payload.clone()).await)
-                .is_break()
-            {
+            let result = self
+                .process_inner(payload.clone(), target, &mut dispatch)
+                .await;
+            if outcome.record(result).is_break() {
                 break;
             }
         }
+        if let Err(e) = self.send_grpc(dispatch).await {
+            outcome.retry_all(e);
+        }
 
+        let Some(ticket) = ticket else {
+            return outcome;
+        };
+        // A held answer is all or nothing: the sender resends the whole batch.
+        if let Some(e) = outcome.unavailable.take() {
+            outcome.retry_all(e);
+            return outcome;
+        }
+        let answered = ticket.outcome().await;
+        if !answered.is_success() {
+            debug!(
+                outcome = answered.as_str(),
+                records = payloads.len(),
+                "Destinations did not confirm the batch; answering retryable"
+            );
+            outcome.retry_all(Error::Transport(format!(
+                "delivery not confirmed ({})",
+                answered.as_str()
+            )));
+        }
         outcome
     }
 
@@ -557,7 +789,12 @@ impl PipelineState {
 
     /// Inner processing logic (after backpressure check).
     #[inline]
-    async fn process_inner(&self, payload: Bytes) -> Result<()> {
+    async fn process_inner(
+        &self,
+        payload: Bytes,
+        target: Target<'_>,
+        dispatch: &mut Dispatch<'_>,
+    ) -> Result<()> {
         trace!(bytes = payload.len(), "Processing message");
 
         // Validate (read guard dropped before any .await)
@@ -569,7 +806,7 @@ impl PipelineState {
             ValidationResult::Dlq(reason) => {
                 debug!(reason = %reason, bytes = payload.len(), "Message validation failed, routing to DLQ");
                 security::input_validation_failure("json_validate", &reason, None);
-                return self.send_to_dlq(&payload, &reason).await;
+                return self.send_to_dlq(&payload, &reason, dispatch).await;
             }
             ValidationResult::Reject(reason) => {
                 debug!(reason = %reason, bytes = payload.len(), "Message rejected by validator");
@@ -578,6 +815,16 @@ impl PipelineState {
             }
         }
 
+        match target {
+            Target::Routed => self.process_routed(payload, dispatch).await,
+            // The memory transport has no broker for a topic the listener picked.
+            Target::Topic(_) if self.kafka.is_none() && self.discards() => Ok(()),
+            Target::Topic(topic) => self.send_to_kafka(topic, &payload, dispatch).await,
+        }
+    }
+
+    /// Enrich, route and send a validated record.
+    async fn process_routed(&self, payload: Bytes, dispatch: &mut Dispatch<'_>) -> Result<()> {
         // Enrich (only when common header / enrichment enabled)
         let payload = if self.enrichment_enabled() {
             let enriched = Self::enrich_payload(payload);
@@ -608,7 +855,7 @@ impl PipelineState {
                 ref destinations,
                 ref topic,
             } => {
-                self.send_to_destinations(destinations, topic.as_deref(), &payload)
+                self.send_to_destinations(destinations, topic.as_deref(), &payload, dispatch)
                     .await?;
                 trace!(
                     destinations = destinations.len(),
@@ -619,7 +866,7 @@ impl PipelineState {
                 );
             }
             RouteResult::Dlq(ref topic) => {
-                self.send_to_kafka(topic, payload.clone()).await?;
+                self.send_to_kafka(topic, &payload, dispatch).await?;
                 trace!(
                     topic = %topic,
                     bytes = payload.len(),
@@ -639,56 +886,30 @@ impl PipelineState {
         Ok(())
     }
 
-    /// Process a message, sending directly to a specific Kafka topic.
-    ///
-    /// Skips routing but still applies validation and backpressure.
-    /// Used by protocol handlers that handle their own protocol-to-topic mapping.
-    ///
-    /// On the test-only memory transport (`loader.transport: memory`, refused
-    /// at startup) there is no broker and a valid record is accepted and
-    /// dropped, as the routed path does.
+    /// Send one record to a Kafka topic: through the buffer at enqueue, or
+    /// straight to the producer with a piece its delivery report settles.
     #[inline]
-    pub async fn process_to_topic(&self, payload: Bytes, topic: &str) -> Result<()> {
-        // Check for backpressure
-        if self.should_apply_backpressure() {
-            if scalo::logger::log_state_change(&PRESSURE_LOGGED, true) {
-                warn!("Memory pressure HIGH -- backpressure active");
-            }
-            return Err(Error::Buffer("server under memory pressure".into()));
-        }
-        // Log recovery when pressure drops
-        if scalo::logger::log_state_change(&PRESSURE_LOGGED, false) {
-            info!("Memory pressure recovered");
-        }
-
-        // Tracked for the life of this future.
-        let _lease = MemoryLease::acquire(&self.memory_guard, payload.len() as u64);
-
-        // Validate (acquire and release lock before any await)
-        let validation = self.validator.read().validate(&payload);
-        match validation {
-            ValidationResult::Valid if self.kafka_sink.is_none() && self.discards() => Ok(()),
-            ValidationResult::Valid => self.send_to_kafka(topic, payload).await,
-            ValidationResult::Dlq(reason) => {
-                debug!(reason = %reason, "Message validation failed, routing to DLQ");
-                security::input_validation_failure("json_validate", &reason, None);
-                self.send_to_dlq(&payload, &reason).await
-            }
-            ValidationResult::Reject(reason) => {
-                security::input_validation_failure("json_validate", &reason, None);
-                Err(Error::Validation(reason))
-            }
-        }
-    }
-
-    /// Send message to Kafka.
-    #[inline]
-    async fn send_to_kafka(&self, topic: &str, payload: Bytes) -> Result<()> {
-        let Some(ref sink) = self.kafka_sink else {
+    async fn send_to_kafka(
+        &self,
+        topic: &str,
+        payload: &Bytes,
+        dispatch: &Dispatch<'_>,
+    ) -> Result<()> {
+        let Some(ref kafka) = self.kafka else {
             return Err(Error::Config("Kafka sink not configured".into()));
         };
-
-        sink.send(topic, payload).await
+        let Some(ticket) = dispatch.ticket else {
+            return kafka.at_enqueue().send(topic, payload.clone()).await;
+        };
+        match kafka.primary.send_held(topic, payload, ticket.piece()) {
+            Ok(()) => Ok(()),
+            Err((Error::Rejected(reason), Some(piece))) => {
+                self.rejects
+                    .dispose_held(topic, payload, &reason, piece)
+                    .await
+            }
+            Err((e, _unsettled)) => Err(e),
+        }
     }
 
     /// Whether the destination set holds the memory transport's discard sink.
@@ -705,17 +926,17 @@ impl PipelineState {
     /// that already accepted sees it twice -- at-least-once, duplicates never
     /// loss.
     ///
-    /// On the bus, accepted means librdkafka queued the record, not that a
-    /// broker holds it: the verdict arrives later on a delivery report, and a
-    /// record refused then is lost with the sender already answered. That
-    /// failure shows up as `receiver_kafka_delivery_failures_total` and an
-    /// unhealthy sink, never as an error on the request.
+    /// A gRPC destination's records are collected in `dispatch` and sent
+    /// together by [`send_grpc`](Self::send_grpc). At enqueue, the bus counts
+    /// a record accepted once librdkafka queued it; a held answer waits for
+    /// its delivery report.
     #[inline]
     async fn send_to_destinations(
         &self,
         destinations: &[Arc<str>],
         topic: Option<&str>,
         payload: &Bytes,
+        dispatch: &mut Dispatch<'_>,
     ) -> Result<()> {
         for name in destinations {
             let Some(sink) = self.destinations.get(name.as_ref()) else {
@@ -723,31 +944,97 @@ impl PipelineState {
                     "destination '{name}' is not configured"
                 )));
             };
-            // Bytes clone is a refcount bump, not a payload copy.
             match sink {
                 DestinationSink::Bus { topic: fixed } => {
                     let topic = fixed.as_deref().or(topic).ok_or_else(|| {
                         Error::Config(format!("destination '{name}' resolved no topic"))
                     })?;
-                    self.send_to_kafka(topic, payload.clone()).await?;
+                    self.send_to_kafka(topic, payload, dispatch).await?;
                 }
                 // A gRPC listener takes the record itself, so it is sent with
                 // no wire key -- the source travels inside the record.
-                DestinationSink::Grpc(sink) => sink.send("", payload.clone()).await?,
+                DestinationSink::Grpc(delivery) => match delivery.primary.refuses(payload) {
+                    // Never batched: the batch would leave it out and report it sent.
+                    Some(reason) => self.settle_refused("", payload, &reason, dispatch).await?,
+                    // Bytes clone is a refcount bump, not a payload copy.
+                    None => dispatch.push_grpc(name, payload.clone()),
+                },
                 DestinationSink::Discard => {}
             }
         }
         Ok(())
     }
 
-    /// Send message to DLQ via unified scalo module (cascade: Kafka -> file).
+    /// Send each gRPC destination's records from `dispatch` in one batch.
+    ///
+    /// # Errors
+    ///
+    /// The first destination's failure; a held answer's piece for it is then
+    /// left unreported, which settles it `Errored`.
+    async fn send_grpc(&self, dispatch: Dispatch<'_>) -> Result<()> {
+        let Dispatch { ticket, grpc } = dispatch;
+        for (name, payloads) in grpc {
+            let Some(DestinationSink::Grpc(delivery)) = self.destinations.get(name.as_ref()) else {
+                return Err(Error::Config(format!(
+                    "destination '{name}' is not a gRPC destination"
+                )));
+            };
+            match ticket {
+                None => delivery.at_enqueue().send_batch("", &payloads).await?,
+                Some(ticket) => {
+                    let piece = ticket.piece();
+                    delivery.primary.send_batch("", &payloads).await?;
+                    piece.report(DeliveryStatus::Delivered);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Settle a record a destination refuses for good: dead-letter it, or
+    /// drop it where no DLQ is configured.
+    async fn settle_refused(
+        &self,
+        topic: &str,
+        payload: &Bytes,
+        reason: &str,
+        dispatch: &Dispatch<'_>,
+    ) -> Result<()> {
+        match dispatch.ticket {
+            Some(ticket) => {
+                self.rejects
+                    .dispose_held(topic, payload, reason, ticket.piece())
+                    .await
+            }
+            None => self.rejects.dispose(topic, payload, reason).await.answer(),
+        }
+    }
+
+    /// Send a record validation refused to the DLQ via the unified scalo
+    /// module (cascade: Kafka -> file).
+    ///
+    /// Held, the record counts as settled only once the DLQ confirmed the
+    /// write.
     #[inline]
-    async fn send_to_dlq(&self, payload: &Bytes, reason: &str) -> Result<()> {
+    async fn send_to_dlq(
+        &self,
+        payload: &Bytes,
+        reason: &str,
+        dispatch: &mut Dispatch<'_>,
+    ) -> Result<()> {
         if let Some(ref dlq) = self.dlq {
             let entry = DlqEntry::new("receiver", reason, payload.to_vec());
-            dlq.send(entry)
+            let Some(ticket) = dispatch.ticket else {
+                return dlq
+                    .send(entry)
+                    .await
+                    .map_err(|e| Error::Config(format!("DLQ send failed: {e}")));
+            };
+            let piece = ticket.piece();
+            crate::buffer::rejects::dead_letter_confirmed(dlq, entry)
                 .await
-                .map_err(|e| Error::Config(format!("DLQ send failed: {e}")))?;
+                .map_err(|e| Error::Transport(format!("DLQ did not confirm the write: {e}")))?;
+            piece.report(DeliveryStatus::Rejected);
             Ok(())
         } else {
             // With no DLQ configured the record follows the routing table, so a
@@ -755,12 +1042,12 @@ impl PipelineState {
             // record.
             let dlq_route = { self.router.read().route_dlq(reason) };
             match dlq_route {
-                RouteResult::Dlq(topic) => self.send_to_kafka(&topic, payload.clone()).await,
+                RouteResult::Dlq(topic) => self.send_to_kafka(&topic, payload, dispatch).await,
                 RouteResult::Send {
                     ref destinations,
                     ref topic,
                 } => {
-                    self.send_to_destinations(destinations, topic.as_deref(), payload)
+                    self.send_to_destinations(destinations, topic.as_deref(), payload, dispatch)
                         .await
                 }
             }
@@ -785,8 +1072,9 @@ impl PipelineState {
 
         // Kafka sink stats
         let mut total_queue = 0u64;
-        if let Some(ref kafka) = self.kafka_sink {
-            let stats = kafka.stats().await;
+        if let Some(ref kafka) = self.kafka
+            && let Some(stats) = kafka.stats().await
+        {
             total_queue += stats.queue_size as u64;
             metrics.set_circuit_state(stats.circuit_state, stats.consecutive_failures);
         }
@@ -795,7 +1083,7 @@ impl PipelineState {
         for sink in self.destinations.values() {
             let queue = match sink {
                 DestinationSink::Bus { .. } | DestinationSink::Discard => 0,
-                DestinationSink::Grpc(s) => s.stats().await.queue_size,
+                DestinationSink::Grpc(s) => s.stats().await.map_or(0, |stats| stats.queue_size),
             };
             total_queue += queue as u64;
         }
@@ -860,11 +1148,41 @@ impl PipelineState {
     }
 }
 
-/// Carry the receiver's spillover settings onto scalo's `TieredSink`.
+/// The spool directory of gRPC destination `name`, relative to the spillover
+/// path: a path segment of its own, with anything outside `[A-Za-z0-9_-]`
+/// replaced.
+fn grpc_spool(name: &str) -> PathBuf {
+    let segment: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    Path::new("grpc").join(segment)
+}
+
+/// Take `spool` for one sink, refusing a second sink the same directory.
+fn claim_spool(claimed: &mut FxHashSet<PathBuf>, spool: PathBuf) -> Result<PathBuf> {
+    if !claimed.insert(spool.clone()) {
+        return Err(Error::Config(format!(
+            "two destinations would share the spool directory {} -- rename one",
+            spool.display()
+        )));
+    }
+    Ok(spool)
+}
+
+/// Carry the receiver's spillover settings onto scalo's `TieredSink`, spooling
+/// under `spool` within the spillover path.
 fn spillover_config(
     spillover: &crate::config::SpilloverConfig,
+    spool: &Path,
 ) -> scalo::tiered_sink::TieredSinkConfig {
-    let mut config = scalo::tiered_sink::TieredSinkConfig::new(&spillover.path);
+    let mut config = scalo::tiered_sink::TieredSinkConfig::new(spillover.path.join(spool));
     config.disk_aware = Some(scalo::tiered_sink::DiskAwareConfig {
         max_usage_percent: spillover.max_usage_percent,
         poll_interval_secs: spillover.poll_interval_secs,
@@ -878,21 +1196,31 @@ fn spillover_config(
 /// with disk spillover. Otherwise, uses the default in-memory buffer. Either way
 /// a record the primary refuses for good goes to `rejects`, never the buffer.
 async fn build_sink_backend<S: crate::sink::Sink + 'static>(
-    primary: S,
-    buffer_config: &crate::config::BufferConfig,
+    primary: Arc<S>,
+    spool: &Path,
+    buffer_config: &BufferConfig,
     rejects: Rejects,
 ) -> Result<SinkBackend<S>> {
     if buffer_config.spillover.enabled {
-        let adapter = crate::buffer::adapter::ScaloSinkAdapter::new(Arc::new(primary), rejects);
-        let spillover = &buffer_config.spillover;
+        let adapter = crate::buffer::adapter::ScaloSinkAdapter::new(primary, rejects);
+        let config = spillover_config(&buffer_config.spillover, spool);
+        tokio::fs::create_dir_all(&config.spool_path)
+            .await
+            .map_err(|e| {
+                Error::Config(format!(
+                    "failed to create spool directory {}: {e}",
+                    config.spool_path.display()
+                ))
+            })?;
+        let path = config.spool_path.clone();
 
-        let tiered = scalo::tiered_sink::TieredSink::new(adapter, spillover_config(spillover))
+        let tiered = scalo::tiered_sink::TieredSink::new(adapter, config)
             .await
             .map_err(|e| Error::Config(format!("failed to create tiered sink: {e}")))?;
 
         info!(
-            path = %spillover.path.display(),
-            max_usage_percent = spillover.max_usage_percent,
+            path = %path.display(),
+            max_usage_percent = buffer_config.spillover.max_usage_percent,
             "Disk spillover enabled"
         );
 
@@ -975,13 +1303,13 @@ impl Orchestrator {
         info!("Pipeline orchestrator running");
 
         // Start drain tasks for tiered sinks
-        if let Some(ref kafka) = self.state.kafka_sink {
-            kafka.clone().start_drain_task(self.shutdown.clone());
+        if let Some(ref kafka) = self.state.kafka {
+            kafka.start(self.shutdown.clone());
         }
         for sink in self.state.destinations.values() {
             match sink {
                 DestinationSink::Bus { .. } | DestinationSink::Discard => {}
-                DestinationSink::Grpc(s) => s.clone().start_drain_task(self.shutdown.clone()),
+                DestinationSink::Grpc(s) => s.start(self.shutdown.clone()),
             }
         }
 
@@ -1009,7 +1337,7 @@ impl Orchestrator {
         info!("Pipeline orchestrator shutting down");
 
         // Flush all sinks
-        if let Some(ref kafka) = self.state.kafka_sink
+        if let Some(ref kafka) = self.state.kafka
             && let Err(e) = kafka.flush().await
         {
             error!(error = %e, "Failed to flush Kafka sink");
@@ -1082,7 +1410,40 @@ mod tests {
         .unwrap()
     }
 
-    /// The spillover thresholds an operator sets reach scalo's TieredSink.
+    /// The acknowledgement setting a listener with acks on gets.
+    fn holding(state: &PipelineState) -> Acks {
+        state.acks("test", AcknowledgementsConfig::default(), None)
+    }
+
+    /// Declared gRPC destinations `names`, every record fanned out to all of
+    /// them, each at an address nothing listens on.
+    fn grpc_destinations(config: &mut Config, names: &[&str]) {
+        config.destinations.default =
+            crate::config::DestinationRef::Many(names.iter().map(ToString::to_string).collect());
+        for (port, name) in (1_u16..).zip(names) {
+            config.destinations.named.insert(
+                (*name).to_string(),
+                crate::config::DestinationSpec {
+                    grpc: Some(crate::config::GrpcDestination {
+                        endpoint: format!("http://127.0.0.1:{port}"),
+                    }),
+                    kafka: None,
+                },
+            );
+        }
+    }
+
+    /// Spillover on, under `dir`.
+    fn spill_to(config: &mut Config, dir: &std::path::Path) {
+        config.buffer.spillover = crate::config::SpilloverConfig {
+            enabled: true,
+            path: dir.to_path_buf(),
+            ..crate::config::SpilloverConfig::default()
+        };
+    }
+
+    /// The spillover thresholds an operator sets reach scalo's TieredSink,
+    /// under the bus's own directory.
     #[test]
     fn spillover_settings_reach_the_tiered_sink() {
         let spillover = crate::config::SpilloverConfig {
@@ -1092,12 +1453,190 @@ mod tests {
             poll_interval_secs: 17,
         };
 
-        let built = spillover_config(&spillover);
+        let built = spillover_config(&spillover, Path::new(BUS_SPOOL));
 
-        assert_eq!(built.spool_path, spillover.path);
+        assert_eq!(built.spool_path, spillover.path.join("kafka"));
         let disk = built.disk_aware.unwrap();
         assert!((disk.max_usage_percent - 0.55).abs() < f64::EPSILON);
         assert_eq!(disk.poll_interval_secs, 17);
+    }
+
+    /// A destination name becomes one path segment under `grpc/`, so no name
+    /// reaches outside the spillover path.
+    #[test]
+    fn a_destination_spools_under_its_own_segment() {
+        assert_eq!(grpc_spool("orders"), Path::new("grpc/orders"));
+        assert_eq!(grpc_spool("../etc"), Path::new("grpc/___etc"));
+        assert_eq!(grpc_spool("a/b"), Path::new("grpc/a_b"));
+    }
+
+    /// Two names that map to one directory are refused rather than left to
+    /// share a spool.
+    #[test]
+    fn two_sinks_never_share_a_spool() {
+        let mut claimed = FxHashSet::default();
+        assert!(claim_spool(&mut claimed, grpc_spool("a.b")).is_ok());
+        assert!(claim_spool(&mut claimed, grpc_spool("a_b")).is_err());
+    }
+
+    /// Two gRPC destinations with spillover each open a spool of their own, so
+    /// both start: sharing one path fails the second at startup.
+    #[tokio::test]
+    async fn two_grpc_destinations_with_spillover_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_config();
+        grpc_destinations(&mut config, &["alpha", "beta"]);
+        spill_to(&mut config, dir.path());
+        // An at-enqueue listener is what needs the spools.
+        config.server.acknowledgements = AcknowledgementsConfig::new(false);
+
+        let built = PipelineState::new(SharedConfig::new(config), CancellationToken::new()).await;
+
+        assert!(built.is_ok(), "{:?}", built.err());
+        assert!(dir.path().join("grpc/alpha").is_dir());
+        assert!(dir.path().join("grpc/beta").is_dir());
+    }
+
+    /// With every listener holding its answer, no buffer or spool is built:
+    /// a spooled record could be spooled again on every resend.
+    #[tokio::test]
+    async fn held_answers_open_no_spool() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_config();
+        grpc_destinations(&mut config, &["alpha"]);
+        spill_to(&mut config, dir.path());
+
+        let state = test_state_with(config).await;
+
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "a spool was opened with every answer held"
+        );
+        let Some(DestinationSink::Grpc(delivery)) = state.destinations.get("alpha") else {
+            panic!("alpha is a gRPC destination");
+        };
+        assert!(delivery.queued.is_none(), "a buffer was built");
+    }
+
+    /// A destination that refuses the record answers the held request as a
+    /// resend of all of it, with nothing counted as taken.
+    #[tokio::test]
+    async fn a_refusing_destination_answers_a_held_request_retryable() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_config();
+        grpc_destinations(&mut config, &["alpha"]);
+        spill_to(&mut config, dir.path());
+        let state = test_state_with(config).await;
+
+        let outcome = state
+            .process_batch_acked(
+                &[Bytes::from(r#"{"a":1}"#), Bytes::from(r#"{"a":2}"#)],
+                &holding(&state),
+                None,
+            )
+            .await;
+
+        assert!(
+            outcome
+                .unavailable
+                .as_ref()
+                .is_some_and(Error::is_retryable),
+            "{:?}",
+            outcome.unavailable
+        );
+        assert_eq!(outcome.settled(), 0, "a held batch is all or nothing");
+    }
+
+    /// A Kafka config pointed at an unroutable broker whose records time out
+    /// locally after a second.
+    fn unroutable_bus(config: &mut Config) {
+        config.destinations.default = crate::config::BUS_DESTINATION.into();
+        config.kafka.brokers = vec!["192.0.2.1:9092".to_string()];
+        config
+            .kafka
+            .librdkafka_overrides
+            .insert("message.timeout.ms".to_string(), "1000".to_string());
+    }
+
+    /// Held, a record no broker confirms answers retryable; at enqueue the
+    /// same record is taken once librdkafka queues it.
+    #[tokio::test]
+    async fn a_held_answer_waits_for_the_kafka_delivery_report() {
+        let mut config = test_config();
+        unroutable_bus(&mut config);
+        let state = test_state_with(config).await;
+        let record = [Bytes::from(r#"{"a":1}"#)];
+
+        let at_enqueue = state.process_batch(&record).await;
+        assert_eq!(at_enqueue.accepted, 1);
+        assert!(at_enqueue.unavailable.is_none());
+
+        let held = tokio::time::timeout(
+            Duration::from_secs(20),
+            state.process_batch_acked(&record, &holding(&state), None),
+        )
+        .await
+        .expect("the delivery report settles the request inside its hold");
+        assert!(
+            held.unavailable.as_ref().is_some_and(Error::is_retryable),
+            "a record no broker confirmed was answered as taken: {held:?}"
+        );
+        assert_eq!(held.settled(), 0);
+    }
+
+    /// A validation DLQ writing to files under `dir`.
+    fn file_dlq(config: &mut Config, dir: &std::path::Path) {
+        config.routing.dlq = crate::config::DlqConfig {
+            enabled: true,
+            mode: "file_only".to_string(),
+            file_path: dir.display().to_string(),
+            kafka_enabled: false,
+            ..crate::config::DlqConfig::default()
+        };
+    }
+
+    /// Held, a dead-lettered record counts once the DLQ confirmed the write.
+    #[tokio::test]
+    async fn a_dead_letter_the_dlq_confirms_is_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_config();
+        file_dlq(&mut config, dir.path());
+        let state = test_state_with(config).await;
+
+        let outcome = state
+            .process_batch_acked(&[Bytes::from("not json")], &holding(&state), None)
+            .await;
+
+        assert!(outcome.unavailable.is_none(), "{:?}", outcome.unavailable);
+        assert_eq!(outcome.accepted, 1);
+    }
+
+    /// Held, a dead letter the DLQ refuses answers retryable: the record is in
+    /// neither the destination nor the DLQ.
+    #[tokio::test]
+    async fn a_dead_letter_the_dlq_refuses_answers_retryable() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_config();
+        file_dlq(&mut config, dir.path());
+        let state = test_state_with(config).await;
+        // Every file write fails once the service directory is a regular file.
+        std::fs::remove_dir_all(dir.path().join("receiver")).unwrap();
+        std::fs::write(dir.path().join("receiver"), b"not a directory").unwrap();
+
+        let outcome = state
+            .process_batch_acked(&[Bytes::from("not json")], &holding(&state), None)
+            .await;
+
+        assert!(
+            outcome
+                .unavailable
+                .as_ref()
+                .is_some_and(Error::is_retryable),
+            "{:?}",
+            outcome.unavailable
+        );
+        assert_eq!(outcome.settled(), 0);
     }
 
     /// `loader.transport: kafka` is the bus with no fixed topic, so a record
@@ -1550,6 +2089,28 @@ mod tests {
             "{:?}",
             outcome.first_rejection
         );
+    }
+
+    /// Held, a record refused for good is still the sender's to hear about,
+    /// and the records around it are taken once confirmed.
+    #[tokio::test]
+    async fn a_held_batch_reports_a_rejected_record() {
+        let mut config = test_config();
+        config.validation.dlq_on_invalid = false;
+        let state = test_state_with(config).await;
+        let payloads = vec![
+            Bytes::from(r#"{"ok":1}"#),
+            Bytes::from("not json"),
+            Bytes::from(r#"{"ok":2}"#),
+        ];
+
+        let outcome = state
+            .process_batch_acked(&payloads, &holding(&state), None)
+            .await;
+
+        assert_eq!(outcome.accepted, 2);
+        assert_eq!(outcome.rejected, 1);
+        assert!(outcome.unavailable.is_none(), "{:?}", outcome.unavailable);
     }
 
     /// A retryable failure stops the batch where it happened: the sender is
