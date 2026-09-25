@@ -246,6 +246,7 @@ impl Config {
             "grpc" => DestinationSpec {
                 grpc: Some(GrpcDestination {
                     endpoint: self.loader.effective_grpc_endpoint(),
+                    ..GrpcDestination::default()
                 }),
                 kafka: None,
             },
@@ -2198,10 +2199,26 @@ pub struct DestinationSpec {
 }
 
 /// A gRPC destination -- the address of a scalo Push listener.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GrpcDestination {
     /// Endpoint URI, e.g. `http://dfe-transform-orders:6000`.
     pub endpoint: String,
+
+    /// Whether the listener answers a push only once its records are durable.
+    /// Set false for one that answers on receipt, as the archiver's direct
+    /// listener does: every listener whose records can reach it then reports
+    /// `best_effort` in `pipeline_delivery_guarantee`. Delivery is unchanged.
+    #[serde(default = "default_true")]
+    pub confirms_delivery: bool,
+}
+
+impl Default for GrpcDestination {
+    fn default() -> Self {
+        Self {
+            endpoint: String::new(),
+            confirms_delivery: true,
+        }
+    }
 }
 
 /// A bus destination.

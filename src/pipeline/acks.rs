@@ -72,13 +72,15 @@ impl Acks {
     }
 
     /// The setting of listener `transport` (the metric label), whose own
-    /// request timeout, where it has one, bounds the hold.
+    /// request timeout, where it has one, bounds the hold. `sink` is what the
+    /// weakest destination its records can reach confirms.
     #[must_use]
     pub fn new(
         transport: &'static str,
         config: AcknowledgementsConfig,
         request_timeout: Option<Duration>,
         max_held_bytes: u64,
+        sink: SinkConfirmation,
     ) -> Self {
         let acks = Self {
             tickets: config
@@ -86,13 +88,7 @@ impl Acks {
                 .then(|| Tickets::new(transport, max_held_bytes)),
             max_hold: hold_budget(MAX_HOLD, request_timeout),
         };
-        publish_guarantee(
-            transport,
-            EffectiveGuarantee::of(
-                Some(&ListenerAcks(config.enabled)),
-                SinkConfirmation::Remote,
-            ),
-        );
+        EffectiveGuarantee::of(Some(&ListenerAcks(config.enabled)), sink).publish_for(transport);
         acks
     }
 
@@ -128,30 +124,25 @@ impl Acks {
 /// Publish the guarantee of `listener`, whose protocol carries no
 /// acknowledgement: syslog, GELF, flow.
 pub fn publish_unacknowledged_listener(listener: &'static str) {
-    publish_guarantee(
-        listener,
-        EffectiveGuarantee::of(None, SinkConfirmation::Remote),
-    );
+    EffectiveGuarantee::of(None, SinkConfirmation::Remote).publish_for(listener);
 }
 
-/// Set `pipeline_delivery_guarantee{listener, guarantee, reason}` to 1.
-///
-/// scalo's `EffectiveGuarantee::publish` carries no listener label, and one
-/// receiver runs listeners that give different guarantees.
-fn publish_guarantee(listener: &'static str, effective: EffectiveGuarantee) {
-    let guarantee = effective.guarantee.as_str();
-    let reason = effective.reason.as_str();
-    metrics::gauge!(
-        "pipeline_delivery_guarantee",
-        "listener" => listener,
-        "guarantee" => guarantee,
-        "reason" => reason
-    )
-    .set(1.0);
-    tracing::info!(listener, guarantee, reason, "Listener delivery guarantee");
+/// The weaker of two destinations' confirmations: a record that can reach
+/// either is confirmed only as far as the weaker one confirms.
+#[must_use]
+pub fn weakest(a: SinkConfirmation, b: SinkConfirmation) -> SinkConfirmation {
+    fn strength(confirmation: SinkConfirmation) -> u8 {
+        match confirmation {
+            SinkConfirmation::Remote => 2,
+            SinkConfirmation::Local => 1,
+            _ => 0,
+        }
+    }
+    if strength(b) < strength(a) { b } else { a }
 }
 
-/// A listener's setting in the shape scalo's guarantee metric reads.
+/// A listener's setting in the shape scalo's guarantee metric reads: a
+/// listener's own hold is armed from its first request.
 struct ListenerAcks(bool);
 
 impl AckControl for ListenerAcks {
@@ -177,6 +168,17 @@ impl AckControl for ListenerAcks {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Listener `transport` holding its answers, every destination confirming.
+    fn held_acks(transport: &'static str) -> Acks {
+        Acks::new(
+            transport,
+            AcknowledgementsConfig::default(),
+            None,
+            1_000,
+            SinkConfirmation::Remote,
+        )
+    }
 
     /// How long `acks` holds an answer for a sender that sets no deadline.
     fn held_for(acks: &Acks) -> Duration {
@@ -208,6 +210,7 @@ mod tests {
                 AcknowledgementsConfig::default(),
                 Some(Duration::from_millis(timeout_ms)),
                 1_000,
+                SinkConfirmation::Remote,
             );
             let hold = held_for(&acks);
             assert!(hold > HELD_MESSAGE_TIMEOUT, "{listener} holds {hold:?}");
@@ -221,7 +224,7 @@ mod tests {
     /// A cap shortens the hold and keeps the listener's held-byte ceiling.
     #[test]
     fn a_capped_hold_answers_by_its_cap() {
-        let acks = Acks::new("test", AcknowledgementsConfig::default(), None, 1_000);
+        let acks = held_acks("test");
         let capped = acks.holding_at_most(Duration::from_secs(9));
         let hold = held_for(&capped);
         assert!(
@@ -278,10 +281,11 @@ mod tests {
         }
 
         fn register_gauge(&self, key: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
-            let labels: Vec<String> = key
+            let mut labels: Vec<String> = key
                 .labels()
                 .map(|l| format!("{}={}", l.key(), l.value()))
                 .collect();
+            labels.sort();
             self.0
                 .lock()
                 .unwrap()
@@ -303,22 +307,61 @@ mod tests {
     fn each_listener_reports_its_own_guarantee() {
         let recorder = GaugeKeys::default();
         metrics::with_local_recorder(&recorder, || {
-            let _held = Acks::new("http", AcknowledgementsConfig::default(), None, 1_000);
-            let _queued = Acks::new("webhook", AcknowledgementsConfig::new(false), None, 1_000);
+            let _held = held_acks("http");
+            let _queued = Acks::new(
+                "webhook",
+                AcknowledgementsConfig::new(false),
+                None,
+                1_000,
+                SinkConfirmation::Remote,
+            );
             publish_unacknowledged_listener("syslog");
         });
 
         let gauges = recorder.0.into_inner().unwrap();
         for expected in [
-            "pipeline_delivery_guarantee{listener=http,guarantee=at_least_once,reason=confirmed}",
-            "pipeline_delivery_guarantee{listener=webhook,guarantee=best_effort,reason=acks_disabled}",
-            "pipeline_delivery_guarantee{listener=syslog,guarantee=best_effort,reason=source_cannot_ack}",
+            "pipeline_delivery_guarantee{guarantee=at_least_once,listener=http,reason=confirmed}",
+            "pipeline_delivery_guarantee{guarantee=best_effort,listener=webhook,reason=acks_disabled}",
+            "pipeline_delivery_guarantee{guarantee=best_effort,listener=syslog,reason=source_cannot_ack}",
         ] {
             assert!(
                 gauges.iter().any(|g| g == expected),
                 "{expected} not in {gauges:?}"
             );
         }
+    }
+
+    /// A held listener whose records can reach a destination that answers on
+    /// receipt reports that weakest leg, not its own hold.
+    #[test]
+    fn a_held_listener_reports_its_weakest_leg() {
+        let recorder = GaugeKeys::default();
+        metrics::with_local_recorder(&recorder, || {
+            let _archived = Acks::new(
+                "http",
+                AcknowledgementsConfig::default(),
+                None,
+                1_000,
+                SinkConfirmation::None,
+            );
+        });
+
+        let gauges = recorder.0.into_inner().unwrap();
+        let expected = "pipeline_delivery_guarantee{guarantee=best_effort,listener=http,reason=sink_cannot_confirm}";
+        assert!(
+            gauges.iter().any(|g| g == expected),
+            "{expected} not in {gauges:?}"
+        );
+    }
+
+    #[test]
+    fn the_weakest_confirmation_wins() {
+        use SinkConfirmation::{Local, None, Remote};
+        assert_eq!(weakest(Remote, Remote), Remote);
+        assert_eq!(weakest(Remote, Local), Local);
+        assert_eq!(weakest(Local, Remote), Local);
+        assert_eq!(weakest(Remote, None), None);
+        assert_eq!(weakest(None, Local), None);
     }
 
     #[test]
@@ -330,11 +373,17 @@ mod tests {
     #[test]
     fn only_an_enabled_listener_admits() {
         assert!(Acks::at_enqueue().admit(10, None).is_none());
-        let off = Acks::new("test", AcknowledgementsConfig::new(false), None, 1_000);
+        let off = Acks::new(
+            "test",
+            AcknowledgementsConfig::new(false),
+            None,
+            1_000,
+            SinkConfirmation::Remote,
+        );
         assert!(!off.holds());
         assert!(off.admit(10, None).is_none());
 
-        let on = Acks::new("test", AcknowledgementsConfig::default(), None, 1_000);
+        let on = held_acks("test");
         assert!(on.holds());
         let ticket = on.admit(10, None).expect("holding").expect("admitted");
         let remaining = ticket.deadline().saturating_duration_since(Instant::now());

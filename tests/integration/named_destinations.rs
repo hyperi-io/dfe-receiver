@@ -53,6 +53,7 @@ fn grpc_destination(endpoint: &str) -> DestinationSpec {
     DestinationSpec {
         grpc: Some(GrpcDestination {
             endpoint: endpoint.to_string(),
+            ..GrpcDestination::default()
         }),
         kafka: None,
     }

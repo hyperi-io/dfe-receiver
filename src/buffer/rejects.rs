@@ -14,7 +14,8 @@
 //! goes to the DLQ when one is configured and is dropped when not, counted
 //! either way in `receiver_records_rejected_total`. A write the DLQ does not
 //! confirm leaves the record where it was -- queued, spilled, or its sender told
-//! to resend -- so it is offered again.
+//! to resend -- so it is offered again. An entry no DLQ backend can ever hold
+//! is dropped instead, since every retry would be refused the same.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,13 +35,17 @@ static REJECTED: AtomicU64 = AtomicU64::new(0);
 /// offer while the DLQ is down.
 static DLQ_REFUSED: AtomicU64 = AtomicU64::new(0);
 
+/// Sampled log counter for dead letters no DLQ backend can hold.
+static UNWRITABLE: AtomicU64 = AtomicU64::new(0);
+
 /// What became of a refused record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[must_use]
 pub enum Disposal {
     /// The DLQ took it.
     DeadLettered,
-    /// No DLQ is configured, so it was dropped.
+    /// No DLQ is configured, or none of its backends can hold the entry, so
+    /// it was dropped.
     Dropped,
     /// The DLQ did not take it.
     Refused,
@@ -74,15 +79,47 @@ fn dlq_refused() -> Error {
     Error::Transport("the dead-letter queue did not take a refused record".into())
 }
 
+/// What a dead letter the DLQ was asked to confirm came to.
+#[derive(Debug)]
+#[must_use]
+pub(crate) enum DeadLetter {
+    /// The DLQ holds the entry.
+    Written,
+    /// No DLQ backend can ever hold the entry, so it was dropped and counted
+    /// in `pipeline_dead_letters_dropped_total`.
+    Unwritable,
+}
+
 /// Write `entry` and wait until the DLQ reports whether it holds it.
 ///
 /// The answer is about this entry alone: another writer's refusal never
-/// reaches it.
+/// reaches it. An entry every backend refuses by size is never written, since
+/// each retry would be refused the same.
+///
+/// # Errors
+///
+/// The DLQ's refusal of a write that can clear on a retry.
 pub(crate) async fn dead_letter_confirmed(
     dlq: &Dlq,
     entry: DlqEntry,
-) -> std::result::Result<(), DlqError> {
-    dlq.write_confirmed(vec![entry]).await
+) -> std::result::Result<DeadLetter, DlqError> {
+    if let Some(refusal) = dlq.refusal(&entry) {
+        metrics::counter!("pipeline_dead_letters_dropped_total", "reason" => refusal.as_str())
+            .increment(1);
+        if scalo::logger::log_sampled(&UNWRITABLE, 100) {
+            let total = UNWRITABLE.load(Ordering::Relaxed);
+            error!(
+                error = %refusal,
+                destination = entry.destination.as_deref().unwrap_or(""),
+                total,
+                "No DLQ backend can hold this dead letter; dropped it (logged 1 in 100)"
+            );
+        }
+        return Ok(DeadLetter::Unwritable);
+    }
+    dlq.write_confirmed(vec![entry])
+        .await
+        .map(|()| DeadLetter::Written)
 }
 
 /// Log a DLQ write that was not confirmed, the first and then 1 in 100.
@@ -116,14 +153,16 @@ impl Rejects {
     }
 
     /// Take `payload` off the delivery path: dead-letter it once the DLQ
-    /// confirms the write, or drop it where no DLQ is configured.
+    /// confirms the write, or drop it where no DLQ is configured or none of
+    /// its backends can hold it.
     ///
     /// [`Disposal::Refused`] leaves the record with the caller, to keep and
     /// offer again.
     pub async fn dispose(&self, topic: &str, payload: &Bytes, reason: &str) -> Disposal {
         let disposal = match &self.dlq {
             Some(dlq) => match dead_letter_confirmed(dlq, entry(topic, payload, reason)).await {
-                Ok(()) => Disposal::DeadLettered,
+                Ok(DeadLetter::Written) => Disposal::DeadLettered,
+                Ok(DeadLetter::Unwritable) => Disposal::Dropped,
                 Err(e) => {
                     log_dlq_refusal(&e, topic);
                     Disposal::Refused
@@ -139,14 +178,15 @@ impl Rejects {
     ///
     /// With a DLQ the piece reports `Rejected` once the DLQ confirmed the
     /// write; a write it refused leaves the piece unreported, which counts as
-    /// `Errored`, so the sender resends. With no DLQ the refusal is the
-    /// sender's to hear: the piece reports `Dropped` and the error names the
-    /// record as refused for good.
+    /// `Errored`, so the sender resends. With no DLQ, or one none of whose
+    /// backends can hold the entry, the refusal is the sender's to hear: the
+    /// piece reports `Dropped` and the error names the record as refused for
+    /// good.
     ///
     /// # Errors
     ///
     /// [`Error::Transport`] when the DLQ did not confirm the write, and
-    /// [`Error::Rejected`] when there is no DLQ.
+    /// [`Error::Rejected`] when the record cannot be dead-lettered.
     pub async fn dispose_held(
         &self,
         topic: &str,
@@ -160,10 +200,15 @@ impl Rejects {
             return Err(Error::Rejected(reason.to_string()));
         };
         match dead_letter_confirmed(dlq, entry(topic, payload, reason)).await {
-            Ok(()) => {
+            Ok(DeadLetter::Written) => {
                 piece.report(DeliveryStatus::Rejected);
                 self.count(Disposal::DeadLettered, topic, payload, reason);
                 Ok(())
+            }
+            Ok(DeadLetter::Unwritable) => {
+                piece.report(DeliveryStatus::Dropped);
+                self.count(Disposal::Dropped, topic, payload, reason);
+                Err(Error::Rejected(reason.to_string()))
             }
             Err(e) => {
                 log_dlq_refusal(&e, topic);
@@ -249,11 +294,117 @@ pub(crate) mod test_dlq {
         std::fs::write(&service_dir, b"not a directory").unwrap();
         dlq
     }
+
+    /// A Kafka-only DLQ at a broker nothing reaches, so its one backend has a
+    /// size ceiling and nothing beside it takes what that refuses.
+    pub(crate) fn kafka_only_dlq() -> Arc<Dlq> {
+        let config = crate::config::DlqConfig {
+            mode: "kafka_only".to_string(),
+            file_enabled: false,
+            ..crate::config::DlqConfig::default()
+        }
+        .to_scalo_config();
+        let kafka = crate::config::KafkaConfig {
+            brokers: vec!["192.0.2.1:9092".to_string()],
+            ..crate::config::KafkaConfig::default()
+        }
+        .to_scalo_kafka_config();
+        Arc::new(Dlq::spawn(&config, "receiver", Some(&kafka), CancellationToken::new()).unwrap())
+    }
+
+    /// A record whose DLQ entry, base64 payload included, is over any Kafka
+    /// ceiling.
+    pub(crate) fn oversize_record() -> bytes::Bytes {
+        bytes::Bytes::from(vec![
+            b'x';
+            scalo::transport::kafka::MESSAGE_MAX_BYTES as usize
+        ])
+    }
+}
+
+/// A recorder counting each counter by `name{label=value,...}`.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct CountedKeys(std::sync::Mutex<std::collections::HashMap<String, Arc<AtomicU64>>>);
+
+#[cfg(test)]
+impl CountedKeys {
+    /// What the counter keyed `key` reached.
+    pub(crate) fn get(&self, key: &str) -> u64 {
+        self.0
+            .lock()
+            .unwrap()
+            .get(key)
+            .map_or(0, |hits| hits.load(Ordering::Relaxed))
+    }
+}
+
+#[cfg(test)]
+struct Hits(Arc<AtomicU64>);
+
+#[cfg(test)]
+impl metrics::CounterFn for Hits {
+    fn increment(&self, value: u64) {
+        self.0.fetch_add(value, Ordering::Relaxed);
+    }
+
+    fn absolute(&self, value: u64) {
+        self.0.store(value, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+impl metrics::Recorder for CountedKeys {
+    fn describe_counter(
+        &self,
+        _: metrics::KeyName,
+        _: Option<metrics::Unit>,
+        _: metrics::SharedString,
+    ) {
+    }
+
+    fn describe_gauge(
+        &self,
+        _: metrics::KeyName,
+        _: Option<metrics::Unit>,
+        _: metrics::SharedString,
+    ) {
+    }
+
+    fn describe_histogram(
+        &self,
+        _: metrics::KeyName,
+        _: Option<metrics::Unit>,
+        _: metrics::SharedString,
+    ) {
+    }
+
+    fn register_counter(&self, key: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Counter {
+        let labels: Vec<String> = key
+            .labels()
+            .map(|l| format!("{}={}", l.key(), l.value()))
+            .collect();
+        let name = format!("{}{{{}}}", key.name(), labels.join(","));
+        let hits = Arc::clone(self.0.lock().unwrap().entry(name).or_default());
+        metrics::Counter::from_arc(Arc::new(Hits(hits)))
+    }
+
+    fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
+        metrics::Gauge::noop()
+    }
+
+    fn register_histogram(
+        &self,
+        _: &metrics::Key,
+        _: &metrics::Metadata<'_>,
+    ) -> metrics::Histogram {
+        metrics::Histogram::noop()
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::test_dlq::{file_dlq, refusing_dlq};
+    use super::test_dlq::{self, file_dlq, refusing_dlq};
     use super::*;
     use base64::Engine;
     use scalo::transport::ack::{TicketOutcome, Tickets};
@@ -297,6 +448,71 @@ mod tests {
         assert_eq!(
             entry["payload"],
             base64::engine::general_purpose::STANDARD.encode(&payload)
+        );
+    }
+
+    /// Run `future` on a runtime of this thread, counted by `recorder`.
+    fn counted<T>(recorder: &CountedKeys, future: impl std::future::Future<Output = T>) -> T {
+        metrics::with_local_recorder(recorder, || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(future)
+        })
+    }
+
+    /// A held record too large for every DLQ backend is dropped and counted
+    /// without a write, and its sender hears it refused for good rather than
+    /// told to retry a write that can never land.
+    #[test]
+    fn a_dead_letter_no_backend_can_hold_is_dropped_and_answered() {
+        let recorder = CountedKeys::default();
+        let (result, outcome) = counted(&recorder, async {
+            let rejects = Rejects::new(Some(test_dlq::kafka_only_dlq()), None);
+            let tickets = Tickets::new("test", 1 << 20);
+            let ticket = held_ticket(&tickets);
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                rejects.dispose_held(
+                    "events",
+                    &test_dlq::oversize_record(),
+                    "too large",
+                    ticket.piece(),
+                ),
+            )
+            .await
+            .expect("answered without waiting on a write");
+            (result, ticket.outcome().await)
+        });
+
+        assert!(matches!(result, Err(Error::Rejected(_))), "got {result:?}");
+        assert_eq!(outcome, TicketOutcome::Dropped);
+        assert_eq!(
+            recorder.get("pipeline_dead_letters_dropped_total{reason=too_large}"),
+            1
+        );
+        assert_eq!(
+            recorder.get("receiver_records_rejected_total{outcome=dropped}"),
+            1
+        );
+    }
+
+    /// Answered at enqueue, the same record leaves the queue dropped rather
+    /// than waiting at its head for a write that can never land.
+    #[test]
+    fn a_queued_dead_letter_no_backend_can_hold_is_dropped() {
+        let recorder = CountedKeys::default();
+        let disposal = counted(&recorder, async {
+            Rejects::new(Some(test_dlq::kafka_only_dlq()), None)
+                .dispose("events", &test_dlq::oversize_record(), "too large")
+                .await
+        });
+
+        assert_eq!(disposal, Disposal::Dropped);
+        assert_eq!(
+            recorder.get("pipeline_dead_letters_dropped_total{reason=too_large}"),
+            1
         );
     }
 

@@ -469,6 +469,9 @@ destinations:
   # archiver:
   #   grpc:
   #     endpoint: "http://dfe-archiver:6000"
+  #     # Its direct listener answers on receipt, so a listener whose records
+  #     # can reach it reports best_effort in pipeline_delivery_guarantee.
+  #     confirms_delivery: false
   # audit_bus:
   #   kafka:
   #     topic: "audit_land"     # unset = the record's own source topic

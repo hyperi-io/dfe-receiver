@@ -513,7 +513,7 @@ holds it.
 | `receiver_kafka_delivered_total` | Counter | Messages a broker acknowledged |
 | `receiver_kafka_delivery_failures_total` | Counter | Messages no broker confirmed, by `reason` (librdkafka error code); a timed-out message may still have been written |
 | `records_dlq_total` | Counter | Messages sent to DLQ (scalo emits this one) |
-| `receiver_records_rejected_total` | Counter | Records a destination can never take (over its size ceiling), on any sink, by `outcome`: `dead_lettered`, `dropped` when no DLQ is configured, or `dlq_refused` when the DLQ did not confirm the write, so the record stays buffered or its sender is told to retry |
+| `receiver_records_rejected_total` | Counter | Records a destination can never take (over its size ceiling), on any sink, by `outcome`: `dead_lettered`, `dropped` when no DLQ is configured or no DLQ backend can hold the entry (also counted in `pipeline_dead_letters_dropped_total{reason}`), or `dlq_refused` when the DLQ did not confirm the write, so the record stays buffered or its sender is told to retry |
 
 ### Scaling Metrics
 

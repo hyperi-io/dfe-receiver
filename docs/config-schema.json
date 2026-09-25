@@ -2174,6 +2174,11 @@
         "endpoint": {
           "description": "Endpoint URI, e.g. `http://dfe-transform-orders:6000`.",
           "type": "string"
+        },
+        "confirms_delivery": {
+          "description": "Whether the listener answers a push only once its records are durable.\nSet false for one that answers on receipt, as the archiver's direct\nlistener does: every listener whose records can reach it then reports\n`best_effort` in `pipeline_delivery_guarantee`. Delivery is unchanged.",
+          "type": "boolean",
+          "default": true
         }
       },
       "required": [

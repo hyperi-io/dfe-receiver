@@ -31,12 +31,13 @@ use scalo::dlq::{Dlq, DlqEntry};
 use scalo::logger::security;
 use scalo::transport::AcknowledgementsConfig;
 use scalo::transport::DeliveryStatus;
-use scalo::transport::ack::Ticket;
+use scalo::transport::ack::{SinkConfirmation, Ticket};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
 pub use acks::Acks;
 
+use crate::buffer::rejects::DeadLetter;
 use crate::buffer::{
     InMemoryBuffer, InMemoryBufferStats, MemoryGuard, MemoryGuardConfig, MemoryPressure, Rejects,
     SinkBackend,
@@ -301,6 +302,8 @@ pub struct PipelineState {
     dlq: Option<Arc<Dlq>>,
     /// Where a record a destination refuses for good goes.
     rejects: Rejects,
+    /// What the weakest destination a record can reach confirms.
+    sink_confirmation: SinkConfirmation,
     /// The listeners readiness waits on, `None` until the server declares them.
     listeners: RwLock<Option<Vec<BoundAddr>>>,
 }
@@ -447,7 +450,10 @@ impl PipelineState {
 
         // Build the named destination set: one sink per destination the config
         // actually refers to, so an unused declaration opens no connection.
+        // A record can reach any of them, so a listener confirms no more than
+        // the weakest does.
         let mut destinations: FxHashMap<Arc<str>, DestinationSink> = FxHashMap::default();
+        let mut sink_confirmation = SinkConfirmation::Remote;
         for name in destinations_config.referenced_names() {
             if destinations.contains_key(name) {
                 continue;
@@ -455,6 +461,10 @@ impl PipelineState {
             let sink = match destinations_config.named.get(name) {
                 Some(spec) => match (&spec.grpc, &spec.kafka) {
                     (Some(grpc), _) => {
+                        if !grpc.confirms_delivery {
+                            sink_confirmation =
+                                acks::weakest(sink_confirmation, SinkConfirmation::None);
+                        }
                         // loader.timeout_ms bounds the loader's own RPC; a
                         // declared destination has no timeout key of its own.
                         let deadline = if name == crate::config::LOADER_DESTINATION {
@@ -486,7 +496,10 @@ impl PipelineState {
                     }
                 },
                 // `loader` survives resolution only on the memory transport.
-                None if name == crate::config::LOADER_DESTINATION => DestinationSink::Discard,
+                None if name == crate::config::LOADER_DESTINATION => {
+                    sink_confirmation = acks::weakest(sink_confirmation, SinkConfirmation::None);
+                    DestinationSink::Discard
+                }
                 None => DestinationSink::Bus { topic: None },
             };
             destinations.insert(Arc::from(name), sink);
@@ -516,6 +529,7 @@ impl PipelineState {
             pressure,
             dlq,
             rejects,
+            sink_confirmation,
             listeners: RwLock::new(None),
         })
     }
@@ -544,6 +558,7 @@ impl PipelineState {
             config,
             request_timeout,
             acks::max_held_bytes(self.memory_guard.limit_bytes()),
+            self.sink_confirmation,
         )
     }
 
@@ -1094,11 +1109,20 @@ impl PipelineState {
                     .map_err(|e| Error::Config(format!("DLQ send failed: {e}")));
             };
             let piece = ticket.piece();
-            crate::buffer::rejects::dead_letter_confirmed(dlq, entry)
+            let written = crate::buffer::rejects::dead_letter_confirmed(dlq, entry)
                 .await
                 .map_err(|e| Error::Transport(format!("DLQ did not confirm the write: {e}")))?;
-            piece.report(DeliveryStatus::Rejected);
-            Ok(())
+            match written {
+                DeadLetter::Written => {
+                    piece.report(DeliveryStatus::Rejected);
+                    Ok(())
+                }
+                // No DLQ backend can hold it, so the sender hears the record is at fault.
+                DeadLetter::Unwritable => {
+                    piece.report(DeliveryStatus::Dropped);
+                    Err(Error::Validation(reason.to_string()))
+                }
+            }
         } else {
             // With no DLQ configured the record follows the routing table, so a
             // brokerless deployment does not need a DLQ topic to reject a bad
@@ -1489,6 +1513,7 @@ mod tests {
                 crate::config::DestinationSpec {
                     grpc: Some(crate::config::GrpcDestination {
                         endpoint: format!("http://127.0.0.1:{port}"),
+                        ..crate::config::GrpcDestination::default()
                     }),
                     kafka: None,
                 },
@@ -1793,6 +1818,66 @@ mod tests {
         assert_eq!(outcome.settled(), 0);
     }
 
+    /// An archived source's records also reach the archiver, whose direct
+    /// listener answers on receipt, so every listener confirms only as far as
+    /// that leg does. The other legs confirming does not lift it.
+    #[tokio::test]
+    async fn an_archiver_leg_that_answers_on_receipt_sets_the_guarantee() {
+        let mut config = test_config();
+        grpc_destinations(&mut config, &["loader_leg", "archiver"]);
+        let state = test_state_with(config.clone()).await;
+        assert_eq!(
+            state.sink_confirmation,
+            SinkConfirmation::Remote,
+            "every leg confirms"
+        );
+
+        if let Some(grpc) = config
+            .destinations
+            .named
+            .get_mut("archiver")
+            .and_then(|spec| spec.grpc.as_mut())
+        {
+            grpc.confirms_delivery = false;
+        }
+        let state = test_state_with(config).await;
+        assert_eq!(state.sink_confirmation, SinkConfirmation::None);
+    }
+
+    /// Held, a record too large for the topic and for a Kafka-only DLQ is
+    /// answered refused for good: retrying would be refused the same, for ever.
+    #[tokio::test]
+    async fn a_record_too_large_for_the_bus_and_its_dlq_is_answered_not_retried() {
+        let mut config = test_config();
+        unroutable_bus(&mut config);
+        config.routing.dlq = crate::config::DlqConfig {
+            enabled: true,
+            mode: "kafka_only".to_string(),
+            file_enabled: false,
+            ..crate::config::DlqConfig::default()
+        };
+        let state = test_state_with(config).await;
+        let record = Bytes::from(format!(
+            r#"{{"pad":"{}"}}"#,
+            "x".repeat(scalo::transport::kafka::MESSAGE_MAX_BYTES as usize)
+        ));
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(10),
+            state.process_batch_acked(&[record], &holding(&state), None),
+        )
+        .await
+        .expect("answered without waiting on the DLQ");
+
+        assert!(outcome.unavailable.is_none(), "{:?}", outcome.unavailable);
+        assert_eq!(outcome.rejected, 1, "refused for good, not a retry");
+        assert!(
+            outcome
+                .into_error()
+                .is_some_and(|e| matches!(e, Error::Rejected(_)))
+        );
+    }
+
     /// `loader.transport: kafka` is the bus with no fixed topic, so a record
     /// lands on the topic its source resolves to.
     #[test]
@@ -1844,6 +1929,7 @@ mod tests {
             crate::config::DestinationSpec {
                 grpc: Some(crate::config::GrpcDestination {
                     endpoint: "http://elsewhere:6000".to_string(),
+                    ..crate::config::GrpcDestination::default()
                 }),
                 kafka: None,
             },
