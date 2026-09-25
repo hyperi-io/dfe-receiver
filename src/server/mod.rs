@@ -250,12 +250,14 @@ impl Server {
             }
         }
 
-        if config.syslog.enabled
-            || config.gelf.enabled
-            || config.flow.enabled
-            || config.flow.split.is_some()
-        {
-            crate::pipeline::acks::publish_unacknowledged_listener();
+        for (listener, enabled) in [
+            ("syslog", config.syslog.enabled),
+            ("gelf", config.gelf.enabled),
+            ("flow", config.flow.enabled || config.flow.split.is_some()),
+        ] {
+            if enabled {
+                crate::pipeline::acks::publish_unacknowledged_listener(listener);
+            }
         }
 
         handlers

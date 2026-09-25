@@ -702,22 +702,31 @@ impl PipelineState {
             }
         };
 
-        let mut dispatch = Dispatch::new(ticket.as_ref());
-        for payload in payloads {
-            let result = self
-                .process_inner(payload.clone(), target, &mut dispatch)
-                .await;
-            if outcome.record(result).is_break() {
-                break;
-            }
-        }
-        if let Err(e) = self.send_grpc(dispatch).await {
-            outcome.retry_all(e);
-        }
-
         let Some(ticket) = ticket else {
+            self.dispatch(payloads, target, None, &mut outcome).await;
             return outcome;
         };
+        // A slow destination must not hold the answer past the sender's deadline.
+        let hold_ends = tokio::time::Instant::from_std(ticket.deadline());
+        let dispatched = self.dispatch(payloads, target, Some(&ticket), &mut outcome);
+        if tokio::time::timeout_at(hold_ends, dispatched)
+            .await
+            .is_err()
+        {
+            // A send cut off here may still land: the resend is a duplicate, never a loss.
+            ticket.piece().report(DeliveryStatus::Errored);
+            let answered = ticket.outcome().await;
+            debug!(
+                outcome = answered.as_str(),
+                records = payloads.len(),
+                "Destinations did not answer within the hold; answering retryable"
+            );
+            outcome.retry_all(Error::Transport(format!(
+                "delivery not confirmed within the hold ({})",
+                answered.as_str()
+            )));
+            return outcome;
+        }
         // A held answer is all or nothing: the sender resends the whole batch.
         if let Some(e) = outcome.unavailable.take() {
             outcome.retry_all(e);
@@ -736,6 +745,29 @@ impl PipelineState {
             )));
         }
         outcome
+    }
+
+    /// Route and send each record of a batch, then send the gRPC destinations
+    /// their share, recording in `outcome` what was taken.
+    async fn dispatch(
+        &self,
+        payloads: &[Bytes],
+        target: Target<'_>,
+        ticket: Option<&Ticket>,
+        outcome: &mut BatchOutcome,
+    ) {
+        let mut dispatch = Dispatch::new(ticket);
+        for payload in payloads {
+            let result = self
+                .process_inner(payload.clone(), target, &mut dispatch)
+                .await;
+            if outcome.record(result).is_break() {
+                break;
+            }
+        }
+        if let Err(e) = self.send_grpc(dispatch).await {
+            outcome.retry_all(e);
+        }
     }
 
     /// Check if enrichment (timestamp injection, source rules) is enabled.
@@ -1537,6 +1569,60 @@ mod tests {
             )
             .await;
 
+        assert!(
+            outcome
+                .unavailable
+                .as_ref()
+                .is_some_and(Error::is_retryable),
+            "{:?}",
+            outcome.unavailable
+        );
+        assert_eq!(outcome.settled(), 0, "a held batch is all or nothing");
+    }
+
+    /// A next hop that takes the connection and never answers is cut off at
+    /// the hold, not at its 20 s send deadline, so the sender hears retryable
+    /// while it still waits.
+    #[tokio::test]
+    async fn a_stalled_next_hop_is_answered_at_the_hold() {
+        let stalled = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = stalled.local_addr().unwrap();
+        // Accepts every connection and holds it, reading and writing nothing.
+        let holder = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = stalled.accept().await {
+                held.push(socket);
+            }
+        });
+        let mut config = test_config();
+        grpc_destinations(&mut config, &["alpha"]);
+        if let Some(grpc) = config
+            .destinations
+            .named
+            .get_mut("alpha")
+            .and_then(|spec| spec.grpc.as_mut())
+        {
+            grpc.endpoint = format!("http://{addr}");
+        }
+        let state = test_state_with(config).await;
+        // A 2 s request timeout holds for 1 s.
+        let acks = state.acks(
+            "test",
+            AcknowledgementsConfig::default(),
+            Some(Duration::from_secs(2)),
+        );
+
+        let started = std::time::Instant::now();
+        let outcome = state
+            .process_batch_acked(&[Bytes::from(r#"{"a":1}"#)], &acks, None)
+            .await;
+        let answered_in = started.elapsed();
+        holder.abort();
+
+        assert!(
+            answered_in < Duration::from_secs(5),
+            "answered after {answered_in:?}, not at the 1 s hold"
+        );
         assert!(
             outcome
                 .unavailable

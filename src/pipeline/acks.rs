@@ -86,11 +86,13 @@ impl Acks {
                 .then(|| Tickets::new(transport, max_held_bytes)),
             max_hold: hold_budget(MAX_HOLD, request_timeout),
         };
-        EffectiveGuarantee::of(
-            Some(&ListenerAcks(config.enabled)),
-            SinkConfirmation::Remote,
-        )
-        .publish();
+        publish_guarantee(
+            transport,
+            EffectiveGuarantee::of(
+                Some(&ListenerAcks(config.enabled)),
+                SinkConfirmation::Remote,
+            ),
+        );
         acks
     }
 
@@ -123,10 +125,30 @@ impl Acks {
     }
 }
 
-/// Publish the guarantee of a listener whose protocol carries no
+/// Publish the guarantee of `listener`, whose protocol carries no
 /// acknowledgement: syslog, GELF, flow.
-pub fn publish_unacknowledged_listener() {
-    EffectiveGuarantee::of(None, SinkConfirmation::Remote).publish();
+pub fn publish_unacknowledged_listener(listener: &'static str) {
+    publish_guarantee(
+        listener,
+        EffectiveGuarantee::of(None, SinkConfirmation::Remote),
+    );
+}
+
+/// Set `pipeline_delivery_guarantee{listener, guarantee, reason}` to 1.
+///
+/// scalo's `EffectiveGuarantee::publish` carries no listener label, and one
+/// receiver runs listeners that give different guarantees.
+fn publish_guarantee(listener: &'static str, effective: EffectiveGuarantee) {
+    let guarantee = effective.guarantee.as_str();
+    let reason = effective.reason.as_str();
+    metrics::gauge!(
+        "pipeline_delivery_guarantee",
+        "listener" => listener,
+        "guarantee" => guarantee,
+        "reason" => reason
+    )
+    .set(1.0);
+    tracing::info!(listener, guarantee, reason, "Listener delivery guarantee");
 }
 
 /// A listener's setting in the shape scalo's guarantee metric reads.
@@ -216,6 +238,87 @@ mod tests {
             matches!(acks.admit(100, None), Some(Err(_))),
             "the capped copy's held bytes count against the listener's ceiling"
         );
+    }
+
+    /// Records every gauge registered, as `name{label=value,...}`.
+    #[derive(Default)]
+    struct GaugeKeys(std::sync::Mutex<Vec<String>>);
+
+    impl metrics::Recorder for GaugeKeys {
+        fn describe_counter(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn describe_gauge(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn describe_histogram(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn register_counter(
+            &self,
+            _: &metrics::Key,
+            _: &metrics::Metadata<'_>,
+        ) -> metrics::Counter {
+            metrics::Counter::noop()
+        }
+
+        fn register_gauge(&self, key: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
+            let labels: Vec<String> = key
+                .labels()
+                .map(|l| format!("{}={}", l.key(), l.value()))
+                .collect();
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("{}{{{}}}", key.name(), labels.join(",")));
+            metrics::Gauge::noop()
+        }
+
+        fn register_histogram(
+            &self,
+            _: &metrics::Key,
+            _: &metrics::Metadata<'_>,
+        ) -> metrics::Histogram {
+            metrics::Histogram::noop()
+        }
+    }
+
+    /// Each listener reports the guarantee it gives under its own label.
+    #[test]
+    fn each_listener_reports_its_own_guarantee() {
+        let recorder = GaugeKeys::default();
+        metrics::with_local_recorder(&recorder, || {
+            let _held = Acks::new("http", AcknowledgementsConfig::default(), None, 1_000);
+            let _queued = Acks::new("webhook", AcknowledgementsConfig::new(false), None, 1_000);
+            publish_unacknowledged_listener("syslog");
+        });
+
+        let gauges = recorder.0.into_inner().unwrap();
+        for expected in [
+            "pipeline_delivery_guarantee{listener=http,guarantee=at_least_once,reason=confirmed}",
+            "pipeline_delivery_guarantee{listener=webhook,guarantee=best_effort,reason=acks_disabled}",
+            "pipeline_delivery_guarantee{listener=syslog,guarantee=best_effort,reason=source_cannot_ack}",
+        ] {
+            assert!(
+                gauges.iter().any(|g| g == expected),
+                "{expected} not in {gauges:?}"
+            );
+        }
     }
 
     #[test]

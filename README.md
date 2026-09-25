@@ -299,7 +299,7 @@ Key metrics:
 - `receiver_kafka_delivered_total` - Messages a broker acknowledged
 - `receiver_kafka_delivery_failures_total` - Messages no broker confirmed, by
   reason; a timed-out message may still have been written
-- `pipeline_delivery_guarantee` - What each listener's answer promises, and why
+- `pipeline_delivery_guarantee` - What each listener's answer promises, and why, by `listener`
 - `receiver_records_dropped_total` - Records dropped with no way to tell the
   sender (UDP syslog, a record refused on an acknowledgement-only protocol, a
   held record at shutdown), by transport and reason
