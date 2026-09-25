@@ -42,6 +42,7 @@ use crate::sink::Sink;
 use crate::sink::file::FileSink;
 use crate::sink::grpc::GrpcSink;
 use crate::sink::kafka::KafkaSink;
+use crate::validation::depth::{self, MAX_PARSE_DEPTH};
 use crate::validation::{ValidationResult, Validator};
 
 // Trace-level logging imports (only used for per-message tracing)
@@ -169,6 +170,8 @@ pub struct PipelineState {
     dlq: Option<Arc<Dlq>>,
     /// The listeners readiness waits on, `None` until the server declares them.
     listeners: RwLock<Option<Vec<BoundAddr>>>,
+    /// Counts records refused before validation; `None` in tests built without it.
+    metrics: Option<Arc<Metrics>>,
 }
 
 impl PipelineState {
@@ -275,7 +278,7 @@ impl PipelineState {
             None
         };
         // Records a destination refuses for good go to the same DLQ.
-        let rejects = Rejects::new(dlq.clone(), metrics);
+        let rejects = Rejects::new(dlq.clone(), metrics.clone());
 
         // Initialise Kafka sink with buffer wrapper if brokers configured
         let kafka_sink = if !config.kafka.brokers.is_empty() {
@@ -346,6 +349,7 @@ impl PipelineState {
             pressure,
             dlq,
             listeners: RwLock::new(None),
+            metrics,
         })
     }
 
@@ -560,6 +564,9 @@ impl PipelineState {
     async fn process_inner(&self, payload: Bytes) -> Result<()> {
         trace!(bytes = payload.len(), "Processing message");
 
+        // Validation, routing and stamping all parse lazily, and routing runs with validation off.
+        depth::admit(&payload, MAX_PARSE_DEPTH, self.metrics.as_deref())?;
+
         // Validate (read guard dropped before any .await)
         let validation = self.validator.read().validate(&payload);
         match validation {
@@ -663,6 +670,8 @@ impl PipelineState {
 
         // Tracked for the life of this future.
         let _lease = MemoryLease::acquire(&self.memory_guard, payload.len() as u64);
+
+        depth::admit(&payload, MAX_PARSE_DEPTH, self.metrics.as_deref())?;
 
         // Validate (acquire and release lock before any await)
         let validation = self.validator.read().validate(&payload);
@@ -1578,6 +1587,79 @@ mod tests {
             "{:?}",
             outcome.unavailable
         );
+    }
+
+    /// Run `test` on a thread with a Tokio worker's 2 MiB stack.
+    fn on_worker_stack<F, Fut>(test: F)
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()>,
+    {
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(test());
+            })
+            .unwrap()
+            .join()
+            .expect("the pipeline thread must return");
+    }
+
+    fn nested(depth: usize) -> Bytes {
+        Bytes::from(format!("{}1{}", "[".repeat(depth), "]".repeat(depth)))
+    }
+
+    /// Every listener enters through `process`, `process_batch` or
+    /// `process_to_topic`, and each refuses a deep record before it parses.
+    #[test]
+    fn a_deeply_nested_record_is_refused_at_every_pipeline_entry() {
+        on_worker_stack(|| async {
+            let mut config = test_config();
+            // Routing parses whether or not validation does.
+            config.validation.require_json = false;
+            let state = test_state_with(config).await;
+
+            for depth in [20_000, 100_000] {
+                let err = state.process(nested(depth)).await.expect_err("too deep");
+                assert!(
+                    matches!(err, Error::Validation(ref r) if r.contains("maximum parse depth")),
+                    "{err}"
+                );
+                let err = state
+                    .process_to_topic(nested(depth), "deep_land")
+                    .await
+                    .expect_err("too deep");
+                assert!(matches!(err, Error::Validation(_)), "{err}");
+            }
+        });
+    }
+
+    /// A deep record is refused for good, so the records behind it are still taken.
+    #[test]
+    fn a_deeply_nested_record_does_not_stop_the_batch() {
+        on_worker_stack(|| async {
+            let state = test_state().await;
+            let payloads = vec![
+                Bytes::from(r#"{"ok":1}"#),
+                nested(20_000),
+                Bytes::from(r#"{"ok":2}"#),
+            ];
+
+            let outcome = state.process_batch(&payloads).await;
+
+            assert_eq!(outcome.accepted, 2);
+            assert_eq!(outcome.rejected, 1);
+            assert!(outcome.unavailable.is_none(), "{:?}", outcome.unavailable);
+            assert!(
+                matches!(outcome.first_rejection, Some(Error::Validation(_))),
+                "{:?}",
+                outcome.first_rejection
+            );
+        });
     }
 
     /// Pressure refuses the whole batch before any record is taken.

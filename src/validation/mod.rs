@@ -11,6 +11,8 @@
 //! Validates incoming payloads for JSON format and required field presence
 //! using on-demand parsing for maximum performance.
 
+pub mod depth;
+
 use bytes::Bytes;
 use sonic_rs::LazyValue;
 
@@ -558,12 +560,9 @@ mod tests {
 
     #[test]
     fn test_deeply_nested() {
-        // sonic-rs 0.5 parses by recursive descent, so deep nesting consumes
-        // proportional stack. In production the parse runs on Tokio worker /
-        // server threads (>=2 MiB stacks); the default libtest harness thread
-        // is far smaller (and smaller still on macOS), so run the parse on a
-        // thread with a production-representative stack -- the test verifies the
-        // validator HANDLES deep input gracefully, not the harness stack limit.
+        // sonic-rs recurses once per nesting level, at about 56 KiB of stack a
+        // level in a debug build, so this runs on 8 MiB; the pipeline refuses
+        // anything deeper than depth::MAX_PARSE_DEPTH before the validator sees it.
         let handle = std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024)
             .spawn(|| {
