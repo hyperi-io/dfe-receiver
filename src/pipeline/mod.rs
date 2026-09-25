@@ -157,27 +157,39 @@ struct Delivery<S: Sink + 'static> {
     /// An at-enqueue answer sends here. `None` when every enabled listener
     /// holds its answer, so no buffer or spool is built at all.
     queued: Option<Arc<SinkBackend<S>>>,
+    /// The sink behind `queued` when it is not `primary`.
+    enqueue_sink: Option<Arc<S>>,
 }
 
 impl<S: Sink + 'static> Delivery<S> {
     /// The sink, with a buffer in front of it when `queued` and its spool,
-    /// with spillover on, at `spool` under the spillover path.
+    /// with spillover on, at `spool` under the spillover path. The buffer
+    /// sends through `enqueue_sink` where given, else through `primary`.
     async fn build(
         primary: S,
+        enqueue_sink: Option<S>,
         spool: &Path,
         buffer: &BufferConfig,
         rejects: Rejects,
         queued: bool,
     ) -> Result<Self> {
         let primary = Arc::new(primary);
+        let enqueue_sink = enqueue_sink.filter(|_| queued).map(Arc::new);
         let queued = if queued {
+            let behind = enqueue_sink
+                .as_ref()
+                .map_or_else(|| Arc::clone(&primary), Arc::clone);
             Some(Arc::new(
-                build_sink_backend(Arc::clone(&primary), spool, buffer, rejects).await?,
+                build_sink_backend(behind, spool, buffer, rejects).await?,
             ))
         } else {
             None
         };
-        Ok(Self { primary, queued })
+        Ok(Self {
+            primary,
+            queued,
+            enqueue_sink,
+        })
     }
 
     /// The sink an at-enqueue answer sends through.
@@ -189,7 +201,7 @@ impl<S: Sink + 'static> Delivery<S> {
     }
 
     fn is_healthy(&self) -> bool {
-        self.at_enqueue().is_healthy()
+        self.at_enqueue().is_healthy() && (self.enqueue_sink.is_none() || self.primary.is_healthy())
     }
 
     async fn stats(&self) -> Option<InMemoryBufferStats> {
@@ -206,8 +218,14 @@ impl<S: Sink + 'static> Delivery<S> {
         }
     }
 
+    /// Drain the buffer into its sink and flush it, and flush `primary` too
+    /// when it is a sink of its own.
     async fn flush(&self) -> Result<()> {
-        self.at_enqueue().flush().await
+        if self.enqueue_sink.is_none() {
+            return self.at_enqueue().flush().await;
+        }
+        let (queued, held) = tokio::join!(self.at_enqueue().flush(), self.primary.flush());
+        queued.and(held)
     }
 }
 
@@ -408,10 +426,22 @@ impl PipelineState {
             None
         } else {
             let primary = KafkaSink::new(&config.kafka, held_message_timeout)?;
+            // A record answered at enqueue has no resend behind it once librdkafka
+            // gives up, so it keeps librdkafka's own timeout on its own producer.
+            let enqueue_sink = (at_enqueue && held_message_timeout.is_some())
+                .then(|| KafkaSink::new(&config.kafka, None))
+                .transpose()?;
             let spool = claim_spool(&mut spools, PathBuf::from(BUS_SPOOL))?;
             Some(
-                Delivery::build(primary, &spool, &config.buffer, rejects.clone(), at_enqueue)
-                    .await?,
+                Delivery::build(
+                    primary,
+                    enqueue_sink,
+                    &spool,
+                    &config.buffer,
+                    rejects.clone(),
+                    at_enqueue,
+                )
+                .await?,
             )
         };
 
@@ -437,6 +467,7 @@ impl PipelineState {
                         DestinationSink::Grpc(
                             Delivery::build(
                                 primary,
+                                None,
                                 &spool,
                                 &config.buffer,
                                 rejects.clone(),
@@ -1643,6 +1674,43 @@ mod tests {
             .kafka
             .librdkafka_overrides
             .insert("message.timeout.ms".to_string(), "1000".to_string());
+    }
+
+    /// A record answered at enqueue keeps librdkafka's own message timeout:
+    /// beside a held listener it gets a producer of its own, since a held
+    /// timeout would give it up after 20 s with nothing to resend it.
+    #[tokio::test]
+    async fn records_answered_at_enqueue_never_run_on_the_held_timeout() {
+        let held = Some(acks::HELD_MESSAGE_TIMEOUT);
+        let mut config = test_config();
+        unroutable_bus(&mut config);
+
+        // The default: every listener holds, so one producer on the held timeout.
+        let state = test_state_with(config.clone()).await;
+        let kafka = state.kafka.as_ref().unwrap();
+        assert_eq!(kafka.primary.held_message_timeout(), held);
+        assert!(kafka.queued.is_none() && kafka.enqueue_sink.is_none());
+
+        // Syslog answers at enqueue beside the held HTTP listener.
+        config.syslog.enabled = true;
+        let state = test_state_with(config.clone()).await;
+        let kafka = state.kafka.as_ref().unwrap();
+        assert_eq!(kafka.primary.held_message_timeout(), held);
+        assert_eq!(
+            kafka
+                .enqueue_sink
+                .as_ref()
+                .map(|sink| sink.held_message_timeout()),
+            Some(None),
+            "the buffer sends through a producer on librdkafka's own timeout"
+        );
+
+        // Nothing holds, so one producer on librdkafka's own timeout.
+        config.server.acknowledgements = AcknowledgementsConfig::new(false);
+        let state = test_state_with(config).await;
+        let kafka = state.kafka.as_ref().unwrap();
+        assert_eq!(kafka.primary.held_message_timeout(), None);
+        assert!(kafka.enqueue_sink.is_none());
     }
 
     /// Held, a record no broker confirms answers retryable; at enqueue the

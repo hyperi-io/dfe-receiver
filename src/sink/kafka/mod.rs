@@ -231,6 +231,11 @@ pub struct KafkaSink {
     /// Tripped when librdkafka refuses to take a record into its queue,
     /// cleared by the next accepted enqueue.
     refusing: FailureLatch,
+
+    /// The `message.timeout.ms` this producer runs with for held answers,
+    /// `None` for librdkafka's own.
+    #[cfg(test)]
+    held_message_timeout: Option<Duration>,
 }
 
 impl KafkaSink {
@@ -268,6 +273,7 @@ impl KafkaSink {
         info!(
             brokers = ?config.brokers,
             profile = "high_throughput",
+            held_message_timeout_ms = held_message_timeout.map(|t| t.as_millis()),
             "Kafka producer initialised"
         );
 
@@ -275,7 +281,15 @@ impl KafkaSink {
             producer,
             delivery,
             refusing: FailureLatch::default(),
+            #[cfg(test)]
+            held_message_timeout,
         })
+    }
+
+    /// The `message.timeout.ms` this producer was built with for held answers.
+    #[cfg(test)]
+    pub(crate) fn held_message_timeout(&self) -> Option<Duration> {
+        self.held_message_timeout
     }
 
     /// Queue a record whose delivery report settles `piece`.
@@ -521,6 +535,45 @@ mod tests {
             outcome,
             scalo::transport::ack::TicketOutcome::Errored,
             "a record no broker confirmed must not answer success"
+        );
+    }
+
+    /// A record answered at enqueue lasts a broker outage only as long as its
+    /// producer's message timeout: once librdkafka gives it up, nothing resends
+    /// it. A held timeout on the same producer would cut that to the hold.
+    #[tokio::test]
+    async fn an_enqueued_record_lasts_only_as_long_as_its_producers_timeout() {
+        let config = KafkaConfig {
+            brokers: vec![UNROUTABLE_BROKER.to_string()],
+            ..KafkaConfig::default()
+        };
+        let held = KafkaSink::new(&config, Some(Duration::from_millis(500))).unwrap();
+        let own = KafkaSink::new(&config, None).unwrap();
+        for sink in [&held, &own] {
+            sink.send("stranded", Bytes::from_static(b"{}"))
+                .await
+                .unwrap();
+        }
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while held.delivery.awaiting_report.load(Ordering::Relaxed) > 0
+            && tokio::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(
+            held.delivery.awaiting_report.load(Ordering::Relaxed),
+            0,
+            "the held timeout never gave the record up"
+        );
+        assert!(
+            held.delivery.failures.is_tripped(),
+            "and reported it failed"
+        );
+        assert_eq!(
+            own.delivery.awaiting_report.load(Ordering::Relaxed),
+            1,
+            "librdkafka's own timeout still holds the record"
         );
     }
 
