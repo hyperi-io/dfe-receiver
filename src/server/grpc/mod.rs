@@ -20,6 +20,7 @@ pub mod convert;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use scalo::transport::grpc::sender_deadline;
 use tokio_util::sync::CancellationToken;
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::server::TcpIncoming;
@@ -29,7 +30,6 @@ use tracing::{debug, info, trace};
 use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
-use crate::pipeline::acks::sender_deadline;
 use crate::pipeline::{Acks, BatchOutcome, PipelineState};
 use crate::server::auth::{AuthMode, AuthState, validate_bearer_auth};
 use crate::server::http::create_auth_state;

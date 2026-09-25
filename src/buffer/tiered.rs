@@ -26,7 +26,7 @@ use parking_lot::Mutex;
 use scalo::tiered_sink::{CircuitBreaker, CircuitState};
 use tracing::{debug, warn};
 
-use crate::buffer::Rejects;
+use crate::buffer::{Disposal, Rejects};
 use crate::config::{BufferConfig, QueueBound};
 use crate::error::{Error, Result};
 use crate::sink::Sink;
@@ -211,13 +211,20 @@ impl<S: Sink + Send + Sync + 'static> InMemoryBuffer<S> {
                     self.circuit.record_success().await;
                 }
                 // Requeued, a record refused for good would hold up every record
-                // behind it; its sender was answered when it was queued.
+                // behind it, so it leaves once settled; its sender was answered
+                // when it was queued, so a DLQ refusal keeps it at the front.
                 Err(Error::Rejected(reason)) => {
-                    rejected += 1;
-                    let _ = self
+                    match self
                         .rejects
                         .dispose(&msg.topic, &msg.payload, &reason)
-                        .await;
+                        .await
+                    {
+                        Disposal::DeadLettered | Disposal::Dropped => rejected += 1,
+                        Disposal::Refused => {
+                            failed = Some(msg);
+                            break;
+                        }
+                    }
                 }
                 Err(e) => {
                     self.circuit.record_failure().await;
@@ -881,6 +888,40 @@ mod tests {
                 Bytes::from_static(b"three"),
             ]
         );
+    }
+
+    /// A queued record refused for good that the DLQ does not take stays at
+    /// the front, and leaves once the DLQ holds it.
+    #[tokio::test]
+    async fn a_dlq_refusal_keeps_the_record_queued_until_the_dlq_takes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let buffer = queued_behind_an_outage(&["bad", "good"])
+            .await
+            .with_rejects(Rejects::new(
+                Some(crate::buffer::rejects::test_dlq::refusing_dlq(dir.path())),
+                None,
+            ));
+
+        assert_eq!(buffer.try_drain().await, 0);
+        assert_eq!(
+            buffer.stats().await.queue_size,
+            2,
+            "the record the DLQ did not take left the queue"
+        );
+        assert!(
+            buffer.primary.taken.lock().is_empty(),
+            "drained out of order"
+        );
+
+        std::fs::remove_file(dir.path().join("receiver")).unwrap();
+        std::fs::create_dir(dir.path().join("receiver")).unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while buffer.stats().await.queue_size > 0 && tokio::time::Instant::now() < deadline {
+            buffer.drain_queued().await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(buffer.stats().await.queue_size, 0);
+        assert_eq!(*buffer.primary.taken.lock(), [Bytes::from_static(b"good")]);
     }
 
     /// A record refused on the direct path never enters the queue.

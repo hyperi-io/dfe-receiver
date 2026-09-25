@@ -19,14 +19,16 @@
 //! (not `Fatal`) so the TieredSink spills the record rather than dropping it --
 //! preserving at-least-once delivery across a downstream outage. A record the
 //! inner sink refuses for good is settled here through [`Rejects`] and reported
-//! as sent, so it is never spilled or replayed.
+//! as sent once the DLQ holds it, so it is not replayed; a DLQ write that is
+//! not confirmed reports `Backpressured`, so the record stays spilled and is
+//! offered again.
 
 use std::sync::Arc;
 
 use bytes::Bytes;
 use scalo::transport::{SendResult, TransportBase, TransportResult, TransportSender};
 
-use crate::buffer::Rejects;
+use crate::buffer::{Disposal, Rejects};
 use crate::error::Error;
 use crate::sink::Sink as ReceiverSink;
 
@@ -69,10 +71,12 @@ impl<S: ReceiverSink + 'static> TransportSender for ScaloSinkAdapter<S> {
         match self.inner.send(key, payload.clone()).await {
             Ok(()) => SendResult::Ok,
             // Spilled, a record refused for good would be replayed forever
-            // ahead of everything behind it on disk.
+            // ahead of everything behind it on disk, so it leaves once settled.
             Err(Error::Rejected(reason)) => {
-                let _ = self.rejects.dispose(key, &payload, &reason).await;
-                SendResult::Ok
+                match self.rejects.dispose(key, &payload, &reason).await {
+                    Disposal::DeadLettered | Disposal::Dropped => SendResult::Ok,
+                    Disposal::Refused => SendResult::Backpressured,
+                }
             }
             // Transient: surface as Backpressured so the TieredSink spills to
             // disk (at-least-once) instead of dropping the record.
@@ -87,6 +91,7 @@ impl<S: ReceiverSink + 'static> TransportSender for ScaloSinkAdapter<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::buffer::rejects::test_dlq;
     use async_trait::async_trait;
     use parking_lot::Mutex;
     use scalo::transport::{PayloadFormat, Record, RecordMeta};
@@ -221,6 +226,59 @@ mod tests {
                 ("orders".to_string(), b"good-2".to_vec()),
             ]
         );
+        tiered.shutdown().await;
+    }
+
+    /// A refused record the DLQ does not confirm stays with the spool.
+    #[tokio::test]
+    async fn a_dlq_refusal_reports_backpressured() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = Arc::new(FakeSink::new());
+        let rejects = Rejects::new(Some(test_dlq::refusing_dlq(dir.path())), None);
+        let adapter = ScaloSinkAdapter::new(Arc::clone(&fake), rejects);
+
+        let result = adapter.send("orders", Bytes::from_static(b"bad")).await;
+        assert!(
+            matches!(result, SendResult::Backpressured),
+            "got {result:?}"
+        );
+    }
+
+    /// Through the real TieredSink: a refused record the DLQ did not take is
+    /// kept on disk, and leaves once the DLQ holds it.
+    #[tokio::test]
+    async fn a_dlq_refusal_keeps_the_record_spilled_until_the_dlq_takes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let dlq_dir = dir.path().join("dlq");
+        std::fs::create_dir(&dlq_dir).unwrap();
+        let rejects = Rejects::new(Some(test_dlq::refusing_dlq(&dlq_dir)), None);
+        let mut config = scalo::tiered_sink::TieredSinkConfig::new(dir.path().join("spool"));
+        config.circuit_failure_threshold = 1;
+        config.circuit_reset_timeout_ms = 20;
+        config.drain_interval_ms = 5;
+        let tiered = scalo::tiered_sink::TieredSink::new(
+            ScaloSinkAdapter::new(Arc::new(FakeSink::new()), rejects),
+            config,
+        )
+        .await
+        .unwrap();
+
+        tiered.send(&record("orders", b"bad")).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(tiered.spool_len().await, 1, "the record left the spool");
+
+        std::fs::remove_file(dlq_dir.join("receiver")).unwrap();
+        std::fs::create_dir(dlq_dir.join("receiver")).unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !tiered.spool_is_empty().await && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            tiered.spool_is_empty().await,
+            "the DLQ took it, the spool kept it"
+        );
+        let written = std::fs::read_to_string(dlq_dir.join("receiver/dlq.ndjson")).unwrap();
+        assert_eq!(written.lines().count(), 1, "{written}");
         tiered.shutdown().await;
     }
 

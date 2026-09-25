@@ -26,6 +26,7 @@ use scalo::transport::AcknowledgementsConfig;
 use scalo::transport::ack::{
     AckControl, AckKind, EffectiveGuarantee, HeldAcks, Refused, SinkConfirmation, Ticket, Tickets,
 };
+use scalo::transport::grpc::hold_budget;
 
 /// The longest a listener holds an answer.
 pub const MAX_HOLD: Duration = Duration::from_secs(25);
@@ -37,44 +38,8 @@ pub const NEXT_HOP_DEADLINE_MS: u64 = 20_000;
 /// [`MAX_HOLD`], so a delivery report settles a request before its hold ends.
 pub const HELD_MESSAGE_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// The least headroom kept below a sender's deadline.
-const MIN_MARGIN: Duration = Duration::from_secs(1);
-
 /// Bytes one listener may hold when the memory guard reports no limit.
 const DEFAULT_MAX_HELD_BYTES: u64 = 256 * 1024 * 1024;
-
-/// How long an answer may be held for a sender that allows `deadline`: up to
-/// `max_hold`, and a margin of a tenth of the deadline (at least a second)
-/// short of it, so the answer reaches the sender in time.
-#[must_use]
-pub fn hold_budget(max_hold: Duration, deadline: Option<Duration>) -> Duration {
-    let Some(deadline) = deadline else {
-        return max_hold;
-    };
-    let margin = (deadline / 10).max(MIN_MARGIN).min(deadline / 2);
-    max_hold.min(deadline.saturating_sub(margin))
-}
-
-/// The deadline a gRPC sender set in its `grpc-timeout` header: at most eight
-/// digits and a unit of `H`, `M`, `S`, `m`, `u` or `n`, as tonic reads it.
-#[must_use]
-pub fn sender_deadline(metadata: &tonic::metadata::MetadataMap) -> Option<Duration> {
-    let value = metadata.get("grpc-timeout")?.to_str().ok()?;
-    let (digits, unit) = value.split_at(value.len().checked_sub(1)?);
-    if digits.is_empty() || digits.len() > 8 {
-        return None;
-    }
-    let n: u64 = digits.parse().ok()?;
-    Some(match unit {
-        "H" => Duration::from_secs(n * 3_600),
-        "M" => Duration::from_secs(n * 60),
-        "S" => Duration::from_secs(n),
-        "m" => Duration::from_millis(n),
-        "u" => Duration::from_micros(n),
-        "n" => Duration::from_nanos(n),
-        _ => return None,
-    })
-}
 
 /// Bytes one listener may hold unanswered: a quarter of the memory limit.
 #[must_use]
@@ -129,6 +94,16 @@ impl Acks {
         acks
     }
 
+    /// The same setting and held-byte ceiling, holding an answer no longer
+    /// than `max_hold`.
+    #[must_use]
+    pub fn holding_at_most(&self, max_hold: Duration) -> Self {
+        Self {
+            tickets: self.tickets.clone(),
+            max_hold: self.max_hold.min(max_hold),
+        }
+    }
+
     /// Whether this listener holds its answers.
     #[must_use]
     pub fn holds(&self) -> bool {
@@ -181,28 +156,10 @@ impl AckControl for ListenerAcks {
 mod tests {
     use super::*;
 
-    #[test]
-    fn the_hold_leaves_the_sender_a_margin() {
-        assert_eq!(hold_budget(MAX_HOLD, None), MAX_HOLD);
-        assert_eq!(
-            hold_budget(MAX_HOLD, Some(Duration::from_secs(30))),
-            MAX_HOLD,
-            "a 30s request timeout holds for the full 25s"
-        );
-        assert_eq!(
-            hold_budget(MAX_HOLD, Some(Duration::from_secs(10))),
-            Duration::from_secs(9)
-        );
-        assert_eq!(
-            hold_budget(MAX_HOLD, Some(Duration::from_secs(2))),
-            Duration::from_secs(1),
-            "never less than a second short of the deadline"
-        );
-        assert_eq!(
-            hold_budget(MAX_HOLD, Some(Duration::from_millis(500))),
-            Duration::from_millis(250),
-            "and never more than half of it"
-        );
+    /// How long `acks` holds an answer for a sender that sets no deadline.
+    fn held_for(acks: &Acks) -> Duration {
+        let ticket = acks.admit(10, None).expect("holding").expect("admitted");
+        ticket.deadline().saturating_duration_since(Instant::now())
     }
 
     /// The Kafka report and the next gRPC hop both settle inside the hold.
@@ -212,21 +169,53 @@ mod tests {
         assert!(Duration::from_millis(NEXT_HOP_DEADLINE_MS) < MAX_HOLD);
     }
 
+    /// A listener bounded by its own request timeout holds past the Kafka
+    /// message timeout and the next gRPC hop at its default, so a slow
+    /// delivery is confirmed rather than answered retry.
     #[test]
-    fn a_grpc_timeout_header_is_read_as_tonic_reads_it() {
-        let mut metadata = tonic::metadata::MetadataMap::new();
-        assert_eq!(sender_deadline(&metadata), None);
-        metadata.insert("grpc-timeout", "20S".parse().unwrap());
-        assert_eq!(sender_deadline(&metadata), Some(Duration::from_secs(20)));
-        metadata.insert("grpc-timeout", "1500m".parse().unwrap());
-        assert_eq!(
-            sender_deadline(&metadata),
-            Some(Duration::from_millis(1500))
+    fn every_default_request_timeout_holds_past_the_downstream_deadlines() {
+        let config = crate::config::Config::default();
+        for (listener, timeout_ms) in [
+            ("server", config.server.request_timeout_ms),
+            ("splunk_hec", config.splunk_hec.request_timeout_ms),
+            ("prometheus_rw", config.prometheus_rw.request_timeout_ms),
+            ("webhook", config.webhook.request_timeout_ms),
+        ] {
+            let acks = Acks::new(
+                "test",
+                AcknowledgementsConfig::default(),
+                Some(Duration::from_millis(timeout_ms)),
+                1_000,
+            );
+            let hold = held_for(&acks);
+            assert!(hold > HELD_MESSAGE_TIMEOUT, "{listener} holds {hold:?}");
+            assert!(
+                hold > Duration::from_millis(NEXT_HOP_DEADLINE_MS),
+                "{listener} holds {hold:?}"
+            );
+        }
+    }
+
+    /// A cap shortens the hold and keeps the listener's held-byte ceiling.
+    #[test]
+    fn a_capped_hold_answers_by_its_cap() {
+        let acks = Acks::new("test", AcknowledgementsConfig::default(), None, 1_000);
+        let capped = acks.holding_at_most(Duration::from_secs(9));
+        let hold = held_for(&capped);
+        assert!(
+            hold <= Duration::from_secs(9) && hold > Duration::from_secs(8),
+            "held {hold:?}"
         );
-        metadata.insert("grpc-timeout", "123456789S".parse().unwrap());
-        assert_eq!(sender_deadline(&metadata), None, "nine digits");
-        metadata.insert("grpc-timeout", "20x".parse().unwrap());
-        assert_eq!(sender_deadline(&metadata), None, "no such unit");
+        assert!(
+            held_for(&acks.holding_at_most(Duration::from_secs(60))) > Duration::from_secs(24),
+            "a cap above the hold leaves it at {MAX_HOLD:?}"
+        );
+
+        let _held = capped.admit(990, None).expect("holding").expect("admitted");
+        assert!(
+            matches!(acks.admit(100, None), Some(Err(_))),
+            "the capped copy's held bytes count against the listener's ceiling"
+        );
     }
 
     #[test]

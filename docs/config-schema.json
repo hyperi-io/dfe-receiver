@@ -123,7 +123,8 @@
         "max_message_size": 16777216,
         "acknowledgements": {
           "enabled": true
-        }
+        },
+        "http_max_hold_ms": 9000
       }
     },
     "lumberjack": {
@@ -387,7 +388,7 @@
         "enabled": false,
         "bind_address": null,
         "max_body_size": 1048576,
-        "request_timeout_ms": 10000,
+        "request_timeout_ms": 30000,
         "tls": {
           "enabled": false,
           "cert_file": null,
@@ -997,6 +998,13 @@
           "default": {
             "enabled": true
           }
+        },
+        "http_max_hold_ms": {
+          "description": "The longest an HTTP export is held for its destinations to confirm, in\nmilliseconds. OTel exporters give up after 10 s by default, so a longer\nhold keeps the bytes of a request nobody is waiting on. Raise it with\nthe exporters' `timeout`. A gRPC export is bounded by its own\n`grpc-timeout` instead.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 9000
         }
       }
     },
@@ -1763,11 +1771,11 @@
           "default": 1048576
         },
         "request_timeout_ms": {
-          "description": "Request timeout in milliseconds (own listener only).",
+          "description": "Request timeout in milliseconds, on either listener. It bounds the\nheld answer, so the default keeps the hold past the Kafka message\ntimeout.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0,
-          "default": 10000
+          "default": 30000
         },
         "tls": {
           "description": "TLS for the own listener. Refused when `bind_address` is unset, since\nthe shared listener is under `server.tls`.",

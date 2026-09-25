@@ -12,7 +12,9 @@
 //! over the destination's size ceiling. Buffered and retried in order, it
 //! would sit at the head of the queue and hold up every record behind it. It
 //! goes to the DLQ when one is configured and is dropped when not, counted
-//! either way in `receiver_records_rejected_total`.
+//! either way in `receiver_records_rejected_total`. A write the DLQ does not
+//! confirm leaves the record where it was -- queued, spilled, or its sender told
+//! to resend -- so it is offered again.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -27,6 +29,10 @@ use crate::metrics::Metrics;
 
 /// Sampled log counter for refused records (logs the first, then 1 in 100).
 static REJECTED: AtomicU64 = AtomicU64::new(0);
+
+/// Sampled log counter for DLQ writes not confirmed, which repeat on every
+/// offer while the DLQ is down.
+static DLQ_REFUSED: AtomicU64 = AtomicU64::new(0);
 
 /// What became of a refused record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,14 +76,26 @@ fn dlq_refused() -> Error {
 
 /// Write `entry` and wait until the DLQ reports whether it holds it.
 ///
-/// `send` returning means the entry is queued; the flush after it is what
-/// reports a write the DLQ refused.
+/// The answer is about this entry alone: another writer's refusal never
+/// reaches it.
 pub(crate) async fn dead_letter_confirmed(
     dlq: &Dlq,
     entry: DlqEntry,
 ) -> std::result::Result<(), DlqError> {
-    dlq.send(entry).await?;
-    dlq.flush().await
+    dlq.write_confirmed(vec![entry]).await
+}
+
+/// Log a DLQ write that was not confirmed, the first and then 1 in 100.
+fn log_dlq_refusal(error: &DlqError, topic: &str) {
+    if scalo::logger::log_sampled(&DLQ_REFUSED, 100) {
+        let total = DLQ_REFUSED.load(Ordering::Relaxed);
+        error!(
+            error = %error,
+            topic,
+            total,
+            "DLQ did not confirm a refused record; it is offered again (logged 1 in 100)"
+        );
+    }
 }
 
 /// Where a record goes once its destination has refused it for good.
@@ -97,13 +115,17 @@ impl Rejects {
         Self { dlq, metrics }
     }
 
-    /// Take `payload` off the delivery path: queue it on the DLQ, or drop it.
+    /// Take `payload` off the delivery path: dead-letter it once the DLQ
+    /// confirms the write, or drop it where no DLQ is configured.
+    ///
+    /// [`Disposal::Refused`] leaves the record with the caller, to keep and
+    /// offer again.
     pub async fn dispose(&self, topic: &str, payload: &Bytes, reason: &str) -> Disposal {
         let disposal = match &self.dlq {
-            Some(dlq) => match dlq.send(entry(topic, payload, reason)).await {
+            Some(dlq) => match dead_letter_confirmed(dlq, entry(topic, payload, reason)).await {
                 Ok(()) => Disposal::DeadLettered,
                 Err(e) => {
-                    error!(error = %e, topic, "DLQ did not take a refused record");
+                    log_dlq_refusal(&e, topic);
                     Disposal::Refused
                 }
             },
@@ -144,7 +166,7 @@ impl Rejects {
                 Ok(())
             }
             Err(e) => {
-                error!(error = %e, topic, "DLQ did not confirm a refused record; the sender is told to resend it");
+                log_dlq_refusal(&e, topic);
                 self.count(Disposal::Refused, topic, payload, reason);
                 Err(dlq_refused())
             }
@@ -198,15 +220,16 @@ fn entry(topic: &str, payload: &Bytes, reason: &str) -> DlqEntry {
     }
 }
 
+/// DLQ fixtures shared by the buffer tests.
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use base64::Engine;
-    use scalo::transport::ack::{TicketOutcome, Tickets};
+pub(crate) mod test_dlq {
+    use std::sync::Arc;
+
+    use scalo::dlq::Dlq;
     use tokio_util::sync::CancellationToken;
 
     /// A file-only DLQ writing under `dir`.
-    fn file_dlq(dir: &std::path::Path) -> Arc<Dlq> {
+    pub(crate) fn file_dlq(dir: &std::path::Path) -> Arc<Dlq> {
         let config = crate::config::DlqConfig {
             mode: "file_only".to_string(),
             file_path: dir.display().to_string(),
@@ -219,13 +242,21 @@ mod tests {
 
     /// A file-only DLQ whose every write fails: its service directory is a
     /// regular file.
-    fn refusing_dlq(dir: &std::path::Path) -> Arc<Dlq> {
+    pub(crate) fn refusing_dlq(dir: &std::path::Path) -> Arc<Dlq> {
         let dlq = file_dlq(dir);
         let service_dir = dir.join("receiver");
         let _ = std::fs::remove_dir_all(&service_dir);
         std::fs::write(&service_dir, b"not a directory").unwrap();
         dlq
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_dlq::{file_dlq, refusing_dlq};
+    use super::*;
+    use base64::Engine;
+    use scalo::transport::ack::{TicketOutcome, Tickets};
 
     fn held_ticket(tickets: &Tickets) -> scalo::transport::ack::Ticket {
         tickets
@@ -267,6 +298,20 @@ mod tests {
             entry["payload"],
             base64::engine::general_purpose::STANDARD.encode(&payload)
         );
+    }
+
+    /// A write the DLQ does not confirm is reported, not counted as taken.
+    #[tokio::test]
+    async fn a_dlq_that_does_not_confirm_the_write_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let metrics = Arc::new(Metrics::default());
+
+        let disposal = Rejects::new(Some(refusing_dlq(dir.path())), Some(Arc::clone(&metrics)))
+            .dispose("events", &Bytes::from_static(b"{}"), "too large")
+            .await;
+
+        assert_eq!(disposal, Disposal::Refused);
+        assert_eq!(metrics.get_messages_dlq(), 0);
     }
 
     /// With no DLQ the record is dropped, and a drop is not a dead-letter.

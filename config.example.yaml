@@ -125,6 +125,20 @@ grpc:
     #   secret_source: "file:/etc/secrets/grpc-tokens"
     #   refresh_interval_secs: 300
 
+# OTLP receiver: gRPC on 4317, HTTP on 4318. tls and auth take the same keys as
+# grpc above and cover both endpoints.
+otlp:
+  enabled: false
+  grpc_bind_address: "0.0.0.0:4317"
+  http_bind_address: "0.0.0.0:4318"
+  max_message_size: 16777216  # 16 MiB, the largest gRPC export decoded
+  acknowledgements:
+    enabled: true
+  # An HTTP export carries no deadline, so its hold is set here: a second
+  # inside the OTel exporters' 10s default timeout. Raise both together. A gRPC
+  # export is held inside its own grpc-timeout.
+  http_max_hold_ms: 9000
+
 # Lumberjack v2 / Beats protocol (Filebeat, Winlogbeat, etc.)
 lumberjack:
   enabled: false
@@ -258,7 +272,7 @@ webhook:
   enabled: false
   # bind_address: "0.0.0.0:8090"   # unset = share the ingest listener
   max_body_size: 1048576           # 1 MiB; alerts are small, bulk goes to /ingest
-  request_timeout_ms: 10000        # the hold is 9s under it
+  request_timeout_ms: 30000        # bounds the hold; under 22300 it ends before the 20s Kafka timeout
   acknowledgements:
     enabled: true
   # tls: (own listener only; same keys as server.tls)

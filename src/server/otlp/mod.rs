@@ -23,7 +23,9 @@ pub mod convert;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
+use scalo::transport::grpc::sender_deadline;
 use tokio_util::sync::CancellationToken;
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::server::TcpIncoming;
@@ -33,7 +35,6 @@ use tracing::{debug, info, warn};
 use crate::config::{OtlpConfig, RawCapture};
 use crate::error::{Error, Result, unavailable_response};
 use crate::metrics::Metrics;
-use crate::pipeline::acks::sender_deadline;
 use crate::pipeline::{Acks, BatchOutcome, PipelineState};
 use crate::server::auth::{AuthMode, AuthState, validate_bearer_auth};
 use crate::server::http::create_auth_state;
@@ -765,13 +766,15 @@ impl ProtocolHandler for OtlpHandler {
         let http_metrics = self.metrics.clone();
         let http_shutdown = shutdown.clone();
         let http_bound = self.http_bound.clone();
+        // An HTTP exporter sends no deadline, so its hold is configured.
+        let http_acks = acks.holding_at_most(Duration::from_millis(self.config.http_max_hold_ms));
         listeners.spawn("OTLP HTTP", async move {
             run_http_server(
                 &http_config,
                 http_raw,
                 http_pipeline,
                 http_metrics,
-                acks,
+                http_acks,
                 http_shutdown,
                 &http_bound,
             )

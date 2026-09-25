@@ -369,6 +369,17 @@ impl Config {
         }
 
         self.validate_auth()?;
+        // A zero hold answers every held OTLP HTTP export as not confirmed.
+        #[cfg(feature = "otlp")]
+        if self.otlp.enabled
+            && self.otlp.acknowledgements.enabled
+            && self.otlp.http_max_hold_ms == 0
+        {
+            return Err(Error::Config(
+                "otlp.http_max_hold_ms must be greater than zero while acknowledgements are on"
+                    .into(),
+            ));
+        }
         self.webhook.validate()?;
         // The flow handler refuses this block at build, so it has to fail startup here.
         self.flow
@@ -1184,7 +1195,18 @@ pub struct OtlpConfig {
     /// Answer an export, on either endpoint, only once every destination
     /// confirmed its records (default on). Off answers once they are queued.
     pub acknowledgements: AcknowledgementsConfig,
+
+    /// The longest an HTTP export is held for its destinations to confirm, in
+    /// milliseconds. OTel exporters give up after 10 s by default, so a longer
+    /// hold keeps the bytes of a request nobody is waiting on. Raise it with
+    /// the exporters' `timeout`. A gRPC export is bounded by its own
+    /// `grpc-timeout` instead.
+    pub http_max_hold_ms: u64,
 }
+
+/// The OTLP HTTP hold: a second inside the OTel exporters' 10 s default timeout.
+#[cfg(feature = "otlp")]
+pub const DEFAULT_OTLP_HTTP_MAX_HOLD_MS: u64 = 9_000;
 
 #[cfg(feature = "otlp")]
 impl Default for OtlpConfig {
@@ -1202,6 +1224,7 @@ impl Default for OtlpConfig {
             },
             max_message_size: DEFAULT_GRPC_MAX_MESSAGE_SIZE,
             acknowledgements: AcknowledgementsConfig::default(),
+            http_max_hold_ms: DEFAULT_OTLP_HTTP_MAX_HOLD_MS,
         }
     }
 }
@@ -1531,7 +1554,9 @@ pub struct WebhookConfig {
     /// `server.max_body_size`.
     pub max_body_size: usize,
 
-    /// Request timeout in milliseconds (own listener only).
+    /// Request timeout in milliseconds, on either listener. It bounds the
+    /// held answer, so the default keeps the hold past the Kafka message
+    /// timeout.
     pub request_timeout_ms: u64,
 
     /// TLS for the own listener. Refused when `bind_address` is unset, since
@@ -1552,7 +1577,7 @@ impl Default for WebhookConfig {
             enabled: false,
             bind_address: None,
             max_body_size: 1024 * 1024,
-            request_timeout_ms: 10_000,
+            request_timeout_ms: 30_000,
             tls: TlsConfig::default(),
             callers: Vec::new(),
             acknowledgements: AcknowledgementsConfig::default(),
@@ -2666,6 +2691,25 @@ mod tests {
         // Default destination is kafka, so we need brokers
         config.kafka.brokers = vec!["localhost:9092".to_string()];
         assert!(config.validate().is_ok());
+    }
+
+    /// An OTLP HTTP export is held a second inside the exporters' default
+    /// timeout, and a zero hold is refused while acknowledgements are on.
+    #[cfg(feature = "otlp")]
+    #[test]
+    fn the_otlp_http_hold_defaults_inside_the_exporter_timeout() {
+        let mut config = Config::default();
+        config.kafka.brokers = vec!["localhost:9092".to_string()];
+        config.otlp.enabled = true;
+        assert_eq!(config.otlp.http_max_hold_ms, 9_000);
+        assert!(config.validate().is_ok());
+
+        config.otlp.http_max_hold_ms = 0;
+        let err = config.validate().expect_err("a zero hold is refused");
+        assert!(err.to_string().contains("otlp.http_max_hold_ms"), "{err}");
+
+        config.otlp.acknowledgements = AcknowledgementsConfig::new(false);
+        assert!(config.validate().is_ok(), "no hold to bound with acks off");
     }
 
     /// A config that passes every rule outside the flow block.

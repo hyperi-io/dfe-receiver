@@ -24,8 +24,9 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use dfe_receiver::config::{Config, SharedConfig};
+use dfe_receiver::config::{BUS_DESTINATION, Config, SharedConfig};
 use dfe_receiver::metrics::Metrics;
 use dfe_receiver::pipeline::PipelineState;
 use dfe_receiver::server::otlp::OtlpHandler;
@@ -377,6 +378,37 @@ async fn test_otlp_http_logs() {
     assert!(
         bytes_received(&otlp.metrics) > 0,
         "Expected bytes to be counted"
+    );
+
+    otlp.shutdown.cancel();
+}
+
+/// A held OTLP HTTP export is answered at `otlp.http_max_hold_ms`, not at the
+/// 20 s Kafka message timeout, so the exporter is still waiting for the answer.
+#[tokio::test]
+async fn otlp_http_answers_a_held_export_at_its_hold_cap() {
+    let mut config = test_config();
+    config.destinations.default = BUS_DESTINATION.into();
+    // TEST-NET-1 (RFC 5737): never routable, so no broker confirms the record.
+    config.kafka.brokers = vec!["192.0.2.1:9092".to_string()];
+    config.otlp.http_max_hold_ms = 1_000;
+    let otlp = start_otlp_handler(config).await;
+
+    let started = Instant::now();
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/v1/logs", otlp.http))
+        .header("content-type", "application/x-protobuf")
+        .body(build_logs_request().encode_to_vec())
+        .send()
+        .await
+        .expect("Failed to send OTLP HTTP request");
+    let answered_in = started.elapsed();
+
+    assert_eq!(resp.status(), 503);
+    assert!(resp.headers().contains_key("retry-after"));
+    assert!(
+        answered_in < Duration::from_secs(10),
+        "answered after {answered_in:?}, not at the 1 s hold cap"
     );
 
     otlp.shutdown.cancel();
