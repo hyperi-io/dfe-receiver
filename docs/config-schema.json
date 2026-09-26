@@ -419,7 +419,6 @@
       "description": "Validation rules.",
       "$ref": "#/$defs/ValidationConfig",
       "default": {
-        "require_json": true,
         "required_fields": [],
         "dlq_on_invalid": true
       }
@@ -1921,11 +1920,6 @@
       "description": "Validation configuration.\n\nJSON is the only payload format: a body that is not JSON is refused with a\n400 and counted, never sent to the DLQ.",
       "type": "object",
       "properties": {
-        "require_json": {
-          "description": "Require JSON format.",
-          "type": "boolean",
-          "default": true
-        },
         "required_fields": {
           "description": "Required fields (reject if missing).",
           "type": "array",

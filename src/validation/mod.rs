@@ -71,9 +71,7 @@ impl Validator {
     #[inline]
     pub fn validate(&self, payload: &Bytes) -> ValidationResult {
         // Check JSON format using sonic-rs LazyValue (no full parse)
-        if self.config.require_json
-            && let Err(reason) = Self::validate_json(payload)
-        {
+        if let Err(reason) = Self::validate_json(payload) {
             return ValidationResult::NotJson(reason);
         }
 
@@ -132,7 +130,6 @@ mod tests {
 
     fn default_config() -> ValidationConfig {
         ValidationConfig {
-            require_json: true,
             required_fields: vec![],
             dlq_on_invalid: true,
         }
@@ -171,7 +168,6 @@ mod tests {
     #[test]
     fn test_required_field_present() {
         let config = ValidationConfig {
-            require_json: true,
             required_fields: vec!["org_id".to_string()],
             dlq_on_invalid: true,
         };
@@ -184,7 +180,6 @@ mod tests {
     #[test]
     fn test_required_field_missing() {
         let config = ValidationConfig {
-            require_json: true,
             required_fields: vec!["org_id".to_string()],
             dlq_on_invalid: true,
         };
@@ -200,7 +195,6 @@ mod tests {
     #[test]
     fn test_nested_required_field() {
         let config = ValidationConfig {
-            require_json: true,
             required_fields: vec!["tags.event_category".to_string()],
             dlq_on_invalid: true,
         };
@@ -219,7 +213,6 @@ mod tests {
     #[test]
     fn test_reject_mode() {
         let config = ValidationConfig {
-            require_json: true,
             required_fields: vec!["org_id".to_string()],
             dlq_on_invalid: false,
         };

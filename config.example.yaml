@@ -422,7 +422,6 @@ raw_capture:
 # 400 and counted, never sent to the DLQ. dlq_on_invalid decides only what
 # happens to JSON that is missing a required field.
 validation:
-  require_json: true
   required_fields: []
   dlq_on_invalid: true
 

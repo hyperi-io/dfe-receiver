@@ -1807,9 +1807,6 @@ impl WebhookConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ValidationConfig {
-    /// Require JSON format.
-    pub require_json: bool,
-
     /// Required fields (reject if missing).
     pub required_fields: Vec<String>,
 
@@ -1820,7 +1817,6 @@ pub struct ValidationConfig {
 impl Default for ValidationConfig {
     fn default() -> Self {
         Self {
-            require_json: true,
             required_fields: vec![],
             dlq_on_invalid: true,
         }
@@ -3726,6 +3722,27 @@ kafka:
             Some(&"5000".to_string()),
             "user config must override the default"
         );
+    }
+
+    /// A config written for a release that had `validation.require_json` still
+    /// loads, and a body that is not JSON is refused whatever it said.
+    #[test]
+    fn a_config_setting_the_removed_require_json_still_loads() {
+        let yaml = r#"
+validation:
+  require_json: false
+  required_fields: ["org_id"]
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(
+            config.validation.required_fields,
+            vec!["org_id".to_string()]
+        );
+        let validator = crate::validation::Validator::new(config.validation);
+        assert!(matches!(
+            validator.validate(&bytes::Bytes::from("not json")),
+            crate::validation::ValidationResult::NotJson(_)
+        ));
     }
 
     #[test]

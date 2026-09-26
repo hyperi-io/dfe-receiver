@@ -27,7 +27,7 @@ HyperI internal -> see infrastructure standards, PB scale patterns
 | mTLS client auth | Per-protocol | `*.tls.client_auth: required` |
 | Bearer token auth | Per-protocol, hot-reloadable | `*.auth.mode: bearer` |
 | Header auth | HTTP | `server.auth.mode: header` |
-| JSON validation | Global | `validation.require_json` |
+| JSON validation | Global, always on: a body that is not JSON is refused with a 400 | Not configurable |
 | Required field check | Global | `validation.required_fields` |
 | Dead-letter queue | Global | `routing.dlq` |
 | Memory pressure backpressure | Internal, 503 on all ingest endpoints | `buffer.pressure_threshold` |

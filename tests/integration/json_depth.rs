@@ -174,11 +174,9 @@ fn a_deeply_nested_body_is_refused_and_the_listener_keeps_serving() {
 }
 
 #[test]
-fn a_deep_sibling_ahead_of_the_routing_field_is_refused_with_validation_off() {
+fn a_deep_sibling_ahead_of_the_routing_field_is_refused() {
     on_worker_stack(|| async {
         let mut config = ingest_config();
-        // With validation off, routing is the first parse, and it walks past the sibling.
-        config.validation.require_json = false;
         config.routing.source_rules = vec![SourceRule {
             field: "event_type".to_string(),
             mode: "key_value_use".to_string(),

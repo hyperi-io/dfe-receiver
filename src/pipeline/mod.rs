@@ -879,7 +879,7 @@ impl PipelineState {
     ) -> Result<()> {
         trace!(bytes = payload.len(), "Processing message");
 
-        // Validation, routing and stamping all parse lazily, and routing runs with validation off.
+        // Validation, routing and stamping parse lazily, so depth is settled first.
         depth::admit(&payload, MAX_PARSE_DEPTH, self.metrics.as_deref())?;
 
         // Validate (read guard dropped before any .await)
@@ -2490,10 +2490,7 @@ mod tests {
     #[test]
     fn a_deeply_nested_record_is_refused_at_every_pipeline_entry() {
         on_worker_stack(|| async {
-            let mut config = test_config();
-            // Routing parses whether or not validation does.
-            config.validation.require_json = false;
-            let state = test_state_with(config).await;
+            let state = test_state().await;
 
             for depth in [20_000, 100_000] {
                 let err = state.process(nested(depth)).await.expect_err("too deep");

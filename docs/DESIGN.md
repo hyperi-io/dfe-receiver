@@ -282,7 +282,6 @@ server:
       refresh_interval_secs: 300
 
 validation:
-  require_json: true
   required_fields: ["org_id"]
   dlq_on_invalid: true
 

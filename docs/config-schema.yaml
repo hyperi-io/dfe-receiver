@@ -350,7 +350,6 @@ properties:
     description: Validation rules.
     $ref: '#/$defs/ValidationConfig'
     default:
-      require_json: true
       required_fields: []
       dlq_on_invalid: true
   routing:
@@ -1739,10 +1738,6 @@ $defs:
       400 and counted, never sent to the DLQ.
     type: object
     properties:
-      require_json:
-        description: Require JSON format.
-        type: boolean
-        default: true
       required_fields:
         description: Required fields (reject if missing).
         type: array
