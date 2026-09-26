@@ -51,7 +51,8 @@ impl<S: ReceiverSink + 'static> ReceiverSink for SinkBackend<S> {
                     headers: Vec::new(),
                     metadata: scalo::transport::RecordMeta {
                         timestamp_ms: None,
-                        format: scalo::transport::PayloadFormat::Auto,
+                        // Every record the receiver forwards is JSON.
+                        format: scalo::transport::PayloadFormat::Json,
                     },
                 };
                 tiered

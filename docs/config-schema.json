@@ -1918,7 +1918,7 @@
       ]
     },
     "ValidationConfig": {
-      "description": "Validation configuration.",
+      "description": "Validation configuration.\n\nJSON is the only payload format: a body that is not JSON is refused with a\n400 and counted, never sent to the DLQ.",
       "type": "object",
       "properties": {
         "require_json": {
@@ -1935,7 +1935,7 @@
           "default": []
         },
         "dlq_on_invalid": {
-          "description": "Send invalid messages to DLQ instead of rejecting.",
+          "description": "Send a record missing a required field to the DLQ instead of refusing it.",
           "type": "boolean",
           "default": true
         }

@@ -52,6 +52,7 @@ use crate::server::http::split_json_array;
 use crate::server::ip_filter::IpFilter;
 use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
 use crate::server::traits::{BoundAddr, ProtocolHandler};
+use crate::validation::depth::{self, MAX_BATCH_DEPTH, MAX_PARSE_DEPTH};
 
 use self::auth::CallerAuth;
 
@@ -369,8 +370,8 @@ impl IntoResponse for Refused {
 
 /// `POST /webhook/{caller}`.
 ///
-/// Order: caller lookup, authentication, readiness, body split, then every
-/// record is checked, filtered and stamped before any is delivered.
+/// Order: caller lookup, authentication, readiness, nesting depth, body split,
+/// then every record is checked, filtered and stamped before any is delivered.
 /// Authentication runs before the readiness check so an unauthenticated
 /// client learns nothing about the pipeline's state.
 async fn webhook_handler(
@@ -415,6 +416,16 @@ async fn webhook_handler(
         state.metrics.inc_requests_error(TRANSPORT);
         state.metrics.record_backpressure();
         return unavailable_response("server is overloaded");
+    }
+
+    // The split and the stamp both parse lazily, so depth is settled before either.
+    let max_depth = match caller.body {
+        WebhookBody::Single => MAX_PARSE_DEPTH,
+        WebhookBody::Array => MAX_BATCH_DEPTH,
+    };
+    if let Err(e) = depth::admit(&body, max_depth, Some(&state.metrics)) {
+        state.metrics.inc_requests_error(TRANSPORT);
+        return e.into_response();
     }
 
     let records = match caller.body {

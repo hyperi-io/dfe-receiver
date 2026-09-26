@@ -418,6 +418,9 @@ raw_capture:
 #   _raw_truncated: true   the tail was dropped to respect max_bytes
 #   _raw_lossy: true       invalid UTF-8 was replaced with U+FFFD
 
+# JSON is the only payload format: a body that is not JSON is refused with a
+# 400 and counted, never sent to the DLQ. dlq_on_invalid decides only what
+# happens to JSON that is missing a required field.
 validation:
   require_json: true
   required_fields: []

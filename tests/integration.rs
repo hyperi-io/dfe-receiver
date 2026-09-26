@@ -38,6 +38,10 @@ mod grpc_sink;
 mod http_ingest;
 #[path = "integration/http_security.rs"]
 mod http_security;
+#[path = "integration/json_depth.rs"]
+mod json_depth;
+#[path = "integration/json_only.rs"]
+mod json_only;
 #[path = "integration/kafka_sink.rs"]
 mod kafka_sink;
 #[path = "integration/listener_admission.rs"]

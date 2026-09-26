@@ -60,6 +60,8 @@ pub enum ValidationFailureReason {
     InvalidJson,
     /// Required field is missing.
     MissingField,
+    /// Payload nests deeper than the parser can take without exhausting its stack.
+    NestingTooDeep,
 }
 
 /// Why a record was dropped with no way to tell its sender.
@@ -529,7 +531,7 @@ impl Metrics {
         // Local label string + standardised scalo enum (scalo typed the
         // validation_failure label). InvalidJson maps to EncodingError (the
         // input bytes can't be decoded into a JSON value); MissingField maps
-        // exactly to FieldMissing.
+        // exactly to FieldMissing; NestingTooDeep is a bound, so OutOfRange.
         let (reason_str, dfe_reason) = match reason {
             ValidationFailureReason::InvalidJson => {
                 self.validation_failures_invalid_json
@@ -540,6 +542,9 @@ impl Metrics {
                 self.validation_failures_missing_field
                     .fetch_add(1, Ordering::Relaxed);
                 ("missing_field", RlValidationReason::FieldMissing)
+            }
+            ValidationFailureReason::NestingTooDeep => {
+                ("nesting_too_deep", RlValidationReason::OutOfRange)
             }
         };
         metrics::counter!(
