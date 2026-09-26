@@ -16,7 +16,12 @@ dfe-receiver is a high-performance HTTP/gRPC receiver for PB/s scale data ingest
 2. **Validation**
    - Accept only valid JSON payloads
    - Optionally validate required fields (JSON path)
-   - Route invalid data to DLQ or reject with error
+   - Refuse a body that is not JSON with a 400, counted on `receiver_validation_failures_total{reason="invalid_json"}`; route a record missing a required field to the DLQ or refuse it, per `dlq_on_invalid`
+   - Refuse JSON nested deeper than 64 levels with a 400, before any parse reads it
+
+   JSON is the only payload format. MessagePack, supported in DFE/XDR 2.0 and 2.1, is deprecated in DFE 2.2 and no longer accepted: the JSON path (SIMD parsing with sonic-rs, zstd on the wire) is fast enough that MessagePack gave no CPU saving.
+
+   Fluent Forward input (fluentd) is still accepted: it is converted to JSON at the receiver.
 
 3. **Routing**
    - Route to Kafka topics using configurable source rules (first match wins)

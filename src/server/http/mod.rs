@@ -52,6 +52,7 @@ use crate::server::auth::{AuthState, BearerTokenProvider, token_auth_middleware}
 use crate::server::ip_filter::IpFilter;
 use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
 use crate::server::traits::{BoundAddr, ProtocolHandler};
+use crate::validation::depth::{MAX_BATCH_DEPTH, MAX_PARSE_DEPTH, json_depth_within};
 
 /// TLS handshake timeout to prevent slow TLS attacks.
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -773,6 +774,10 @@ fn split_ndjson(body: &Bytes) -> Option<Result<Vec<Bytes>>> {
     if lines.len() < 2 {
         return None;
     }
+    // Too deep to parse stays unsplit, and the pipeline refuses the whole body.
+    if !json_depth_within(lines[0], MAX_PARSE_DEPTH) {
+        return None;
+    }
     sonic_rs::from_slice::<sonic_rs::LazyValue>(lines[0]).ok()?;
     if lines.len() > MAX_BATCH_EVENTS {
         return Some(Err(Error::Validation(format!(
@@ -797,6 +802,10 @@ fn split_ndjson(body: &Bytes) -> Option<Result<Vec<Bytes>>> {
 /// rejected rather than forwarded whole.
 pub(crate) fn split_json_array(body: &Bytes) -> Option<Result<Vec<Bytes>>> {
     if *body.iter().find(|b| !b.is_ascii_whitespace())? != b'[' {
+        return None;
+    }
+    // Too deep to split stays whole, and the pipeline refuses it.
+    if !json_depth_within(body, MAX_BATCH_DEPTH) {
         return None;
     }
     // The element iterator stops at the closing bracket, so anything trailing

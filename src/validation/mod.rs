@@ -10,6 +10,12 @@
 //!
 //! Validates incoming payloads for JSON format and required field presence
 //! using on-demand parsing for maximum performance.
+//!
+//! JSON is the only payload format. A body that is not JSON is refused for
+//! good; `dlq_on_invalid` decides only what happens to JSON that fails a
+//! required-field check.
+
+pub mod depth;
 
 use bytes::Bytes;
 use sonic_rs::LazyValue;
@@ -21,6 +27,8 @@ use crate::config::ValidationConfig;
 pub enum ValidationResult {
     /// Payload is valid.
     Valid,
+    /// Payload is not JSON, so it is refused whatever `dlq_on_invalid` says.
+    NotJson(String),
     /// Payload should go to DLQ.
     Dlq(String),
     /// Payload should be rejected.
@@ -66,11 +74,7 @@ impl Validator {
         if self.config.require_json
             && let Err(reason) = Self::validate_json(payload)
         {
-            return if self.config.dlq_on_invalid {
-                ValidationResult::Dlq(reason)
-            } else {
-                ValidationResult::Reject(reason)
-            };
+            return ValidationResult::NotJson(reason);
         }
 
         // Check required fields (using pre-split paths)
@@ -149,7 +153,7 @@ mod tests {
 
         assert!(matches!(
             validator.validate(&payload),
-            ValidationResult::Dlq(_)
+            ValidationResult::NotJson(_)
         ));
     }
 
@@ -160,7 +164,7 @@ mod tests {
 
         assert!(matches!(
             validator.validate(&payload),
-            ValidationResult::Dlq(_)
+            ValidationResult::NotJson(_)
         ));
     }
 
@@ -216,16 +220,30 @@ mod tests {
     fn test_reject_mode() {
         let config = ValidationConfig {
             require_json: true,
-            required_fields: vec![],
+            required_fields: vec!["org_id".to_string()],
             dlq_on_invalid: false,
         };
         let validator = Validator::new(config);
-        let payload = Bytes::from("not json");
+        let payload = Bytes::from(r#"{"data": "value"}"#);
 
         assert!(matches!(
             validator.validate(&payload),
             ValidationResult::Reject(_)
         ));
+    }
+
+    #[test]
+    fn a_body_that_is_not_json_is_refused_whatever_dlq_on_invalid_says() {
+        for dlq_on_invalid in [true, false] {
+            let validator = Validator::new(ValidationConfig {
+                dlq_on_invalid,
+                ..default_config()
+            });
+            assert!(matches!(
+                validator.validate(&Bytes::from("not json")),
+                ValidationResult::NotJson(_)
+            ));
+        }
     }
 
     // ===== Fuzzing-style tests for malformed/bad inbound data =====
@@ -238,7 +256,7 @@ mod tests {
 
         assert!(matches!(
             validator.validate(&payload),
-            ValidationResult::Dlq(_)
+            ValidationResult::NotJson(_)
         ));
     }
 
@@ -252,7 +270,7 @@ mod tests {
         let result = validator.validate(&payload);
         assert!(matches!(
             result,
-            ValidationResult::Valid | ValidationResult::Dlq(_)
+            ValidationResult::Valid | ValidationResult::NotJson(_)
         ));
     }
 
@@ -263,7 +281,7 @@ mod tests {
 
         assert!(matches!(
             validator.validate(&payload),
-            ValidationResult::Dlq(_)
+            ValidationResult::NotJson(_)
         ));
     }
 
@@ -274,7 +292,7 @@ mod tests {
 
         assert!(matches!(
             validator.validate(&payload),
-            ValidationResult::Dlq(_)
+            ValidationResult::NotJson(_)
         ));
     }
 
@@ -285,7 +303,7 @@ mod tests {
 
         assert!(matches!(
             validator.validate(&payload),
-            ValidationResult::Dlq(_)
+            ValidationResult::NotJson(_)
         ));
     }
 
@@ -296,7 +314,7 @@ mod tests {
 
         assert!(matches!(
             validator.validate(&payload),
-            ValidationResult::Dlq(_)
+            ValidationResult::NotJson(_)
         ));
     }
 
@@ -307,7 +325,7 @@ mod tests {
 
         assert!(matches!(
             validator.validate(&payload),
-            ValidationResult::Dlq(_)
+            ValidationResult::NotJson(_)
         ));
     }
 
@@ -319,7 +337,7 @@ mod tests {
 
         assert!(matches!(
             validator.validate(&payload),
-            ValidationResult::Dlq(_)
+            ValidationResult::NotJson(_)
         ));
     }
 
@@ -334,7 +352,7 @@ mod tests {
         // BOM is not valid JSON - should be rejected
         assert!(matches!(
             validator.validate(&payload),
-            ValidationResult::Dlq(_)
+            ValidationResult::NotJson(_)
         ));
     }
 
@@ -363,7 +381,7 @@ mod tests {
 
         assert!(matches!(
             validator.validate(&payload),
-            ValidationResult::Dlq(_)
+            ValidationResult::NotJson(_)
         ));
     }
 
@@ -375,7 +393,7 @@ mod tests {
         // Multiple objects is invalid JSON
         assert!(matches!(
             validator.validate(&payload),
-            ValidationResult::Dlq(_)
+            ValidationResult::NotJson(_)
         ));
     }
 
@@ -386,7 +404,7 @@ mod tests {
 
         assert!(matches!(
             validator.validate(&payload),
-            ValidationResult::Dlq(_)
+            ValidationResult::NotJson(_)
         ));
     }
 
@@ -397,7 +415,7 @@ mod tests {
 
         assert!(matches!(
             validator.validate(&payload),
-            ValidationResult::Dlq(_)
+            ValidationResult::NotJson(_)
         ));
     }
 
@@ -408,7 +426,7 @@ mod tests {
 
         assert!(matches!(
             validator.validate(&payload),
-            ValidationResult::Dlq(_)
+            ValidationResult::NotJson(_)
         ));
     }
 
@@ -420,7 +438,7 @@ mod tests {
         // Single quotes are not valid JSON
         assert!(matches!(
             validator.validate(&payload),
-            ValidationResult::Dlq(_)
+            ValidationResult::NotJson(_)
         ));
     }
 
@@ -432,7 +450,7 @@ mod tests {
         // Unquoted keys are not valid JSON
         assert!(matches!(
             validator.validate(&payload),
-            ValidationResult::Dlq(_)
+            ValidationResult::NotJson(_)
         ));
     }
 
@@ -444,7 +462,7 @@ mod tests {
         // Trailing commas are not valid JSON
         assert!(matches!(
             validator.validate(&payload),
-            ValidationResult::Dlq(_)
+            ValidationResult::NotJson(_)
         ));
     }
 
@@ -456,7 +474,7 @@ mod tests {
         // Trailing commas are not valid JSON
         assert!(matches!(
             validator.validate(&payload),
-            ValidationResult::Dlq(_)
+            ValidationResult::NotJson(_)
         ));
     }
 
@@ -468,7 +486,7 @@ mod tests {
         // Comments are not valid JSON
         assert!(matches!(
             validator.validate(&payload),
-            ValidationResult::Dlq(_)
+            ValidationResult::NotJson(_)
         ));
     }
 
@@ -480,7 +498,7 @@ mod tests {
         // Comments are not valid JSON
         assert!(matches!(
             validator.validate(&payload),
-            ValidationResult::Dlq(_)
+            ValidationResult::NotJson(_)
         ));
     }
 
@@ -492,7 +510,7 @@ mod tests {
         // Infinity is not valid JSON
         assert!(matches!(
             validator.validate(&payload),
-            ValidationResult::Dlq(_)
+            ValidationResult::NotJson(_)
         ));
     }
 
@@ -504,7 +522,7 @@ mod tests {
         // NaN is not valid JSON
         assert!(matches!(
             validator.validate(&payload),
-            ValidationResult::Dlq(_)
+            ValidationResult::NotJson(_)
         ));
     }
 
@@ -516,7 +534,7 @@ mod tests {
         // undefined is not valid JSON
         assert!(matches!(
             validator.validate(&payload),
-            ValidationResult::Dlq(_)
+            ValidationResult::NotJson(_)
         ));
     }
 
@@ -528,7 +546,7 @@ mod tests {
         // Hex numbers are not valid JSON
         assert!(matches!(
             validator.validate(&payload),
-            ValidationResult::Dlq(_)
+            ValidationResult::NotJson(_)
         ));
     }
 
@@ -540,7 +558,7 @@ mod tests {
         // Octal numbers are not valid JSON (leading zero)
         assert!(matches!(
             validator.validate(&payload),
-            ValidationResult::Dlq(_)
+            ValidationResult::NotJson(_)
         ));
     }
 
@@ -552,18 +570,15 @@ mod tests {
         // Plus sign prefix is not valid JSON
         assert!(matches!(
             validator.validate(&payload),
-            ValidationResult::Dlq(_)
+            ValidationResult::NotJson(_)
         ));
     }
 
     #[test]
     fn test_deeply_nested() {
-        // sonic-rs 0.5 parses by recursive descent, so deep nesting consumes
-        // proportional stack. In production the parse runs on Tokio worker /
-        // server threads (>=2 MiB stacks); the default libtest harness thread
-        // is far smaller (and smaller still on macOS), so run the parse on a
-        // thread with a production-representative stack -- the test verifies the
-        // validator HANDLES deep input gracefully, not the harness stack limit.
+        // sonic-rs recurses once per nesting level, at about 56 KiB of stack a
+        // level in a debug build, so this runs on 8 MiB; the pipeline refuses
+        // anything deeper than depth::MAX_PARSE_DEPTH before the validator sees it.
         let handle = std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024)
             .spawn(|| {
@@ -580,10 +595,7 @@ mod tests {
 
                 // Should handle nesting without panic
                 let result = validator.validate(&payload);
-                assert!(matches!(
-                    result,
-                    ValidationResult::Valid | ValidationResult::Dlq(_)
-                ));
+                assert_eq!(result, ValidationResult::Valid);
             })
             .expect("spawn validation thread");
         handle.join().expect("validation thread panicked");
@@ -649,7 +661,7 @@ mod tests {
         // Unescaped tab is invalid JSON
         assert!(matches!(
             validator.validate(&payload),
-            ValidationResult::Dlq(_)
+            ValidationResult::NotJson(_)
         ));
     }
 
@@ -670,7 +682,7 @@ mod tests {
 
         assert!(matches!(
             validator.validate(&payload),
-            ValidationResult::Dlq(_)
+            ValidationResult::NotJson(_)
         ));
     }
 
@@ -682,7 +694,7 @@ mod tests {
 
         assert!(matches!(
             validator.validate(&payload),
-            ValidationResult::Dlq(_)
+            ValidationResult::NotJson(_)
         ));
     }
 
@@ -693,7 +705,7 @@ mod tests {
 
         assert!(matches!(
             validator.validate(&payload),
-            ValidationResult::Dlq(_)
+            ValidationResult::NotJson(_)
         ));
     }
 
@@ -831,7 +843,7 @@ mod tests {
 
         assert!(matches!(
             validator.validate(&payload),
-            ValidationResult::Dlq(_)
+            ValidationResult::NotJson(_)
         ));
     }
 
@@ -843,19 +855,19 @@ mod tests {
 
         assert!(matches!(
             validator.validate(&payload),
-            ValidationResult::Dlq(_)
+            ValidationResult::NotJson(_)
         ));
     }
 
     #[test]
-    fn test_msgpack_like() {
+    fn test_msgpack_is_not_json() {
         let validator = Validator::new(default_config());
-        // MessagePack header bytes
+        // MessagePack is refused like any other body that is not JSON.
         let payload = Bytes::from_static(&[0x82, 0xA3, 0x66, 0x6F, 0x6F, 0x01]);
 
         assert!(matches!(
             validator.validate(&payload),
-            ValidationResult::Dlq(_)
+            ValidationResult::NotJson(_)
         ));
     }
 
@@ -867,7 +879,7 @@ mod tests {
 
         assert!(matches!(
             validator.validate(&payload),
-            ValidationResult::Dlq(_)
+            ValidationResult::NotJson(_)
         ));
     }
 }

@@ -1673,6 +1673,9 @@ impl WebhookConfig {
 }
 
 /// Validation configuration.
+///
+/// JSON is the only payload format: a body that is not JSON is refused with a
+/// 400 and counted, never sent to the DLQ.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ValidationConfig {
@@ -1682,7 +1685,7 @@ pub struct ValidationConfig {
     /// Required fields (reject if missing).
     pub required_fields: Vec<String>,
 
-    /// Send invalid messages to DLQ instead of rejecting.
+    /// Send a record missing a required field to the DLQ instead of refusing it.
     pub dlq_on_invalid: bool,
 }
 

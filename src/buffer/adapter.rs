@@ -137,7 +137,7 @@ mod tests {
             headers: Vec::new(),
             metadata: RecordMeta {
                 timestamp_ms: None,
-                format: PayloadFormat::Auto,
+                format: PayloadFormat::Json,
             },
         }
     }
