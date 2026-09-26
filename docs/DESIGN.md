@@ -519,6 +519,12 @@ holds it.
 | `records_dlq_total` | Counter | Messages sent to DLQ (scalo emits this one) |
 | `receiver_records_rejected_total` | Counter | Records a destination can never take (over its size ceiling), on any sink, by `outcome`: `dead_lettered`, `dropped` when no DLQ is configured or no DLQ backend can hold the entry (also counted in `pipeline_dead_letters_dropped_total{reason}`), or `dlq_refused` when the DLQ did not confirm the write, so the record stays buffered or its sender is told to retry |
 
+### gRPC Destination Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `receiver_destination_send_failures_total` | Counter | Records a gRPC destination did not take, by `reason`: `unavailable` (down, refusing connections, busy or past its deadline) or `failed` (it answered with an error). Both are retried, and each class logs at most once per 10 s per destination |
+
 ### Scaling Metrics
 
 | Metric | Type | Description |

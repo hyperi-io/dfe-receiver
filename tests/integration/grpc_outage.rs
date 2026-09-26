@@ -39,16 +39,28 @@ const PER_PHASE: u64 = 20;
 /// buffer's circuit stays open 30s after it trips, then drains.
 const RECOVERY_BUDGET: Duration = Duration::from_secs(90);
 
-/// Start the full receiver -- orchestrator drain tasks and HTTP ingest -- with
-/// every record routed to the gRPC destination at `loader_endpoint`.
-async fn start_receiver(loader_endpoint: &str, held: bool) -> (String, CancellationToken) {
+/// A receiver config routing every record to the gRPC destination at
+/// `loader_endpoint`, with the shipped acknowledgement default.
+fn receiver_config(loader_endpoint: &str) -> Config {
     let mut config = Config::default();
     config.server.bind_address = "127.0.0.1:0".to_string();
-    config.server.acknowledgements = AcknowledgementsConfig::new(held);
     config.destinations.default = DestinationRef::One("loader".to_string());
     config.loader.transport = "grpc".to_string();
     config.loader.grpc_endpoint = Some(loader_endpoint.to_string());
+    config
+}
 
+/// Start the full receiver -- orchestrator drain tasks and HTTP ingest -- with
+/// every record routed to the gRPC destination at `loader_endpoint`.
+async fn start_receiver(loader_endpoint: &str, held: bool) -> (String, CancellationToken) {
+    let mut config = receiver_config(loader_endpoint);
+    config.server.acknowledgements = AcknowledgementsConfig::new(held);
+    let (url, shutdown, _) = serve(config).await;
+    (url, shutdown)
+}
+
+/// Start the full receiver on `config`: its URL, its shutdown, and its metrics.
+async fn serve(config: Config) -> (String, CancellationToken, Arc<Metrics>) {
     let shutdown = CancellationToken::new();
     let metrics = Arc::new(Metrics::default());
     let orchestrator = Orchestrator::new(config.clone(), metrics.clone(), shutdown.clone())
@@ -62,12 +74,37 @@ async fn start_receiver(loader_endpoint: &str, held: bool) -> (String, Cancellat
         let _ = orchestrator.shutdown().await;
     });
 
-    let handler = HttpHandler::new(config.server.bind_address.clone(), pipeline, metrics);
+    let handler = HttpHandler::new(
+        config.server.bind_address.clone(),
+        pipeline,
+        Arc::clone(&metrics),
+    );
     let bound = handler.bound_addr();
     let server_shutdown = shutdown.clone();
     let mut task = tokio::spawn(async move { handler.start(server_shutdown).await });
     let addr = crate::common::bound_addr("HTTP", &bound, &mut task).await;
-    (format!("http://{addr}"), shutdown)
+    (format!("http://{addr}"), shutdown, metrics)
+}
+
+/// POST one record per id and return each id's answer.
+async fn post_statuses(
+    url: &str,
+    ids: impl IntoIterator<Item = u64>,
+) -> Vec<(u64, reqwest::StatusCode)> {
+    let client = reqwest::Client::new();
+    let mut answers = Vec::new();
+    for id in ids {
+        let status = client
+            .post(format!("{url}/ingest"))
+            .header("content-type", "application/json")
+            .body(format!(r#"{{"event_category":"outage","id":{id}}}"#))
+            .send()
+            .await
+            .expect("request failed")
+            .status();
+        answers.push((id, status));
+    }
+    answers
 }
 
 /// POST one record per id and return the ids answered 202.
@@ -184,4 +221,74 @@ async fn a_held_answer_is_202_only_once_the_destination_took_the_record() {
         missing.is_empty(),
         "answered 202 before the destination had {missing:?}"
     );
+}
+
+/// How long the destination must stay quiet before the drain counts it done.
+const QUIET: Duration = Duration::from_secs(3);
+
+#[tokio::test]
+async fn a_refused_destination_is_answered_503_and_each_record_arrives_once() {
+    // The shipped acknowledgement default: nothing here turns holding on or off.
+    let closed = crate::common::ClosedPort::loopback().expect("hold the destination's port");
+    let endpoint = format!("http://{}", closed.addr());
+    let (url, shutdown, metrics) = serve(receiver_config(&endpoint)).await;
+
+    let refused = post_statuses(&url, 0..PER_PHASE).await;
+    let not_503: Vec<_> = refused
+        .iter()
+        .filter(|(_, status)| *status != reqwest::StatusCode::SERVICE_UNAVAILABLE)
+        .collect();
+    assert!(
+        not_503.is_empty(),
+        "a refused destination must answer 503, got {not_503:?}"
+    );
+    assert_eq!(
+        metrics.get_requests_success(),
+        0,
+        "a record the destination refused was counted delivered"
+    );
+
+    let destination = closed.release();
+    let loader = GrpcTransport::new(&GrpcConfig::server(&destination.to_string()))
+        .await
+        .expect("bring the destination up on its original address");
+
+    // The sender retries each record until it is answered 202.
+    let deadline = tokio::time::Instant::now() + RECOVERY_BUDGET;
+    let mut accepted = BTreeSet::new();
+    while accepted.len() < PER_PHASE as usize && tokio::time::Instant::now() < deadline {
+        let missing: Vec<u64> = (0..PER_PHASE).filter(|id| !accepted.contains(id)).collect();
+        accepted.extend(post_ids(&url, missing).await);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert_eq!(
+        accepted.len(),
+        PER_PHASE as usize,
+        "the destination returned but only {accepted:?} were answered 202"
+    );
+
+    // Every copy the destination got, until it has been quiet for QUIET.
+    let mut copies: std::collections::BTreeMap<u64, u32> = std::collections::BTreeMap::new();
+    let mut quiet_since = tokio::time::Instant::now();
+    while quiet_since.elapsed() < QUIET {
+        if let Ok(batch) = loader.recv(100).await
+            && !batch.records.is_empty()
+        {
+            for id in batch.records.iter().filter_map(|r| record_id(&r.payload)) {
+                *copies.entry(id).or_default() += 1;
+            }
+            quiet_since = tokio::time::Instant::now();
+        }
+    }
+    shutdown.cancel();
+
+    let not_once: Vec<_> = (0..PER_PHASE)
+        .map(|id| (id, copies.get(&id).copied().unwrap_or(0)))
+        .filter(|(_, n)| *n != 1)
+        .collect();
+    assert!(
+        not_once.is_empty(),
+        "each record must arrive exactly once, (id, copies): {not_once:?}"
+    );
+    assert_eq!(metrics.get_requests_success(), PER_PHASE);
 }

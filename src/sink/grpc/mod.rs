@@ -13,14 +13,22 @@
 //! `loader.transport = "grpc"`, enabling receiver→loader communication
 //! without Kafka (e.g., inside dfe-docker).
 
+use std::sync::atomic::AtomicU64;
+
 use async_trait::async_trait;
 use bytes::Bytes;
 use scalo::transport::{GrpcConfig, GrpcTransport, Record, SendResult};
 use scalo::transport::{TransportBase, TransportSender};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::error::{Error, Result};
 use crate::sink::{FailureLatch, SINK_RETRY_AFTER, Sink};
+
+/// Counts records a gRPC destination did not take, by `reason`.
+pub const SEND_FAILURES_TOTAL: &str = "receiver_destination_send_failures_total";
+
+/// Least time between two logs of the same failure class on one destination.
+const FAILURE_LOG_INTERVAL_MS: u64 = 10_000;
 
 /// The client config a sink dials with; `None` keeps scalo's own deadline.
 fn client_config(endpoint: &str, send_timeout_ms: Option<u64>) -> GrpcConfig {
@@ -48,10 +56,34 @@ fn unkeyed(payload: Bytes) -> Record {
 /// dfe-loader sink using DFE native gRPC transport.
 pub struct GrpcSink {
     transport: GrpcTransport,
+    /// The endpoint this sink dials, for its logs.
+    endpoint: String,
     /// The largest payload the transport will encode.
     max_message_size: usize,
     /// Tripped by a send the destination refused, cleared by one it took.
     failures: FailureLatch,
+    /// Epoch ms of the last `unavailable` log, the debounce clock.
+    unavailable_logged: AtomicU64,
+    /// Epoch ms of the last `failed` log, the debounce clock.
+    failed_logged: AtomicU64,
+}
+
+/// Why a gRPC destination did not take a send, the `reason` label.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SendFailure {
+    /// Down, refusing connections, busy or past its deadline: scalo cannot tell these apart.
+    Unavailable,
+    /// The destination answered the send with an error.
+    Failed,
+}
+
+impl SendFailure {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Unavailable => "unavailable",
+            Self::Failed => "failed",
+        }
+    }
 }
 
 impl GrpcSink {
@@ -76,8 +108,11 @@ impl GrpcSink {
 
         Ok(Self {
             transport,
+            endpoint: endpoint.to_string(),
             max_message_size: config.max_message_size,
             failures: FailureLatch::default(),
+            unavailable_logged: AtomicU64::new(0),
+            failed_logged: AtomicU64::new(0),
         })
     }
 
@@ -88,13 +123,41 @@ impl GrpcSink {
                 debug!(records, "Sent to gRPC destination");
                 self.failures.clear();
             }
+            SendResult::Backpressured => {
+                count_failure(SendFailure::Unavailable, records);
+                if scalo::logger::log_debounced(&self.unavailable_logged, FAILURE_LOG_INTERVAL_MS) {
+                    warn!(
+                        endpoint = %self.endpoint,
+                        records,
+                        reason = SendFailure::Unavailable.label(),
+                        "gRPC destination did not take the send; it is retried \
+                         (logged at most once per 10 s, counted in \
+                         receiver_destination_send_failures_total)"
+                    );
+                }
+            }
             SendResult::Fatal(e) => {
-                error!(error = %e, records, "gRPC destination send failed");
+                count_failure(SendFailure::Failed, records);
+                if scalo::logger::log_debounced(&self.failed_logged, FAILURE_LOG_INTERVAL_MS) {
+                    error!(
+                        endpoint = %self.endpoint,
+                        error = %e,
+                        records,
+                        reason = SendFailure::Failed.label(),
+                        "gRPC destination send failed (logged at most once per 10 s, \
+                         counted in receiver_destination_send_failures_total)"
+                    );
+                }
                 self.failures.trip();
             }
-            SendResult::Backpressured | SendResult::FilteredDlq => {}
+            SendResult::FilteredDlq => {}
         }
     }
+}
+
+/// Count `records` a gRPC destination did not take.
+fn count_failure(failure: SendFailure, records: usize) {
+    metrics::counter!(SEND_FAILURES_TOTAL, "reason" => failure.label()).increment(records as u64);
 }
 
 /// The receiver's verdict on one send result.
@@ -241,6 +304,38 @@ mod tests {
 
         assert!(sink.refuses(&Bytes::from(vec![b'x'; limit])).is_some());
         assert!(sink.refuses(&Bytes::from_static(b"{}")).is_none());
+    }
+
+    /// A destination refusing connections is counted per record as
+    /// `unavailable`, and the send stays retryable.
+    #[test]
+    fn a_refused_connection_is_counted_unavailable() {
+        let recorder = crate::buffer::rejects::CountedKeys::default();
+        let result = metrics::with_local_recorder(&recorder, || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    // Port 1 on loopback refuses every connection.
+                    let sink = GrpcSink::new("http://127.0.0.1:1", None).await.unwrap();
+                    let records = [Bytes::from_static(b"{}"), Bytes::from_static(b"{}")];
+                    sink.send_batch("t", &records).await
+                })
+        });
+
+        assert!(
+            matches!(result, Err(ref e) if e.is_retryable()),
+            "got {result:?}"
+        );
+        assert_eq!(
+            recorder.get("receiver_destination_send_failures_total{reason=unavailable}"),
+            2
+        );
+        assert_eq!(
+            recorder.get("receiver_destination_send_failures_total{reason=failed}"),
+            0
+        );
     }
 
     #[tokio::test]
