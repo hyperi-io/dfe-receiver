@@ -230,11 +230,7 @@ pub fn contract() -> DeploymentContract {
             },
             "kafka": {
                 "brokers": ["kafka:9092"],
-                "client_id": "dfe-receiver",
-                "producer": {
-                    "compression": "zstd",
-                    "acks": "all"
-                }
+                "client_id": "dfe-receiver"
             },
             "routing": {
                 "default_source": "main",

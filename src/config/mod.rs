@@ -2258,10 +2258,8 @@ pub struct KafkaConfig {
     /// TLS configuration.
     pub tls: KafkaTlsConfig,
 
-    /// Producer-specific settings.
-    pub producer: ProducerConfig,
-
-    /// Raw librdkafka configuration overrides (highest priority).
+    /// Raw librdkafka configuration overrides (highest priority), the one
+    /// place producer batching, linger, compression and acks are tuned.
     pub librdkafka_overrides: std::collections::HashMap<String, String>,
 }
 
@@ -2278,7 +2276,6 @@ impl Default for KafkaConfig {
             client_id: "dfe-receiver".to_string(),
             sasl: None,
             tls: KafkaTlsConfig::default(),
-            producer: ProducerConfig::default(),
             librdkafka_overrides: overrides,
         }
     }
@@ -2335,42 +2332,6 @@ impl Default for KafkaTlsConfig {
             ca_file: None,
             cert_file: None,
             key_file: None,
-        }
-    }
-}
-
-/// Kafka producer settings.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct ProducerConfig {
-    /// Maximum batch size in bytes.
-    pub batch_size: usize,
-
-    /// Maximum messages per batch.
-    pub batch_messages: usize,
-
-    /// Linger time in milliseconds.
-    pub linger_ms: u32,
-
-    /// Compression type (none, gzip, snappy, lz4, zstd).
-    pub compression: String,
-
-    /// Acknowledgment level (0, 1, all).
-    pub acks: String,
-
-    /// Number of retries.
-    pub retries: u32,
-}
-
-impl Default for ProducerConfig {
-    fn default() -> Self {
-        Self {
-            batch_size: 8 * 1024 * 1024, // 8MiB
-            batch_messages: 10_000,
-            linger_ms: 20,
-            compression: "lz4".to_string(),
-            acks: "all".to_string(),
-            retries: 5,
         }
     }
 }
@@ -2698,7 +2659,19 @@ mod tests {
     fn test_default_config() {
         let config = Config::default();
         assert_eq!(config.server.bind_address, "0.0.0.0:8080");
-        assert_eq!(config.kafka.producer.batch_messages, 10_000);
+    }
+
+    /// The producer is tuned through scalo's builder alone: a removed
+    /// `kafka.producer` block in an old config parses and changes nothing.
+    #[test]
+    fn a_leftover_producer_block_changes_nothing() {
+        let with_block: KafkaConfig =
+            serde_yaml_ng::from_str("producer:\n  compression: lz4\n  linger_ms: 20\n").unwrap();
+        let client = with_block.to_scalo_kafka_config_for_producer();
+        assert_eq!(
+            client.librdkafka_overrides,
+            KafkaConfig::default().librdkafka_overrides
+        );
     }
 
     #[test]

@@ -146,9 +146,6 @@ config:
     brokers:
     - kafka:9092
     client_id: dfe-receiver
-    producer:
-      compression: zstd
-      acks: all
   routing:
     default_source: main
     topic_suffix: _land

@@ -307,11 +307,8 @@ kafka:
     password: "${KAFKA_PASSWORD}"
   tls:
     enabled: true              # SASL_SSL for external listeners; omit for internal K8s
-  producer:
-    batch_size: 8388608
-    batch_messages: 10000
-    linger_ms: 20
-    compression: zstd
+  librdkafka_overrides:        # producer tuning over scalo's high-throughput profile
+    linger.ms: "20"
 
 buffer:
   memory_limit: 0  # Auto (85% of the cgroup limit)

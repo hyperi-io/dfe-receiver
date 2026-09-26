@@ -465,14 +465,6 @@
           "cert_file": null,
           "key_file": null
         },
-        "producer": {
-          "batch_size": 8388608,
-          "batch_messages": 10000,
-          "linger_ms": 20,
-          "compression": "lz4",
-          "acks": "all",
-          "retries": 5
-        },
         "librdkafka_overrides": {
           "statistics.interval.ms": "0"
         }
@@ -2232,20 +2224,8 @@
             "key_file": null
           }
         },
-        "producer": {
-          "description": "Producer-specific settings.",
-          "$ref": "#/$defs/ProducerConfig",
-          "default": {
-            "batch_size": 8388608,
-            "batch_messages": 10000,
-            "linger_ms": 20,
-            "compression": "lz4",
-            "acks": "all",
-            "retries": 5
-          }
-        },
         "librdkafka_overrides": {
-          "description": "Raw librdkafka configuration overrides (highest priority).",
+          "description": "Raw librdkafka configuration overrides (highest priority), the one\nplace producer batching, linger, compression and acks are tuned.",
           "type": "object",
           "additionalProperties": {
             "type": "string"
@@ -2316,50 +2296,6 @@
             "null"
           ],
           "default": null
-        }
-      }
-    },
-    "ProducerConfig": {
-      "description": "Kafka producer settings.",
-      "type": "object",
-      "properties": {
-        "batch_size": {
-          "description": "Maximum batch size in bytes.",
-          "type": "integer",
-          "format": "uint",
-          "minimum": 0,
-          "default": 8388608
-        },
-        "batch_messages": {
-          "description": "Maximum messages per batch.",
-          "type": "integer",
-          "format": "uint",
-          "minimum": 0,
-          "default": 10000
-        },
-        "linger_ms": {
-          "description": "Linger time in milliseconds.",
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0,
-          "default": 20
-        },
-        "compression": {
-          "description": "Compression type (none, gzip, snappy, lz4, zstd).",
-          "type": "string",
-          "default": "lz4"
-        },
-        "acks": {
-          "description": "Acknowledgment level (0, 1, all).",
-          "type": "string",
-          "default": "all"
-        },
-        "retries": {
-          "description": "Number of retries.",
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0,
-          "default": 5
         }
       }
     },

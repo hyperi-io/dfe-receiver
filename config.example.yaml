@@ -490,14 +490,9 @@ kafka:
   tls:
     enabled: false
     ca_file: "/etc/ssl/kafka-ca.crt"
-  producer:
-    batch_size: 8388608      # 8MiB
-    batch_messages: 10000
-    linger_ms: 20
-    compression: "zstd"
-    acks: "all"
-    retries: 5
   # Raw librdkafka overrides (highest priority, override profile defaults).
+  # The producer runs scalo's high-throughput profile (zstd, idempotent,
+  # acks=all); tune batching, linger or the codec here, e.g. linger.ms: "20".
   # Stats disabled by default to prevent log spam (GH #3).
   librdkafka_overrides:
     statistics.interval.ms: "0"

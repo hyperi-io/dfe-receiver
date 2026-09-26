@@ -78,6 +78,16 @@ fn create_producer() -> FutureProducer {
     config.create().expect("Failed to create Kafka producer")
 }
 
+/// Send each record on its own at once, through the receiver's librdkafka overrides.
+fn send_immediately(config: &mut dfe_receiver::config::Config) {
+    for (key, value) in [("linger.ms", "0"), ("batch.num.messages", "1")] {
+        config
+            .kafka
+            .librdkafka_overrides
+            .insert(key.to_string(), value.to_string());
+    }
+}
+
 /// Create a Kafka consumer with dual-mode configuration.
 fn create_consumer(group_id: &str) -> StreamConsumer {
     let kf = kafka_test_config();
@@ -296,8 +306,7 @@ async fn test_full_pipeline_to_kafka() {
     config.routing.topic_suffix = "".to_string(); // No suffix for test
 
     // Use small batch settings for tests to send immediately
-    config.kafka.producer.batch_messages = 1;
-    config.kafka.producer.linger_ms = 0;
+    send_immediately(&mut config);
 
     // Create pipeline
     let pipeline = PipelineState::new(
@@ -366,8 +375,7 @@ async fn test_http_to_kafka() {
     config.routing.topic_suffix = "".to_string();
 
     // Use small batch settings for tests to send immediately
-    config.kafka.producer.batch_messages = 1;
-    config.kafka.producer.linger_ms = 0;
+    send_immediately(&mut config);
 
     // Port 0, read back once bound: a port picked and handed over can be taken
     // by another process before the handler binds it.
