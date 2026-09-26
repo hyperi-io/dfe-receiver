@@ -182,6 +182,25 @@ fn producer_config(
 /// The librdkafka key bounding how long a record may wait for its broker.
 const MESSAGE_TIMEOUT_KEY: &str = "message.timeout.ms";
 
+/// librdkafka's other name for [`MESSAGE_TIMEOUT_KEY`].
+const DELIVERY_TIMEOUT_KEY: &str = "delivery.timeout.ms";
+
+/// The override, under either librdkafka name, that keeps a record queued at
+/// least as long as a listener holds its answer.
+fn outlives_the_hold(
+    overrides: &std::collections::HashMap<String, String>,
+    held: Duration,
+) -> Option<(&'static str, &str)> {
+    [MESSAGE_TIMEOUT_KEY, DELIVERY_TIMEOUT_KEY]
+        .into_iter()
+        .find_map(|key| {
+            let set = overrides.get(key)?;
+            set.parse::<u128>()
+                .is_ok_and(|ms| ms >= held.as_millis())
+                .then_some((key, set.as_str()))
+        })
+}
+
 /// Kafka sink backed by a `ThreadedProducer` and its delivery reports.
 pub struct KafkaSink {
     producer: ThreadedProducer<DeliveryObserver>,
@@ -212,13 +231,13 @@ impl KafkaSink {
         };
 
         if let Some(held) = held_message_timeout
-            && let Some(set) = scalo_config.librdkafka_overrides.get(MESSAGE_TIMEOUT_KEY)
-            && set.parse::<u128>().is_ok_and(|ms| ms >= held.as_millis())
+            && let Some((key, set)) = outlives_the_hold(&scalo_config.librdkafka_overrides, held)
         {
             warn!(
-                message_timeout_ms = %set,
+                key,
+                timeout_ms = %set,
                 held_ms = held.as_millis(),
-                "kafka.librdkafka_overrides sets message.timeout.ms past the time a \
+                "kafka.librdkafka_overrides sets the message timeout past the time a \
                  listener holds its answer, so a request can be answered unavailable \
                  while its record is still queued and later lands twice"
             );
@@ -473,6 +492,30 @@ mod tests {
             client.get(MESSAGE_TIMEOUT_KEY),
             None,
             "both names set leave the timeout to hash order"
+        );
+    }
+
+    /// A timeout at or past the hold is caught under either librdkafka name,
+    /// and one inside the hold, or none, is not.
+    #[test]
+    fn a_timeout_outliving_the_hold_is_caught_under_either_name() {
+        let held = Duration::from_secs(20);
+        for key in [MESSAGE_TIMEOUT_KEY, DELIVERY_TIMEOUT_KEY] {
+            let mut overrides = std::collections::HashMap::new();
+            overrides.insert(key.to_string(), "20000".to_string());
+            assert_eq!(outlives_the_hold(&overrides, held), Some((key, "20000")));
+
+            overrides.insert(key.to_string(), "19999".to_string());
+            assert_eq!(
+                outlives_the_hold(&overrides, held),
+                None,
+                "{key} inside the hold"
+            );
+        }
+        let defaults = KafkaConfig::default().to_scalo_kafka_config_for_producer();
+        assert_eq!(
+            outlives_the_hold(&defaults.librdkafka_overrides, held),
+            None
         );
     }
 
