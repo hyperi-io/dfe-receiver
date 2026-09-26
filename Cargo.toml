@@ -82,6 +82,8 @@ futures-core = "0.3.34"
 
 # JSON (SIMD-accelerated)
 sonic-rs = "0.5.10"
+# Safe SIMD byte compares for the JSON depth guard; this crate forbids unsafe_code.
+wide = "1.7.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 serde_yaml_ng = "0.10"
@@ -234,6 +236,10 @@ harness = false
 
 [[bench]]
 name = "flow_decode"
+harness = false
+
+[[bench]]
+name = "json_depth"
 harness = false
 
 [[bin]]
