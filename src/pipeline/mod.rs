@@ -391,29 +391,7 @@ impl PipelineState {
             }
         };
 
-        // DLQ (unified scalo module - cascade: Kafka primary, file fallback)
-        let dlq = if config.routing.dlq.enabled {
-            let dlq_config = config.routing.dlq.to_scalo_config();
-            let kafka_config = config.kafka.to_scalo_kafka_config();
-            match Dlq::spawn(
-                &dlq_config,
-                "receiver",
-                Some(&kafka_config),
-                shutdown.clone(),
-            ) {
-                Ok(d) => {
-                    info!(mode = ?dlq_config.mode, "DLQ enabled");
-                    Some(Arc::new(d))
-                }
-                Err(e) => {
-                    warn!(error = %e, "Failed to create DLQ, disabled");
-                    None
-                }
-            }
-        } else {
-            debug!("DLQ disabled by config");
-            None
-        };
+        let dlq = spawn_dlq(&config, &shutdown);
         // Records a destination refuses for good go to the same DLQ.
         let rejects = Rejects::new(dlq.clone(), metrics.clone());
 
@@ -1257,6 +1235,48 @@ impl PipelineState {
     }
 }
 
+/// The scalo DLQ config, and the Kafka client config its Kafka backend is
+/// built on.
+///
+/// A receiver with no brokers delivers over gRPC alone, so its DLQ gets no
+/// Kafka backend and no Kafka client config: dead letters go to the file
+/// backend. A Kafka backend there queues every entry for a broker nobody
+/// configured, and scalo's cascade never hands a queued entry on to the file
+/// backend.
+fn dlq_backends(config: &Config) -> (scalo::dlq::DlqConfig, Option<scalo::transport::KafkaConfig>) {
+    let mut dlq = config.routing.dlq.to_scalo_config();
+    if config.kafka.brokers.is_empty() {
+        dlq.kafka.enabled = false;
+        return (dlq, None);
+    }
+    (dlq, Some(config.kafka.to_scalo_kafka_config()))
+}
+
+/// Start the DLQ the config asks for, or `None` when it is disabled or fails
+/// to start.
+fn spawn_dlq(config: &Config, shutdown: &CancellationToken) -> Option<Arc<Dlq>> {
+    if !config.routing.dlq.enabled {
+        debug!("DLQ disabled by config");
+        return None;
+    }
+    let (dlq_config, kafka) = dlq_backends(config);
+    match Dlq::spawn(&dlq_config, "receiver", kafka.as_ref(), shutdown.clone()) {
+        Ok(d) => {
+            info!(
+                mode = ?dlq_config.mode,
+                kafka_backend = dlq_config.kafka.enabled,
+                file_backend = dlq_config.file.enabled,
+                "DLQ enabled"
+            );
+            Some(Arc::new(d))
+        }
+        Err(e) => {
+            warn!(error = %e, "Failed to create DLQ, disabled");
+            None
+        }
+    }
+}
+
 /// The spool directory of gRPC destination `name`, relative to the spillover
 /// path: a path segment of its own, with anything outside `[A-Za-z0-9_-]`
 /// replaced.
@@ -1852,6 +1872,58 @@ mod tests {
             outcome.unavailable
         );
         assert_eq!(outcome.settled(), 0);
+    }
+
+    /// With no brokers the receiver delivers over gRPC alone. A Kafka DLQ
+    /// backend there queues every entry for a broker nobody configured, and
+    /// scalo's cascade never hands a queued entry on to the file backend.
+    #[tokio::test]
+    async fn a_brokerless_dead_letter_lands_in_the_file_dlq_and_no_kafka_client_is_built() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_config();
+        grpc_destinations(&mut config, &["loader_leg"]);
+        config.routing.dlq.file_path = dir.path().display().to_string();
+        config.validation.required_fields = vec!["org_id".to_string()];
+        assert!(config.kafka.brokers.is_empty());
+        assert_eq!(config.routing.dlq.mode, "cascade", "the shipped default");
+        assert!(config.routing.dlq.kafka_enabled, "the shipped default");
+
+        let (dlq_config, kafka) = dlq_backends(&config);
+        assert!(
+            kafka.is_none(),
+            "a Kafka client config reached Dlq::spawn with no brokers"
+        );
+        assert!(
+            !dlq_config.kafka.enabled,
+            "the brokerless DLQ asked for a Kafka backend"
+        );
+
+        let state = test_state_with(config).await;
+        let outcome = state
+            .process_batch_acked(&[missing_org_id()], &holding(&state), None)
+            .await;
+
+        assert!(outcome.unavailable.is_none(), "{:?}", outcome.unavailable);
+        assert_eq!(outcome.accepted, 1);
+        let written =
+            std::fs::read_to_string(dir.path().join("receiver").join("dlq.ndjson")).unwrap();
+        assert!(
+            written.contains("missing required field: org_id"),
+            "the dead letter is not in the file DLQ: {written:?}"
+        );
+    }
+
+    #[test]
+    fn a_receiver_with_brokers_keeps_its_kafka_dlq_backend() {
+        let mut config = test_config();
+        unroutable_bus(&mut config);
+
+        let (dlq_config, kafka) = dlq_backends(&config);
+        assert!(dlq_config.kafka.enabled);
+        assert!(
+            kafka.is_some(),
+            "the Kafka DLQ backend lost its client config"
+        );
     }
 
     /// An archived source's records also reach the archiver, whose direct
