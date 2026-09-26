@@ -214,10 +214,11 @@ jemalloc = ["dep:tikv-jemallocator"]
 pgo-driver = ["dep:reqwest"]
 
 [patch.crates-io]
-# Temporary: the source acknowledgement API (scalo::transport::ack) until scalo
-# 2.13.0 is on crates.io. Removed, with the floors above raised to >=2.13.0,
-# before this branch merges.
-scalo = { git = "https://github.com/hyperi-io/scalo-rs", branch = "fix/at-least-once" }
+# Temporary: the source acknowledgement API (scalo::transport::ack) and the
+# public producer builder (scalo::transport::kafka::producer_client_config)
+# until scalo 2.13.0 is on crates.io. Removed, with the floors above raised to
+# >=2.13.0, before this branch merges.
+scalo = { git = "https://github.com/hyperi-io/scalo-rs", branch = "fix/zstd-default" }
 
 [profile.release]
 lto = "thin"

@@ -8,11 +8,11 @@
 
 //! Kafka sink over a receiver-owned librdkafka producer.
 //!
-//! Batching and compression stay librdkafka's, built from the same profile and
-//! sizing surface scalo's `KafkaProducer` applies. The producer is constructed
-//! here rather than taken from scalo because the delivery callback lives on the
-//! context handed to librdkafka at creation and scalo's context has no delivery
-//! body (scalo-rs#26).
+//! Batching and compression stay librdkafka's, configured by scalo's
+//! `producer_client_config`, the builder scalo's `KafkaProducer` uses. The
+//! producer is constructed here rather than taken from scalo because the
+//! delivery callback lives on the context handed to librdkafka at creation and
+//! scalo's context has no delivery body (scalo-rs#26).
 //!
 //! Owning the context is what makes a broker-side refusal visible. `send`
 //! returns once the record is QUEUED; whether a broker ever took it arrives
@@ -36,7 +36,7 @@ use rdkafka::message::Message;
 use rdkafka::producer::{BaseRecord, DeliveryResult, Producer, ProducerContext, ThreadedProducer};
 use rdkafka::util::Timeout;
 use rustc_hash::FxHashSet;
-use scalo::transport::kafka::PRODUCER_HIGH_THROUGHPUT;
+use scalo::transport::kafka::{PRODUCER_HIGH_THROUGHPUT, producer_client_config};
 use scalo::transport::{DeliveryStatus, PieceFinalizer};
 use tracing::{debug, error, info, trace, warn};
 
@@ -162,62 +162,21 @@ fn failure_reason(err: &KafkaError) -> String {
     }
 }
 
-/// Build the producer's librdkafka config from the scalo Kafka config.
+/// Build the producer's librdkafka config with scalo's producer builder.
 ///
-/// The key order is scalo's `KafkaProducer::new`: profile defaults, then the
-/// operator's `librdkafka_overrides`, then the sizing surface, which wins. Keep
-/// it in step -- a different order runs different batching, compression and ack
-/// settings than the rest of the platform.
-///
-/// `message_timeout` sets `message.timeout.ms` among the profile defaults, so
-/// an operator's override still wins.
-fn producer_client_config(
+/// scalo's high-throughput profile and `message_timeout`, as
+/// `message.timeout.ms`, form the profile-defaults layer, so the sizing
+/// surface and an operator's override under either librdkafka name win over both.
+fn producer_config(
     config: &scalo::transport::KafkaConfig,
     message_timeout: Option<Duration>,
 ) -> ClientConfig {
-    let mut client = ClientConfig::new();
-
-    client.set("bootstrap.servers", config.brokers.join(","));
-    client.set("client.id", &config.client_id);
-
-    client.set("security.protocol", &config.security_protocol);
-    if let Some(ref mechanism) = config.sasl_mechanism {
-        client.set("sasl.mechanism", mechanism);
+    let timeout_ms = message_timeout.map(|timeout| timeout.as_millis().to_string());
+    let mut defaults = PRODUCER_HIGH_THROUGHPUT.to_vec();
+    if let Some(ref ms) = timeout_ms {
+        defaults.push((MESSAGE_TIMEOUT_KEY, ms.as_str()));
     }
-    if let Some(ref username) = config.sasl_username {
-        client.set("sasl.username", username);
-    }
-    if let Some(ref password) = config.sasl_password {
-        client.set("sasl.password", password.expose());
-    }
-
-    if let Some(ref ca) = config.ssl_ca_location {
-        client.set("ssl.ca.location", ca);
-    }
-    if let Some(ref cert) = config.ssl_certificate_location {
-        client.set("ssl.certificate.location", cert);
-    }
-    if let Some(ref key) = config.ssl_key_location {
-        client.set("ssl.key.location", key);
-    }
-    if config.ssl_skip_verify {
-        client.set("enable.ssl.certificate.verification", "false");
-    }
-
-    for (key, value) in PRODUCER_HIGH_THROUGHPUT {
-        client.set(*key, *value);
-    }
-    if let Some(timeout) = message_timeout {
-        client.set(MESSAGE_TIMEOUT_KEY, timeout.as_millis().to_string());
-    }
-    for (key, value) in &config.librdkafka_overrides {
-        client.set(key, value);
-    }
-    for (key, value) in config.sizing.resolved_producer_map() {
-        client.set(key, value);
-    }
-
-    client
+    producer_client_config(config, &defaults)
 }
 
 /// The librdkafka key bounding how long a record may wait for its broker.
@@ -266,7 +225,7 @@ impl KafkaSink {
         }
 
         let producer: ThreadedProducer<DeliveryObserver> =
-            producer_client_config(&scalo_config, held_message_timeout)
+            producer_config(&scalo_config, held_message_timeout)
                 .create_with_context(observer)
                 .map_err(|e| Error::Transport(format!("failed to create Kafka producer: {e}")))?;
 
@@ -478,31 +437,101 @@ mod tests {
             "the profile no longer sets a stats interval, so this test proves nothing"
         );
         let scalo_config = KafkaConfig::default().to_scalo_kafka_config_for_producer();
-        let client = producer_client_config(&scalo_config, None);
+        let client = producer_config(&scalo_config, None);
         assert_eq!(client.get("statistics.interval.ms"), Some("0"));
     }
 
     /// Holding answers bounds how long a record waits for its broker, and an
-    /// operator's own setting still wins.
+    /// operator's own setting still wins, under either librdkafka name.
     #[test]
     fn a_held_message_timeout_applies_unless_the_operator_set_one() {
         let held = Some(Duration::from_secs(20));
         let scalo_config = KafkaConfig::default().to_scalo_kafka_config_for_producer();
         assert_eq!(
-            producer_client_config(&scalo_config, None).get(MESSAGE_TIMEOUT_KEY),
+            producer_config(&scalo_config, None).get(MESSAGE_TIMEOUT_KEY),
             None,
             "answers at enqueue keep librdkafka's own timeout"
         );
         assert_eq!(
-            producer_client_config(&scalo_config, held).get(MESSAGE_TIMEOUT_KEY),
+            producer_config(&scalo_config, held).get(MESSAGE_TIMEOUT_KEY),
             Some("20000")
         );
 
         let overridden = unroutable_config("5000").to_scalo_kafka_config_for_producer();
         assert_eq!(
-            producer_client_config(&overridden, held).get(MESSAGE_TIMEOUT_KEY),
+            producer_config(&overridden, held).get(MESSAGE_TIMEOUT_KEY),
             Some("5000")
         );
+
+        let mut by_alias = KafkaConfig::default();
+        by_alias
+            .librdkafka_overrides
+            .insert("delivery.timeout.ms".to_string(), "5000".to_string());
+        let client = producer_config(&by_alias.to_scalo_kafka_config_for_producer(), held);
+        assert_eq!(client.get("delivery.timeout.ms"), Some("5000"));
+        assert_eq!(
+            client.get(MESSAGE_TIMEOUT_KEY),
+            None,
+            "both names set leave the timeout to hash order"
+        );
+    }
+
+    /// The value librdkafka itself runs for `key` once it takes `client`.
+    fn librdkafka_runs(client: &ClientConfig, key: &str) -> String {
+        client
+            .create_native_config()
+            .expect("librdkafka takes every key the config sets")
+            .get(key)
+            .expect("librdkafka knows the key")
+    }
+
+    /// An operator's override wins over the sizing surface, and one under the
+    /// other librdkafka name replaces the sizing default instead of racing it.
+    #[test]
+    fn an_override_wins_over_sizing_under_either_librdkafka_name() {
+        let sized = KafkaConfig::default()
+            .to_scalo_kafka_config_for_producer()
+            .sizing
+            .resolved_producer_map();
+        assert_eq!(
+            sized.get("compression.type").map(String::as_str),
+            Some("zstd"),
+            "sizing no longer sets the codec, so this test proves nothing"
+        );
+        assert!(
+            sized.get("linger.ms").is_some_and(|ms| ms != "5"),
+            "sizing no longer sets a linger other than 5, so this test proves nothing"
+        );
+
+        let mut named = KafkaConfig::default();
+        for (key, value) in [("compression.type", "lz4"), ("linger.ms", "5")] {
+            named
+                .librdkafka_overrides
+                .insert(key.to_string(), value.to_string());
+        }
+        let client = producer_config(&named.to_scalo_kafka_config_for_producer(), None);
+        assert_eq!(client.get("compression.type"), Some("lz4"));
+        assert_eq!(client.get("linger.ms"), Some("5"));
+        assert_eq!(
+            client.get("compression.level"),
+            None,
+            "zstd's level stays off another codec"
+        );
+        assert_eq!(librdkafka_runs(&client, "compression.codec"), "lz4");
+        assert_eq!(librdkafka_runs(&client, "linger.ms"), "5");
+
+        let mut by_alias = KafkaConfig::default();
+        by_alias
+            .librdkafka_overrides
+            .insert("compression.codec".to_string(), "lz4".to_string());
+        let client = producer_config(&by_alias.to_scalo_kafka_config_for_producer(), None);
+        assert_eq!(client.get("compression.codec"), Some("lz4"));
+        assert_eq!(
+            client.get("compression.type"),
+            None,
+            "both names set leave the codec to hash order"
+        );
+        assert_eq!(librdkafka_runs(&client, "compression.codec"), "lz4");
     }
 
     fn held_ticket() -> (

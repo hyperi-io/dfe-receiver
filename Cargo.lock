@@ -4063,7 +4063,7 @@ dependencies = [
 [[package]]
 name = "scalo"
 version = "2.12.0"
-source = "git+https://github.com/hyperi-io/scalo-rs?branch=fix%2Fat-least-once#7497494d0f5dafa9d9bbf2220bde882fd5b8292a"
+source = "git+https://github.com/hyperi-io/scalo-rs?branch=fix%2Fzstd-default#7270b91d877620df74fcbde83bcbd8882f26bd4f"
 dependencies = [
  "aes-gcm",
  "axum",
