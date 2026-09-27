@@ -25,8 +25,10 @@ pub use shared::SharedConfig;
 
 use std::collections::HashMap;
 
+use scalo::SensitiveString;
 use scalo::config::flat_env::{self, ApplyFlatEnv, Normalize};
 use scalo::config::{self, ConfigOptions};
+use scalo::transport::AcknowledgementsConfig;
 use serde::{Deserialize, Serialize};
 
 use scalo::scaling::{ScalingComponent, ScalingPressure, ScalingPressureConfig};
@@ -244,6 +246,7 @@ impl Config {
             "grpc" => DestinationSpec {
                 grpc: Some(GrpcDestination {
                     endpoint: self.loader.effective_grpc_endpoint(),
+                    ..GrpcDestination::default()
                 }),
                 kafka: None,
             },
@@ -251,6 +254,54 @@ impl Config {
         };
         resolved.named.insert(LOADER_DESTINATION.to_string(), spec);
         resolved
+    }
+
+    /// Whether some enabled listener holds its answer until every destination
+    /// confirmed delivery.
+    #[must_use]
+    pub fn holds_answers(&self) -> bool {
+        self.ack_capable_listeners().any(|acks| acks.enabled)
+    }
+
+    /// Whether some enabled listener answers once a record is queued, so each
+    /// destination needs its buffer, and its spool when spillover is on.
+    ///
+    /// Syslog, GELF and flow carry no acknowledgement, so they always count.
+    #[must_use]
+    pub fn answers_at_enqueue(&self) -> bool {
+        self.syslog.enabled
+            || self.gelf.enabled
+            || self.flow.enabled
+            || self.flow.split.is_some()
+            || self.ack_capable_listeners().any(|acks| !acks.enabled)
+    }
+
+    /// The `acknowledgements` section of every enabled listener that has one.
+    fn ack_capable_listeners(&self) -> impl Iterator<Item = AcknowledgementsConfig> + '_ {
+        #[cfg(feature = "otlp")]
+        let otlp = self.otlp.enabled.then_some(self.otlp.acknowledgements);
+        #[cfg(not(feature = "otlp"))]
+        let otlp = None;
+        [
+            Some(self.server.acknowledgements),
+            self.grpc.enabled.then_some(self.grpc.acknowledgements),
+            otlp,
+            self.lumberjack
+                .enabled
+                .then_some(self.lumberjack.acknowledgements),
+            self.splunk_hec
+                .enabled
+                .then_some(self.splunk_hec.acknowledgements),
+            self.prometheus_rw
+                .enabled
+                .then_some(self.prometheus_rw.acknowledgements),
+            self.fluent.enabled.then_some(self.fluent.acknowledgements),
+            self.webhook
+                .enabled
+                .then_some(self.webhook.acknowledgements),
+        ]
+        .into_iter()
+        .flatten()
     }
 
     /// Validate the configuration.
@@ -319,6 +370,17 @@ impl Config {
         }
 
         self.validate_auth()?;
+        // A zero hold answers every held OTLP HTTP export as not confirmed.
+        #[cfg(feature = "otlp")]
+        if self.otlp.enabled
+            && self.otlp.acknowledgements.enabled
+            && self.otlp.http_max_hold_ms == 0
+        {
+            return Err(Error::Config(
+                "otlp.http_max_hold_ms must be greater than zero while acknowledgements are on"
+                    .into(),
+            ));
+        }
         self.webhook.validate()?;
         // The flow handler refuses this block at build, so it has to fail startup here.
         self.flow
@@ -543,7 +605,7 @@ impl ApplyFlatEnv for Config {
                 .flat_map(|line| line.split(','))
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
-                .map(String::from)
+                .map(SensitiveString::new)
                 .collect();
         }
 
@@ -771,6 +833,10 @@ pub struct ServerConfig {
 
     /// Authentication configuration.
     pub auth: AuthConfig,
+
+    /// Answer `/ingest` only once every destination confirmed the records
+    /// (default on). Off answers once they are queued.
+    pub acknowledgements: AcknowledgementsConfig,
 }
 
 impl Default for ServerConfig {
@@ -784,6 +850,7 @@ impl Default for ServerConfig {
             ip_filter: IpFilterConfig::default(),
             tls: TlsConfig::default(),
             auth: AuthConfig::default(),
+            acknowledgements: AcknowledgementsConfig::default(),
         }
     }
 }
@@ -942,7 +1009,7 @@ pub struct AuthConfig {
     /// Legacy: Allowed header values for single header.
     /// Deprecated: Use `accepted_headers` instead.
     #[serde(default)]
-    pub header_values: Vec<String>,
+    pub header_values: Vec<SensitiveString>,
 }
 
 fn default_true() -> bool {
@@ -956,7 +1023,7 @@ pub struct BearerConfig {
     /// Static tokens (for dev/simple deployments).
     /// In production, use `secret_source` instead.
     #[serde(default)]
-    pub tokens: Vec<String>,
+    pub tokens: Vec<SensitiveString>,
 
     /// Secret source for dynamic token loading.
     /// Format: `provider:path[:key]` (e.g. "vault:secret/auth:bearer_tokens").
@@ -998,7 +1065,7 @@ pub struct AcceptedHeader {
     /// Allowed values for this header.
     /// If empty, any non-empty value is accepted.
     #[serde(default)]
-    pub values: Vec<String>,
+    pub values: Vec<SensitiveString>,
 }
 
 impl Default for AuthConfig {
@@ -1026,7 +1093,7 @@ impl AuthConfig {
             if !already_exists {
                 headers.push(AcceptedHeader {
                     name: COMMON_HEADER_NAME.to_string(),
-                    values: vec![COMMON_HEADER_VALUE.to_string()],
+                    values: vec![SensitiveString::new(COMMON_HEADER_VALUE)],
                 });
             }
         }
@@ -1061,7 +1128,17 @@ pub struct GrpcConfig {
 
     /// Authentication configuration for gRPC server.
     pub auth: AuthConfig,
+
+    /// Largest decoded push the server takes, in bytes.
+    pub max_message_size: usize,
+
+    /// Answer a push only once every destination confirmed its events
+    /// (default on). Off answers once they are queued.
+    pub acknowledgements: AcknowledgementsConfig,
 }
+
+/// The largest decoded gRPC message the receiver's gRPC listeners take.
+pub const DEFAULT_GRPC_MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
 
 impl Default for GrpcConfig {
     fn default() -> Self {
@@ -1073,6 +1150,8 @@ impl Default for GrpcConfig {
                 mode: "none".to_string(),
                 ..AuthConfig::default()
             },
+            max_message_size: DEFAULT_GRPC_MAX_MESSAGE_SIZE,
+            acknowledgements: AcknowledgementsConfig::default(),
         }
     }
 }
@@ -1110,7 +1189,25 @@ pub struct OtlpConfig {
     /// rendering of the record -- the least-shaped decode we produce. In
     /// `generic` mode it is therefore a copy of the event itself.
     pub raw_capture: RawCaptureConfig,
+
+    /// Largest decoded export the gRPC endpoint takes, in bytes.
+    pub max_message_size: usize,
+
+    /// Answer an export, on either endpoint, only once every destination
+    /// confirmed its records (default on). Off answers once they are queued.
+    pub acknowledgements: AcknowledgementsConfig,
+
+    /// The longest an HTTP export is held for its destinations to confirm, in
+    /// milliseconds. OTel exporters give up after 10 s by default, so a longer
+    /// hold keeps the bytes of a request nobody is waiting on. Raise it with
+    /// the exporters' `timeout`. A gRPC export is bounded by its own
+    /// `grpc-timeout` instead.
+    pub http_max_hold_ms: u64,
 }
+
+/// The OTLP HTTP hold: a second inside the OTel exporters' 10 s default timeout.
+#[cfg(feature = "otlp")]
+pub const DEFAULT_OTLP_HTTP_MAX_HOLD_MS: u64 = 9_000;
 
 #[cfg(feature = "otlp")]
 impl Default for OtlpConfig {
@@ -1126,6 +1223,9 @@ impl Default for OtlpConfig {
                 mode: "none".to_string(),
                 ..AuthConfig::default()
             },
+            max_message_size: DEFAULT_GRPC_MAX_MESSAGE_SIZE,
+            acknowledgements: AcknowledgementsConfig::default(),
+            http_max_hold_ms: DEFAULT_OTLP_HTTP_MAX_HOLD_MS,
         }
     }
 }
@@ -1148,6 +1248,10 @@ pub struct LumberjackConfig {
 
     /// Authentication configuration.
     pub auth: AuthConfig,
+
+    /// Acknowledge a window only once every destination confirmed its events
+    /// (default on). Off acknowledges once they are queued.
+    pub acknowledgements: AcknowledgementsConfig,
 }
 
 impl Default for LumberjackConfig {
@@ -1160,6 +1264,7 @@ impl Default for LumberjackConfig {
                 mode: "none".to_string(),
                 ..AuthConfig::default()
             },
+            acknowledgements: AcknowledgementsConfig::default(),
         }
     }
 }
@@ -1195,6 +1300,10 @@ pub struct SplunkHecConfig {
     /// value before HEC metadata is merged in. On `/services/collector/raw`
     /// it carries the original line bytes.
     pub raw_capture: RawCaptureConfig,
+
+    /// Answer a request only once every destination confirmed its events
+    /// (default on). Off answers once they are queued.
+    pub acknowledgements: AcknowledgementsConfig,
 }
 
 impl Default for SplunkHecConfig {
@@ -1210,6 +1319,7 @@ impl Default for SplunkHecConfig {
                 mode: "none".to_string(),
                 ..AuthConfig::default()
             },
+            acknowledgements: AcknowledgementsConfig::default(),
         }
     }
 }
@@ -1301,6 +1411,10 @@ pub struct PrometheusRwConfig {
     /// `native`-mode rendering of the sample -- the least-shaped decode we
     /// produce. In `native` mode it is therefore a copy of the event itself.
     pub raw_capture: RawCaptureConfig,
+
+    /// Answer a write only once every destination confirmed its samples
+    /// (default on). Off answers once they are queued.
+    pub acknowledgements: AcknowledgementsConfig,
 }
 
 impl Default for PrometheusRwConfig {
@@ -1317,6 +1431,7 @@ impl Default for PrometheusRwConfig {
                 mode: "none".to_string(),
                 ..AuthConfig::default()
             },
+            acknowledgements: AcknowledgementsConfig::default(),
         }
     }
 }
@@ -1350,6 +1465,11 @@ pub struct FluentConfig {
     /// msgpack-to-JSON decode, before the tag, timestamp and `_source` this
     /// handler adds.
     pub raw_capture: RawCaptureConfig,
+
+    /// Acknowledge a chunk, or read past a message without one, only once
+    /// every destination confirmed its records (default on). Off does so once
+    /// they are queued.
+    pub acknowledgements: AcknowledgementsConfig,
 }
 
 impl Default for FluentConfig {
@@ -1360,6 +1480,7 @@ impl Default for FluentConfig {
             max_message_size: 32 * 1024 * 1024,
             tls: TlsConfig::default(),
             raw_capture: RawCaptureConfig::default(),
+            acknowledgements: AcknowledgementsConfig::default(),
         }
     }
 }
@@ -1434,7 +1555,9 @@ pub struct WebhookConfig {
     /// `server.max_body_size`.
     pub max_body_size: usize,
 
-    /// Request timeout in milliseconds (own listener only).
+    /// Request timeout in milliseconds, on either listener. It bounds the
+    /// held answer, so the default keeps the hold past the Kafka message
+    /// timeout.
     pub request_timeout_ms: u64,
 
     /// TLS for the own listener. Refused when `bind_address` is unset, since
@@ -1443,6 +1566,10 @@ pub struct WebhookConfig {
 
     /// The callers, one entry per product.
     pub callers: Vec<WebhookCallerConfig>,
+
+    /// Answer a request only once Kafka confirmed its records (default on).
+    /// Off answers once they are queued.
+    pub acknowledgements: AcknowledgementsConfig,
 }
 
 impl Default for WebhookConfig {
@@ -1451,9 +1578,10 @@ impl Default for WebhookConfig {
             enabled: false,
             bind_address: None,
             max_body_size: 1024 * 1024,
-            request_timeout_ms: 10_000,
+            request_timeout_ms: 30_000,
             tls: TlsConfig::default(),
             callers: Vec::new(),
+            acknowledgements: AcknowledgementsConfig::default(),
         }
     }
 }
@@ -1679,9 +1807,6 @@ impl WebhookConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct ValidationConfig {
-    /// Require JSON format.
-    pub require_json: bool,
-
     /// Required fields (reject if missing).
     pub required_fields: Vec<String>,
 
@@ -1692,7 +1817,6 @@ pub struct ValidationConfig {
 impl Default for ValidationConfig {
     fn default() -> Self {
         Self {
-            require_json: true,
             required_fields: vec![],
             dlq_on_invalid: true,
         }
@@ -2074,10 +2198,26 @@ pub struct DestinationSpec {
 }
 
 /// A gRPC destination -- the address of a scalo Push listener.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GrpcDestination {
     /// Endpoint URI, e.g. `http://dfe-transform-orders:6000`.
     pub endpoint: String,
+
+    /// Whether the listener answers a push only once its records are durable.
+    /// Set false for one that answers on receipt, as the archiver's direct
+    /// listener does: every listener whose records can reach it then reports
+    /// `best_effort` in `pipeline_delivery_guarantee`. Delivery is unchanged.
+    #[serde(default = "default_true")]
+    pub confirms_delivery: bool,
+}
+
+impl Default for GrpcDestination {
+    fn default() -> Self {
+        Self {
+            endpoint: String::new(),
+            confirms_delivery: true,
+        }
+    }
 }
 
 /// A bus destination.
@@ -2118,10 +2258,8 @@ pub struct KafkaConfig {
     /// TLS configuration.
     pub tls: KafkaTlsConfig,
 
-    /// Producer-specific settings.
-    pub producer: ProducerConfig,
-
-    /// Raw librdkafka configuration overrides (highest priority).
+    /// Raw librdkafka configuration overrides (highest priority), the one
+    /// place producer batching, linger, compression and acks are tuned.
     pub librdkafka_overrides: std::collections::HashMap<String, String>,
 }
 
@@ -2138,7 +2276,6 @@ impl Default for KafkaConfig {
             client_id: "dfe-receiver".to_string(),
             sasl: None,
             tls: KafkaTlsConfig::default(),
-            producer: ProducerConfig::default(),
             librdkafka_overrides: overrides,
         }
     }
@@ -2199,42 +2336,6 @@ impl Default for KafkaTlsConfig {
     }
 }
 
-/// Kafka producer settings.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
-pub struct ProducerConfig {
-    /// Maximum batch size in bytes.
-    pub batch_size: usize,
-
-    /// Maximum messages per batch.
-    pub batch_messages: usize,
-
-    /// Linger time in milliseconds.
-    pub linger_ms: u32,
-
-    /// Compression type (none, gzip, snappy, lz4, zstd).
-    pub compression: String,
-
-    /// Acknowledgment level (0, 1, all).
-    pub acks: String,
-
-    /// Number of retries.
-    pub retries: u32,
-}
-
-impl Default for ProducerConfig {
-    fn default() -> Self {
-        Self {
-            batch_size: 8 * 1024 * 1024, // 8MiB
-            batch_messages: 10_000,
-            linger_ms: 20,
-            compression: "lz4".to_string(),
-            acks: "all".to_string(),
-            retries: 5,
-        }
-    }
-}
-
 /// dfe-loader connection configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -2247,6 +2348,7 @@ pub struct LoaderConfig {
     pub transport: String,
 
     /// Per-RPC deadline for the gRPC loader client, in milliseconds (0 = none).
+    /// The default sits inside the hold a listener gives its sender.
     pub timeout_ms: u64,
 
     /// gRPC endpoint URI for loader (only used when transport = "grpc").
@@ -2259,7 +2361,7 @@ impl Default for LoaderConfig {
         Self {
             address: "dfe-loader:6000".to_string(),
             transport: "kafka".to_string(),
-            timeout_ms: 5000,
+            timeout_ms: crate::pipeline::acks::NEXT_HOP_DEADLINE_MS,
             grpc_endpoint: None,
         }
     }
@@ -2371,13 +2473,18 @@ impl BufferConfig {
 /// When enabled, failed sends are spilled to disk via scalo's TieredSink
 /// instead of being held in an in-memory queue. This provides crash-resilient
 /// buffering at the cost of disk I/O on the failure path.
+///
+/// Only records a listener answers at enqueue are spooled. With every enabled
+/// listener holding its answer (`acknowledgements.enabled`, the default) no
+/// spool is opened: the sender keeps its copy until a destination confirms it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 #[serde(default)]
 pub struct SpilloverConfig {
     /// Enable disk spillover (default: false).
     pub enabled: bool,
 
-    /// Directory for spool files.
+    /// Directory for spool files. The bus spools under `kafka/` and each gRPC
+    /// destination under `grpc/<name>/`, since two sinks cannot share a spool.
     pub path: std::path::PathBuf,
 
     /// Maximum filesystem usage percentage (0.0-1.0) before pausing spool writes.
@@ -2552,7 +2659,19 @@ mod tests {
     fn test_default_config() {
         let config = Config::default();
         assert_eq!(config.server.bind_address, "0.0.0.0:8080");
-        assert_eq!(config.kafka.producer.batch_messages, 10_000);
+    }
+
+    /// The producer is tuned through scalo's builder alone: a removed
+    /// `kafka.producer` block in an old config parses and changes nothing.
+    #[test]
+    fn a_leftover_producer_block_changes_nothing() {
+        let with_block: KafkaConfig =
+            serde_yaml_ng::from_str("producer:\n  compression: lz4\n  linger_ms: 20\n").unwrap();
+        let client = with_block.to_scalo_kafka_config_for_producer();
+        assert_eq!(
+            client.librdkafka_overrides,
+            KafkaConfig::default().librdkafka_overrides
+        );
     }
 
     #[test]
@@ -2561,6 +2680,25 @@ mod tests {
         // Default destination is kafka, so we need brokers
         config.kafka.brokers = vec!["localhost:9092".to_string()];
         assert!(config.validate().is_ok());
+    }
+
+    /// An OTLP HTTP export is held a second inside the exporters' default
+    /// timeout, and a zero hold is refused while acknowledgements are on.
+    #[cfg(feature = "otlp")]
+    #[test]
+    fn the_otlp_http_hold_defaults_inside_the_exporter_timeout() {
+        let mut config = Config::default();
+        config.kafka.brokers = vec!["localhost:9092".to_string()];
+        config.otlp.enabled = true;
+        assert_eq!(config.otlp.http_max_hold_ms, 9_000);
+        assert!(config.validate().is_ok());
+
+        config.otlp.http_max_hold_ms = 0;
+        let err = config.validate().expect_err("a zero hold is refused");
+        assert!(err.to_string().contains("otlp.http_max_hold_ms"), "{err}");
+
+        config.otlp.acknowledgements = AcknowledgementsConfig::new(false);
+        assert!(config.validate().is_ok(), "no hold to bound with acks off");
     }
 
     /// A config that passes every rule outside the flow block.
@@ -2694,7 +2832,7 @@ mod tests {
         config.server.auth.mode = "both".to_string();
         config.server.auth.accepted_headers = vec![AcceptedHeader {
             name: "x-api-key".to_string(),
-            values: vec!["k".to_string()],
+            values: vec!["k".into()],
         }];
 
         let err = config.validate().expect_err("must not start");
@@ -2766,7 +2904,7 @@ mod tests {
         config.grpc.auth.mode = "header".to_string();
         config.grpc.auth.accepted_headers = vec![AcceptedHeader {
             name: "x-api-key".to_string(),
-            values: vec!["k".to_string()],
+            values: vec!["k".into()],
         }];
 
         let err = config.validate().expect_err("must not start");
@@ -2781,7 +2919,7 @@ mod tests {
         let mut config = auth_base();
         config.grpc.enabled = true;
         config.grpc.auth.mode = "bearer".to_string();
-        config.grpc.auth.bearer.tokens = vec!["t".to_string()];
+        config.grpc.auth.bearer.tokens = vec!["t".into()];
 
         assert!(config.validate().is_ok());
     }
@@ -2794,7 +2932,7 @@ mod tests {
         let mut config = auth_base();
         config.syslog.enabled = true;
         config.syslog.auth.mode = "bearer".to_string();
-        config.syslog.auth.bearer.tokens = vec!["t".to_string()];
+        config.syslog.auth.bearer.tokens = vec!["t".into()];
 
         let err = config.validate().expect_err("must not start");
         assert!(
@@ -3257,10 +3395,15 @@ webhook:
             let mut config = Config::default();
             config.apply_flat_env(ENV_PREFIX);
             assert_eq!(
-                config.server.auth.bearer.tokens,
-                vec!["alpha".to_string(), "beta".to_string()]
+                exposed(&config.server.auth.bearer.tokens),
+                ["alpha", "beta"]
             );
         });
+    }
+
+    /// The values behind a list of secrets.
+    fn exposed(secrets: &[SensitiveString]) -> Vec<&str> {
+        secrets.iter().map(SensitiveString::expose).collect()
     }
 
     #[test]
@@ -3273,8 +3416,8 @@ webhook:
                 let mut config = Config::default();
                 config.apply_flat_env(ENV_PREFIX);
                 assert_eq!(
-                    config.server.auth.bearer.tokens,
-                    vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()],
+                    exposed(&config.server.auth.bearer.tokens),
+                    ["alpha", "beta", "gamma"],
                     "blank entries must not become empty tokens"
                 );
             },
@@ -3285,9 +3428,9 @@ webhook:
     fn bearer_tokens_from_config_survive_an_unset_environment() {
         with_env(&[], || {
             let mut config = Config::default();
-            config.server.auth.bearer.tokens = vec!["from-yaml".to_string()];
+            config.server.auth.bearer.tokens = vec!["from-yaml".into()];
             config.apply_flat_env(ENV_PREFIX);
-            assert_eq!(config.server.auth.bearer.tokens, vec!["from-yaml"]);
+            assert_eq!(exposed(&config.server.auth.bearer.tokens), ["from-yaml"]);
         });
     }
 
@@ -3411,12 +3554,8 @@ webhook:
                 let mut config = Config::default();
                 config.apply_flat_env(ENV_PREFIX);
                 assert_eq!(
-                    config.server.auth.bearer.tokens,
-                    vec![
-                        "tok-a".to_string(),
-                        "tok-b".to_string(),
-                        "tok-c".to_string()
-                    ]
+                    exposed(&config.server.auth.bearer.tokens),
+                    ["tok-a", "tok-b", "tok-c"]
                 );
             },
         );
@@ -3556,6 +3695,27 @@ kafka:
             Some(&"5000".to_string()),
             "user config must override the default"
         );
+    }
+
+    /// A config written for a release that had `validation.require_json` still
+    /// loads, and a body that is not JSON is refused whatever it said.
+    #[test]
+    fn a_config_setting_the_removed_require_json_still_loads() {
+        let yaml = r#"
+validation:
+  require_json: false
+  required_fields: ["org_id"]
+"#;
+        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(
+            config.validation.required_fields,
+            vec!["org_id".to_string()]
+        );
+        let validator = crate::validation::Validator::new(config.validation);
+        assert!(matches!(
+            validator.validate(&bytes::Bytes::from("not json")),
+            crate::validation::ValidationResult::NotJson(_)
+        ));
     }
 
     #[test]
@@ -3699,7 +3859,7 @@ kafka:
     #[test]
     fn bearer_debug_redacts_tokens() {
         let bearer = BearerConfig {
-            tokens: vec!["super-secret-token".to_string(), "another".to_string()],
+            tokens: vec!["super-secret-token".into(), "another".into()],
             secret_source: Some("file:/etc/secrets/tokens".to_string()),
             refresh_interval_secs: 300,
         };
@@ -3727,12 +3887,8 @@ kafka:
                 let mut config = Config::default();
                 config.apply_flat_env(ENV_PREFIX);
                 assert_eq!(
-                    config.server.auth.bearer.tokens,
-                    vec![
-                        "tok-a".to_string(),
-                        "tok-b".to_string(),
-                        "tok-c".to_string()
-                    ]
+                    exposed(&config.server.auth.bearer.tokens),
+                    ["tok-a", "tok-b", "tok-c"]
                 );
             },
         );

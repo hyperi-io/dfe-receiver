@@ -98,7 +98,7 @@ fn shared_listener_config(callers: Vec<WebhookCallerConfig>) -> Config {
     let mut config = Config::default();
     config.server.bind_address = "127.0.0.1:0".to_string();
     config.server.auth.mode = "bearer".to_string();
-    config.server.auth.bearer.tokens = vec!["ingest-token".to_string()];
+    config.server.auth.bearer.tokens = vec!["ingest-token".into()];
     config.webhook.enabled = true;
     config.webhook.bind_address = None;
     config.webhook.callers = callers;

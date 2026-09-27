@@ -230,11 +230,7 @@ pub fn contract() -> DeploymentContract {
             },
             "kafka": {
                 "brokers": ["kafka:9092"],
-                "client_id": "dfe-receiver",
-                "producer": {
-                    "compression": "zstd",
-                    "acks": "all"
-                }
+                "client_id": "dfe-receiver"
             },
             "routing": {
                 "default_source": "main",
@@ -371,6 +367,24 @@ mod tests {
     fn test_config_artifacts_do_not_drift() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs");
         scalo::deployment::assert_no_config_artifact_drift(&contract(), dir);
+    }
+
+    /// A consumer of the schema masks a field only when it carries the secret marker.
+    #[test]
+    fn credential_fields_carry_the_secret_marker() {
+        let schema = scalo::deployment::config_schema_json::<crate::config::Config>();
+        for (def, field) in [
+            ("BearerConfig", "tokens"),
+            ("AcceptedHeader", "values"),
+            ("AuthConfig", "header_values"),
+        ] {
+            let items = &schema["$defs"][def]["properties"][field]["items"];
+            assert_eq!(
+                items["x-dfe-secret"],
+                serde_json::Value::Bool(true),
+                "{def}.{field}"
+            );
+        }
     }
 
     #[test]
@@ -533,7 +547,9 @@ mod tests {
                     config.apply_flat_env(crate::config::ENV_PREFIX);
                 });
 
-                let applied = serde_json::to_string(&config).expect("config serialises");
+                // Secrets serialise redacted outside `expose_during`.
+                let applied = scalo::expose_during(|| serde_json::to_string(&config))
+                    .expect("config serialises");
                 assert!(
                     applied.contains(&sentinel),
                     "{} ({}) was set and no config field read it",

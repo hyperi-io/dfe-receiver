@@ -27,8 +27,8 @@ use dfe_receiver::config::{
 };
 use dfe_receiver::pipeline::PipelineState;
 use scalo::memory::{MemoryGuard, MemoryGuardConfig, UsageSource};
-use scalo::transport::TransportReceiver;
 use scalo::transport::grpc::GrpcTransport;
+use scalo::transport::{AcknowledgementsConfig, TransportReceiver};
 use tokio_util::sync::CancellationToken;
 
 /// Start a scalo Push listener: what a transform, the archiver and the loader
@@ -53,6 +53,7 @@ fn grpc_destination(endpoint: &str) -> DestinationSpec {
     DestinationSpec {
         grpc: Some(GrpcDestination {
             endpoint: endpoint.to_string(),
+            ..GrpcDestination::default()
         }),
         kafka: None,
     }
@@ -207,6 +208,8 @@ async fn an_unreachable_destination_holds_then_back_pressures_the_ingest() {
     );
 
     let mut config = config_with(named, vec![]);
+    // The buffer exists only for a listener that answers at enqueue.
+    config.server.acknowledgements = AcknowledgementsConfig::new(false);
     // A 2 KiB buffer budget, so the queue fills in tens of records.
     config.buffer.memory_limit = 2048;
     let pipeline = pipeline_on_reservations(config).await;

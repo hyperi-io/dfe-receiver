@@ -51,7 +51,7 @@ fn test_config() -> Config {
 fn test_config_with_auth(token: &str) -> Config {
     let mut config = test_config();
     config.splunk_hec.auth.mode = "bearer".to_string();
-    config.splunk_hec.auth.bearer.tokens = vec![token.to_string()];
+    config.splunk_hec.auth.bearer.tokens = vec![token.into()];
     config
 }
 

@@ -21,8 +21,9 @@ path = "src/lib.rs"
 doctest = false
 
 [dependencies]
-# scalo shared library (crates.io)
-scalo = { version = ">=2.12.8, <3", features = [
+# scalo shared library (crates.io). The floor is the first release with
+# scalo::transport::ack and the public scalo::parse_guard.
+scalo = { version = ">=2.13.0, <3", features = [
     "config",
     "config-reload",
     "config-schema",
@@ -82,8 +83,6 @@ futures-core = "0.3.34"
 
 # JSON (SIMD-accelerated)
 sonic-rs = "0.5.10"
-# Safe SIMD byte compares for the JSON depth guard; this crate forbids unsafe_code.
-wide = "1.7.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 serde_yaml_ng = "0.10"
@@ -198,7 +197,7 @@ sha2 = ">=0.11.0, <0.12"
 # transport-grpc-vector-compat is test-only: it gives VectorCompatClient, the
 # same PushEvents client dfe-fetcher and Vector use, so the gRPC ingest path can
 # be driven in-process. Dev-dep features do not reach a release build.
-scalo = { version = ">=2.12.8, <3", features = [
+scalo = { version = ">=2.13.0, <3", features = [
     "deployment-test-support",
     "transport-grpc-vector-compat",
 ] }

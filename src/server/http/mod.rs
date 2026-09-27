@@ -47,7 +47,7 @@ use scalo::logger::security::{self, SecurityOutcome};
 use crate::config::{AuthConfig, SharedConfig};
 use crate::error::{Error, Result, unavailable_response};
 use crate::metrics::Metrics;
-use crate::pipeline::PipelineState;
+use crate::pipeline::{Acks, PipelineState};
 use crate::server::auth::{AuthState, BearerTokenProvider, token_auth_middleware};
 use crate::server::ip_filter::IpFilter;
 use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
@@ -238,6 +238,8 @@ pub struct HttpState {
     pub metrics: Arc<Metrics>,
     pub auth: AuthState,
     pub ip_filter: IpFilter,
+    /// When `/ingest` answers: once every destination confirmed, or at enqueue.
+    pub acks: Acks,
 }
 
 /// Run the HTTP server with optional TLS.
@@ -271,12 +273,18 @@ async fn serve(
     );
 
     let ip_filter = IpFilter::from_config(&config.server.ip_filter);
+    let request_timeout = Duration::from_millis(config.server.request_timeout_ms);
 
     let state = HttpState {
         pipeline: pipeline.clone(),
         metrics: metrics.clone(),
         auth: auth_state.clone(),
         ip_filter: ip_filter.clone(),
+        acks: pipeline.acks(
+            "http",
+            config.server.acknowledgements,
+            Some(request_timeout),
+        ),
     };
 
     // Build TLS: use TlsCertProvider with hot-reload if secrets configured,
@@ -297,7 +305,6 @@ async fn serve(
 
     // Security configuration
     let max_body_size = config.server.max_body_size;
-    let request_timeout = Duration::from_millis(config.server.request_timeout_ms);
 
     info!(
         max_body_size = max_body_size,
@@ -656,6 +663,10 @@ pub(crate) async fn run_tls_server(
 /// Returns 503 with Retry-After header when the pipeline is not ready
 /// (memory pressure, sink failure, shutdown). This gives clients a clear
 /// backpressure signal to back off rather than accepting and dropping.
+///
+/// With `server.acknowledgements` on, the 202 waits until every destination
+/// confirmed the records; a 503 then says they were not confirmed, and some
+/// may still land, so a resend can duplicate them.
 #[inline]
 async fn ingest_handler(
     State(state): State<HttpState>,
@@ -698,15 +709,9 @@ async fn ingest_handler(
     // total one look the same. A retryable failure is the answer over an
     // earlier refusal, so the sender resends rather than dropping the batch.
     let (accepted, result) = match batch {
-        Some(Ok(payloads)) => {
-            let outcome = state.pipeline.process_batch(&payloads).await;
-            (outcome.accepted, outcome.into_error().map_or(Ok(()), Err))
-        }
         Some(Err(oversize)) => (0, Err(oversize)),
-        None => {
-            let result = state.pipeline.process(body).await;
-            (usize::from(result.is_ok()), result)
-        }
+        Some(Ok(payloads)) => ingest(&state, &payloads).await,
+        None => ingest(&state, std::slice::from_ref(&body)).await,
     };
     let elapsed = start.elapsed();
     state
@@ -739,6 +744,16 @@ async fn ingest_handler(
             Err(e)
         }
     }
+}
+
+/// Run one request's events through the pipeline: how many it took, and the
+/// one error the answer reports.
+async fn ingest(state: &HttpState, payloads: &[Bytes]) -> (usize, Result<()>) {
+    let outcome = state
+        .pipeline
+        .process_batch_acked(payloads, &state.acks, None)
+        .await;
+    (outcome.accepted, outcome.into_error().map_or(Ok(()), Err))
 }
 
 /// Split a batched ingest body into one payload per event.
@@ -844,7 +859,76 @@ async fn readiness_handler(State(state): State<HttpState>) -> StatusCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AcceptedHeader, AuthConfig, BearerConfig};
+    use crate::config::{AcceptedHeader, AuthConfig, BearerConfig, Config};
+    use scalo::transport::AcknowledgementsConfig;
+
+    /// POST one record to `/ingest` on a receiver whose only destination is a
+    /// Kafka broker nothing reaches, and return the answer.
+    async fn ingest_with_an_unreachable_broker(
+        acknowledgements: AcknowledgementsConfig,
+    ) -> axum::response::Response {
+        let mut config = Config::default();
+        config.kafka.brokers = vec!["192.0.2.1:9092".to_string()];
+        // A local timeout, so the failed delivery report lands in a second.
+        config
+            .kafka
+            .librdkafka_overrides
+            .insert("message.timeout.ms".to_string(), "1000".to_string());
+        config.server.acknowledgements = acknowledgements;
+        let pipeline = Arc::new(
+            PipelineState::new(SharedConfig::new(config.clone()), CancellationToken::new())
+                .await
+                .unwrap(),
+        );
+        let state = HttpState {
+            acks: pipeline.acks(
+                "http",
+                acknowledgements,
+                Some(Duration::from_millis(config.server.request_timeout_ms)),
+            ),
+            pipeline,
+            metrics: Arc::new(Metrics::default()),
+            auth: AuthState::new(config.server.auth.clone()),
+            ip_filter: IpFilter::from_config(&config.server.ip_filter),
+        };
+        let app = Router::new()
+            .route("/ingest", post(ingest_handler))
+            .with_state(state);
+        let request = axum::http::Request::post("/ingest")
+            .body(axum::body::Body::from(r#"{"a":1}"#))
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(20),
+            tower::ServiceExt::oneshot(app, request),
+        )
+        .await
+        .expect("answered inside the hold")
+        .unwrap()
+    }
+
+    /// Held, a record Kafka never confirms is answered 503 with Retry-After,
+    /// so the sender keeps it and resends.
+    #[tokio::test]
+    async fn a_held_ingest_answers_503_when_kafka_does_not_confirm() {
+        let response = ingest_with_an_unreachable_broker(AcknowledgementsConfig::default()).await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some(crate::error::RETRY_AFTER_SECS.to_string().as_str())
+        );
+    }
+
+    /// With acknowledgements off the same record is answered 202 once queued.
+    #[tokio::test]
+    async fn an_ingest_at_enqueue_answers_202_before_kafka_confirms() {
+        let response = ingest_with_an_unreachable_broker(AcknowledgementsConfig::new(false)).await;
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+    }
 
     fn split_ok(body: &Bytes) -> Vec<Bytes> {
         split_json_array(body)
@@ -1007,7 +1091,7 @@ mod tests {
             mode: "none".to_string(),
             accepted_headers: vec![AcceptedHeader {
                 name: "x-api-key".to_string(),
-                values: vec!["test".to_string()],
+                values: vec!["test".into()],
             }],
             bearer: BearerConfig::default(),
             include_common_header: false,

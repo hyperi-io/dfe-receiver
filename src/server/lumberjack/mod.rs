@@ -32,7 +32,7 @@ static LUMBERJACK_ERRORS: AtomicU64 = AtomicU64::new(0);
 use crate::config::LumberjackConfig;
 use crate::error::{Error, Result};
 use crate::metrics::{DropReason, Metrics};
-use crate::pipeline::PipelineState;
+use crate::pipeline::{Acks, PipelineState};
 use crate::server::ip_filter::IpFilter;
 use crate::server::traits::{BoundAddr, ProtocolHandler};
 use codec::{Frame, decompress_and_parse, encode_ack, read_frame};
@@ -44,36 +44,101 @@ const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 // Per-connection handler
 // ---------------------------------------------------------------------------
 
-/// Offer one event to the pipeline. False when the pipeline could not take it
-/// and the client must send it again.
-///
-/// An event refused for good counts as settled: Lumberjack has no refusal,
-/// and a resend would be refused again.
-async fn take_event(
-    pipeline: &PipelineState,
-    metrics: &Metrics,
-    peer_addr: SocketAddr,
-    sequence: u32,
-    payload: bytes::Bytes,
-) -> bool {
-    metrics.inc_requests_total("lumberjack");
-    metrics.add_bytes_received("lumberjack", payload.len() as u64);
+/// The events read since the last ACK, with their sequence numbers.
+#[derive(Default)]
+struct Window {
+    /// Events the current `Window` frame announced; zero before one arrives.
+    size: u32,
+    sequences: Vec<u32>,
+    payloads: Vec<bytes::Bytes>,
+}
 
-    let Err(e) = pipeline.process(payload).await else {
-        metrics.inc_requests_success("lumberjack");
+impl Window {
+    fn push(&mut self, sequence: u32, payload: bytes::Bytes) {
+        self.sequences.push(sequence);
+        self.payloads.push(payload);
+    }
+
+    /// Whether every event the window announced has arrived.
+    fn is_complete(&self) -> bool {
+        self.sequences.len() >= self.size as usize
+    }
+}
+
+/// The pipeline, and when the connection's events count as taken.
+struct Intake<'a> {
+    pipeline: &'a PipelineState,
+    metrics: &'a Metrics,
+    acks: &'a Acks,
+    peer_addr: SocketAddr,
+}
+
+impl Intake<'_> {
+    /// Offer the window's events to the pipeline and ACK the last one it
+    /// settled. False when the connection must close, after a partial ACK
+    /// for the events before the first it could not take.
+    ///
+    /// An event refused for good counts as settled: Lumberjack has no refusal,
+    /// and a resend would be refused again.
+    async fn settle<W: AsyncWrite + Unpin>(&self, window: &mut Window, writer: &mut W) -> bool {
+        if window.payloads.is_empty() {
+            return true;
+        }
+        for payload in &window.payloads {
+            self.metrics.inc_requests_total("lumberjack");
+            self.metrics
+                .add_bytes_received("lumberjack", payload.len() as u64);
+        }
+
+        let outcome = self
+            .pipeline
+            .process_batch_acked(&window.payloads, self.acks, None)
+            .await;
+        for _ in 0..outcome.accepted {
+            self.metrics.inc_requests_success("lumberjack");
+        }
+        for _ in 0..outcome.rejected {
+            self.metrics.inc_requests_error("lumberjack");
+        }
+        self.metrics.add_records_dropped(
+            "lumberjack",
+            DropReason::Rejected,
+            outcome.rejected as u64,
+        );
+        let taken = outcome
+            .settled()
+            .checked_sub(1)
+            .map_or(0, |last| window.sequences[last]);
+        let events = window.payloads.len();
+        window.sequences.clear();
+        window.payloads.clear();
+
+        let Some(e) = outcome.unavailable else {
+            return ack(writer, taken, self.peer_addr).await;
+        };
+        if scalo::logger::log_sampled(&LUMBERJACK_ERRORS, 100) {
+            let total = LUMBERJACK_ERRORS.load(Ordering::Relaxed);
+            warn!(peer = %self.peer_addr, events, error = %e, total_errors = total, "Lumberjack window not taken (1 in 100)");
+        }
+        self.metrics.inc_requests_error("lumberjack");
+        self.metrics.record_backpressure();
+        ack_and_close(writer, taken, self.peer_addr).await;
+        false
+    }
+}
+
+/// Acknowledge every event up to `sequence`. False when the write failed.
+async fn ack<W: AsyncWrite + Unpin>(writer: &mut W, sequence: u32, peer_addr: SocketAddr) -> bool {
+    if sequence == 0 {
         return true;
-    };
-    if scalo::logger::log_sampled(&LUMBERJACK_ERRORS, 100) {
-        let total = LUMBERJACK_ERRORS.load(Ordering::Relaxed);
-        warn!(peer = %peer_addr, seq = sequence, error = %e, total_errors = total, "Lumberjack event error (1 in 100)");
     }
-    metrics.inc_requests_error("lumberjack");
-    if e.is_retryable() {
-        metrics.record_backpressure();
-        return false;
+    match writer.write_all(&encode_ack(sequence)).await {
+        Ok(()) => true,
+        Err(e) => {
+            warn!(peer = %peer_addr, error = %e, "Failed to send ACK");
+            false
+        }
     }
-    metrics.add_records_dropped("lumberjack", DropReason::Rejected, 1);
-    true
 }
 
 /// Acknowledge every event up to `sequence`, then close: the client resends
@@ -97,23 +162,20 @@ async fn ack_and_close<W: AsyncWrite + Unpin>(
 
 /// Handle a single Lumberjack v2 client connection.
 ///
-/// Reads frames in a loop, processes JSON payloads through the pipeline,
-/// and sends ACKs after completing each window. An event the pipeline cannot
-/// take ends the connection after a partial ACK for the events before it, so
-/// the client resends it and nothing behind it is acknowledged.
+/// Reads frames in a loop and hands each window's events to the pipeline
+/// together once the window is complete, or at the end of a compressed frame,
+/// then ACKs them. With `acks` holding, the ACK waits until every destination
+/// confirmed the events. A window the pipeline cannot take ends the connection
+/// after a partial ACK for the events before the first it could not take, so
+/// the client resends the rest and nothing behind it is acknowledged.
 async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin>(
     stream: S,
-    pipeline: Arc<PipelineState>,
-    metrics: Arc<Metrics>,
+    intake: Intake<'_>,
     shutdown: CancellationToken,
-    peer_addr: SocketAddr,
 ) {
+    let peer_addr = intake.peer_addr;
     let mut reader = BufReader::new(stream);
-    let mut window_size: u32 = 0;
-    let mut events_in_window: u32 = 0;
-    let mut last_sequence: u32 = 0;
-    // The last sequence in the current window the pipeline settled.
-    let mut settled: u32 = 0;
+    let mut window = Window::default();
 
     loop {
         let frame = tokio::select! {
@@ -138,31 +200,18 @@ async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin>(
 
         match frame {
             Frame::Window { size } => {
-                window_size = size;
-                events_in_window = 0;
-                settled = 0;
-                debug!(peer = %peer_addr, window_size, "Lumberjack window started");
+                // Events of a window the client left short are settled before the next.
+                if !intake.settle(&mut window, reader.get_mut()).await {
+                    return;
+                }
+                window.size = size;
+                debug!(peer = %peer_addr, window_size = size, "Lumberjack window started");
             }
 
             Frame::JsonData { sequence, payload } => {
-                last_sequence = sequence;
-                events_in_window += 1;
-
-                if !take_event(&pipeline, &metrics, peer_addr, sequence, payload).await {
-                    ack_and_close(reader.get_mut(), settled, peer_addr).await;
+                window.push(sequence, payload);
+                if window.is_complete() && !intake.settle(&mut window, reader.get_mut()).await {
                     return;
-                }
-                settled = sequence;
-
-                // ACK after window is complete
-                if window_size > 0 && events_in_window >= window_size {
-                    let ack = encode_ack(last_sequence);
-                    let writer = reader.get_mut();
-                    if let Err(e) = writer.write_all(&ack).await {
-                        warn!(peer = %peer_addr, error = %e, "Failed to send ACK");
-                        break;
-                    }
-                    events_in_window = 0;
                 }
             }
 
@@ -178,21 +227,12 @@ async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin>(
                 for inner in inner_frames {
                     match inner {
                         Frame::Window { size } => {
-                            window_size = size;
-                            events_in_window = 0;
-                            settled = 0;
-                        }
-                        Frame::JsonData { sequence, payload } => {
-                            last_sequence = sequence;
-                            events_in_window += 1;
-
-                            if !take_event(&pipeline, &metrics, peer_addr, sequence, payload).await
-                            {
-                                ack_and_close(reader.get_mut(), settled, peer_addr).await;
+                            if !intake.settle(&mut window, reader.get_mut()).await {
                                 return;
                             }
-                            settled = sequence;
+                            window.size = size;
                         }
+                        Frame::JsonData { sequence, payload } => window.push(sequence, payload),
                         Frame::Compressed { .. } => {
                             warn!(peer = %peer_addr, "Nested compressed frame rejected");
                             break;
@@ -201,14 +241,8 @@ async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin>(
                 }
 
                 // ACK after processing all events in compressed batch
-                if last_sequence > 0 {
-                    let ack = encode_ack(last_sequence);
-                    let writer = reader.get_mut();
-                    if let Err(e) = writer.write_all(&ack).await {
-                        warn!(peer = %peer_addr, error = %e, "Failed to send ACK");
-                        break;
-                    }
-                    events_in_window = 0;
+                if !intake.settle(&mut window, reader.get_mut()).await {
+                    return;
                 }
             }
         }
@@ -276,6 +310,9 @@ impl ProtocolHandler for LumberjackHandler {
         // A Lumberjack frame carries no credential, so the IP filter and the
         // TLS handshake are the whole admission surface on this port.
         let ip_filter = IpFilter::from_config(&self.pipeline.config().server.ip_filter);
+        let acks = self
+            .pipeline
+            .acks("lumberjack", self.config.acknowledgements, None);
 
         // Build TLS acceptor if enabled
         let tls_acceptor = if self.config.tls.enabled {
@@ -313,6 +350,7 @@ impl ProtocolHandler for LumberjackHandler {
 
                     let pipeline = self.pipeline.clone();
                     let metrics = self.metrics.clone();
+                    let acks = acks.clone();
                     let conn_shutdown = shutdown.clone();
 
                     if let Some(ref acceptor) = tls_acceptor {
@@ -335,11 +373,13 @@ impl ProtocolHandler for LumberjackHandler {
                             };
 
                             debug!(peer = %peer_addr, "Lumberjack TLS connection established");
-                            handle_connection(tls_stream, pipeline, metrics, conn_shutdown, peer_addr).await;
+                            let intake = Intake { pipeline: &pipeline, metrics: &metrics, acks: &acks, peer_addr };
+                            handle_connection(tls_stream, intake, conn_shutdown).await;
                         });
                     } else {
                         tokio::spawn(async move {
-                            handle_connection(stream, pipeline, metrics, conn_shutdown, peer_addr).await;
+                            let intake = Intake { pipeline: &pipeline, metrics: &metrics, acks: &acks, peer_addr };
+                            handle_connection(stream, intake, conn_shutdown).await;
                         });
                     }
                 }

@@ -237,6 +237,13 @@ impl Metrics {
         let cb = CircuitBreakerMetrics::new(manager);
         let bp = BackpressureMetrics::new(manager);
         let dfe = ServiceMetrics::register(manager);
+        let _ = manager.counter_with_labels(
+            crate::sink::grpc::SEND_FAILURES_TOTAL,
+            "Records a gRPC destination did not take, by reason (unavailable: down, refusing \
+             connections, busy or past its deadline; failed: it answered with an error)",
+            &["reason"],
+            "receiver",
+        );
 
         describe_receiver_metrics();
 
@@ -812,7 +819,7 @@ fn describe_receiver_metrics() {
     );
     metrics::describe_counter!(
         "receiver_records_rejected_total",
-        "Records a destination refused for good, by outcome (dead_lettered or dropped)"
+        "Records a destination refused for good, by outcome (dead_lettered, dropped or dlq_refused)"
     );
     metrics::describe_counter!(
         "receiver_records_dropped_total",
@@ -846,7 +853,7 @@ fn describe_receiver_metrics() {
     );
     metrics::describe_counter!(
         "receiver_kafka_delivery_failures_total",
-        "Records no broker took after the sender was answered, by librdkafka error code"
+        "Records no broker confirmed, by librdkafka error code; a timed-out record may still have been written"
     );
 
     // EPS
@@ -946,6 +953,23 @@ mod tests {
         };
         metrics::with_local_recorder(&recorder, f);
         hits.load(Ordering::Relaxed)
+    }
+
+    #[test]
+    fn the_destination_send_failure_counter_is_in_the_manifest() {
+        let manager = MetricsManager::with_config(scalo::metrics::MetricsConfig::offline(""));
+        let _ = Metrics::register_on(
+            Arc::new(crate::config::ScalingConfig::default().build_pressure()),
+            &manager,
+        );
+
+        let manifest = manager.registry().manifest();
+        let entry = manifest
+            .metrics
+            .iter()
+            .find(|m| m.name.ends_with(crate::sink::grpc::SEND_FAILURES_TOTAL))
+            .expect("the gRPC destination send-failure counter is in the manifest");
+        assert_eq!(entry.labels, vec!["reason".to_string()]);
     }
 
     #[test]

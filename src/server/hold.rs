@@ -13,7 +13,8 @@
 //! TCP flow control is the only signal the sender reads. A listener that cannot
 //! hand a record to the pipeline keeps it and stops reading the socket: the
 //! kernel buffers fill, the sender's writes block, and the record is offered
-//! again until the pipeline takes it.
+//! again until the pipeline takes it. A listener that holds its answers reads
+//! on only once every destination confirmed the records.
 
 use std::time::Duration;
 
@@ -22,7 +23,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 use crate::metrics::{DropReason, Metrics};
-use crate::pipeline::PipelineState;
+use crate::pipeline::{Acks, PipelineState};
 
 /// Wait before the first re-offer.
 const FIRST_RETRY: Duration = Duration::from_millis(100);
@@ -42,12 +43,13 @@ pub(crate) async fn hold_until_settled(
     metrics: &Metrics,
     transport: &str,
     shutdown: &CancellationToken,
+    acks: &Acks,
 ) -> bool {
     let mut pending = payloads;
     let mut rejected = 0;
     let mut wait = FIRST_RETRY;
     loop {
-        let outcome = pipeline.process_batch(pending).await;
+        let outcome = pipeline.process_batch_acked(pending, acks, None).await;
         rejected += outcome.rejected;
         let settled = outcome.settled();
         let Some(e) = outcome.unavailable else {
@@ -137,6 +139,7 @@ mod tests {
                     &metrics,
                     "test",
                     &CancellationToken::new(),
+                    &Acks::at_enqueue(),
                 )
                 .await
             }
@@ -172,6 +175,7 @@ mod tests {
             &metrics,
             "test",
             &shutdown,
+            &Acks::at_enqueue(),
         )
         .await;
 
@@ -197,6 +201,7 @@ mod tests {
                 &metrics,
                 "test",
                 &CancellationToken::new(),
+                &Acks::at_enqueue(),
             ),
         )
         .await
@@ -205,5 +210,34 @@ mod tests {
         assert!(kept_reading);
         assert_eq!(metrics.get_records_dropped(), 1);
         assert_eq!(metrics.get_requests_error(), 1);
+    }
+
+    /// Holding, the socket is read on only once the records are confirmed.
+    #[tokio::test]
+    async fn a_held_listener_reads_on_once_the_records_are_confirmed() {
+        let pipeline = pipeline().await;
+        let metrics = Metrics::default();
+        let acks = pipeline.acks(
+            "test",
+            scalo::transport::AcknowledgementsConfig::default(),
+            None,
+        );
+
+        let kept_reading = tokio::time::timeout(
+            Duration::from_secs(5),
+            hold_until_settled(
+                &pipeline,
+                &[Bytes::from_static(br#"{"held":true}"#)],
+                &metrics,
+                "test",
+                &CancellationToken::new(),
+                &acks,
+            ),
+        )
+        .await
+        .unwrap();
+
+        assert!(kept_reading);
+        assert_eq!(metrics.get_requests_success(), 1);
     }
 }

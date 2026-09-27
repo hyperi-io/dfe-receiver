@@ -34,7 +34,7 @@ static SYSLOG_UDP_WARN: AtomicU64 = AtomicU64::new(0);
 use crate::config::{RawCapture, SyslogConfig};
 use crate::error::{Error, Result};
 use crate::metrics::{DropReason, Metrics};
-use crate::pipeline::PipelineState;
+use crate::pipeline::{Acks, PipelineState};
 use crate::server::hold::hold_until_settled;
 use crate::server::ip_filter::IpFilter;
 use crate::server::traits::{BoundAddr, Listeners, ProtocolHandler};
@@ -171,7 +171,7 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
                         match syslog_to_json(&raw, raw_capture) {
                             Ok(payload) => {
                                 let held = [payload];
-                                if !hold_until_settled(&pipeline, &held, &metrics, "syslog", &shutdown).await {
+                                if !hold_until_settled(&pipeline, &held, &metrics, "syslog", &shutdown, &Acks::at_enqueue()).await {
                                     debug!(peer = %peer_addr, "Syslog TCP connection closing (shutdown during a hold)");
                                     break;
                                 }

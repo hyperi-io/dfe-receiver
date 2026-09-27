@@ -12,7 +12,7 @@
 //! secret, topic and body shape (see [`WebhookConfig`]). A record that passes
 //! the caller's authentication and optional CEL filter is stamped with
 //! `_source` (the caller name) and `_timestamp_receiver`, then delivered to
-//! the caller's topic through [`PipelineState::process_to_topic`].
+//! the caller's topic through [`PipelineState::process_batch_to_topic`].
 //!
 //! With `webhook.bind_address` unset the routes are merged into the main
 //! ingest listener by `server::http::run_server`, so they sit under its TLS,
@@ -47,7 +47,7 @@ use tracing::{debug, info};
 use crate::config::{Config, WebhookBody, WebhookCallerConfig, WebhookConfig};
 use crate::error::{Error, Result, unavailable_response};
 use crate::metrics::Metrics;
-use crate::pipeline::{BatchOutcome, PipelineState};
+use crate::pipeline::{Acks, PipelineState};
 use crate::server::http::split_json_array;
 use crate::server::ip_filter::IpFilter;
 use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
@@ -211,6 +211,7 @@ struct WebhookState {
     callers: Arc<FxHashMap<String, Caller>>,
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
+    acks: Acks,
 }
 
 /// Build the webhook routes with their own body limit and timeout.
@@ -240,8 +241,11 @@ pub async fn build_router(
         );
     }
 
+    // Every webhook route runs under its own timeout, on either listener.
+    let request_timeout = Duration::from_millis(config.request_timeout_ms);
     let state = WebhookState {
         callers: Arc::new(callers),
+        acks: pipeline.acks(TRANSPORT, config.acknowledgements, Some(request_timeout)),
         pipeline,
         metrics: metrics.clone(),
     };
@@ -257,7 +261,7 @@ pub async fn build_router(
         ))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
-            Duration::from_millis(config.request_timeout_ms),
+            request_timeout,
         ))
         .with_state(state))
 }
@@ -452,13 +456,10 @@ async fn webhook_handler(
     };
 
     let start = std::time::Instant::now();
-    let mut outcome = BatchOutcome::default();
-    for record in records {
-        let result = state.pipeline.process_to_topic(record, &caller.topic).await;
-        if outcome.record(result).is_break() {
-            break;
-        }
-    }
+    let outcome = state
+        .pipeline
+        .process_batch_to_topic(&records, &caller.topic, &state.acks)
+        .await;
     let elapsed = start.elapsed();
     state
         .metrics

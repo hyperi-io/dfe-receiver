@@ -1136,7 +1136,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
- "wide",
 ]
 
 [[package]]
@@ -3296,7 +3295,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03da047801ff44bb6a4d407d4860c05fd70bb81714e6b2f3812603d5b145b042"
 dependencies = [
  "heck",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "log",
  "multimap",
  "petgraph",
@@ -3317,7 +3316,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -4072,9 +4071,9 @@ dependencies = [
 
 [[package]]
 name = "scalo"
-version = "2.12.10"
+version = "2.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92684375e5d05b039885743081182efc1c5d491de5c1f542690b66a48a1e3d33"
+checksum = "cce445668f2f9ca2d64ec96f3b16aa901ceba43560a6753b3babed02295aa1ba"
 dependencies = [
  "aes-gcm",
  "axum",
@@ -4091,6 +4090,7 @@ dependencies = [
  "file-rotate",
  "governor",
  "hkdf",
+ "hyper-util",
  "libc",
  "lz4_flex",
  "memchr",
@@ -4135,6 +4135,7 @@ dependencies = [
  "tracing-throttle",
  "uuid",
  "vaultrs",
+ "wide",
  "yaque",
  "zstd",
 ]

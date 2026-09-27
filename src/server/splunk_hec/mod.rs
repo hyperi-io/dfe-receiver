@@ -39,7 +39,7 @@ use tracing::{debug, info, warn};
 use crate::config::{RawCapture, SplunkHecConfig};
 use crate::error::{Error, RETRY_AFTER_SECS, Result};
 use crate::metrics::Metrics;
-use crate::pipeline::{BatchOutcome, PipelineState};
+use crate::pipeline::{Acks, BatchOutcome, PipelineState};
 use crate::server::http::create_auth_state;
 use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
 use crate::server::traits::{BoundAddr, ProtocolHandler};
@@ -254,6 +254,9 @@ struct HecState {
     metrics: Arc<Metrics>,
     /// Raw capture already resolved against the common `raw_capture` block.
     raw_capture: RawCapture,
+    /// When a request is answered: once every destination confirmed, or at
+    /// enqueue.
+    acks: Acks,
 }
 
 // ---------------------------------------------------------------------------
@@ -276,15 +279,16 @@ async fn run_hec_server(
     // one port of it.
     let server = pipeline.config().server;
 
+    // Security configuration
+    let max_body_size = config.max_body_size;
+    let request_timeout = Duration::from_millis(config.request_timeout_ms);
+
     let state = HecState {
+        acks: pipeline.acks("splunk_hec", config.acknowledgements, Some(request_timeout)),
         pipeline,
         metrics: metrics.clone(),
         raw_capture,
     };
-
-    // Security configuration
-    let max_body_size = config.max_body_size;
-    let request_timeout = Duration::from_millis(config.request_timeout_ms);
 
     // Build router with HEC endpoints
     let app = Router::new()
@@ -435,7 +439,10 @@ async fn event_handler(
     }
 
     let start = std::time::Instant::now();
-    let outcome = state.pipeline.process_batch(&payloads).await;
+    let outcome = state
+        .pipeline
+        .process_batch_acked(&payloads, &state.acks, None)
+        .await;
     debug!(
         transport = "splunk_hec",
         events = event_count,
@@ -509,7 +516,10 @@ async fn raw_handler(
     let line_count = payloads.len();
 
     let start = std::time::Instant::now();
-    let outcome = state.pipeline.process_batch(&payloads).await;
+    let outcome = state
+        .pipeline
+        .process_batch_acked(&payloads, &state.acks, None)
+        .await;
     debug!(
         transport = "splunk_hec_raw",
         lines = line_count,

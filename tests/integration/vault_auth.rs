@@ -139,7 +139,7 @@ async fn test_bearer_tokens_file_ignores_blank_lines() {
 #[tokio::test]
 async fn test_bearer_tokens_missing_file_falls_back_to_static() {
     let config = BearerConfig {
-        tokens: vec!["static-fallback".to_string()],
+        tokens: vec!["static-fallback".into()],
         secret_source: Some("file:/nonexistent/path/tokens".to_string()),
         refresh_interval_secs: 0,
     };
@@ -158,7 +158,7 @@ async fn test_bearer_tokens_missing_file_falls_back_to_static() {
 #[tokio::test]
 async fn test_bearer_tokens_source_with_no_provider_is_not_used_as_a_token() {
     let config = BearerConfig {
-        tokens: vec!["static".to_string()],
+        tokens: vec!["static".into()],
         secret_source: Some("invalid_no_colon".to_string()),
         refresh_interval_secs: 0,
     };
@@ -175,7 +175,7 @@ async fn test_bearer_tokens_source_with_no_provider_is_not_used_as_a_token() {
 #[tokio::test]
 async fn test_bearer_tokens_unknown_provider_rejected() {
     let config = BearerConfig {
-        tokens: vec!["fallback".to_string()],
+        tokens: vec!["fallback".into()],
         secret_source: Some("nonexistent_provider:some_path".to_string()),
         refresh_interval_secs: 0,
     };

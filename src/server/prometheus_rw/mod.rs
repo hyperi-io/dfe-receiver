@@ -40,7 +40,7 @@ use tracing::{debug, info, warn};
 use crate::config::{PrometheusRwConfig, RawCapture};
 use crate::error::{Error, RETRY_AFTER_SECS, Result};
 use crate::metrics::Metrics;
-use crate::pipeline::PipelineState;
+use crate::pipeline::{Acks, PipelineState};
 use crate::server::http::create_auth_state;
 use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
 use crate::server::traits::{BoundAddr, ProtocolHandler};
@@ -117,6 +117,9 @@ struct RwState {
     metrics: Arc<Metrics>,
     mode: PrometheusRwMode,
     raw_capture: RawCapture,
+    /// When a write is answered: once every destination confirmed, or at
+    /// enqueue.
+    acks: Acks,
 }
 
 // ---------------------------------------------------------------------------
@@ -146,15 +149,20 @@ async fn run_prometheus_rw_server(
     // one port of it.
     let server = pipeline.config().server;
 
+    let max_body_size = config.max_body_size;
+    let request_timeout = Duration::from_millis(config.request_timeout_ms);
+
     let state = RwState {
+        acks: pipeline.acks(
+            "prometheus_rw",
+            config.acknowledgements,
+            Some(request_timeout),
+        ),
         pipeline,
         metrics: metrics.clone(),
         mode,
         raw_capture,
     };
-
-    let max_body_size = config.max_body_size;
-    let request_timeout = Duration::from_millis(config.request_timeout_ms);
 
     let app = Router::new()
         .route("/api/v1/write", post(write_handler))
@@ -297,7 +305,10 @@ async fn write_handler(
     // Remote Write senders MUST retry a 5xx and MUST NOT retry a 4xx other
     // than 429, so a sample the pipeline could not take answers 503 and one it
     // refused for good answers 400.
-    let outcome = state.pipeline.process_batch(&events).await;
+    let outcome = state
+        .pipeline
+        .process_batch_acked(&events, &state.acks, None)
+        .await;
     if let Some(e) = outcome.unavailable {
         debug!(samples = events.len(), accepted = outcome.accepted, error = %e, "Remote Write request not fully taken");
         state.metrics.inc_requests_error("prometheus_rw");

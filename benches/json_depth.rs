@@ -153,7 +153,6 @@ fn long_string_body() -> Vec<u8> {
 /// The receiver's validator and router as a default ingest listener configures them.
 fn ingress() -> (Validator, Router) {
     let validator = Validator::new(ValidationConfig {
-        require_json: true,
         required_fields: Vec::new(),
         dlq_on_invalid: true,
     });

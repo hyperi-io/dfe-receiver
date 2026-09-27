@@ -38,7 +38,8 @@ dfe-receiver is a high-performance HTTP/gRPC receiver for PB/s scale data ingest
    - Certificates from file or secret manager (AWS, OpenBao/Vault)
 
 5. **Resilience**
-   - In-memory buffering with backpressure (no disk spillover by design)
+   - A sender is answered once every destination confirmed its records (`acknowledgements.enabled`, default on)
+   - For answers given at enqueue: in-memory buffering with backpressure, disk spillover opt-in
    - Circuit breaker for failing sinks
    - Memory pressure detection and backpressure
 
@@ -201,7 +202,7 @@ Wraps primary sink with resilience:
 
 ### What a sender is told
 
-A record the pipeline could not take -- memory pressure, a full queue, a destination down, a route with no sink -- is answered with the protocol's retry signal. One refused for good -- malformed, over a destination's size ceiling -- gets its non-retryable answer. A batch stops at the first record not taken, and the sender resends the whole request, so records taken before it arrive twice.
+A record the pipeline could not take -- memory pressure, a full queue, a destination down, a route with no sink -- is answered with the protocol's retry signal. One refused for good -- malformed, over a destination's size ceiling -- gets its non-retryable answer. A batch stops at the first record not taken, and the sender resends the whole request, so records taken before it arrive twice. With acknowledgements on, a request whose records were not all confirmed within the hold gets the same retry signal for the whole request.
 
 | Listener | Could not take | Refused for good | The protocol rule behind it |
 |---|---|---|---|
@@ -220,7 +221,7 @@ No answer carries the receiver's internals: a refused record is told why only wh
 
 "Counted dropped" is `receiver_records_dropped_total{transport,reason}`: a record gone with no way to tell its sender, `reason` one of `unavailable`, `rejected` or `shutdown` (a held record dropped at shutdown). The flow listeners count their drops in `transport_drops_total`.
 
-Every answer is still given when the record is in the receiver's buffer, not when a broker has it; see [architecture.md](architecture.md#delivery-and-the-acknowledgement-that-is-not-one).
+With acknowledgements on (the default), each answer above is given once the destinations confirmed the records; with them off, once the record is in the receiver's buffer. See [architecture.md](architecture.md#delivery-the-answer-waits-for-the-destination).
 
 ### Authentication
 
@@ -228,10 +229,12 @@ Every answer is still given when the record is in the receiver's buffer, not whe
 
 ```rust
 pub struct BearerTokenProvider {
-    tokens: RwLock<HashSet<String>>,  // Thread-safe for hot reload
+    token_hashes: RwLock<HashSet<TokenHash>>,  // SHA-256 of each token, swapped on reload
     shutdown_tx: broadcast::Sender<()>,
 }
 ```
+
+Static tokens, `accepted_headers[].values` and `header_values` are `SensitiveString`: redacted when the config is serialised, and marked `x-dfe-secret` in the config schema. A presented credential is compared by its SHA-256 hash.
 
 Supports:
 
@@ -279,7 +282,6 @@ server:
       refresh_interval_secs: 300
 
 validation:
-  require_json: true
   required_fields: ["org_id"]
   dlq_on_invalid: true
 
@@ -305,11 +307,8 @@ kafka:
     password: "${KAFKA_PASSWORD}"
   tls:
     enabled: true              # SASL_SSL for external listeners; omit for internal K8s
-  producer:
-    batch_size: 8388608
-    batch_messages: 10000
-    linger_ms: 20
-    compression: zstd
+  librdkafka_overrides:        # producer tuning over scalo's high-throughput profile
+    linger.ms: "20"
 
 buffer:
   memory_limit: 0  # Auto (85% of the cgroup limit)
@@ -513,9 +512,15 @@ holds it.
 | `receiver_kafka_bytes_sent_total` | Counter | Bytes queued to Kafka |
 | `receiver_kafka_send_errors_total` | Counter | Messages librdkafka refused to queue |
 | `receiver_kafka_delivered_total` | Counter | Messages a broker acknowledged |
-| `receiver_kafka_delivery_failures_total` | Counter | Messages no broker took, by `reason` (librdkafka error code) |
+| `receiver_kafka_delivery_failures_total` | Counter | Messages no broker confirmed, by `reason` (librdkafka error code); a timed-out message may still have been written |
 | `records_dlq_total` | Counter | Messages sent to DLQ (scalo emits this one) |
-| `receiver_records_rejected_total` | Counter | Records a destination can never take (over its size ceiling), on any sink, by `outcome`: `dead_lettered` or `dropped` when no DLQ is configured |
+| `receiver_records_rejected_total` | Counter | Records a destination can never take (over its size ceiling), on any sink, by `outcome`: `dead_lettered`, `dropped` when no DLQ is configured or no DLQ backend can hold the entry (also counted in `pipeline_dead_letters_dropped_total{reason}`), or `dlq_refused` when the DLQ did not confirm the write, so the record stays buffered or its sender is told to retry |
+
+### gRPC Destination Metrics
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `receiver_destination_send_failures_total` | Counter | Records a gRPC destination did not take, by `reason`: `unavailable` (down, refusing connections, busy or past its deadline) or `failed` (it answered with an error). Both are retried, and each class logs at most once per 10 s per destination |
 
 ### Scaling Metrics
 
@@ -705,7 +710,12 @@ sequenceDiagram
         Handler-->>Client: 400 Bad Request
     else Valid JSON
         Handler->>Kafka: Route to topic
-        Handler-->>Client: 202 Accepted
+        alt Delivery report within the hold
+            Kafka-->>Handler: Delivered
+            Handler-->>Client: 202 Accepted
+        else Not confirmed
+            Handler-->>Client: 503 Service Unavailable, Retry-After
+        end
     end
 ```
 

@@ -443,6 +443,7 @@ mod tests {
                 crate::config::DestinationSpec {
                     grpc: Some(crate::config::GrpcDestination {
                         endpoint: format!("http://dfe-{name}:6000"),
+                        ..crate::config::GrpcDestination::default()
                     }),
                     kafka: None,
                 },

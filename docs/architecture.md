@@ -95,14 +95,17 @@ that any required fields are present. It does not prove the payload is
 well-shaped for downstream. That is deliberate -- a full parse at the door would
 cost the throughput the design exists for.
 
-## Delivery, and the acknowledgement that is not one
+## Delivery: the answer waits for the destination
 
-`POST /ingest` answers `202 Accepted` when the record is accepted into the
-producer's queue, not when a broker has it. Those are two different events, and
-since #110 they are counted separately: `receiver_kafka_sends_total` is what
-librdkafka queued, `receiver_kafka_delivered_total` is what a broker
-acknowledged, and `receiver_kafka_delivery_failures_total{reason}` is what no
-broker took. A gap between the first two is the signal worth alerting on.
+A listener whose protocol carries an answer holds it until every destination confirmed the request's records: a Kafka delivery report, a gRPC destination's answer, or a dead-letter write the DLQ confirmed. That is `acknowledgements.enabled`, default on, per listener: `server`, `grpc`, `otlp`, `splunk_hec`, `lumberjack`, `fluent`, `webhook`, `prometheus_rw`. Syslog, GELF and flow have no answer to hold.
+
+A record not confirmed within the hold gets the protocol's retryable refusal (503 with `Retry-After`, `UNAVAILABLE`, no ack), and the sender keeps it. That means "not confirmed", not "not written": a Kafka message timeout can expire while a produce request is in flight, so a resend can deliver a record twice. Duplicates, never loss.
+
+The hold is 25 s, short of the listener's request timeout or a gRPC sender's `grpc-timeout` by a margin. OTLP HTTP exports carry no deadline, so they hold 9 s (`otlp.http_max_hold_ms`), inside the OTel exporters' 10 s default timeout. The producer held answers use runs `message.timeout.ms` 20 s unless the operator set one, and a gRPC destination's send deadline is 20 s (`loader.timeout_ms` for the loader), so both settle inside the hold. A send still running when a shorter hold ends is cut off and answered retryable.
+
+Records answered at enqueue have no resend behind them, so beside a held listener they get a producer of their own on librdkafka's default timeout. Admission, the held-byte ceiling (a quarter of the memory limit per listener) and the `transport_ack_*` metrics are scalo's `Tickets`, behind the pipeline's own pressure brake and memory lease.
+
+With `acknowledgements.enabled: false` a listener answers once the record is queued. `receiver_kafka_sends_total` is what librdkafka queued, `receiver_kafka_delivered_total` what a broker acknowledged, and `receiver_kafka_delivery_failures_total{reason}` what no broker confirmed. `pipeline_delivery_guarantee{listener,guarantee,reason}` reports what each listener gives: its weakest reachable leg, so a gRPC destination declared `confirms_delivery: false` (the archiver's direct listener answers on receipt) makes every held listener `best_effort`.
 
 The sink builds its own `ThreadedProducer` instead of using scalo's
 `KafkaProducer`, because scalo hard-codes a `ProducerContext` with no injection
@@ -114,18 +117,15 @@ scalo-rs#26 is the long-term fix.
 
 No listener answers success for a record the pipeline did not take: a sender that reads a false success discards the record, and nothing downstream can recover it. A failure is final only when the record itself is at fault -- malformed, over a destination's size ceiling, or sent without valid credentials. Anything else tells the sender to retry, in its own protocol's terms, and a batch stops at the first record not taken. The sender resends the whole request, so the records taken before it arrive twice: duplicates, never loss. Each listener's answer, and the protocol rule behind it, is in [DESIGN.md](DESIGN.md#what-a-sender-is-told).
 
-## Buffering: memory by default, disk by choice
+## Buffering: only for answers given at enqueue
 
-The default backend is an in-memory buffer behind a circuit breaker, with no
-disk involved. For the Kubernetes deployment that is the right trade -- OOMKill
-plus KEDA answers a backlog by adding pods, and a spool on an ephemeral volume
-buys little.
+A held answer sends straight to the destination's sink: the sender still has the record, so nothing buffers or spools it. A buffer, and its spool, are built only when some enabled listener answers at enqueue -- one with `acknowledgements.enabled: false`, or syslog, GELF or flow. With every listener holding, `buffer.spillover.enabled` opens no spool.
 
-Disk spillover exists for deployments that want crash-resilient buffering or run
-outside Kubernetes. `buffer.spillover.enabled` swaps the backend for scalo's
-`TieredSink` with a disk spool. `SinkBackend` (`src/buffer/mod.rs:30`) is the
-enum holding one or the other, and the two branches differ in their shutdown
-behaviour -- see invariant 1.
+For answers given at enqueue, the default backend is an in-memory buffer behind a circuit breaker, with no disk involved. For the Kubernetes deployment that is the right trade -- OOMKill plus KEDA answers a backlog by adding pods, and a spool on an ephemeral volume buys little. The buffer counts as healthy only while its sink is healthy and it has room, so a broker refusing every record stops admission rather than letting the queue hide it.
+
+Disk spillover exists for deployments that want crash-resilient buffering or run outside Kubernetes. `buffer.spillover.enabled` swaps the backend for scalo's `TieredSink` with a disk spool, one directory per sink under `buffer.spillover.path`: `kafka/` for the bus and `grpc/<name>/` for each gRPC destination. Two sinks cannot share a spool. `SinkBackend` (`src/buffer/mod.rs`) is the enum holding one or the other. Either way the shutdown drains into the sink and then flushes it.
+
+A buffered record a destination refuses for good leaves once the DLQ confirms the write. While the DLQ refuses, it stays at the front and holds up the records behind it: its sender was answered at enqueue, so dropping it would be loss.
 
 ## Configuration
 
@@ -145,12 +145,11 @@ would need, rather than pulling the AWS SDK in for a path nothing uses.
 The rules a reader cannot infer, in rough order of how much damage getting them
 wrong does.
 
-1. **A 202 is not a delivery receipt.** The client has already been answered by
-   the time a broker sees the record. Two open issues live in that window: #132,
-   where the buffer's drain tasks and the metrics loop only start at SIGTERM, and
-   #130, where spillover being on means the Kafka producer's queue is never
-   flushed at shutdown. Neither is fixed. Read both before changing anything
-   under `src/buffer/` or the startup order in `main.rs`.
+1. **An answer given at enqueue is not a delivery receipt.** With
+   `acknowledgements.enabled: false` the client has been answered by the time a
+   broker sees the record, and a kill loses what the producer and the buffer
+   held. The default holds the answer until the destination confirmed it; a
+   change that answers earlier, or buffers a held record, gives that away.
 
 2. **`chart/` and `Dockerfile` are generated, not written.** Both come from the
    deployment contract in `src/deployment.rs`, and two unit tests assert the

@@ -19,6 +19,9 @@
 //!
 //! Either way the sender must be told to retry, and a record the pipeline did
 //! not take must never be answered as accepted.
+//!
+//! The refusing bus runs with acknowledgements off, the path that can take part
+//! of a request; a held answer retries the whole request instead.
 
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
@@ -46,8 +49,8 @@ use dfe_receiver::server::traits::ProtocolHandler;
 use dfe_receiver::server::webhook::WebhookHandler;
 use prost::Message;
 use scalo::memory::{MemoryGuard, MemoryGuardConfig, UsageSource};
-use scalo::transport::TransportReceiver;
 use scalo::transport::grpc::GrpcTransport;
+use scalo::transport::{AcknowledgementsConfig, TransportReceiver};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
@@ -82,7 +85,25 @@ fn bus_config() -> Config {
         .librdkafka_overrides
         .insert("queue.buffering.max.messages".to_string(), "1".to_string());
     config.routing.dlq.enabled = false;
+    answer_at_enqueue(&mut config);
     config
+}
+
+/// Turn every listener's acknowledgements off, so a record is answered once
+/// queued and the buffer these tests fill exists.
+fn answer_at_enqueue(config: &mut Config) {
+    let off = AcknowledgementsConfig::new(false);
+    config.server.acknowledgements = off;
+    config.grpc.acknowledgements = off;
+    #[cfg(feature = "otlp")]
+    {
+        config.otlp.acknowledgements = off;
+    }
+    config.lumberjack.acknowledgements = off;
+    config.splunk_hec.acknowledgements = off;
+    config.prometheus_rw.acknowledgements = off;
+    config.fluent.acknowledgements = off;
+    config.webhook.acknowledgements = off;
 }
 
 /// Build the pipeline for `config` and fill its queue to one record short of

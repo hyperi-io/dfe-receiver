@@ -13,16 +13,22 @@
 //! `loader.transport = "grpc"`, enabling receiver→loader communication
 //! without Kafka (e.g., inside dfe-docker).
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicU64;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use scalo::transport::{GrpcConfig, GrpcTransport, SendResult};
+use scalo::transport::{GrpcConfig, GrpcTransport, Record, SendResult};
 use scalo::transport::{TransportBase, TransportSender};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::error::{Error, Result};
-use crate::sink::Sink;
+use crate::sink::{FailureLatch, SINK_RETRY_AFTER, Sink};
+
+/// Counts records a gRPC destination did not take, by `reason`.
+pub const SEND_FAILURES_TOTAL: &str = "receiver_destination_send_failures_total";
+
+/// Least time between two logs of the same failure class on one destination.
+const FAILURE_LOG_INTERVAL_MS: u64 = 10_000;
 
 /// The client config a sink dials with; `None` keeps scalo's own deadline.
 fn client_config(endpoint: &str, send_timeout_ms: Option<u64>) -> GrpcConfig {
@@ -33,18 +39,57 @@ fn client_config(endpoint: &str, send_timeout_ms: Option<u64>) -> GrpcConfig {
     config
 }
 
+/// A record as the gRPC transport carries it: no wire key, the source travels
+/// inside the payload.
+fn unkeyed(payload: Bytes) -> Record {
+    Record {
+        payload,
+        key: None,
+        headers: Vec::new(),
+        metadata: scalo::transport::RecordMeta {
+            timestamp_ms: None,
+            format: scalo::transport::PayloadFormat::Auto,
+        },
+    }
+}
+
 /// dfe-loader sink using DFE native gRPC transport.
 pub struct GrpcSink {
     transport: GrpcTransport,
+    /// The endpoint this sink dials, for its logs.
+    endpoint: String,
     /// The largest payload the transport will encode.
     max_message_size: usize,
-    healthy: AtomicBool,
+    /// Tripped by a send the destination refused, cleared by one it took.
+    failures: FailureLatch,
+    /// Epoch ms of the last `unavailable` log, the debounce clock.
+    unavailable_logged: AtomicU64,
+    /// Epoch ms of the last `failed` log, the debounce clock.
+    failed_logged: AtomicU64,
+}
+
+/// Why a gRPC destination did not take a send, the `reason` label.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SendFailure {
+    /// Down, refusing connections, busy or past its deadline: scalo cannot tell these apart.
+    Unavailable,
+    /// The destination answered the send with an error.
+    Failed,
+}
+
+impl SendFailure {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Unavailable => "unavailable",
+            Self::Failed => "failed",
+        }
+    }
 }
 
 impl GrpcSink {
     /// Create a new gRPC loader sink connecting to the given endpoint.
     ///
-    /// `send_timeout_ms` bounds a single Push RPC, so a loader that accepts the
+    /// `send_timeout_ms` bounds a single RPC, so a loader that accepts the
     /// connection and then stops answering cannot hold a sender task forever;
     /// `None` keeps scalo's 30s default.
     ///
@@ -63,13 +108,59 @@ impl GrpcSink {
 
         Ok(Self {
             transport,
+            endpoint: endpoint.to_string(),
             max_message_size: config.max_message_size,
-            healthy: AtomicBool::new(true),
+            failures: FailureLatch::default(),
+            unavailable_logged: AtomicU64::new(0),
+            failed_logged: AtomicU64::new(0),
         })
+    }
+
+    /// Record what the destination made of a send.
+    fn note(&self, result: &SendResult, records: usize) {
+        match result {
+            SendResult::Ok => {
+                debug!(records, "Sent to gRPC destination");
+                self.failures.clear();
+            }
+            SendResult::Backpressured => {
+                count_failure(SendFailure::Unavailable, records);
+                if scalo::logger::log_debounced(&self.unavailable_logged, FAILURE_LOG_INTERVAL_MS) {
+                    warn!(
+                        endpoint = %self.endpoint,
+                        records,
+                        reason = SendFailure::Unavailable.label(),
+                        "gRPC destination did not take the send; it is retried \
+                         (logged at most once per 10 s, counted in \
+                         receiver_destination_send_failures_total)"
+                    );
+                }
+            }
+            SendResult::Fatal(e) => {
+                count_failure(SendFailure::Failed, records);
+                if scalo::logger::log_debounced(&self.failed_logged, FAILURE_LOG_INTERVAL_MS) {
+                    error!(
+                        endpoint = %self.endpoint,
+                        error = %e,
+                        records,
+                        reason = SendFailure::Failed.label(),
+                        "gRPC destination send failed (logged at most once per 10 s, \
+                         counted in receiver_destination_send_failures_total)"
+                    );
+                }
+                self.failures.trip();
+            }
+            SendResult::FilteredDlq => {}
+        }
     }
 }
 
-/// The receiver's verdict on one Push result.
+/// Count `records` a gRPC destination did not take.
+fn count_failure(failure: SendFailure, records: usize) {
+    metrics::counter!(SEND_FAILURES_TOTAL, "reason" => failure.label()).increment(records as u64);
+}
+
+/// The receiver's verdict on one send result.
 ///
 /// scalo's `Fatal` carries no gRPC status, so a refusal of this one record
 /// cannot be told from a destination refusing every record: it stays
@@ -93,42 +184,57 @@ impl Sink for GrpcSink {
     /// The topic is passed as the `key` to the DFE Push RPC, where dfe-loader
     /// uses it for routing.
     async fn send(&self, topic: &str, payload: Bytes) -> Result<()> {
-        // scalo: TransportSender::send takes owned `Bytes`
-        // (reqwest/tonic bodies are zero-copy from Bytes). The clone is a
-        // refcount bump, not a payload copy.
-        let bytes = payload.len();
         // scalo's single-record send reports an over-limit payload as backpressure.
-        if bytes > self.max_message_size {
-            return Err(Error::Rejected(format!(
-                "{bytes}-byte record exceeds the gRPC max_message_size of {}",
-                self.max_message_size
-            )));
+        if let Some(reason) = self.refuses(&payload) {
+            return Err(Error::Rejected(reason));
         }
+        // The clone is a refcount bump, not a payload copy.
         let result = self.transport.send(topic, payload).await;
-        match &result {
-            SendResult::Ok => {
-                debug!(topic = %topic, bytes, "Sent to loader via gRPC");
-                self.healthy.store(true, Ordering::Relaxed);
-            }
-            SendResult::Fatal(e) => {
-                error!(error = %e, topic = %topic, "gRPC loader send failed");
-                self.healthy.store(false, Ordering::Relaxed);
-            }
-            SendResult::Backpressured | SendResult::FilteredDlq => {}
-        }
+        self.note(&result, 1);
         push_outcome(result)
+    }
+
+    /// Send the records in one `RouteBatch` call, split only where the
+    /// message size limit requires it.
+    ///
+    /// A failure after the first split leaves the earlier parts delivered, and
+    /// the caller's retry sends them again: duplicates, never loss.
+    async fn send_batch(&self, _topic: &str, payloads: &[Bytes]) -> Result<()> {
+        if payloads.is_empty() {
+            return Ok(());
+        }
+        let records: Vec<Record> = payloads.iter().cloned().map(unkeyed).collect();
+        let result = self.transport.send_batch(&records).await;
+        self.note(&result, records.len());
+        push_outcome(result)
+    }
+
+    /// A record over the transport's message size limit, measured as the
+    /// batch call frames it.
+    fn refuses(&self, payload: &Bytes) -> Option<String> {
+        if payload.len() > self.max_message_size {
+            return Some(format!(
+                "{}-byte record exceeds the gRPC max_message_size of {}",
+                payload.len(),
+                self.max_message_size
+            ));
+        }
+        self.transport
+            .dead_letter_reason(&unkeyed(payload.clone()))
+            .map(|reason| reason.to_string())
     }
 
     /// Flush pending messages.
     ///
-    /// No-op for gRPC — acknowledgement is implicit in the Push RPC response.
+    /// No-op for gRPC -- acknowledgement is implicit in the RPC response.
     async fn flush(&self) -> Result<()> {
         Ok(())
     }
 
-    /// Check if the sink is healthy.
+    /// Healthy while the destination takes records, and again
+    /// [`SINK_RETRY_AFTER`] after it refused one, so traffic tries it.
     fn is_healthy(&self) -> bool {
-        self.healthy.load(Ordering::Relaxed) && self.transport.is_healthy()
+        self.failures.admits(SINK_RETRY_AFTER) && self.transport.is_healthy()
     }
 }
 
@@ -187,6 +293,49 @@ mod tests {
         let result = sink.send("t", Bytes::from(vec![b'x'; limit + 1])).await;
 
         assert!(matches!(result, Err(Error::Rejected(_))), "got {result:?}");
+    }
+
+    /// The batch path screens with the same limit, framing included, so a
+    /// record a batch would leave out is refused before it is sent.
+    #[tokio::test]
+    async fn a_record_the_batch_cannot_frame_is_refused_up_front() {
+        let limit = GrpcConfig::client("http://127.0.0.1:1").max_message_size;
+        let sink = GrpcSink::new("http://127.0.0.1:1", None).await.unwrap();
+
+        assert!(sink.refuses(&Bytes::from(vec![b'x'; limit])).is_some());
+        assert!(sink.refuses(&Bytes::from_static(b"{}")).is_none());
+    }
+
+    /// A destination refusing connections is counted per record as
+    /// `unavailable`, and the send stays retryable.
+    #[test]
+    fn a_refused_connection_is_counted_unavailable() {
+        let recorder = crate::buffer::rejects::CountedKeys::default();
+        let result = metrics::with_local_recorder(&recorder, || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    // Port 1 on loopback refuses every connection.
+                    let sink = GrpcSink::new("http://127.0.0.1:1", None).await.unwrap();
+                    let records = [Bytes::from_static(b"{}"), Bytes::from_static(b"{}")];
+                    sink.send_batch("t", &records).await
+                })
+        });
+
+        assert!(
+            matches!(result, Err(ref e) if e.is_retryable()),
+            "got {result:?}"
+        );
+        assert_eq!(
+            recorder.get("receiver_destination_send_failures_total{reason=unavailable}"),
+            2
+        );
+        assert_eq!(
+            recorder.get("receiver_destination_send_failures_total{reason=failed}"),
+            0
+        );
     }
 
     #[tokio::test]
