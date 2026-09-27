@@ -1136,7 +1136,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
- "wide",
 ]
 
 [[package]]
@@ -4072,8 +4071,9 @@ dependencies = [
 
 [[package]]
 name = "scalo"
-version = "2.12.0"
-source = "git+https://github.com/hyperi-io/scalo-rs?branch=fix%2Fzstd-default#7270b91d877620df74fcbde83bcbd8882f26bd4f"
+version = "2.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cce445668f2f9ca2d64ec96f3b16aa901ceba43560a6753b3babed02295aa1ba"
 dependencies = [
  "aes-gcm",
  "axum",
@@ -4135,6 +4135,7 @@ dependencies = [
  "tracing-throttle",
  "uuid",
  "vaultrs",
+ "wide",
  "yaque",
  "zstd",
 ]
