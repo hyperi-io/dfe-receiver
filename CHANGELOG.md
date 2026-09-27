@@ -3,6 +3,21 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.15.41](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.40...v1.15.41) (2026-09-27)
+
+### Bug Fixes
+
+* clear the warn-tier findings and reap only dead-run test containers ([#152](https://github.com/hyperi-io/dfe-receiver/issues/152)) ([58152db](https://github.com/hyperi-io/dfe-receiver/commit/58152db04856f26b8659321d70ea7565f8d8ecbc))
+* flow no-port readiness, Kafka flush count, DLQ ack wait ([#151](https://github.com/hyperi-io/dfe-receiver/issues/151)) ([01981d0](https://github.com/hyperi-io/dfe-receiver/commit/01981d07ab14cc41ede9e9e54e1d43cfc0525627)), closes [#195](https://github.com/hyperi-io/dfe-receiver/issues/195)
+* hold each answer until delivery is confirmed ([#155](https://github.com/hyperi-io/dfe-receiver/issues/155)) ([0a3823f](https://github.com/hyperi-io/dfe-receiver/commit/0a3823fed97da0b4d6fc580337dd0f48e5c2199d))
+* **metrics:** count each received record once ([#153](https://github.com/hyperi-io/dfe-receiver/issues/153)) ([40ca5aa](https://github.com/hyperi-io/dfe-receiver/commit/40ca5aa62114ff68275183c582584c1065769f9a))
+* never answer success for a record not taken ([#154](https://github.com/hyperi-io/dfe-receiver/issues/154)) ([d7d2fb6](https://github.com/hyperi-io/dfe-receiver/commit/d7d2fb6dd127f6611a812c65377b41f380e23559))
+* refuse JSON nested past 64 levels, JSON is the only payload format ([56472a7](https://github.com/hyperi-io/dfe-receiver/commit/56472a72c57e9b2ebc88722b1bff1437c4108d41))
+
+### Performance Improvements
+
+* faster JSON depth guard, same verdicts ([#157](https://github.com/hyperi-io/dfe-receiver/issues/157)) ([3aac688](https://github.com/hyperi-io/dfe-receiver/commit/3aac6889981cc7efe981f31c56da992da3bcf907))
+
 ## [1.15.40](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.39...v1.15.40) (2026-09-24)
 
 ### Bug Fixes
