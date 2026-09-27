@@ -1,6 +1,6 @@
 # Project:   dfe-receiver
 # File:      .cargo/config.toml
-# Purpose:   Cargo build and registry configuration
+# Purpose:   Cargo build configuration
 # License:   BUSL-1.1
 # Copyright: (c) 2026 HYPERI PTY LIMITED
 
@@ -16,15 +16,3 @@ rustflags = ["-C", "target-cpu=x86-64-v3", "-C", "link-arg=-fuse-ld=mold"]  # AV
 [target.aarch64-unknown-linux-gnu]
 linker = "aarch64-linux-gnu-gcc"
 rustflags = ["-C", "target-cpu=generic"]    # NEON is baseline for ARM64
-
-# For local development, use native CPU features
-[build]
-rustflags = ["-C", "target-cpu=native"]
-
-# =============================================================================
-# HyperI Private Cargo Registry (Artifactory)
-# =============================================================================
-
-[registries.hyperi]
-index = "sparse+https://hypersec.jfrog.io/artifactory/api/cargo/hyperi-cargo-virtual/index/"
-credential-provider = "cargo:token"
