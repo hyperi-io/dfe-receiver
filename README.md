@@ -464,6 +464,6 @@ actually deploys the receiver. **dfe-engine** by `mirrored-logic` -- it
 reimplements `Config::validate()` by hand, so only a human closes that edge.
 
 ```bash
-python3 /projects/dfe-infra/scripts/dfe-stack suite --consumer dfe-receiver
-python3 /projects/dfe-infra/scripts/dfe-stack suite --producer dfe-receiver
+python3 ../dfe-infra/scripts/dfe-stack suite --consumer dfe-receiver
+python3 ../dfe-infra/scripts/dfe-stack suite --producer dfe-receiver
 ```

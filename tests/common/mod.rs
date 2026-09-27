@@ -9,7 +9,7 @@
 //! Test infrastructure helpers for dual-mode integration tests.
 //!
 //! Supports two backends controlled by `TEST_MODE` in `.env`:
-//! - `remote` (default) — DevEx cluster via env vars (KAFKA_BROKERS, etc.)
+//! - `remote` (default) — remote cluster via env vars (KAFKA_BROKERS, etc.)
 //! - `docker` — dfe-docker infra profile (localhost:19092, no auth)
 
 use std::env;
