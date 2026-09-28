@@ -166,6 +166,7 @@ impl Config {
     pub fn load(config_path: Option<&str>) -> Result<Self> {
         // If an explicit config file is provided, load it directly
         if let Some(path) = config_path {
+            init_cascade(path)?;
             return Self::load_from_file(path);
         }
 
@@ -568,6 +569,26 @@ fn no_application_auth(scope: &str, auth: &AuthConfig) -> Result<()> {
          field. Authenticate clients at the handshake instead, with \
          {scope}.tls.enabled: true and {scope}.tls.client_auth: required"
     )))
+}
+
+/// Set up scalo's cascade with the `--config` file as its settings layer.
+///
+/// The receiver reads its own sections from the file directly, but the sections
+/// scalo's runtime owns (`version_check`, `metrics`, `scaling` and the rest)
+/// resolve from the cascade alone. A reload re-enters here, and the cascade is
+/// set once per process.
+fn init_cascade(path: &str) -> Result<()> {
+    let opts = ConfigOptions {
+        env_prefix: ENV_PREFIX.to_string(),
+        config_paths: vec![std::path::PathBuf::from(path)],
+        // A working-tree `.env` must not reach a deployment's `--config` load.
+        load_dotenv: false,
+        ..Default::default()
+    };
+    match config::setup(opts) {
+        Ok(()) | Err(config::ConfigError::AlreadyInitialised) => Ok(()),
+        Err(e) => Err(Error::Config(format!("failed to setup config: {e}"))),
+    }
 }
 
 /// Reload configuration from the same source.

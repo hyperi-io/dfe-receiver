@@ -140,10 +140,9 @@ pub fn contract() -> DeploymentContract {
             SecretGroupContract {
                 group_name: "auth".into(),
                 // apply_flat_env reads this one; flat_env joins the prefix and
-                // the key with ONE underscore, and the figment cascade that
-                // would have read the double-underscore form never runs in the
-                // container -- entrypoint_args pass --config, which takes
-                // Config::load_from_file and skips config::setup entirely.
+                // the key with ONE underscore. entrypoint_args pass --config,
+                // which reads the receiver's own sections from the file and
+                // apply_flat_env, never from the cascade's double-underscore form.
                 env_vars: vec![SecretEnvContract {
                     env_var: "DFE_RECEIVER_BEARER_TOKENS".into(),
                     key_name: "bearer-tokens".into(),
