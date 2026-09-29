@@ -583,11 +583,11 @@ macro_rules! skip_if_no_docker {
 
 /// The JVM image: `apache/kafka-native` before 4.4.0 segfaults in `getpwuid` on ~2% of starts.
 ///
-/// The broker the suite deploys: the Strimzi operator runs Kafka 4.2.0 at most,
-/// and the org Renovate preset holds `apache/kafka` to `<=4.2.0` to match.
+/// The Kafka DFE deploys, held equal to dfe-infra `versions.yaml` `kafka-version`
+/// for the current stack: Strimzi 1.2.0 runs 4.3.1 at most.
 ///
 /// renovate: datasource=docker depName=apache/kafka
-const KAFKA_TAG: &str = "4.2.0";
+const KAFKA_TAG: &str = "4.3.1";
 
 /// A JVM broker takes 5-12 s to become ready, longer on a busy runner, so 60 s is too tight.
 const KAFKA_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
