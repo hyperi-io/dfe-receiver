@@ -770,7 +770,7 @@ volumetric and reputation-based defence.
 | Control | Where it runs | Config |
 |---------|---------------|--------|
 | IP allowlist/denylist | Every accept loop the receiver owns, before TLS or any protocol work; syslog UDP per datagram | `server.ip_filter` |
-| Per-client rate limit | A GCRA limiter per HTTP listener (ingest, webhook, HEC, remote write, OTLP HTTP), answering 429 | `server.rate_limit` |
+| Per-client rate limit | A GCRA limiter per HTTP listener (ingest, webhook, HEC, remote write, OTLP HTTP), keyed on the TCP peer or the client a trusted proxy names, answering 429 | `server.rate_limit`, `server.trusted_proxies` |
 | In-flight request cap | Per HTTP listener | `server.max_concurrent_requests` |
 | Body size and request timeout | Every HTTP listener, answering 413 and 408 | `server.*`, `splunk_hec.*`, `prometheus_rw.*`, `webhook.*` |
 

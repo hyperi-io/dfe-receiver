@@ -219,6 +219,8 @@ syslog:
   tcp_bind_address: "127.0.0.1:5515"
   tls_bind_address: "127.0.0.1:6514"
   max_message_size: 65536
+  # Loopback-only load driver; UDP and plain TCP syslog have no handshake.
+  accept_unauthenticated: true
   tls:
     enabled: false
   auth:

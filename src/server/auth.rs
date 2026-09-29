@@ -9,7 +9,7 @@
 //! Authentication middleware for header, bearer token, and mTLS validation.
 //!
 //! Supports:
-//! - Static header-based authentication (x-api-key, x-hyperi-agent)
+//! - Static header-based authentication against `accepted_headers`
 //! - Bearer token authentication with secret manager integration
 //! - mTLS client certificate validation
 //!
@@ -41,6 +41,7 @@ use tracing::{debug, error, info, warn};
 use crate::config::{AuthConfig, BearerConfig};
 use crate::error::Result;
 use crate::metrics::{AuthFailureReason, Metrics};
+use crate::server::client_ip::ClientIp;
 
 /// Shortest gap between two log lines for one failure reason, or one misconfiguration.
 const AUTH_LOG_INTERVAL_MS: u64 = 5_000;
@@ -68,14 +69,17 @@ pub enum AuthMode {
 }
 
 impl AuthMode {
-    /// Parse from string.
-    pub fn from_str(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "header" => Self::Header,
-            "bearer" => Self::Bearer,
-            "mtls" => Self::Mtls,
-            "both" => Self::Both,
-            _ => Self::None,
+    /// Parse a mode, ignoring ASCII case. `None` for anything else, the empty
+    /// string included, which every caller treats as a misconfiguration.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "none" => Some(Self::None),
+            "header" => Some(Self::Header),
+            "bearer" => Some(Self::Bearer),
+            "mtls" => Some(Self::Mtls),
+            "both" => Some(Self::Both),
+            _ => None,
         }
     }
 
@@ -296,30 +300,19 @@ impl Drop for BearerTokenProvider {
     }
 }
 
-/// Extract client IP from request headers (respects X-Forwarded-For from trusted proxies).
-///
-/// Returns the first IP from X-Forwarded-For if present, otherwise X-Real-IP.
-/// Returns both a display string (for existing log fields) and a parsed `IpAddr`
-/// (for security events).
-fn extract_client_ip(headers: &axum::http::HeaderMap) -> (Option<String>, Option<IpAddr>) {
-    // X-Forwarded-For may contain multiple IPs: "client, proxy1, proxy2"
-    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok())
-        && let Some(first_ip) = xff.split(',').next()
-    {
-        let ip_str = first_ip.trim().to_string();
-        let parsed = ip_str.parse::<IpAddr>().ok();
-        return (Some(ip_str), parsed);
-    }
-    // Fallback to X-Real-IP
-    if let Some(ip_str) = headers
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .map(String::from)
-    {
-        let parsed = ip_str.parse::<IpAddr>().ok();
-        return (Some(ip_str), parsed);
-    }
-    (None, None)
+/// The client a refused request is reported against: the attributed
+/// [`ClientIp`], else the TCP peer. Never a forwarding header on its own.
+fn refused_client(request: &Request<Body>) -> Option<IpAddr> {
+    request
+        .extensions()
+        .get::<ClientIp>()
+        .map(|ClientIp(ip)| *ip)
+        .or_else(|| {
+            request
+                .extensions()
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|ConnectInfo(addr)| addr.ip())
+        })
 }
 
 /// Probe paths served without authentication.
@@ -446,7 +439,6 @@ pub async fn token_auth_middleware(
     next: Next,
 ) -> Response {
     let auth = &gate.auth;
-    let mode = AuthMode::from_str(&auth.config.mode);
 
     // Kubelet does not send credentials, so an authenticated probe path fails
     // liveness and crashloops a pod whose service is perfectly healthy. The
@@ -457,6 +449,12 @@ pub async fn token_auth_middleware(
         return next.run(request).await;
     }
 
+    // A mode that does not parse refuses every request rather than none.
+    let Some(mode) = AuthMode::parse(&auth.config.mode) else {
+        log_misconfigured("the auth mode is not one this listener recognises");
+        return AuthError::misconfigured().into_response();
+    };
+
     // Skip if auth mode doesn't require token auth
     if !mode.requires_token_auth() {
         return next.run(request).await;
@@ -466,30 +464,28 @@ pub async fn token_auth_middleware(
     let auth_result = match mode {
         AuthMode::Bearer => validate_bearer_auth(auth, request.headers()),
         AuthMode::Header | AuthMode::Both => {
-            // Try bearer first if provider is configured, then fall back to header
+            // Try bearer first if provider is configured, then fall back to
+            // header auth when there are headers to fall back to.
             if auth.bearer_provider.is_some() {
                 match validate_bearer_auth(auth, request.headers()) {
                     None => None,
+                    Some(refused) if auth.config.effective_headers().is_empty() => Some(refused),
                     Some(_) => validate_header_auth(&auth.config, request.headers()),
                 }
             } else {
                 validate_header_auth(&auth.config, request.headers())
             }
         }
-        _ => None,
+        AuthMode::None | AuthMode::Mtls => None,
     };
 
     match auth_result {
         None => next.run(request).await,
         Some(err) => {
-            let (client_ip_str, header_ip) = extract_client_ip(request.headers());
-            let peer = request
-                .extensions()
-                .get::<ConnectInfo<SocketAddr>>()
-                .map(|ConnectInfo(addr)| addr.ip());
+            let client = refused_client(&request);
             debug!(
                 transport = gate.transport,
-                client_ip = client_ip_str.as_deref().unwrap_or("unknown"),
+                client_ip = ?client,
                 auth_mode = ?mode,
                 failure_reason = %err.message,
                 status_code = err.status.as_u16(),
@@ -499,7 +495,7 @@ pub async fn token_auth_middleware(
                 &gate.metrics,
                 gate.transport,
                 &err,
-                header_ip.or(peer),
+                client,
                 Some(request.uri().path()),
             );
             err.into_response()
@@ -615,7 +611,10 @@ pub fn validate_header_auth(
     config: &AuthConfig,
     headers: &axum::http::HeaderMap,
 ) -> Option<AuthError> {
-    let mode = AuthMode::from_str(&config.mode);
+    let Some(mode) = AuthMode::parse(&config.mode) else {
+        log_misconfigured("the auth mode is not one this listener recognises");
+        return Some(AuthError::misconfigured());
+    };
 
     // Skip if auth mode doesn't require headers
     if mode == AuthMode::None || mode == AuthMode::Mtls {
@@ -728,12 +727,38 @@ mod tests {
 
     #[test]
     fn test_auth_mode_parsing() {
-        assert_eq!(AuthMode::from_str("none"), AuthMode::None);
-        assert_eq!(AuthMode::from_str("header"), AuthMode::Header);
-        assert_eq!(AuthMode::from_str("mtls"), AuthMode::Mtls);
-        assert_eq!(AuthMode::from_str("both"), AuthMode::Both);
-        assert_eq!(AuthMode::from_str("HEADER"), AuthMode::Header);
-        assert_eq!(AuthMode::from_str("unknown"), AuthMode::None);
+        assert_eq!(AuthMode::parse("none"), Some(AuthMode::None));
+        assert_eq!(AuthMode::parse("header"), Some(AuthMode::Header));
+        assert_eq!(AuthMode::parse("mtls"), Some(AuthMode::Mtls));
+        assert_eq!(AuthMode::parse("both"), Some(AuthMode::Both));
+        assert_eq!(AuthMode::parse("HEADER"), Some(AuthMode::Header));
+    }
+
+    /// No string outside the five parses, so none can read as `none`.
+    #[test]
+    fn an_unrecognised_mode_parses_as_nothing() {
+        for mode in ["unknown", "bearrer", "Bearer Token", ""] {
+            assert_eq!(AuthMode::parse(mode), None, "{mode:?}");
+        }
+    }
+
+    /// Under a mode that does not parse, every request is refused as a
+    /// misconfiguration and none is served.
+    #[tokio::test]
+    async fn a_listener_whose_mode_does_not_parse_refuses_every_request() {
+        let config = AuthConfig {
+            mode: "bearrer".to_string(),
+            ..AuthConfig::default()
+        };
+        let app = axum::Router::new()
+            .route("/ingest", axum::routing::post(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(
+                TokenAuth::new(AuthState::new(config), Arc::new(Metrics::default()), "http"),
+                token_auth_middleware,
+            ));
+        let request = Request::post("/ingest").body(Body::empty()).unwrap();
+        let response = tower::ServiceExt::oneshot(app, request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[test]
@@ -887,7 +912,7 @@ mod tests {
 
     #[test]
     fn test_auth_mode_bearer() {
-        assert_eq!(AuthMode::from_str("bearer"), AuthMode::Bearer);
+        assert_eq!(AuthMode::parse("bearer"), Some(AuthMode::Bearer));
         assert!(AuthMode::Bearer.requires_token_auth());
     }
 
@@ -1055,28 +1080,71 @@ mod tests {
         assert_eq!(new_config.server.auth.mode, "none");
     }
 
+    /// The enrichment switch, on by default, adds no accepted header.
     #[test]
-    fn test_include_common_header_default() {
+    fn the_enrichment_switch_accepts_no_header() {
         let config = AuthConfig::default();
         assert!(config.include_common_header);
-        let effective = config.effective_headers();
-        assert_eq!(effective.len(), 1);
-        assert_eq!(effective[0].name, "x-hyperi-agent");
-        assert_eq!(effective[0].values, vec![SensitiveString::new("1.0")]);
+        assert!(config.effective_headers().is_empty());
     }
 
+    /// `x-hyperi-agent: 1.0` is a published constant, so it authenticates no
+    /// one in header mode, with enrichment on or off.
     #[test]
-    fn test_include_common_header_disabled() {
-        let config = AuthConfig {
-            include_common_header: false,
-            ..AuthConfig::default()
-        };
-        let effective = config.effective_headers();
-        assert!(effective.is_empty());
+    fn the_common_header_is_not_a_credential() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-hyperi-agent", "1.0".parse().unwrap());
+        for include_common_header in [true, false] {
+            let config = AuthConfig {
+                include_common_header,
+                ..test_config()
+            };
+            let err = validate_header_auth(&config, &headers)
+                .expect("the common header must not authenticate");
+            assert_eq!(err.status, StatusCode::UNAUTHORIZED);
+        }
     }
 
+    /// Nor does it in `both` mode, where a failed bearer check falls through to
+    /// header auth: the wrong token is refused as a client failure.
+    #[tokio::test]
+    async fn the_common_header_does_not_pass_a_failed_bearer_check() {
+        let mut config = bearer_config();
+        config.mode = "both".to_string();
+        config.include_common_header = true;
+        let provider = BearerTokenProvider::new(&config.bearer.tokens);
+        let app = axum::Router::new()
+            .route("/ingest", axum::routing::post(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(
+                TokenAuth::new(
+                    AuthState::with_bearer_provider(config, provider),
+                    Arc::new(Metrics::default()),
+                    "http",
+                ),
+                token_auth_middleware,
+            ));
+
+        let request = Request::post("/ingest")
+            .header("authorization", "Bearer wrong-token")
+            .header("x-hyperi-agent", "1.0")
+            .body(Body::empty())
+            .unwrap();
+        let response = tower::ServiceExt::oneshot(app.clone(), request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let request = Request::post("/ingest")
+            .header("authorization", "Bearer secret-token-1")
+            .body(Body::empty())
+            .unwrap();
+        let response = tower::ServiceExt::oneshot(app, request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// An operator who lists the header explicitly gets exactly that entry.
     #[test]
-    fn test_include_common_header_not_duplicated() {
+    fn an_explicit_accepted_header_is_kept_as_written() {
         let config = AuthConfig {
             include_common_header: true,
             accepted_headers: vec![AcceptedHeader {
@@ -1086,7 +1154,6 @@ mod tests {
             ..AuthConfig::default()
         };
         let effective = config.effective_headers();
-        // Should not add a second x-hyperi-agent
         assert_eq!(effective.len(), 1);
         assert_eq!(effective[0].values, vec![SensitiveString::new("2.0")]);
     }

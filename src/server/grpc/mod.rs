@@ -339,7 +339,7 @@ impl ProtocolHandler for GrpcVectorHandler {
         // `auth_state: None` as "register the service with no interceptor", so
         // degrading would serve a wide-open gRPC port and report a successful
         // start.
-        let auth_state = if AuthMode::from_str(&self.config.grpc.auth.mode) != AuthMode::None {
+        let auth_state = if AuthMode::parse(&self.config.grpc.auth.mode) != Some(AuthMode::None) {
             Some(create_auth_state(&self.config.grpc.auth).await?)
         } else {
             None

@@ -1016,9 +1016,8 @@ async fn test_rate_limit_allows_within_burst() {
 
 /// Test that exceeding rate limit returns 429.
 ///
-/// Uses X-Forwarded-For header to provide an IP for the SmartIpKeyExtractor,
-/// since the hyper low-level server doesn't populate ConnectInfo. Sends
-/// concurrent requests from the same "IP" to overwhelm the GCRA limiter.
+/// Every request comes from the loopback peer, the key the limiter uses, so
+/// 20 concurrent requests overrun a budget of one.
 #[tokio::test]
 async fn test_rate_limit_rejects_over_burst() {
     let mut config = test_config(10_000, 30_000, "none");
@@ -1032,8 +1031,6 @@ async fn test_rate_limit_rejects_over_burst() {
         .build()
         .unwrap();
 
-    // Send 20 concurrent requests with X-Forwarded-For to provide an IP
-    // for SmartIpKeyExtractor (ConnectInfo is not available with hyper low-level API)
     let mut handles = Vec::new();
     for i in 0..20 {
         let client = client.clone();
@@ -1042,7 +1039,6 @@ async fn test_rate_limit_rejects_over_burst() {
             let response = client
                 .post(format!("{url}/ingest"))
                 .header("content-type", "application/json")
-                .header("x-forwarded-for", "192.168.1.100")
                 .body(format!(r#"{{"seq":{i}}}"#))
                 .send()
                 .await
@@ -1119,21 +1115,94 @@ async fn test_rate_limit_replenishes_at_the_configured_rate() {
     shutdown.cancel();
 }
 
-/// One `/ingest` POST keyed to a fixed apparent source IP.
-///
-/// `SmartIpKeyExtractor` prefers `x-forwarded-for`, so the header puts every
-/// request in the same bucket however the test client actually connects.
+/// One `/ingest` POST from the loopback peer, which every request here shares.
 async fn post_ingest(client: &reqwest::Client, url: &str, seq: u32) -> u16 {
-    client
+    post_forwarded(client, url, seq, None).await
+}
+
+/// One `/ingest` POST, carrying `forwarded_for` as `X-Forwarded-For` when given.
+async fn post_forwarded(
+    client: &reqwest::Client,
+    url: &str,
+    seq: u32,
+    forwarded_for: Option<&str>,
+) -> u16 {
+    let mut request = client
         .post(format!("{url}/ingest"))
-        .header("content-type", "application/json")
-        .header("x-forwarded-for", "192.0.2.20")
+        .header("content-type", "application/json");
+    if let Some(value) = forwarded_for {
+        request = request.header("x-forwarded-for", value);
+    }
+    request
         .body(format!(r#"{{"seq":{seq}}}"#))
         .send()
         .await
         .expect("Request failed")
         .status()
         .as_u16()
+}
+
+/// A client writing a new `X-Forwarded-For` on every request is still one
+/// peer, and spends that peer's budget.
+#[tokio::test]
+async fn test_rate_limit_ignores_a_forged_forwarding_header() {
+    let mut config = test_config(10_000, 30_000, "none");
+    config.server.rate_limit.enabled = true;
+    config.server.rate_limit.requests_per_second = 1;
+    config.server.rate_limit.burst = 1;
+
+    let (url, shutdown) = start_test_server(config).await;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+
+    let first = post_forwarded(&client, &url, 0, Some("203.0.113.1")).await;
+    assert!((200..300).contains(&first), "got: {first}");
+    for seq in 1..5 {
+        let forged = format!("203.0.113.{}", seq + 1);
+        assert_eq!(
+            post_forwarded(&client, &url, seq, Some(&forged)).await,
+            429,
+            "X-Forwarded-For: {forged} from an untrusted peer bought a fresh budget"
+        );
+    }
+
+    shutdown.cancel();
+}
+
+/// Behind a trusted proxy each client it names has a budget of its own.
+#[tokio::test]
+async fn test_rate_limit_keys_on_the_client_a_trusted_proxy_names() {
+    let mut config = test_config(10_000, 30_000, "none");
+    config.server.rate_limit.enabled = true;
+    config.server.rate_limit.requests_per_second = 1;
+    config.server.rate_limit.burst = 1;
+    config.server.trusted_proxies = vec!["127.0.0.0/8".to_string()];
+
+    let (url, shutdown) = start_test_server(config).await;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+
+    for (seq, client_ip) in ["198.51.100.1", "198.51.100.2", "198.51.100.3"]
+        .into_iter()
+        .enumerate()
+    {
+        let status = post_forwarded(&client, &url, seq as u32, Some(client_ip)).await;
+        assert!(
+            (200..300).contains(&status),
+            "{client_ip} has its own budget, got: {status}"
+        );
+    }
+    assert_eq!(
+        post_forwarded(&client, &url, 9, Some("198.51.100.1")).await,
+        429,
+        "198.51.100.1 spent its budget"
+    );
+
+    shutdown.cancel();
 }
 
 /// Test that rate limiting disabled allows all requests.

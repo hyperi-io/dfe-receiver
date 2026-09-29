@@ -130,10 +130,10 @@ async fn connection_closed_immediately(addr: SocketAddr) -> bool {
     matches!(read, Ok(Ok(0) | Err(_)))
 }
 
-/// Fire requests in parallel from one apparent IP and report the statuses.
+/// Fire requests in parallel from the loopback peer and report the statuses.
 ///
-/// `SmartIpKeyExtractor` prefers `x-forwarded-for`, so the header keys every
-/// request to the same bucket however the test client actually connects.
+/// The `X-Forwarded-For` differs per request and comes from an untrusted peer,
+/// so every request still spends the one loopback budget.
 async fn parallel_post(url: String, count: usize) -> Vec<u16> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
@@ -141,13 +141,13 @@ async fn parallel_post(url: String, count: usize) -> Vec<u16> {
         .unwrap();
 
     let mut handles = Vec::with_capacity(count);
-    for _ in 0..count {
+    for n in 0..count {
         let client = client.clone();
         let url = url.clone();
         handles.push(tokio::spawn(async move {
             client
                 .post(url)
-                .header("x-forwarded-for", "192.0.2.10")
+                .header("x-forwarded-for", format!("192.0.2.{n}"))
                 .body("{}")
                 .send()
                 .await

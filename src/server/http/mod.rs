@@ -36,7 +36,6 @@ use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 use tower::limit::GlobalConcurrencyLimitLayer;
 use tower_governor::governor::GovernorConfigBuilder;
-use tower_governor::key_extractor::SmartIpKeyExtractor;
 use tower_governor::{GovernorError, GovernorLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
@@ -49,6 +48,7 @@ use crate::error::{Error, Result, unavailable_response};
 use crate::metrics::{ConnectionGuard, Metrics};
 use crate::pipeline::{Acks, PipelineState};
 use crate::server::auth::{AuthState, BearerTokenProvider, TokenAuth, token_auth_middleware};
+use crate::server::client_ip::{ClientIpKey, TrustedProxies, attribute_client};
 use crate::server::ip_filter::IpFilter;
 use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
 use crate::server::traits::{BoundAddr, ProtocolHandler};
@@ -378,8 +378,8 @@ async fn serve(
     let app = apply_server_limits(app, &config.server, metrics.clone(), TRANSPORT)?;
 
     // The IP filter runs in the accept loops below, before any HTTP work, and
-    // `connection_service` hands each request the peer address the rate
-    // limiter falls back to.
+    // `connection_service` hands each request the peer address the client is
+    // attributed from.
 
     let addr: SocketAddr = addr
         .parse()
@@ -469,7 +469,8 @@ impl Accept {
 }
 
 /// Apply the server-wide admission limits: the global concurrency cap and the
-/// per-IP GCRA rate limit.
+/// per-IP GCRA rate limit, behind the layer that attributes each request to
+/// its client.
 ///
 /// Outermost layers, added last so they wrap every route on the router,
 /// including ones merged in after the ingest routes' own middleware. Every HTTP
@@ -478,7 +479,8 @@ impl Accept {
 /// `server.*` reads as covering the whole ingest surface.
 ///
 /// Each call builds its own governor, so the per-IP budget is per listener: a
-/// client saturating HEC does not consume the OTLP budget for the same IP.
+/// client saturating HEC does not consume the OTLP budget for the same IP. The
+/// key is the TCP peer, or the client a `server.trusted_proxies` peer names.
 ///
 /// `requests_per_second` is a rate, and the governor is configured by the
 /// interval between replenishments -- see [`replenish_period`].
@@ -508,6 +510,8 @@ fn limit_server(
     prune_every: Duration,
 ) -> Result<(Router, RateLimitKeys)> {
     let mut keys: RateLimitKeys = Box::new(|| 0);
+    let proxies = TrustedProxies::parse(&server.trusted_proxies)
+        .map_err(|e| Error::Config(format!("server.trusted_proxies: {e}")))?;
 
     // Concurrency limit (0 = unlimited)
     if server.max_concurrent_requests > 0 {
@@ -516,9 +520,8 @@ fn limit_server(
         ));
     }
 
-    // Per-IP rate limiting via GCRA (tower-governor).
-    // SmartIpKeyExtractor: checks X-Forwarded-For, X-Real-IP, Forwarded
-    // headers first, then falls back to peer IP.
+    // Per-IP rate limiting via GCRA (tower-governor), keyed on the ClientIp
+    // the attribution layer below sets.
     let rate_limit_config = &server.rate_limit;
     if rate_limit_config.enabled {
         let period = replenish_period(rate_limit_config.requests_per_second).ok_or_else(|| {
@@ -531,7 +534,7 @@ fn limit_server(
         let governor_conf = GovernorConfigBuilder::default()
             .period(period)
             .burst_size(rate_limit_config.burst)
-            .key_extractor(SmartIpKeyExtractor)
+            .key_extractor(ClientIpKey)
             .finish()
             .ok_or_else(|| Error::Config("invalid rate_limit configuration".into()))?;
 
@@ -555,9 +558,13 @@ fn limit_server(
             rps = rate_limit_config.requests_per_second,
             burst = rate_limit_config.burst,
             period_ms = period.as_secs_f64() * 1000.0,
+            trusted_proxies = server.trusted_proxies.len(),
             "Per-IP rate limiting enabled"
         );
     }
+
+    // Outermost, so the rate limiter and the auth middleware read one attribution.
+    app = app.layer(middleware::from_fn_with_state(proxies, attribute_client));
 
     Ok((app, keys))
 }
@@ -601,8 +608,7 @@ fn replenish_period(requests_per_second: u64) -> Option<Duration> {
 ///
 /// Every plaintext HTTP listener runs here rather than on `axum::serve`, so
 /// each gets the accept-loop IP filter, the connection count, the hardened
-/// header-read timeout, and the peer address the rate limiter keys on when no
-/// proxy header names the client.
+/// header-read timeout, and the peer address each request is attributed from.
 pub(crate) async fn run_plain_server(
     listener: TcpListener,
     app: Router,
@@ -659,8 +665,7 @@ pub(crate) async fn run_plain_server(
 }
 
 /// The router as a hyper service for one connection, with the peer address
-/// on every request so the rate limiter keys on it when no proxy header names
-/// the client.
+/// on every request; the rate limiter refuses a request that carries none.
 fn connection_service(
     app: Router,
     peer_addr: SocketAddr,
@@ -1250,19 +1255,133 @@ mod tests {
         assert_eq!(replenish_period(1), Some(Duration::from_secs(1)));
     }
 
-    /// Send one request per client through `app`, each client named by the
-    /// `X-Forwarded-For` the rate limiter keys on.
+    /// A GET on `/` from `peer`, as `connection_service` hands it to the router,
+    /// carrying `forwarded_for` when given.
+    fn request_from(
+        peer: [u8; 4],
+        forwarded_for: Option<&str>,
+    ) -> axum::http::Request<axum::body::Body> {
+        let mut request = axum::http::Request::get("/");
+        if let Some(value) = forwarded_for {
+            request = request.header("x-forwarded-for", value);
+        }
+        let mut request = request.body(axum::body::Body::empty()).unwrap();
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(SocketAddr::from((peer, 40_000))));
+        request
+    }
+
+    async fn status_of(app: &Router, request: axum::http::Request<axum::body::Body>) -> StatusCode {
+        tower::ServiceExt::oneshot(app.clone(), request)
+            .await
+            .unwrap()
+            .status()
+    }
+
+    /// Send one request per client through `app`, each from its own peer address.
     async fn one_request_per_client(app: &Router, clients: u8) {
         for client in 0..clients {
-            let request = axum::http::Request::get("/")
-                .header("x-forwarded-for", format!("198.51.100.{client}"))
-                .body(axum::body::Body::empty())
-                .unwrap();
-            let response = tower::ServiceExt::oneshot(app.clone(), request)
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
+            let request = request_from([198, 51, 100, client], None);
+            assert_eq!(status_of(app, request).await, StatusCode::OK);
         }
+    }
+
+    /// A rate limit of one request a second with no burst above it.
+    fn one_per_second(trusted_proxies: &[&str]) -> crate::config::ServerConfig {
+        crate::config::ServerConfig {
+            max_concurrent_requests: 0,
+            rate_limit: crate::config::RateLimitConfig {
+                enabled: true,
+                requests_per_second: 1,
+                burst: 1,
+            },
+            trusted_proxies: trusted_proxies.iter().map(ToString::to_string).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn limited(server: &crate::config::ServerConfig) -> Router {
+        let routes = Router::new().route("/", get(|| async { "ok" }));
+        limit_server(
+            routes,
+            server,
+            Arc::new(Metrics::default()),
+            TRANSPORT,
+            RATE_LIMIT_PRUNE_INTERVAL,
+        )
+        .unwrap()
+        .0
+    }
+
+    /// A client that writes a new `X-Forwarded-For` on every request still
+    /// spends its own peer's budget.
+    #[tokio::test]
+    async fn a_forged_forwarding_header_does_not_buy_a_fresh_budget() {
+        let app = limited(&one_per_second(&[]));
+        let peer = [198, 51, 100, 7];
+
+        let first = request_from(peer, Some("203.0.113.1"));
+        assert_eq!(status_of(&app, first).await, StatusCode::OK);
+        for victim in 2..6 {
+            let forged = request_from(peer, Some(&format!("203.0.113.{victim}")));
+            assert_eq!(
+                status_of(&app, forged).await,
+                StatusCode::TOO_MANY_REQUESTS,
+                "a forged X-Forwarded-For picked a fresh bucket"
+            );
+        }
+    }
+
+    /// Through a trusted proxy each client has its own budget, and a client
+    /// cannot spend another's by naming it left of the proxy's entry.
+    #[tokio::test]
+    async fn a_trusted_proxy_gives_each_client_its_own_budget() {
+        let app = limited(&one_per_second(&["10.0.0.0/8"]));
+        let proxy = [10, 0, 0, 5];
+
+        for client in ["198.51.100.1", "198.51.100.2", "198.51.100.3"] {
+            let request = request_from(proxy, Some(client));
+            assert_eq!(status_of(&app, request).await, StatusCode::OK, "{client}");
+        }
+        let again = request_from(proxy, Some("198.51.100.1"));
+        assert_eq!(status_of(&app, again).await, StatusCode::TOO_MANY_REQUESTS);
+
+        let spend_another = request_from(proxy, Some("198.51.100.9, 198.51.100.2"));
+        assert_eq!(
+            status_of(&app, spend_another).await,
+            StatusCode::TOO_MANY_REQUESTS,
+            "the proxy appended 198.51.100.2, whose budget is spent"
+        );
+    }
+
+    /// With no peer address there is no client to key on, and the request is refused.
+    #[tokio::test]
+    async fn a_request_with_no_peer_address_is_refused_by_the_rate_limit() {
+        let app = limited(&one_per_second(&[]));
+        let request = axum::http::Request::get("/")
+            .header("x-forwarded-for", "198.51.100.7")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert_eq!(
+            status_of(&app, request).await,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[test]
+    fn a_trusted_proxy_that_is_not_a_cidr_refuses_to_build_the_listener() {
+        let routes = Router::new().route("/", get(|| async { "ok" }));
+        let Err(err) = limit_server(
+            routes,
+            &one_per_second(&["not-a-cidr"]),
+            Arc::new(Metrics::default()),
+            TRANSPORT,
+            RATE_LIMIT_PRUNE_INTERVAL,
+        ) else {
+            panic!("a listener built with an unparseable trusted proxy");
+        };
+        assert!(err.to_string().contains("server.trusted_proxies"), "{err}");
     }
 
     /// A client whose budget has refilled leaves the limiter's key map at the
@@ -1359,14 +1478,7 @@ mod tests {
 
         let mut statuses = Vec::new();
         for _ in 0..4 {
-            let request = axum::http::Request::get("/")
-                .header("x-forwarded-for", "198.51.100.7")
-                .body(axum::body::Body::empty())
-                .unwrap();
-            let response = tower::ServiceExt::oneshot(app.clone(), request)
-                .await
-                .unwrap();
-            statuses.push(response.status());
+            statuses.push(status_of(&app, request_from([198, 51, 100, 7], None)).await);
         }
 
         assert_eq!(

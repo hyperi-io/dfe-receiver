@@ -38,12 +38,6 @@ use crate::error::{Error, Result};
 /// Environment variable prefix for configuration.
 pub const ENV_PREFIX: &str = "DFE_RECEIVER";
 
-/// Common header name injected when `include_common_header` is enabled.
-pub const COMMON_HEADER_NAME: &str = "x-hyperi-agent";
-
-/// Common header value for the injected header.
-pub const COMMON_HEADER_VALUE: &str = "1.0";
-
 /// Main configuration struct.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
@@ -371,6 +365,9 @@ impl Config {
         }
 
         self.validate_auth()?;
+        self.validate_ip_filters()?;
+        crate::server::client_ip::TrustedProxies::parse(&self.server.trusted_proxies)
+            .map_err(|e| Error::Config(format!("server.trusted_proxies: {e}")))?;
         // A zero hold answers every held OTLP HTTP export as not confirmed.
         #[cfg(feature = "otlp")]
         if self.otlp.enabled
@@ -436,21 +433,30 @@ impl Config {
     /// a weaker door -- it is an open one that reads as shut. Each rule below
     /// names the code that does or does not run.
     fn validate_auth(&self) -> Result<()> {
-        // Always-on HTTP listener.
+        // A mode the parser does not recognise is refused on every listener,
+        // running or not: it is a typo whichever block it sits in.
         known_mode("server", &self.server.auth)?;
+        known_mode("grpc", &self.grpc.auth)?;
+        #[cfg(feature = "otlp")]
+        known_mode("otlp", &self.otlp.auth)?;
+        known_mode("lumberjack", &self.lumberjack.auth)?;
+        known_mode("splunk_hec", &self.splunk_hec.auth)?;
+        known_mode("syslog", &self.syslog.auth)?;
+        known_mode("prometheus_rw", &self.prometheus_rw.auth)?;
+
+        // Always-on HTTP listener.
         cert_half_is_enforced("server", &self.server.auth, &self.server.tls)?;
+        header_credentials_configured("server", &self.server.auth)?;
 
         // gRPC and OTLP authenticate through a tonic interceptor that only
         // calls validate_bearer_auth, so `header` and `both` never reach
         // validate_header_auth on those ports.
         if self.grpc.enabled {
-            known_mode("grpc", &self.grpc.auth)?;
             bearer_only("grpc", &self.grpc.auth)?;
             cert_half_is_enforced("grpc", &self.grpc.auth, &self.grpc.tls)?;
         }
         #[cfg(feature = "otlp")]
         if self.otlp.enabled {
-            known_mode("otlp", &self.otlp.auth)?;
             bearer_only("otlp", &self.otlp.auth)?;
             cert_half_is_enforced("otlp", &self.otlp.auth, &self.otlp.tls)?;
         }
@@ -458,49 +464,167 @@ impl Config {
         // Both run the shared token_auth_middleware, so every mode but the
         // certificate half is enforced.
         if self.splunk_hec.enabled {
-            known_mode("splunk_hec", &self.splunk_hec.auth)?;
             cert_half_is_enforced("splunk_hec", &self.splunk_hec.auth, &self.splunk_hec.tls)?;
+            header_credentials_configured("splunk_hec", &self.splunk_hec.auth)?;
         }
         if self.prometheus_rw.enabled {
-            known_mode("prometheus_rw", &self.prometheus_rw.auth)?;
             cert_half_is_enforced(
                 "prometheus_rw",
                 &self.prometheus_rw.auth,
                 &self.prometheus_rw.tls,
             )?;
+            header_credentials_configured("prometheus_rw", &self.prometheus_rw.auth)?;
         }
 
         // Nothing in either module reads its auth block at all.
         if self.lumberjack.enabled {
             no_application_auth("lumberjack", &self.lumberjack.auth)?;
+            unauthenticated_is_accepted(
+                "lumberjack",
+                "a Lumberjack frame",
+                &self.lumberjack.tls,
+                self.lumberjack.accept_unauthenticated,
+            )?;
         }
         if self.syslog.enabled {
             no_application_auth("syslog", &self.syslog.auth)?;
+            syslog_is_accepted(self.syslog.accept_unauthenticated)?;
+        }
+        if self.fluent.enabled {
+            unauthenticated_is_accepted(
+                "fluent",
+                "a Forward frame",
+                &self.fluent.tls,
+                self.fluent.accept_unauthenticated,
+            )?;
+        }
+        if self.gelf.enabled {
+            unauthenticated_is_accepted(
+                "gelf",
+                "a GELF message",
+                &self.gelf.tls,
+                self.gelf.accept_unauthenticated,
+            )?;
         }
 
         Ok(())
     }
+
+    /// Refuse an IP filter that would not filter what it reads as filtering.
+    ///
+    /// Checked wherever the filter takes effect: `server.ip_filter` on every
+    /// accept loop, a flow listener's own filter while that listener is on.
+    fn validate_ip_filters(&self) -> Result<()> {
+        ip_filter_parses("server.ip_filter", &self.server.ip_filter)?;
+        if self.flow.enabled
+            && let Some(filter) = &self.flow.ip_filter
+        {
+            ip_filter_parses("flow.ip_filter", filter)?;
+        }
+        if let Some(split) = &self.flow.split {
+            for (side, listener) in [("netflow", &split.netflow), ("sflow", &split.sflow)] {
+                if listener.enabled
+                    && let Some(filter) = &listener.ip_filter
+                {
+                    ip_filter_parses(&format!("flow.split.{side}.ip_filter"), filter)?;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
-/// The five modes `AuthMode::from_str` recognises.
+/// Refuse an IP filter [`IpFilter::parse`](crate::server::ip_filter::IpFilter::parse)
+/// rejects: an unknown mode, an entry that is not a CIDR, an empty allowlist.
+fn ip_filter_parses(scope: &str, filter: &IpFilterConfig) -> Result<()> {
+    crate::server::ip_filter::IpFilter::parse(filter)
+        .map(drop)
+        .map_err(|e| Error::Config(format!("{scope}: {e}")))
+}
+
+/// The five modes `AuthMode::parse` recognises.
 const AUTH_MODES: [&str; 5] = ["none", "header", "bearer", "mtls", "both"];
 
-/// Refuse a mode string outside [`AUTH_MODES`].
+/// Refuse a mode string outside [`AUTH_MODES`], an empty one included.
 ///
-/// `AuthMode::from_str` maps anything it does not recognise to `None`, so a
-/// typo ("bearrer", "Bearer Token") silently disables authentication on a
-/// listener the operator believes is closed.
+/// The request path refuses every request under a mode it cannot parse, so
+/// a typo ("bearrer", "Bearer Token") would otherwise start a listener that
+/// answers nobody.
 fn known_mode(scope: &str, auth: &AuthConfig) -> Result<()> {
-    let mode = auth.mode.to_ascii_lowercase();
-    if mode.is_empty() || AUTH_MODES.contains(&mode.as_str()) {
+    if crate::server::auth::AuthMode::parse(&auth.mode).is_some() {
         return Ok(());
     }
     Err(Error::Config(format!(
-        "{scope}.auth.mode is '{}', which is not one of {} -- an unrecognised mode \
-         parses as 'none' and disables authentication on this listener",
+        "{scope}.auth.mode is '{}', which is not one of {}",
         auth.mode,
         AUTH_MODES.join(", ")
     )))
+}
+
+/// Refuse `header` / `both` with no credential to compare a request against.
+///
+/// No header is accepted implicitly, so without `accepted_headers`, the
+/// legacy `header_name` or a bearer token, every request is answered 500.
+fn header_credentials_configured(scope: &str, auth: &AuthConfig) -> Result<()> {
+    let mode = auth.mode.to_ascii_lowercase();
+    if mode != "header" && mode != "both" {
+        return Ok(());
+    }
+    let has_bearer = !auth.bearer.tokens.is_empty() || auth.bearer.secret_source.is_some();
+    if has_bearer || !auth.effective_headers().is_empty() {
+        return Ok(());
+    }
+    Err(Error::Config(format!(
+        "{scope}.auth.mode is '{mode}' but {scope}.auth.accepted_headers is empty and no \
+         bearer token is configured -- every request would be refused. List the \
+         headers to accept in {scope}.auth.accepted_headers"
+    )))
+}
+
+/// Whether the TLS handshake on a listener refuses a client with no certificate.
+fn handshake_requires_a_client_certificate(tls: &TlsConfig) -> bool {
+    tls.enabled
+        && tls.client_auth.eq_ignore_ascii_case("required")
+        && (tls.ca_file.is_some() || tls.ca_secret.is_some())
+}
+
+/// Refuse a listener whose wire protocol carries no credential unless its
+/// clients are authenticated at the handshake or `accept_unauthenticated` is set.
+fn unauthenticated_is_accepted(
+    scope: &str,
+    unit: &str,
+    tls: &TlsConfig,
+    accept_unauthenticated: bool,
+) -> Result<()> {
+    if accept_unauthenticated || handshake_requires_a_client_certificate(tls) {
+        return Ok(());
+    }
+    Err(Error::Config(format!(
+        "{scope} accepts any client that can reach its port -- {unit} carries no \
+         credential. Authenticate clients at the handshake with {scope}.tls.enabled: \
+         true, {scope}.tls.client_auth: required and {scope}.tls.ca_file (or \
+         {scope}.tls.ca_secret) naming the CA their certificates are issued from, or \
+         set {scope}.accept_unauthenticated: true and restrict the senders with \
+         server.ip_filter.cidrs"
+    )))
+}
+
+/// Refuse syslog unless `syslog.accept_unauthenticated` is set.
+///
+/// The UDP and plain TCP listeners bind whenever syslog is on, and neither has
+/// a handshake, so client certificates on the TLS listener cannot close them.
+fn syslog_is_accepted(accept_unauthenticated: bool) -> Result<()> {
+    if accept_unauthenticated {
+        return Ok(());
+    }
+    Err(Error::Config(
+        "syslog accepts any sender that can reach its ports -- the UDP and plain TCP \
+         listeners always bind and have no handshake to authenticate at, so \
+         syslog.tls.client_auth: required closes only the TLS listener. Set \
+         syslog.accept_unauthenticated: true and restrict the senders with \
+         server.ip_filter.cidrs"
+            .into(),
+    ))
 }
 
 /// Require the TLS half of `mtls` / `both` to actually be armed.
@@ -558,9 +682,8 @@ fn bearer_only(scope: &str, auth: &AuthConfig) -> Result<()> {
 /// block: neither wire protocol carries a credential to check. A mode written
 /// there changed nothing and reported nothing.
 fn no_application_auth(scope: &str, auth: &AuthConfig) -> Result<()> {
-    known_mode(scope, auth)?;
     let mode = auth.mode.to_ascii_lowercase();
-    if mode.is_empty() || mode == "none" {
+    if mode == "none" {
         return Ok(());
     }
     Err(Error::Config(format!(
@@ -845,6 +968,16 @@ pub struct ServerConfig {
     /// Per-IP rate limiting for every HTTP listener.
     pub rate_limit: RateLimitConfig,
 
+    /// Proxies, as CIDRs, whose `X-Forwarded-For` or `X-Real-IP` names the
+    /// client on every HTTP listener. Empty (the default) believes neither
+    /// header from anyone: a request is the TCP peer's.
+    ///
+    /// The rate limit keys on that client and auth-failure events report it.
+    /// List only proxies that append `X-Forwarded-For` or overwrite
+    /// `X-Real-IP`; a listed proxy that passes a client's own header through
+    /// lets that client pick its rate-limit bucket.
+    pub trusted_proxies: Vec<String>,
+
     /// IP filter (allowlist/denylist) for every listener the receiver owns an
     /// accept loop for.
     pub ip_filter: IpFilterConfig,
@@ -868,6 +1001,7 @@ impl Default for ServerConfig {
             request_timeout_ms: 30_000,
             max_concurrent_requests: 10_000, // safe default for high-throughput ingest
             rate_limit: RateLimitConfig::default(),
+            trusted_proxies: Vec::new(),
             ip_filter: IpFilterConfig::default(),
             tls: TlsConfig::default(),
             auth: AuthConfig::default(),
@@ -881,6 +1015,12 @@ impl Default for ServerConfig {
 /// Applies to `/ingest`, the webhook intake, Splunk HEC, Prometheus remote
 /// write and OTLP HTTP. Each listener keeps its own budget, so the figures
 /// below are per source IP per listener, not a receiver-wide total.
+///
+/// The source IP is the TCP peer, or the client a `server.trusted_proxies`
+/// peer names. On Kubernetes a Service with `externalTrafficPolicy: Cluster`
+/// (the default) rewrites every external source to a node address, so each
+/// node's clients share one budget; set `externalTrafficPolicy: Local`, or
+/// front the receiver with a proxy listed in `server.trusted_proxies`.
 ///
 /// It cannot apply to the raw TCP and UDP listeners (syslog, Lumberjack, Fluent
 /// Forward, GELF) or to the gRPC ports: there is no HTTP request there to count
@@ -934,6 +1074,9 @@ impl Default for RateLimitConfig {
 ///
 /// Each refusal counts on `receiver_ip_filter_rejected_total`, labelled with
 /// the listener's transport.
+///
+/// Startup is refused for an unknown `mode`, an entry in `cidrs` that is not a
+/// CIDR, or an `allowlist` with no `cidrs`.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct IpFilterConfig {
@@ -1019,9 +1162,9 @@ pub struct AuthConfig {
     /// Bearer token configuration.
     pub bearer: BearerConfig,
 
-    /// Include the common `x-hyperi-agent` header in accepted headers.
-    /// Also gates source rule evaluation and timestamp enrichment.
-    /// Default: true
+    /// Enrichment switch, read from `server.auth` alone: stamps
+    /// `_timestamp_receiver` and evaluates `routing.source_rules` on routed
+    /// records. It adds no accepted header. Default: true
     #[serde(default = "default_true")]
     pub include_common_header: bool,
 
@@ -1107,20 +1250,10 @@ impl Default for AuthConfig {
 }
 
 impl AuthConfig {
-    /// Get effective accepted headers (merges common + legacy headers).
+    /// The headers header auth accepts: `accepted_headers` plus the legacy
+    /// `header_name`. Nothing is added implicitly.
     pub fn effective_headers(&self) -> Vec<AcceptedHeader> {
         let mut headers = self.accepted_headers.clone();
-
-        // Inject common header if enabled and not already present
-        if self.include_common_header {
-            let already_exists = headers.iter().any(|h| h.name == COMMON_HEADER_NAME);
-            if !already_exists {
-                headers.push(AcceptedHeader {
-                    name: COMMON_HEADER_NAME.to_string(),
-                    values: vec![SensitiveString::new(COMMON_HEADER_VALUE)],
-                });
-            }
-        }
 
         // Add legacy header if configured and not empty
         if !self.header_name.is_empty() {
@@ -1273,6 +1406,11 @@ pub struct LumberjackConfig {
     /// Authentication configuration.
     pub auth: AuthConfig,
 
+    /// Start without client certificates, accepting every client that can
+    /// reach the port. Without it, an enabled listener refuses to start unless
+    /// `tls.client_auth` is `required`.
+    pub accept_unauthenticated: bool,
+
     /// Acknowledge a window only once every destination confirmed its events
     /// (default on). Off acknowledges once they are queued.
     pub acknowledgements: AcknowledgementsConfig,
@@ -1288,6 +1426,7 @@ impl Default for LumberjackConfig {
                 mode: "none".to_string(),
                 ..AuthConfig::default()
             },
+            accept_unauthenticated: false,
             acknowledgements: AcknowledgementsConfig::default(),
         }
     }
@@ -1376,6 +1515,11 @@ pub struct SyslogConfig {
     /// Authentication configuration.
     pub auth: AuthConfig,
 
+    /// Start the UDP and plain TCP listeners, which accept every sender that
+    /// can reach them. Required whenever syslog is enabled: neither has a
+    /// handshake to authenticate at.
+    pub accept_unauthenticated: bool,
+
     /// Raw-payload capture override (inherits the common `raw_capture` block).
     ///
     /// The strongest case for capture: `_raw` holds the wire line including
@@ -1397,6 +1541,7 @@ impl Default for SyslogConfig {
                 mode: "none".to_string(),
                 ..AuthConfig::default()
             },
+            accept_unauthenticated: false,
         }
     }
 }
@@ -1467,7 +1612,8 @@ impl Default for PrometheusRwConfig {
 ///
 /// There is no `auth` block: the Forward frames this handler reads carry no
 /// credential. Close the port at the handshake with `tls.client_auth:
-/// required`, or restrict the senders with a `server.ip_filter` allowlist.
+/// required`, or set `accept_unauthenticated` and restrict the senders with a
+/// `server.ip_filter` allowlist.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct FluentConfig {
@@ -1482,6 +1628,11 @@ pub struct FluentConfig {
 
     /// TLS configuration.
     pub tls: TlsConfig,
+
+    /// Start without client certificates, accepting every client that can
+    /// reach the port. Without it, an enabled listener refuses to start unless
+    /// `tls.client_auth` is `required`.
+    pub accept_unauthenticated: bool,
 
     /// Raw-payload capture override (inherits the common `raw_capture` block).
     ///
@@ -1503,6 +1654,7 @@ impl Default for FluentConfig {
             bind_address: "0.0.0.0:24224".to_string(),
             max_message_size: 32 * 1024 * 1024,
             tls: TlsConfig::default(),
+            accept_unauthenticated: false,
             raw_capture: RawCaptureConfig::default(),
             acknowledgements: AcknowledgementsConfig::default(),
         }
@@ -1515,8 +1667,9 @@ impl Default for FluentConfig {
 /// on the standard port 12201.
 ///
 /// There is no `auth` block: GELF has no in-protocol authentication. Close the
-/// port at the handshake with `tls.client_auth: required`, or restrict the
-/// senders with a `server.ip_filter` allowlist.
+/// port at the handshake with `tls.client_auth: required`, or set
+/// `accept_unauthenticated` and restrict the senders with a `server.ip_filter`
+/// allowlist.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct GelfConfig {
@@ -1532,6 +1685,11 @@ pub struct GelfConfig {
     /// TLS configuration.
     pub tls: TlsConfig,
 
+    /// Start without client certificates, accepting every client that can
+    /// reach the port. Without it, an enabled listener refuses to start unless
+    /// `tls.client_auth` is `required`.
+    pub accept_unauthenticated: bool,
+
     /// Raw-payload capture override (inherits the common `raw_capture` block).
     ///
     /// `_raw` holds the GELF message exactly as it arrived, before the
@@ -1546,6 +1704,7 @@ impl Default for GelfConfig {
             bind_address: "0.0.0.0:12201".to_string(),
             max_message_size: 1024 * 1024,
             tls: TlsConfig::default(),
+            accept_unauthenticated: false,
             raw_capture: RawCaptureConfig::default(),
         }
     }
@@ -2868,6 +3027,10 @@ mod tests {
     fn both_mode_with_required_client_auth_is_accepted() {
         let mut config = auth_base();
         config.server.auth.mode = "both".to_string();
+        config.server.auth.accepted_headers = vec![AcceptedHeader {
+            name: "x-api-key".to_string(),
+            values: vec!["k".into()],
+        }];
         config.server.tls.enabled = true;
         config.server.tls.client_auth = "required".to_string();
 
@@ -2981,13 +3144,176 @@ mod tests {
     }
 
     #[test]
-    fn syslog_with_no_auth_mode_still_starts() {
+    fn syslog_with_no_auth_mode_starts_once_unauthenticated_senders_are_accepted() {
         let mut config = auth_base();
         config.syslog.enabled = true;
-        config.syslog.tls.enabled = true;
-        config.syslog.tls.client_auth = "required".to_string();
+        config.syslog.accept_unauthenticated = true;
 
         assert!(config.validate().is_ok());
+    }
+
+    // -- listeners whose wire protocol carries no credential --
+    //
+    // Lumberjack, Fluent Forward and GELF start only with client certificates
+    // required at the handshake or accept_unauthenticated set. Syslog's UDP and
+    // plain TCP listeners have no handshake, so it needs the opt-out always.
+
+    /// A TLS block that refuses clients presenting no certificate.
+    fn client_certificates_required() -> TlsConfig {
+        TlsConfig {
+            enabled: true,
+            cert_file: Some("/etc/ssl/receiver.crt".to_string()),
+            key_file: Some("/etc/ssl/receiver.key".to_string()),
+            ca_file: Some("/etc/ssl/ca.crt".to_string()),
+            client_auth: "required".to_string(),
+            ..TlsConfig::default()
+        }
+    }
+
+    /// `auth_base` with one credential-less listener enabled, as `tls` and the opt-out say.
+    fn with_listener(scope: &str, tls: TlsConfig, accept_unauthenticated: bool) -> Config {
+        let mut config = auth_base();
+        match scope {
+            "lumberjack" => {
+                config.lumberjack.enabled = true;
+                config.lumberjack.tls = tls;
+                config.lumberjack.accept_unauthenticated = accept_unauthenticated;
+            }
+            "fluent" => {
+                config.fluent.enabled = true;
+                config.fluent.tls = tls;
+                config.fluent.accept_unauthenticated = accept_unauthenticated;
+            }
+            "gelf" => {
+                config.gelf.enabled = true;
+                config.gelf.tls = tls;
+                config.gelf.accept_unauthenticated = accept_unauthenticated;
+            }
+            "syslog" => {
+                config.syslog.enabled = true;
+                config.syslog.tls = tls;
+                config.syslog.accept_unauthenticated = accept_unauthenticated;
+            }
+            other => panic!("no such listener: {other}"),
+        }
+        config
+    }
+
+    #[test]
+    fn a_credential_less_listener_with_no_client_certificates_is_refused() {
+        for scope in ["lumberjack", "fluent", "gelf", "syslog"] {
+            let err = with_listener(scope, TlsConfig::default(), false)
+                .validate()
+                .expect_err(scope)
+                .to_string();
+            assert!(
+                err.contains(&format!("{scope}.accept_unauthenticated: true")),
+                "the error must name the opt-out key, got: {err}"
+            );
+            assert!(
+                err.contains("server.ip_filter.cidrs"),
+                "the error must name the allowlist, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_refusal_names_every_key_the_handshake_needs() {
+        let err = with_listener("gelf", TlsConfig::default(), false)
+            .validate()
+            .expect_err("must not start")
+            .to_string();
+        for key in [
+            "gelf.tls.enabled: true",
+            "gelf.tls.client_auth: required",
+            "gelf.tls.ca_file",
+        ] {
+            assert!(err.contains(key), "{key} is missing from: {err}");
+        }
+    }
+
+    #[test]
+    fn client_certificates_required_at_the_handshake_start_the_listener() {
+        for scope in ["lumberjack", "fluent", "gelf"] {
+            let config = with_listener(scope, client_certificates_required(), false);
+            assert!(config.validate().is_ok(), "{scope}");
+        }
+    }
+
+    /// `optional` admits a client with no certificate, and `required` with no
+    /// CA has nothing to verify a certificate against.
+    #[test]
+    fn a_handshake_that_admits_certificate_less_clients_is_not_enough() {
+        let optional = TlsConfig {
+            client_auth: "optional".to_string(),
+            ..client_certificates_required()
+        };
+        let no_ca = TlsConfig {
+            ca_file: None,
+            ..client_certificates_required()
+        };
+        let off = TlsConfig {
+            enabled: false,
+            ..client_certificates_required()
+        };
+        for tls in [optional, no_ca, off] {
+            assert!(
+                with_listener("fluent", tls.clone(), false)
+                    .validate()
+                    .is_err(),
+                "{tls:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_ca_secret_names_the_ca_as_well_as_a_ca_file() {
+        let tls = TlsConfig {
+            ca_file: None,
+            ca_secret: Some("vault:secret/tls:ca".to_string()),
+            ..client_certificates_required()
+        };
+        assert!(with_listener("lumberjack", tls, false).validate().is_ok());
+    }
+
+    /// Client certificates on syslog's TLS listener leave UDP and plain TCP open.
+    #[test]
+    fn syslog_needs_the_opt_out_even_with_client_certificates() {
+        let err = with_listener("syslog", client_certificates_required(), false)
+            .validate()
+            .expect_err("UDP and TCP are still open")
+            .to_string();
+        assert!(err.contains("syslog.accept_unauthenticated"), "{err}");
+    }
+
+    #[test]
+    fn accepting_unauthenticated_clients_starts_the_listener() {
+        for scope in ["lumberjack", "fluent", "gelf", "syslog"] {
+            let config = with_listener(scope, TlsConfig::default(), true);
+            assert!(config.validate().is_ok(), "{scope}");
+        }
+    }
+
+    #[test]
+    fn a_disabled_credential_less_listener_needs_no_opt_out() {
+        let mut config = auth_base();
+        config.lumberjack.enabled = false;
+        config.fluent.enabled = false;
+        config.gelf.enabled = false;
+        config.syslog.enabled = false;
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn the_opt_out_parses_from_yaml() {
+        let config: Config = serde_yaml_ng::from_str(
+            "fluent:\n  enabled: true\n  accept_unauthenticated: true\n\
+             syslog:\n  enabled: true\n  accept_unauthenticated: true\n",
+        )
+        .unwrap();
+        assert!(config.fluent.accept_unauthenticated);
+        assert!(config.syslog.accept_unauthenticated);
+        assert!(!config.gelf.accept_unauthenticated, "off unless written");
     }
 
     #[test]
@@ -3017,34 +3343,207 @@ mod tests {
 
     #[test]
     fn a_misspelled_auth_mode_is_refused() {
-        // AuthMode::from_str maps anything unrecognised to None, so this was a
-        // wide-open listener that read as bearer-authenticated.
         let mut config = auth_base();
         config.server.auth.mode = "bearrer".to_string();
 
-        let err = config.validate().expect_err("must not start");
+        let err = config.validate().expect_err("must not start").to_string();
         assert!(
-            err.to_string().contains("parses as 'none'"),
-            "the error must say what the typo actually does, got: {err}"
+            err.contains("'bearrer'"),
+            "the error must name the value, got: {err}"
+        );
+        assert!(
+            err.contains("none, header, bearer, mtls, both"),
+            "the error must name the valid set, got: {err}"
         );
     }
 
     #[test]
+    fn an_empty_auth_mode_is_refused() {
+        let mut config = auth_base();
+        config.server.auth.mode = String::new();
+        let err = config.validate().expect_err("must not start").to_string();
+        assert!(err.contains("server.auth.mode is ''"), "{err}");
+    }
+
+    /// A typo is refused in the block of a listener that is not running too:
+    /// enabling the listener later must not be what surfaces it.
+    #[test]
+    fn a_misspelled_auth_mode_on_a_disabled_listener_is_refused() {
+        for scope in [
+            "grpc",
+            "lumberjack",
+            "splunk_hec",
+            "syslog",
+            "prometheus_rw",
+        ] {
+            let mut config = auth_base();
+            let auth = match scope {
+                "grpc" => &mut config.grpc.auth,
+                "lumberjack" => &mut config.lumberjack.auth,
+                "splunk_hec" => &mut config.splunk_hec.auth,
+                "syslog" => &mut config.syslog.auth,
+                _ => &mut config.prometheus_rw.auth,
+            };
+            auth.mode = "Bearer Token".to_string();
+            let err = config.validate().expect_err(scope).to_string();
+            assert!(err.contains(&format!("{scope}.auth.mode")), "{err}");
+        }
+    }
+
+    #[cfg(feature = "otlp")]
+    #[test]
+    fn a_misspelled_auth_mode_on_a_disabled_otlp_listener_is_refused() {
+        let mut config = auth_base();
+        config.otlp.auth.mode = "Bearer Token".to_string();
+        let err = config.validate().expect_err("must not start").to_string();
+        assert!(err.contains("otlp.auth.mode"), "{err}");
+    }
+
+    /// With no implicit header, `header` mode needs one written down.
+    #[test]
+    fn header_mode_with_nothing_to_accept_is_refused() {
+        let mut config = auth_base();
+        config.server.auth.mode = "header".to_string();
+        let err = config.validate().expect_err("must not start").to_string();
+        assert!(err.contains("server.auth.accepted_headers"), "{err}");
+
+        config.server.auth.bearer.tokens = vec!["t".into()];
+        assert!(config.validate().is_ok(), "a bearer token is a credential");
+
+        config.server.auth.bearer.tokens.clear();
+        config.server.auth.header_name = "x-legacy".to_string();
+        config.server.auth.header_values = vec!["v".into()];
+        assert!(
+            config.validate().is_ok(),
+            "the legacy header is a credential"
+        );
+    }
+
+    #[test]
+    fn header_mode_with_nothing_to_accept_is_refused_on_hec_and_remote_write() {
+        let mut config = auth_base();
+        config.splunk_hec.enabled = true;
+        config.splunk_hec.auth.mode = "header".to_string();
+        let err = config.validate().expect_err("must not start").to_string();
+        assert!(err.contains("splunk_hec.auth.accepted_headers"), "{err}");
+
+        let mut config = auth_base();
+        config.prometheus_rw.enabled = true;
+        config.prometheus_rw.auth.mode = "header".to_string();
+        let err = config.validate().expect_err("must not start").to_string();
+        assert!(err.contains("prometheus_rw.auth.accepted_headers"), "{err}");
+    }
+
+    #[test]
     fn every_documented_auth_mode_is_accepted_on_the_server_listener() {
-        // The five AuthMode::from_str recognises, so known_mode can never
+        // The five AuthMode::parse recognises, so known_mode can never
         // drift away from the parser it guards.
         for mode in ["none", "header", "bearer"] {
             let mut config = auth_base();
             config.server.auth.mode = mode.to_string();
+            config.server.auth.accepted_headers = vec![AcceptedHeader {
+                name: "x-api-key".to_string(),
+                values: vec!["k".into()],
+            }];
             assert!(config.validate().is_ok(), "{mode} must be accepted");
         }
         for mode in ["mtls", "both"] {
             let mut config = auth_base();
             config.server.auth.mode = mode.to_string();
+            config.server.auth.accepted_headers = vec![AcceptedHeader {
+                name: "x-api-key".to_string(),
+                values: vec!["k".into()],
+            }];
             config.server.tls.enabled = true;
             config.server.tls.client_auth = "required".to_string();
             assert!(config.validate().is_ok(), "{mode} must be accepted");
         }
+    }
+
+    // -- the IP filter fails closed --
+
+    fn ip_filter(mode: &str, cidrs: &[&str]) -> IpFilterConfig {
+        IpFilterConfig {
+            mode: mode.to_string(),
+            cidrs: cidrs.iter().map(ToString::to_string).collect(),
+        }
+    }
+
+    /// Each of these reads as a filter and would admit what it names as barred.
+    #[test]
+    fn an_ip_filter_that_would_not_filter_refuses_to_start() {
+        for (filter, says) in [
+            (ip_filter("allowlist", &[]), "cidrs is empty"),
+            (ip_filter("allow", &["10.0.0.0/8"]), "'allow'"),
+            (
+                ip_filter("allowlist", &["10.0.0.0/8", "10.0.0/8"]),
+                "'10.0.0/8'",
+            ),
+            (ip_filter("denylist", &["192.0.2.1"]), "'192.0.2.1'"),
+        ] {
+            let mut config = auth_base();
+            config.server.ip_filter = filter.clone();
+            let err = config.validate().expect_err("must not start").to_string();
+            assert!(err.contains("server.ip_filter"), "{filter:?}: {err}");
+            assert!(err.contains(says), "{filter:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_valid_ip_filter_starts() {
+        for filter in [
+            ip_filter("disabled", &[]),
+            ip_filter("allowlist", &["10.0.0.0/8", "fd00::/8"]),
+            ip_filter("denylist", &[]),
+        ] {
+            let mut config = auth_base();
+            config.server.ip_filter = filter.clone();
+            assert!(config.validate().is_ok(), "{filter:?}");
+        }
+    }
+
+    #[test]
+    fn an_enabled_flow_listeners_ip_filter_is_checked_too() {
+        let mut config = flow_base();
+        config.flow.enabled = true;
+        config.flow.ip_filter = Some(ip_filter("allowlist", &[]));
+        let err = config.validate().expect_err("must not start").to_string();
+        assert!(err.contains("flow.ip_filter"), "{err}");
+
+        config.flow.enabled = false;
+        assert!(config.validate().is_ok(), "an inert block is not checked");
+    }
+
+    #[test]
+    fn a_split_flow_listeners_ip_filter_is_checked_too() {
+        let mut config = flow_base();
+        config.flow = serde_yaml_ng::from_str(
+            "split:\n  netflow:\n    ports: [2055]\n    topic: n\n  \
+             sflow:\n    ports: [6343]\n    topic: s\n    \
+             ip_filter:\n      mode: allowlist\n      cidrs: [\"not-a-cidr\"]\n",
+        )
+        .expect("flow yaml");
+        let err = config.validate().expect_err("must not start").to_string();
+        assert!(err.contains("flow.split.sflow.ip_filter"), "{err}");
+    }
+
+    // -- trusted proxies --
+
+    #[test]
+    fn a_trusted_proxy_that_is_not_a_cidr_refuses_to_start() {
+        let mut config = auth_base();
+        config.server.trusted_proxies = vec!["10.0.0.0/8".to_string(), "proxy".to_string()];
+        let err = config.validate().expect_err("must not start").to_string();
+        assert!(err.contains("server.trusted_proxies"), "{err}");
+        assert!(err.contains("'proxy'"), "{err}");
+    }
+
+    #[test]
+    fn trusted_proxies_default_to_none_and_parse_from_yaml() {
+        assert!(Config::default().server.trusted_proxies.is_empty());
+        let config: Config =
+            serde_yaml_ng::from_str("server:\n  trusted_proxies: [\"10.0.0.0/8\"]\n").unwrap();
+        assert_eq!(config.server.trusted_proxies, ["10.0.0.0/8"]);
     }
 
     // -- the webhook caller table --
