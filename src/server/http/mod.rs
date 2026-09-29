@@ -35,9 +35,9 @@ use tokio::time::{MissedTickBehavior, timeout};
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 use tower::limit::GlobalConcurrencyLimitLayer;
-use tower_governor::GovernorLayer;
 use tower_governor::governor::GovernorConfigBuilder;
 use tower_governor::key_extractor::SmartIpKeyExtractor;
+use tower_governor::{GovernorError, GovernorLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 use tracing::{debug, error, info, warn};
@@ -375,7 +375,7 @@ async fn serve(
         );
     }
 
-    let app = apply_server_limits(app, &config.server)?;
+    let app = apply_server_limits(app, &config.server, metrics.clone(), TRANSPORT)?;
 
     // The IP filter runs in the accept loops below, before any HTTP work, and
     // `connection_service` hands each request the peer address the rate
@@ -485,11 +485,15 @@ impl Accept {
 ///
 /// The governor holds one entry per client key it has seen, so every
 /// [`RATE_LIMIT_PRUNE_INTERVAL`] it drops the keys whose budget has refilled.
+///
+/// Each 429 the rate limit answers counts on `metrics` under `transport`.
 pub(crate) fn apply_server_limits(
     app: Router,
     server: &crate::config::ServerConfig,
+    metrics: Arc<Metrics>,
+    transport: &'static str,
 ) -> Result<Router> {
-    limit_server(app, server, RATE_LIMIT_PRUNE_INTERVAL).map(|(app, _)| app)
+    limit_server(app, server, metrics, transport, RATE_LIMIT_PRUNE_INTERVAL).map(|(app, _)| app)
 }
 
 /// How many client keys a listener's rate limiter holds; 0 with rate limiting off.
@@ -499,6 +503,8 @@ type RateLimitKeys = Box<dyn Fn() -> usize + Send + Sync>;
 fn limit_server(
     mut app: Router,
     server: &crate::config::ServerConfig,
+    metrics: Arc<Metrics>,
+    transport: &'static str,
     prune_every: Duration,
 ) -> Result<(Router, RateLimitKeys)> {
     let mut keys: RateLimitKeys = Box::new(|| 0);
@@ -536,7 +542,15 @@ fn limit_server(
         });
         keys = Box::new(move || limiter.upgrade().map_or(0, |limiter| limiter.len()));
 
-        app = app.layer(GovernorLayer::new(governor_conf));
+        // The governor answers before any inner layer runs, so its refusals are counted here.
+        app = app.layer(GovernorLayer::new(governor_conf).error_handler(
+            move |err: GovernorError| {
+                if matches!(err, GovernorError::TooManyRequests { .. }) {
+                    metrics.inc_rate_limited(transport);
+                }
+                Response::from(err)
+            },
+        ));
         info!(
             rps = rate_limit_config.requests_per_second,
             burst = rate_limit_config.burst,
@@ -1267,10 +1281,23 @@ mod tests {
         };
         let routes = || Router::new().route("/", get(|| async { "ok" }));
 
-        let (unpruned, unpruned_keys) =
-            limit_server(routes(), &server, Duration::from_secs(3_600)).unwrap();
-        let (pruned, pruned_keys) =
-            limit_server(routes(), &server, Duration::from_millis(20)).unwrap();
+        let metrics = Arc::new(Metrics::default());
+        let (unpruned, unpruned_keys) = limit_server(
+            routes(),
+            &server,
+            metrics.clone(),
+            TRANSPORT,
+            Duration::from_secs(3_600),
+        )
+        .unwrap();
+        let (pruned, pruned_keys) = limit_server(
+            routes(),
+            &server,
+            metrics,
+            TRANSPORT,
+            Duration::from_millis(20),
+        )
+        .unwrap();
         one_request_per_client(&unpruned, 100).await;
         one_request_per_client(&pruned, 100).await;
         assert_eq!(unpruned_keys(), 100);
@@ -1291,9 +1318,68 @@ mod tests {
         let server = crate::config::ServerConfig::default();
         assert!(!server.rate_limit.enabled);
         let routes = Router::new().route("/", get(|| async { "ok" }));
-        let (app, keys) = limit_server(routes, &server, RATE_LIMIT_PRUNE_INTERVAL).unwrap();
+        let (app, keys) = limit_server(
+            routes,
+            &server,
+            Arc::new(Metrics::default()),
+            TRANSPORT,
+            RATE_LIMIT_PRUNE_INTERVAL,
+        )
+        .unwrap();
         one_request_per_client(&app, 3).await;
         assert_eq!(keys(), 0);
+    }
+
+    /// Every 429 the rate limit answers is counted, and a request it lets
+    /// through is not.
+    #[tokio::test(flavor = "current_thread")]
+    async fn every_429_the_rate_limit_answers_is_counted() {
+        let totals = crate::metrics::testing::CounterTotals::default();
+        let _recorder = metrics::set_default_local_recorder(&totals);
+        let server = crate::config::ServerConfig {
+            max_concurrent_requests: 0,
+            // One request a second per client, so the three sent straight after the first are refused.
+            rate_limit: crate::config::RateLimitConfig {
+                enabled: true,
+                requests_per_second: 1,
+                burst: 1,
+            },
+            ..Default::default()
+        };
+        let metrics = Arc::new(Metrics::default());
+        let routes = Router::new().route("/", get(|| async { "ok" }));
+        let (app, _keys) = limit_server(
+            routes,
+            &server,
+            metrics.clone(),
+            "splunk_hec",
+            RATE_LIMIT_PRUNE_INTERVAL,
+        )
+        .unwrap();
+
+        let mut statuses = Vec::new();
+        for _ in 0..4 {
+            let request = axum::http::Request::get("/")
+                .header("x-forwarded-for", "198.51.100.7")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let response = tower::ServiceExt::oneshot(app.clone(), request)
+                .await
+                .unwrap();
+            statuses.push(response.status());
+        }
+
+        assert_eq!(
+            statuses,
+            [
+                StatusCode::OK,
+                StatusCode::TOO_MANY_REQUESTS,
+                StatusCode::TOO_MANY_REQUESTS,
+                StatusCode::TOO_MANY_REQUESTS,
+            ]
+        );
+        assert_eq!(metrics.get_rate_limited_total(), 3);
+        assert_eq!(totals.total("receiver_rate_limited_total"), 3);
     }
 
     #[test]

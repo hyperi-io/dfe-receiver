@@ -5,6 +5,8 @@
 > emit through scalo's `MetricsManager` (bare metric names, optional namespace
 > prefix), so the "Current State (Problems)" table and migration plan below are
 > largely resolved. Kept for context; not current guidance.
+>
+> The `dfe_` prefix this plan proposed was not adopted. Every metric name below is the one the runtime emits, except in the "Current State (Problems)" table, which records the names of its time.
 
 Common metrics naming, structure, and implementation patterns for all DFE Rust
 services. Designed for Prometheus scraping, Grafana dashboards, KEDA autoscaling,
@@ -32,24 +34,23 @@ and PagerDuty/OpsGenie alerting.
 
 ### Prefix
 
-All metrics use the `dfe_` platform prefix. Service differentiation comes from
-the Prometheus `job` label (set by scrape config), NOT from the metric name.
+Metric names carry no prefix unless `metrics.namespace` sets one, and it is empty by default. Service differentiation comes from the Prometheus `job` label (set by scrape config), NOT from the metric name.
 
 ```
-dfe_{domain}_{metric_name}_{unit}
+{domain}_{metric_name}_{unit}
 ```
 
 | Component | Rule | Examples |
 |-----------|------|---------|
-| Prefix | Always `dfe_` | |
-| Domain | `transport`, `pipeline`, `records`, `scaling` | `dfe_transport_sent_total` |
-| Unit suffix | `_total` (counters), `_bytes`, `_seconds` (histograms/gauges) | `dfe_pipeline_stall_seconds_total` |
+| Prefix | None unless `metrics.namespace` sets one | |
+| Domain | `transport`, `pipeline`, `records`, `scaling` | `transport_sent_total` |
+| Unit suffix | `_total` (counters), `_bytes`, `_seconds` (histograms/gauges) | `pipeline_stall_seconds_total` |
 
 ### Labels
 
 | Label | Values | When |
 |-------|--------|------|
-| `transport` | `kafka`, `grpc`, `loader`, `file` | All `dfe_transport_*` metrics |
+| `transport` | `kafka`, `grpc`, `loader`, `file` | All `transport_*` metrics |
 | `reason` | `missing_header`, `invalid_token`, `invalid_json`, etc. | Failure counters |
 | `table` | ClickHouse table name | dfe-loader insert metrics |
 | `protocol` | `http`, `grpc`, `otlp`, `syslog`, `splunk_hec`, etc. | dfe-receiver ingest metrics |
@@ -65,76 +66,76 @@ dfe_{domain}_{metric_name}_{unit}
 
 Every DFE service MUST emit the applicable metrics from each category.
 
-### Transport Metrics (`dfe_transport_*`)
+### Transport Metrics (`transport_*`)
 
 Metrics for downstream delivery (Kafka, gRPC, loader, file sinks).
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `dfe_transport_sent_total` | counter | `transport` | Messages sent successfully |
-| `dfe_transport_send_errors_total` | counter | `transport` | Messages that failed to send (fatal) |
-| `dfe_transport_backpressured_total` | counter | `transport` | Send attempts rejected due to backpressure |
-| `dfe_transport_refused_total` | counter | `transport` | Messages refused (queue full, no capacity) |
-| `dfe_transport_healthy` | gauge | `transport` | Transport health: 1=healthy, 0=unhealthy |
-| `dfe_transport_queue_size` | gauge | `transport` | Current messages in send queue |
-| `dfe_transport_queue_capacity` | gauge | `transport` | Maximum send queue capacity |
-| `dfe_transport_inflight` | gauge | `transport` | Messages in-flight (sent, awaiting ack) |
-| `dfe_transport_send_duration_seconds` | histogram | `transport` | Per-send latency |
+| `transport_sent_total` | counter | `transport` | Messages sent successfully |
+| `transport_send_errors_total` | counter | `transport` | Messages that failed to send (fatal) |
+| `transport_backpressured_total` | counter | `transport` | Send attempts rejected due to backpressure |
+| `transport_refused_total` | counter | `transport` | Messages refused (queue full, no capacity) |
+| `transport_healthy` | gauge | `transport` | Transport health: 1=healthy, 0=unhealthy |
+| `transport_queue_size` | gauge | `transport` | Current messages in send queue |
+| `transport_queue_capacity` | gauge | `transport` | Maximum send queue capacity |
+| `transport_inflight` | gauge | `transport` | Messages in-flight (sent, awaiting ack) |
+| `transport_send_duration_seconds` | histogram | `transport` | Per-send latency |
 
-### Pipeline Metrics (`dfe_pipeline_*`)
+### Pipeline Metrics (`pipeline_*`)
 
 Metrics for the processing pipeline itself.
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `dfe_pipeline_ready` | gauge | Pipeline readiness: 1=ready, 0=backpressured/stalled |
-| `dfe_pipeline_stall_seconds_total` | counter | Total seconds spent stalled due to backpressure |
+| `pipeline_ready` | gauge | Pipeline readiness: 1=ready, 0=backpressured/stalled |
+| `pipeline_stall_seconds_total` | counter | Total seconds spent stalled due to backpressure |
 
-### Record Metrics (`dfe_records_*`)
+### Record Metrics (`records_*`)
 
 Metrics for data records flowing through the pipeline.
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `dfe_records_received_total` | counter | `protocol` (receiver only) | Records received before filtering |
-| `dfe_records_delivered_total` | counter | | Records delivered to output |
-| `dfe_records_filtered_total` | counter | | Records dropped by filter expressions |
-| `dfe_records_dlq_total` | counter | | Records routed to dead letter queue |
+| `records_received_total` | counter | `protocol` (receiver only) | Records received before filtering |
+| `records_delivered_total` | counter | | Records delivered to output |
+| `records_filtered_total` | counter | | Records dropped by filter expressions |
+| `records_dlq_total` | counter | | Records routed to dead letter queue |
 
-### Scaling Metrics (`dfe_scaling_*`)
+### Scaling Metrics (`scaling_*`)
 
 Metrics for KEDA autoscaling. All services that run in K8s SHOULD emit these.
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `dfe_scaling_pressure` | gauge | Composite pressure score 0-100 (from scalo `ScalingPressure`) |
-| `dfe_scaling_circuit_open` | gauge | 1 if circuit breaker is open, 0 otherwise |
-| `dfe_scaling_memory_pressure` | gauge | Memory usage as fraction of limit (0.0-1.0) |
+| `scaling_pressure` | gauge | Composite pressure score 0-100 (from scalo `ScalingPressure`) |
+| `scaling_circuit_open` | gauge | 1 if circuit breaker is open, 0 otherwise |
+| `scaling_memory_pressure` | gauge | Memory usage as fraction of limit (0.0-1.0) |
 
-### Spool/Buffer Metrics (`dfe_spool_*`)
+### Spool/Buffer Metrics (`spool_*`)
 
 For services with disk spillover.
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `dfe_spool_bytes` | gauge | Current bytes in disk spool |
-| `dfe_spool_messages` | gauge | Current messages in disk spool |
-| `dfe_spool_disk_available` | gauge | 1 if disk has capacity, 0 if full |
+| `spool_bytes` | gauge | Current bytes in disk spool |
+| `spool_messages` | gauge | Current messages in disk spool |
+| `spool_disk_available` | gauge | 1 if disk has capacity, 0 if full |
 
 ### Process Metrics (automatic via scalo)
 
-These are auto-registered by `MetricsManager` when `enable_process_metrics: true`:
+These are auto-registered by `MetricsManager` when `enable_process_metrics: true`, and are not yet in the manifest (scalo-rs#137):
 
 | Metric | Type | Source |
 |--------|------|--------|
-| `{ns}_process_cpu_seconds_total` | gauge | sysinfo |
-| `{ns}_process_resident_memory_bytes` | gauge | sysinfo |
-| `{ns}_process_virtual_memory_bytes` | gauge | sysinfo |
-| `{ns}_process_open_fds` | gauge | /proc/{pid}/fd |
-| `{ns}_process_start_time_seconds` | gauge | startup epoch |
-| `{ns}_container_memory_limit_bytes` | gauge | cgroup |
-| `{ns}_container_memory_usage_bytes` | gauge | cgroup |
-| `{ns}_container_cpu_limit_cores` | gauge | cgroup |
+| `process_cpu_seconds_total` | gauge | sysinfo |
+| `process_resident_memory_bytes` | gauge | sysinfo |
+| `process_virtual_memory_bytes` | gauge | sysinfo |
+| `process_open_fds` | gauge | /proc/{pid}/fd |
+| `process_start_time_seconds` | gauge | startup epoch |
+| `container_memory_limit_bytes` | gauge | cgroup |
+| `container_memory_usage_bytes` | gauge | cgroup |
+| `container_cpu_limit_cores` | gauge | cgroup |
 
 ---
 
@@ -144,12 +145,12 @@ These PromQL expressions should be standardised across all DFE Grafana dashboard
 
 | Alert | Query | Threshold |
 |-------|-------|-----------|
-| Error rate | `rate(dfe_transport_send_errors_total[5m]) / rate(dfe_transport_sent_total[5m])` | > 0.01 (1%) |
-| Backpressure rate | `rate(dfe_transport_backpressured_total[5m])` | > 0 sustained |
-| Queue saturation | `dfe_transport_queue_size / dfe_transport_queue_capacity` | > 0.8 |
-| Pipeline stall | `dfe_pipeline_ready == 0` | > 60s |
-| Scaling pressure | `dfe_scaling_pressure` | > 70 (KEDA trigger) |
-| Spool disk full | `dfe_spool_disk_available == 0` | > 0s |
+| Error rate | `rate(transport_send_errors_total[5m]) / rate(transport_sent_total[5m])` | > 0.01 (1%) |
+| Backpressure rate | `rate(transport_backpressured_total[5m])` | > 0 sustained |
+| Queue saturation | `transport_queue_size / transport_queue_capacity` | > 0.8 |
+| Pipeline stall | `pipeline_ready == 0` | > 60s |
+| Scaling pressure | `scaling_pressure` | > 70 (KEDA trigger) |
+| Spool disk full | `spool_disk_available == 0` | > 0s |
 
 ---
 
@@ -163,7 +164,7 @@ Prometheus text output. No direct `prometheus` crate usage.
 ```rust
 use scalo::metrics::MetricsManager;
 
-let metrics = MetricsManager::new("dfe");
+let metrics = MetricsManager::new("");
 
 // Register metrics
 let sent = metrics.counter("transport_sent_total", "Messages sent successfully");
@@ -176,15 +177,14 @@ queue.set(42.0);
 latency.record(elapsed.as_secs_f64());
 ```
 
-The namespace is `dfe` (not service-specific). Service differentiation comes from
-the Prometheus `job` label in scrape config.
+An empty namespace records bare names, and it is the `metrics.namespace` default the service runtime reads from the config cascade. Service differentiation comes from the Prometheus `job` label in scrape config.
 
 ### Transport Label Pattern
 
 ```rust
 // Use metrics! macros with labels for transport discrimination
-counter!("dfe_transport_sent_total", "transport" => "kafka").increment(1);
-counter!("dfe_transport_sent_total", "transport" => "grpc").increment(1);
+counter!("transport_sent_total", "transport" => "kafka").increment(1);
+counter!("transport_sent_total", "transport" => "grpc").increment(1);
 ```
 
 ### Histogram Buckets
@@ -202,7 +202,7 @@ Use scalo's standard bucket helpers:
 triggers:
   - type: prometheus
     metadata:
-      query: "avg(dfe_scaling_pressure{job='dfe-receiver'})"
+      query: "avg(scaling_pressure{job='dfe-receiver'})"
       threshold: "70"
 ```
 
@@ -233,17 +233,17 @@ Which standard metrics apply to which service:
 
 | Metric | receiver | loader | fetcher | archiver | transform-vector |
 |--------|----------|--------|---------|----------|-----------------|
-| `dfe_transport_sent_total` | Yes | Yes | Yes | Yes | Via Vector |
-| `dfe_transport_send_errors_total` | Yes | Yes | Yes | Yes | Via Vector |
-| `dfe_transport_backpressured_total` | Yes | Yes | Yes | Yes | - |
-| `dfe_transport_healthy` | Yes | Yes | Yes | Yes | Yes |
-| `dfe_transport_queue_size` | Yes | Yes | - | Yes | Via Vector |
-| `dfe_pipeline_ready` | Yes | Yes | Yes | Yes | Yes |
-| `dfe_records_received_total` | Yes | Yes | Yes | Yes | Via Vector |
-| `dfe_records_delivered_total` | Yes | Yes | Yes | Yes | Via Vector |
-| `dfe_records_dlq_total` | Yes | Yes | - | Yes | - |
-| `dfe_scaling_pressure` | Yes | Yes | Yes | Yes | - |
-| `dfe_spool_bytes` | Yes | - | - | Yes | - |
+| `transport_sent_total` | Yes | Yes | Yes | Yes | Via Vector |
+| `transport_send_errors_total` | Yes | Yes | Yes | Yes | Via Vector |
+| `transport_backpressured_total` | Yes | Yes | Yes | Yes | - |
+| `transport_healthy` | Yes | Yes | Yes | Yes | Yes |
+| `transport_queue_size` | Yes | Yes | - | Yes | Via Vector |
+| `pipeline_ready` | Yes | Yes | Yes | Yes | Yes |
+| `records_received_total` | Yes | Yes | Yes | Yes | Via Vector |
+| `records_delivered_total` | Yes | Yes | Yes | Yes | Via Vector |
+| `records_dlq_total` | Yes | Yes | - | Yes | - |
+| `scaling_pressure` | Yes | Yes | Yes | Yes | - |
+| `spool_bytes` | Yes | - | - | Yes | - |
 
 ---
 

@@ -52,7 +52,7 @@ use crate::sink::file::FileSink;
 use crate::sink::grpc::GrpcSink;
 use crate::sink::kafka::KafkaSink;
 use crate::validation::depth::{self, MAX_PARSE_DEPTH};
-use crate::validation::{ValidationResult, Validator};
+use crate::validation::{self, ValidationResult, Validator};
 
 /// State-change flag for memory pressure log deduplication.
 static PRESSURE_LOGGED: AtomicBool = AtomicBool::new(false);
@@ -942,19 +942,16 @@ impl PipelineState {
             }
             ValidationResult::NotJson(reason) => {
                 debug!(reason = %reason, bytes = payload.len(), "Message refused, not JSON");
-                security::input_validation_failure("json_validate", &reason, None);
                 self.count_validation_failure(ValidationFailureReason::InvalidJson);
                 return Err(Error::Validation(reason));
             }
             ValidationResult::Dlq(reason) => {
                 debug!(reason = %reason, bytes = payload.len(), "Message validation failed, routing to DLQ");
-                security::input_validation_failure("json_validate", &reason, None);
                 self.count_validation_failure(ValidationFailureReason::MissingField);
                 return self.send_to_dlq(&payload, &reason, dispatch).await;
             }
             ValidationResult::Reject(reason) => {
                 debug!(reason = %reason, bytes = payload.len(), "Message rejected by validator");
-                security::input_validation_failure("json_validate", &reason, None);
                 self.count_validation_failure(ValidationFailureReason::MissingField);
                 return Err(Error::Validation(reason));
             }
@@ -1031,11 +1028,9 @@ impl PipelineState {
         Ok(())
     }
 
-    /// Count a record the validator turned away, when the pipeline has metrics.
+    /// Record a record the validator turned away.
     fn count_validation_failure(&self, reason: ValidationFailureReason) {
-        if let Some(ref metrics) = self.metrics {
-            metrics.inc_validation_failure(reason);
-        }
+        validation::record_validation_failure(self.metrics.as_deref(), "json_validate", reason);
     }
 
     /// Send one record to a Kafka topic: through the buffer at enqueue, or
@@ -2195,6 +2190,57 @@ mod tests {
             );
         }
         assert_eq!(metrics.get_validation_failures_total(), 4);
+    }
+
+    /// A flood of refused records writes one security line per reason, counts
+    /// every record, and puts none of the records' bytes in the log.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_flood_of_refused_records_logs_one_line_per_reason_and_no_record_bytes() {
+        const RECORDS: u64 = 5;
+        let metrics = Arc::new(Metrics::default());
+        let state = PipelineState::build(
+            SharedConfig::new(test_config()),
+            CancellationToken::new(),
+            None,
+            None,
+            Some(Arc::clone(&metrics)),
+        )
+        .await
+        .unwrap();
+        for logged in &crate::validation::VALIDATION_FAILURE_LOGGED {
+            logged.store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+        let lines = crate::metrics::testing::LogLines::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(lines.clone())
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+        let _default = tracing::subscriber::set_default(subscriber);
+
+        // The parser quotes the bytes around the fault, so this refusal's reason carries XYZZY.
+        let not_json = Bytes::from_static(br#"{"k":XYZZY}"#);
+        let too_deep =
+            Bytes::from("[".repeat(MAX_PARSE_DEPTH + 1) + &"]".repeat(MAX_PARSE_DEPTH + 1));
+        for _ in 0..RECORDS {
+            let err = state.process(not_json.clone()).await.expect_err("not JSON");
+            assert!(err.to_string().contains("XYZZY"), "{err}");
+            let err = state.process(too_deep.clone()).await.expect_err("too deep");
+            assert!(matches!(err, Error::Validation(_)), "{err}");
+        }
+
+        let log = lines.text();
+        assert_eq!(
+            log.lines().count(),
+            2,
+            "one line per reason for the whole flood: {log}"
+        );
+        assert!(log.contains("invalid_json"), "{log}");
+        assert!(log.contains("nesting_too_deep"), "{log}");
+        assert!(
+            !log.contains("XYZZY"),
+            "a record's bytes reached the log: {log}"
+        );
+        assert_eq!(metrics.get_validation_failures_total(), 2 * RECORDS);
     }
 
     #[tokio::test]
