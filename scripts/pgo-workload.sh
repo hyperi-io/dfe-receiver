@@ -24,10 +24,13 @@
 #
 # Behaviour:
 #   - Starts a single-node Redpanda broker (Kafka wire protocol) via docker run
-#   - Writes an ephemeral config enabling all listeners on fixed ports
+#   - Writes an ephemeral config: the listeners the driver feeds, source rules
+#     on data_stream.dataset as a deployment compiles them, delivery to Kafka
 #   - Starts the passed-in receiver binary in background
 #   - Waits for /readyz
-#   - Runs pgo-driver for the configured duration
+#   - Runs pgo-driver for the configured duration; it exits non-zero unless
+#     every listener took records and the receiver delivered them to Kafka
+#   - Fails unless each routed landing topic holds records
 #   - Cleans up (traps EXIT): kills receiver, stops + removes Kafka
 
 set -euo pipefail
@@ -48,7 +51,13 @@ if [[ ! -x "$RECEIVER_BIN" ]]; then
 fi
 
 DURATION="${PGO_WORKLOAD_DURATION_SECS:-300}"
-KAFKA_IMAGE="${PGO_WORKLOAD_KAFKA_IMAGE:-docker.redpanda.com/redpandadata/redpanda:v26.1.9}"
+# The broker equals dfe-infra versions.yaml services.redpanda-version, pinned by
+# digest so a rebuilt tag cannot change it. Tag and digest sit on their own
+# lines so the org Renovate regex can read them.
+# renovate: datasource=docker depName=docker.redpanda.com/redpandadata/redpanda
+KAFKA_TAG="v26.2.2"
+KAFKA_DIGEST="sha256:468bd13a9f2bd24794cb7fddc867c767fb1008b9a07b297b89fde48c564d7d96"
+KAFKA_IMAGE="${PGO_WORKLOAD_KAFKA_IMAGE:-docker.redpanda.com/redpandadata/redpanda:${KAFKA_TAG}@${KAFKA_DIGEST}}"
 KEEP="${PGO_WORKLOAD_KEEP:-0}"
 
 # Floor of 60s -- shorter workloads produce bad PGO profiles
@@ -136,6 +145,8 @@ echo "pgo-workload: starting Redpanda ($KAFKA_IMAGE)"
 # single C++/Seastar binary that boots in ~1s and fits a hard 512 MiB cap --
 # unlike the Kafka JVM (1.5-2 GB heap+metaspace) which OOMs the 4 GB arm64
 # runners alongside the PGO-instrumented binary + load driver. See gh #34.
+# The broker is addressed as 127.0.0.1: localhost resolves to ::1 first, where
+# the published port may be closed.
 KAFKA_CID=$(docker run -d --rm \
     -p 19092:9092 \
     "$KAFKA_IMAGE" \
@@ -144,7 +155,7 @@ KAFKA_CID=$(docker run -d --rm \
         --smp 1 \
         --memory 512M \
         --kafka-addr PLAINTEXT://0.0.0.0:9092 \
-        --advertise-kafka-addr PLAINTEXT://localhost:19092)
+        --advertise-kafka-addr PLAINTEXT://127.0.0.1:19092)
 
 echo "pgo-workload: Redpanda container: $KAFKA_CID"
 
@@ -171,7 +182,9 @@ done
 CONFIG_DIR=$(mktemp -d -t pgo-workload-XXXXXX)
 CONFIG_FILE="$CONFIG_DIR/config.yaml"
 
-cat > "$CONFIG_FILE" <<'YAML'
+# Every key below is a field of the receiver's Config or scalo's cascade; an
+# unknown key is ignored without a warning. Only the DLQ path is expanded.
+cat > "$CONFIG_FILE" <<YAML
 server:
   bind_address: "127.0.0.1:8080"
   max_body_size: 20971520
@@ -181,7 +194,7 @@ server:
     enabled: false
   auth:
     mode: "none"
-    include_common_header: false
+    include_common_header: true
 
 grpc:
   enabled: false
@@ -190,7 +203,7 @@ otlp:
   enabled: true
   grpc_bind_address: "127.0.0.1:4317"
   http_bind_address: "127.0.0.1:4318"
-  mode: "generic"
+  mode: "hyperdx"
   tls:
     enabled: false
   auth:
@@ -226,8 +239,10 @@ syslog:
   auth:
     mode: "none"
 
+# The Beats wire protocol, which Elastic Agent and Filebeat ship over.
 lumberjack:
-  enabled: false
+  enabled: true
+  bind_address: "127.0.0.1:5044"
 
 fluent:
   enabled: false
@@ -250,7 +265,7 @@ flow:
 
 kafka:
   brokers:
-    - "localhost:19092"
+    - "127.0.0.1:19092"
   client_id: "pgo-workload"
 
 loader:
@@ -259,9 +274,26 @@ loader:
 destinations:
   default: "kafka"
 
+# Source rules in the shape dfe-engine compiles from Source definitions:
+# key_value_set on the identifier the shipper already sends.
 routing:
-  default_source: "pgo"
+  default_source: "main"
   topic_suffix: "_land"
+  source_rules:
+    - field: "data_stream.dataset"
+      mode: "key_value_set"
+      match_value: "cisco_ios.log"
+      source: "cisco_ios"
+    - field: "data_stream.dataset"
+      mode: "key_value_set"
+      match_value: "cylance.protect"
+      source: "cylance"
+    - field: "event.dataset"
+      mode: "key_value_set"
+      match_value: "panw.panos"
+      source: "panw"
+  dlq:
+    file_path: "${CONFIG_DIR}/dlq"
 
 buffer:
   memory_limit: 0
@@ -271,7 +303,7 @@ metrics:
   enabled: true
   address: "127.0.0.1:9090"
 
-log:
+logger:
   format: "json"
   level: "warn"
 YAML
@@ -321,27 +353,38 @@ sleep 2
 
 echo "pgo-workload: driving load for ${DURATION}s via $PGO_DRIVER_PATH"
 
-PGO_DRIVER_DURATION_SECS="$DURATION" \
-PGO_DRIVER_HTTP_URL="http://127.0.0.1:8080/" \
-PGO_DRIVER_PROM_RW_URL="http://127.0.0.1:9091/api/v1/write" \
-PGO_DRIVER_HEC_URL="http://127.0.0.1:8088/services/collector/event" \
-PGO_DRIVER_OTLP_HTTP_URL="http://127.0.0.1:4318/v1/logs" \
-PGO_DRIVER_SYSLOG_UDP="127.0.0.1:5514" \
-PGO_DRIVER_SYSLOG_TCP="127.0.0.1:5515" \
-PGO_DRIVER_NETFLOW_ADDR="127.0.0.1:2055" \
-PGO_DRIVER_SFLOW_ADDR="127.0.0.1:6343" \
-    "$PGO_DRIVER_PATH"
+if ! PGO_DRIVER_DURATION_SECS="$DURATION" \
+    PGO_DRIVER_HTTP_URL="http://127.0.0.1:8080/ingest" \
+    PGO_DRIVER_READY_URL="http://127.0.0.1:8080/readyz" \
+    PGO_DRIVER_METRICS_URL="http://127.0.0.1:9090/metrics" \
+    PGO_DRIVER_LUMBERJACK_ADDR="127.0.0.1:5044" \
+    PGO_DRIVER_PROM_RW_URL="http://127.0.0.1:9091/api/v1/write" \
+    PGO_DRIVER_HEC_URL="http://127.0.0.1:8088/services/collector/event" \
+    PGO_DRIVER_OTLP_HTTP_URL="http://127.0.0.1:4318/v1/logs" \
+    PGO_DRIVER_SYSLOG_UDP="127.0.0.1:5514" \
+    PGO_DRIVER_SYSLOG_TCP="127.0.0.1:5515" \
+    PGO_DRIVER_NETFLOW_ADDR="127.0.0.1:2055" \
+    PGO_DRIVER_SFLOW_ADDR="127.0.0.1:6343" \
+    "$PGO_DRIVER_PATH"; then
+    echo "error: pgo-driver failed" >&2
+    tail -50 "$CONFIG_DIR/receiver.log" >&2
+    exit 1
+fi
 
 echo "pgo-workload: driver complete"
 
-# Give the receiver a moment to flush profile data to disk on normal shutdown
-sleep 3
+# Each landing topic the source rules route to must hold records, or the
+# profile never saw the routing path a deployment takes. The client runs on the
+# host network because the broker advertises the host port, which is closed
+# inside its own container.
+for topic in cisco_ios_land cylance_land panw_land main_land; do
+    if [[ -z "$(docker run --rm --network host "$KAFKA_IMAGE" \
+        topic consume "$topic" -n 1 -o :end -f '%o\n' -X brokers=127.0.0.1:19092 2>/dev/null)" ]]; then
+        echo "error: topic $topic received no records" >&2
+        docker run --rm --network host "$KAFKA_IMAGE" topic list -X brokers=127.0.0.1:19092 >&2
+        exit 1
+    fi
+    echo "pgo-workload: topic $topic has records"
+done
 
 echo "pgo-workload: done (receiver logs: $CONFIG_DIR/receiver.log)"
-# pgo-workload validated locally 2026-04-18: 879 rps, 0 errors, all 6 protocols clean
-# retrigger on hyperi-ci v1.9.2 published to PyPI
-# retrigger on hyperi-ci v1.9.4 channel resolver fix
-# Tier 2 canary retrigger on hyperi-ci v1.9.5 cargo-pgo PATH fix
-# Tier 2 canary on hyperi-ci v1.9.6 (workload binary as $1)
-# Tier 2 canary on hyperi-ci v1.10.0 universal tooling install
-# Tier 2 canary on hyperi-ci v1.10.1 (extended workload grace)
