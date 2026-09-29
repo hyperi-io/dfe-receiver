@@ -42,6 +42,11 @@ on:
         required: false
         default: ""
         description: "'true' to consent, for this run only, to shipping a skipped-optimisation build under a release tag."
+      optimize-tier:
+        type: string
+        required: false
+        default: ""
+        description: "'release' to build the release optimisation tier on a run that publishes nothing (Rust: PGO + BOLT)."
 
 permissions:
   contents: write
@@ -59,4 +64,5 @@ jobs:
       bump: ${{ inputs.bump || 'auto' }}
       skip-optimize: ${{ inputs.skip-optimize || '' }}
       release-unoptimized: ${{ inputs.release-unoptimized || '' }}
+      optimize-tier: ${{ inputs.optimize-tier || '' }}
     secrets: inherit
