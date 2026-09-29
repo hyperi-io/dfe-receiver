@@ -220,13 +220,13 @@ impl UdpFlowListener {
         }
 
         // Gate 2: per-source rate limit.
+        // No source address label: a spoofed UDP source would mint a series each.
         if let Some(rl) = &self.rate_limiter
             && !rl.try_acquire(src.ip())
         {
-            let src_str = src.ip().to_string();
             self.metrics
                 .rate_limited_total
-                .inc(&[("transport", "flow"), ("src_ip", &src_str)]);
+                .inc(&[("transport", "flow")]);
             return;
         }
 

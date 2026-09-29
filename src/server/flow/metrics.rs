@@ -2,16 +2,15 @@
 //!
 //! The trait surface (`FlowCounter`, `FlowLabelledCounter`, `FlowHistogram`,
 //! `FlowLabelledGauge`) lets listener / envelope tests use mocks. The
-//! `register()` constructor wires the production adapters against the global
-//! `metrics` crate recorder that scalo's `MetricsManager` installs.
-//! `register()` accepts a `&MetricsManager` reference for API symmetry with
-//! `ServiceMetrics::register`; the actual metric routing goes through the global
-//! recorder, so the parameter is only used to ensure the recorder has been
-//! installed before any metric handles are constructed.
+//! `register()` constructor registers every flow series on the
+//! `MetricsManager`, so the manifest lists it, and wires the production
+//! adapters against the global `metrics` crate recorder the manager installs.
 
 use std::sync::Arc;
 
-use scalo::metrics::MetricsManager;
+use scalo::metrics::{MetricType, MetricsManager};
+
+use crate::metrics::SeriesSpec;
 
 /// Initialized once per FlowHandler. Provides label-scoped counter handles.
 #[derive(Clone)]
@@ -53,11 +52,8 @@ pub trait FlowLabelledGauge: Send + Sync {
 // ---------------------------------------------------------------------------
 // Production adapters: route every trait call through the `metrics` crate
 // macros so the same `MetricsManager`-installed global recorder receives the
-// values. Metric names are looked up (and lazily registered) by the recorder
-// on the first emission -- there is no separate `register()` step against the
-// recorder. Names that overlap with `ServiceMetrics` (e.g. `transport_*`, which
-// the namespace prefixes to `dfe_transport_*`) are shared by design: both call
-// sites end up incrementing the same series.
+// values. `transport_send_duration_seconds` is the one name shared with
+// `ServiceMetrics`, which describes it; the flow series are in `FLOW_SERIES`.
 // ---------------------------------------------------------------------------
 
 /// Unlabelled counter routed through `metrics::counter!`.
@@ -112,13 +108,12 @@ impl FlowLabelledGauge for PromLabelledGauge {
 }
 
 impl FlowMetrics {
-    /// Build a `FlowMetrics` backed by the global `metrics` crate recorder
-    /// installed by scalo's `MetricsManager`. Idempotent on metric
-    /// names -- the `metrics` crate dedupes by `(name, labels)` so registering
-    /// the same series from multiple call sites (e.g. `ServiceMetrics` +
-    /// `FlowMetrics`) is intentional.
-    pub fn register(_mm: &MetricsManager) -> anyhow::Result<Self> {
-        describe_flow_metrics();
+    /// Register the flow series on `mm` and build a `FlowMetrics` backed by
+    /// the global `metrics` crate recorder it installed. Idempotent: the
+    /// manifest keeps the first descriptor of a name, and the `metrics` crate
+    /// dedupes a series by `(name, labels)`.
+    pub fn register(mm: &MetricsManager) -> anyhow::Result<Self> {
+        register_series_on(mm);
         Ok(Self {
             recv_total: Arc::new(PromCounter {
                 name: "transport_recv_total",
@@ -166,46 +161,91 @@ impl FlowMetrics {
     }
 }
 
-/// Describe flow-specific metrics that don't already have descriptions from
-/// `ServiceMetrics`. Shared `transport_*` series (namespace -> `dfe_transport_*`)
-/// are described by scalo.
-fn describe_flow_metrics() {
-    metrics::describe_counter!(
+/// Every series the flow handler records, bar the one `ServiceMetrics` owns.
+const FLOW_SERIES: &[SeriesSpec] = &[
+    (
+        "transport_recv_total",
+        MetricType::Counter,
+        &[],
+        "Flow datagrams received",
+    ),
+    (
+        "transport_recv_bytes_total",
+        MetricType::Counter,
+        &[],
+        "Flow datagram bytes received",
+    ),
+    (
+        "transport_decode_err_total",
+        MetricType::Counter,
+        &["transport", "reason"],
+        "Flow packets that failed to decode or render, by protocol and reason",
+    ),
+    (
+        "transport_drops_total",
+        MetricType::Counter,
+        &["transport", "reason"],
+        "Flow packets and records dropped, by protocol and reason",
+    ),
+    (
         "flow_invalid_packet_total",
-        "Flow packets rejected before decode (truncated, wrong magic, etc.)"
-    );
-    metrics::describe_counter!(
+        MetricType::Counter,
+        &["transport", "reason"],
+        "Flow packets rejected before decode (truncated, wrong magic, etc.)",
+    ),
+    (
         "flow_rate_limited_total",
-        "Flow packets dropped by the per-source UDP rate limiter"
-    );
-    metrics::describe_counter!(
+        MetricType::Counter,
+        &["transport"],
+        "Flow packets dropped by the per-source UDP rate limiter",
+    ),
+    (
         "flow_records_emitted_total",
-        "Flow records emitted downstream after decode and envelope rendering"
-    );
-    metrics::describe_histogram!(
+        MetricType::Counter,
+        &["transport", "mode"],
+        "Flow records emitted downstream after decode and envelope rendering",
+    ),
+    (
         "flow_records_per_packet",
-        "Distribution of flow records produced per UDP datagram"
-    );
-    metrics::describe_gauge!(
+        MetricType::Histogram,
+        &[],
+        "Distribution of flow records produced per UDP datagram",
+    ),
+    (
         "flow_template_cache_size",
-        "Current entries in the per-exporter NetFlow/IPFIX template cache"
-    );
-    metrics::describe_counter!(
+        MetricType::Gauge,
+        &["transport"],
+        "Current entries in the per-exporter NetFlow/IPFIX template cache",
+    ),
+    (
         "flow_template_evicted_total",
-        "Template cache evictions (LRU + per-exporter cap)"
-    );
-    metrics::describe_counter!(
+        MetricType::Counter,
+        &[],
+        "Template cache evictions (LRU + per-exporter cap)",
+    ),
+    (
         "flow_kernel_drops_total",
-        "UDP datagrams dropped by the kernel before our recv loop (from /proc/net/udp)"
-    );
-    metrics::describe_counter!(
+        MetricType::Counter,
+        &[],
+        "UDP datagrams dropped by the kernel before our recv loop (from /proc/net/udp)",
+    ),
+    (
         "flow_unknown_version_total",
-        "Flow packets whose first 16 bits matched no known protocol version"
-    );
-    metrics::describe_gauge!(
+        MetricType::Counter,
+        &[],
+        "Flow packets whose first 16 bits matched no known protocol version",
+    ),
+    (
         "handler_experimental",
-        "Set to 1 while a protocol handler is marked experimental"
-    );
+        MetricType::Gauge,
+        &["handler"],
+        "Set to 1 while a protocol handler is marked experimental",
+    ),
+];
+
+/// Register every flow series on `manager`, so the manifest lists it.
+pub(crate) fn register_series_on(manager: &MetricsManager) {
+    crate::metrics::register_series(manager, FLOW_SERIES, "flow");
 }
 
 // Mock metrics adapters. Available to unit tests (`cfg(test)`) and to benches

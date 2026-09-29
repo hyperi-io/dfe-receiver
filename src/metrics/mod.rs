@@ -8,25 +8,30 @@
 
 //! Prometheus metrics for dfe-receiver.
 //!
-//! Uses `MetricsManager` with namespace `dfe` and scalo
-//! `groups` for standardised metric groups. Receiver-specific
-//! counters emit BARE names (`receiver_*`) via the `metrics` crate with
-//! transport labels -- the namespace prefixes a single `dfe_` so the
-//! runtime-visible series are `dfe_receiver_*`.
+//! The scalo metric groups and `ServiceMetrics` carry the platform set. Every
+//! series the receiver records under its own `receiver_*` name is registered
+//! on the same `MetricsManager` with its type, labels and description, so the
+//! manifest `metrics-manifest` prints lists it. Names are bare unless
+//! `metrics.namespace` sets a prefix.
+//!
+//! `records_*` count records and `receiver_requests_*` count requests. The
+//! pipeline counts a record as received once, when a listener first offers
+//! it, and again as taken or refused for good.
 //!
 //! # Security Metrics
 //!
 //! Security-related metrics for alerting on potential attacks:
-//! - `dfe_receiver_auth_failures_total` - Authentication failures by reason
-//! - `dfe_receiver_validation_failures_total` - Validation failures by reason
-//! - `dfe_receiver_request_timeouts_total` - Request timeouts (slow loris indicator)
-//! - `dfe_receiver_body_size_rejected_total` - Oversized body rejections
-//! - `dfe_receiver_tls_handshake_failures_total` - TLS failures
+//! - `receiver_auth_failures_total` - Authentication failures by reason
+//! - `receiver_validation_failures_total` - Validation failures by reason
+//! - `receiver_request_timeouts_total` - Request timeouts (slow loris indicator)
+//! - `receiver_body_size_rejected_total` - Oversized body rejections
+//! - `receiver_tls_handshake_failures_total` - TLS failures
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::Duration;
 
+use scalo::metrics::MetricType;
 use scalo::metrics::MetricsManager;
 use scalo::metrics::ServiceMetrics;
 use scalo::metrics::groups::{
@@ -103,6 +108,9 @@ pub struct Metrics {
     messages_spilled: AtomicU64,
     messages_drained: AtomicU64,
     records_dropped: AtomicU64,
+    records_received: AtomicU64,
+    records_taken: AtomicU64,
+    records_refused: AtomicU64,
 
     // Security counters (atomics for test getter access)
     auth_failures_total: AtomicU64,
@@ -183,6 +191,9 @@ impl Metrics {
             messages_spilled: AtomicU64::new(0),
             messages_drained: AtomicU64::new(0),
             records_dropped: AtomicU64::new(0),
+            records_received: AtomicU64::new(0),
+            records_taken: AtomicU64::new(0),
+            records_refused: AtomicU64::new(0),
             auth_failures_total: AtomicU64::new(0),
             auth_failures_missing_header: AtomicU64::new(0),
             auth_failures_invalid_token: AtomicU64::new(0),
@@ -237,15 +248,9 @@ impl Metrics {
         let cb = CircuitBreakerMetrics::new(manager);
         let bp = BackpressureMetrics::new(manager);
         let dfe = ServiceMetrics::register(manager);
-        let _ = manager.counter_with_labels(
-            crate::sink::grpc::SEND_FAILURES_TOTAL,
-            "Records a gRPC destination did not take, by reason (unavailable: down, refusing \
-             connections, busy or past its deadline; failed: it answered with an error)",
-            &["reason"],
-            "receiver",
-        );
-
-        describe_receiver_metrics();
+        register_series(manager, RECEIVER_SERIES, "receiver");
+        // The flow series too, so the manifest is the same whether flow runs or not.
+        crate::server::flow::metrics::register_series_on(manager);
 
         let mut metrics = Self::with_scaling(scaling);
         metrics.dfe = Some(dfe);
@@ -262,7 +267,10 @@ impl Metrics {
     // ======================================================================
 
     /// Increment total requests counter.
-    /// Rate window sampled every 100 requests to reduce write lock contention.
+    ///
+    /// A request is not a record: the records it carries count in
+    /// [`add_records_received`](Self::add_records_received). The rate window
+    /// is sampled every 100 requests to reduce write lock contention.
     #[inline]
     pub fn inc_requests_total(&self, transport: &str) {
         let count = self.requests_total.fetch_add(1, Ordering::Relaxed) + 1;
@@ -271,11 +279,6 @@ impl Metrics {
         }
         metrics::counter!("receiver_requests_total", "transport" => transport.to_string())
             .increment(1);
-        // The app group's `records_received_total` is this same series, so it
-        // is counted here alone.
-        if let Some(ref dfe) = self.dfe {
-            dfe.records_received(1);
-        }
     }
 
     /// Increment successful requests counter.
@@ -287,12 +290,6 @@ impl Metrics {
             "transport" => transport.to_string()
         )
         .increment(1);
-        if let Some(ref dfe) = self.dfe {
-            dfe.records_delivered(1);
-        }
-        if let Some(ref app) = self.app_group {
-            app.record_processed(1);
-        }
     }
 
     /// Increment error requests counter.
@@ -304,9 +301,63 @@ impl Metrics {
             "transport" => transport.to_string()
         )
         .increment(1);
-        if let Some(ref app) = self.app_group {
-            app.record_error(1);
+    }
+
+    // ======================================================================
+    // Record counters (no transport label)
+    // ======================================================================
+
+    /// Count records a listener offered the pipeline, once per record.
+    ///
+    /// `records_received_total` is owned by `ServiceMetrics`; the app group's
+    /// handle names the same series, so it is counted here alone.
+    #[inline]
+    pub fn add_records_received(&self, count: u64) {
+        self.records_received.fetch_add(count, Ordering::Relaxed);
+        if let Some(ref dfe) = self.dfe {
+            dfe.records_received(count);
         }
+    }
+
+    /// Count what the pipeline made of records: `taken` in
+    /// `records_processed_total` and `records_delivered_total`, `refused` for
+    /// good in `records_error_total`.
+    #[inline]
+    pub fn add_records_settled(&self, taken: u64, refused: u64) {
+        // Zero is skipped: a per-record listener settles one record per call.
+        if taken > 0 {
+            self.records_taken.fetch_add(taken, Ordering::Relaxed);
+            if let Some(ref dfe) = self.dfe {
+                dfe.records_delivered(taken);
+            }
+            if let Some(ref app) = self.app_group {
+                app.record_processed(taken);
+            }
+        }
+        if refused > 0 {
+            self.records_refused.fetch_add(refused, Ordering::Relaxed);
+            if let Some(ref app) = self.app_group {
+                app.record_error(refused);
+            }
+        }
+    }
+
+    /// Get the records received count.
+    #[inline]
+    pub fn get_records_received(&self) -> u64 {
+        self.records_received.load(Ordering::Relaxed)
+    }
+
+    /// Get the records taken count.
+    #[inline]
+    pub fn get_records_taken(&self) -> u64 {
+        self.records_taken.load(Ordering::Relaxed)
+    }
+
+    /// Get the records refused-for-good count.
+    #[inline]
+    pub fn get_records_refused(&self) -> u64 {
+        self.records_refused.load(Ordering::Relaxed)
     }
 
     /// Record a per-protocol parse/decode failure.
@@ -400,6 +451,13 @@ impl Metrics {
     #[inline]
     pub fn add_messages_drained(&self, count: u64) {
         self.messages_drained.fetch_add(count, Ordering::Relaxed);
+    }
+
+    /// Publish the destination buffers' running totals: records held back from
+    /// their sink, and records sent on from the hold since.
+    pub fn set_buffered_totals(&self, spilled: u64, drained: u64) {
+        metrics::counter!("receiver_messages_spilled_total").absolute(spilled);
+        metrics::counter!("receiver_messages_drained_total").absolute(drained);
     }
 
     // ======================================================================
@@ -767,100 +825,179 @@ impl Metrics {
     }
 }
 
-/// Describe receiver-specific metrics that take labels.
-fn describe_receiver_metrics() {
-    metrics::describe_counter!(
+/// One series as the manifest describes it: name, type, label keys, description.
+pub(crate) type SeriesSpec = (
+    &'static str,
+    MetricType,
+    &'static [&'static str],
+    &'static str,
+);
+
+/// Every series the receiver records under its own name.
+const RECEIVER_SERIES: &[SeriesSpec] = &[
+    (
         "receiver_requests_total",
-        "Total requests received by transport"
-    );
-    metrics::describe_counter!(
+        MetricType::Counter,
+        &["transport"],
+        "Requests received, by transport; records_received_total counts the records they carry",
+    ),
+    (
         "receiver_requests_success_total",
-        "Total successful requests by transport"
-    );
-    metrics::describe_counter!(
+        MetricType::Counter,
+        &["transport"],
+        "Total successful requests by transport",
+    ),
+    (
         "receiver_requests_error_total",
-        "Total failed requests by transport"
-    );
-    metrics::describe_counter!(
+        MetricType::Counter,
+        &["transport"],
+        "Total failed requests by transport",
+    ),
+    (
         "receiver_parse_failures_total",
-        "Per-protocol ingress parse/decode failures by transport"
-    );
-    metrics::describe_counter!(
+        MetricType::Counter,
+        &["transport"],
+        "Per-protocol ingress parse/decode failures by transport",
+    ),
+    (
         "receiver_bytes_received_total",
-        "Total bytes received by transport"
-    );
-    metrics::describe_counter!(
-        "receiver_auth_failures_total",
-        "Authentication failures by reason"
-    );
-    metrics::describe_counter!(
-        "receiver_validation_failures_total",
-        "Validation failures by reason"
-    );
-    metrics::describe_counter!(
-        "receiver_request_timeouts_total",
-        "Request timeouts (slow loris indicator)"
-    );
-    metrics::describe_counter!(
-        "receiver_body_size_rejected_total",
-        "Oversized body rejections"
-    );
-    metrics::describe_counter!(
-        "receiver_tls_handshake_failures_total",
-        "TLS handshake failures"
-    );
-    metrics::describe_counter!(
-        "receiver_messages_spilled_total",
-        "Messages spilled to disk"
-    );
-    metrics::describe_counter!(
-        "receiver_messages_drained_total",
-        "Messages drained from spool"
-    );
-    metrics::describe_counter!(
-        "receiver_records_rejected_total",
-        "Records a destination refused for good, by outcome (dead_lettered, dropped or dlq_refused)"
-    );
-    metrics::describe_counter!(
+        MetricType::Counter,
+        &["transport"],
+        "Total bytes received by transport",
+    ),
+    (
         "receiver_records_dropped_total",
-        "Records dropped with no way to tell the sender, by transport and reason"
-    );
-
-    // Request latency
-    metrics::describe_histogram!(
+        MetricType::Counter,
+        &["transport", "reason"],
+        "Records dropped with no way to tell the sender, by transport and reason",
+    ),
+    (
         "receiver_request_duration_seconds",
-        "End-to-end request processing latency"
-    );
-    metrics::describe_gauge!(
+        MetricType::Histogram,
+        &["transport"],
+        "End-to-end request processing latency",
+    ),
+    (
         "receiver_active_connections",
-        "Currently active inbound connections"
-    );
-
-    // Kafka outbound
-    metrics::describe_histogram!(
+        MetricType::Gauge,
+        &["transport"],
+        "Currently active inbound connections",
+    ),
+    (
+        "receiver_auth_failures_total",
+        MetricType::Counter,
+        &["reason"],
+        "Authentication failures by reason",
+    ),
+    (
+        "receiver_validation_failures_total",
+        MetricType::Counter,
+        &["reason"],
+        "Validation failures by reason",
+    ),
+    (
+        "receiver_request_timeouts_total",
+        MetricType::Counter,
+        &[],
+        "Request timeouts (slow loris indicator)",
+    ),
+    (
+        "receiver_body_size_rejected_total",
+        MetricType::Counter,
+        &[],
+        "Oversized body rejections",
+    ),
+    (
+        "receiver_tls_handshake_failures_total",
+        MetricType::Counter,
+        &[],
+        "TLS handshake failures",
+    ),
+    (
+        "receiver_records_rejected_total",
+        MetricType::Counter,
+        &["outcome"],
+        "Records a destination refused for good, by outcome (dead_lettered, dropped or dlq_refused)",
+    ),
+    (
+        "receiver_messages_spilled_total",
+        MetricType::Counter,
+        &[],
+        "Records a destination's buffer held back from its sink, in memory or in the disk spool",
+    ),
+    (
+        "receiver_messages_drained_total",
+        MetricType::Counter,
+        &[],
+        "Held-back records that have since left the buffer for the sink",
+    ),
+    (
         "receiver_kafka_send_duration_seconds",
-        "Kafka producer send latency"
-    );
-    metrics::describe_counter!("receiver_kafka_sends_total", "Total Kafka sends");
-    metrics::describe_counter!(
+        MetricType::Histogram,
+        &[],
+        "Time librdkafka took to queue a record",
+    ),
+    (
+        "receiver_kafka_sends_total",
+        MetricType::Counter,
+        &[],
+        "Records librdkafka queued",
+    ),
+    (
         "receiver_kafka_bytes_sent_total",
-        "Total bytes sent to Kafka"
-    );
-    metrics::describe_counter!("receiver_kafka_send_errors_total", "Kafka send errors");
-    metrics::describe_counter!(
+        MetricType::Counter,
+        &[],
+        "Bytes queued to Kafka",
+    ),
+    (
+        "receiver_kafka_send_errors_total",
+        MetricType::Counter,
+        &[],
+        "Records librdkafka refused to queue",
+    ),
+    (
         "receiver_kafka_delivered_total",
-        "Records a broker acknowledged, from librdkafka delivery reports"
-    );
-    metrics::describe_counter!(
+        MetricType::Counter,
+        &[],
+        "Records a broker acknowledged, from librdkafka delivery reports",
+    ),
+    (
         "receiver_kafka_delivery_failures_total",
-        "Records no broker confirmed, by librdkafka error code; a timed-out record may still have been written"
-    );
-
-    // EPS
-    metrics::describe_gauge!(
+        MetricType::Counter,
+        &["reason"],
+        "Records no broker confirmed, by librdkafka error code; a timed-out record may still have been written",
+    ),
+    (
         "receiver_events_per_second",
-        "Current events per second (1s sample)"
-    );
+        MetricType::Gauge,
+        &[],
+        "Requests per second over the last minute; a request carries one record or more",
+    ),
+    (
+        crate::sink::grpc::SEND_FAILURES_TOTAL,
+        MetricType::Counter,
+        &["reason"],
+        "Records a gRPC destination did not take, by reason (unavailable: down, refusing \
+         connections, busy or past its deadline; failed: it answered with an error)",
+    ),
+];
+
+/// Register every series in `series` on `manager` under `group`, so the
+/// manifest lists it with its type and labels.
+pub(crate) fn register_series(manager: &MetricsManager, series: &[SeriesSpec], group: &str) {
+    for &(name, kind, labels, description) in series {
+        match kind {
+            MetricType::Counter => {
+                let _ = manager.counter_with_labels(name, description, labels, group);
+            }
+            MetricType::Gauge => {
+                let _ = manager.gauge_with_labels(name, description, labels, group);
+            }
+            MetricType::Histogram => {
+                let _ = manager.histogram_with_labels(name, description, labels, group, None);
+            }
+        }
+    }
 }
 
 impl Default for Metrics {
@@ -871,30 +1008,35 @@ impl Default for Metrics {
     }
 }
 
+/// A recorder for tests that read what a counter recorded.
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod testing {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    /// Counts one named counter across every label set, as a `sum()` over the
-    /// name reads it.
-    struct CountingRecorder {
-        name: &'static str,
-        hits: Arc<AtomicU64>,
+    use parking_lot::Mutex;
+
+    /// Sums each counter across its label sets, as a `sum()` over the name reads it.
+    ///
+    /// Install it with `metrics::set_default_local_recorder` before the metrics
+    /// are built: a metric group binds its handles when it is built.
+    #[derive(Default)]
+    pub(crate) struct CounterTotals {
+        counters: Mutex<HashMap<String, Arc<AtomicU64>>>,
     }
 
-    struct CountingHandle(Arc<AtomicU64>);
-
-    impl metrics::CounterFn for CountingHandle {
-        fn increment(&self, value: u64) {
-            self.0.fetch_add(value, Ordering::Relaxed);
-        }
-
-        fn absolute(&self, value: u64) {
-            self.0.store(value, Ordering::Relaxed);
+    impl CounterTotals {
+        /// What counter `name` holds, 0 when nothing recorded it.
+        pub(crate) fn total(&self, name: &str) -> u64 {
+            self.counters
+                .lock()
+                .get(name)
+                .map_or(0, |cell| cell.load(Ordering::Relaxed))
         }
     }
 
-    impl metrics::Recorder for CountingRecorder {
+    impl metrics::Recorder for CounterTotals {
         fn describe_counter(
             &self,
             _: metrics::KeyName,
@@ -924,11 +1066,13 @@ mod tests {
             key: &metrics::Key,
             _: &metrics::Metadata<'_>,
         ) -> metrics::Counter {
-            if key.name() == self.name {
-                metrics::Counter::from_arc(Arc::new(CountingHandle(Arc::clone(&self.hits))))
-            } else {
-                metrics::Counter::noop()
-            }
+            let cell = Arc::clone(
+                self.counters
+                    .lock()
+                    .entry(key.name().to_string())
+                    .or_default(),
+            );
+            metrics::Counter::from_arc(cell)
         }
 
         fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
@@ -943,17 +1087,12 @@ mod tests {
             metrics::Histogram::noop()
         }
     }
+}
 
-    /// Run `f` with a thread-local recorder counting `name`.
-    fn counted(name: &'static str, f: impl FnOnce()) -> u64 {
-        let hits = Arc::new(AtomicU64::new(0));
-        let recorder = CountingRecorder {
-            name,
-            hits: Arc::clone(&hits),
-        };
-        metrics::with_local_recorder(&recorder, f);
-        hits.load(Ordering::Relaxed)
-    }
+#[cfg(test)]
+mod tests {
+    use super::testing::CounterTotals;
+    use super::*;
 
     #[test]
     fn the_destination_send_failure_counter_is_in_the_manifest() {
@@ -972,19 +1111,170 @@ mod tests {
         assert_eq!(entry.labels, vec!["reason".to_string()]);
     }
 
+    /// Every Rust source file under `dir`, read whole.
+    fn rust_sources(dir: &std::path::Path) -> Vec<String> {
+        let mut sources = Vec::new();
+        for entry in std::fs::read_dir(dir).expect("read the source tree") {
+            let path = entry.expect("a directory entry").path();
+            if path.is_dir() {
+                sources.extend(rust_sources(&path));
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                sources.push(std::fs::read_to_string(&path).expect("read a source file"));
+            }
+        }
+        sources
+    }
+
+    /// The names every `counter!`, `gauge!` and `histogram!` under `src/`
+    /// records, and the first argument of each that names its metric through
+    /// a binding rather than a string literal.
+    fn recorded_names() -> (
+        std::collections::BTreeSet<String>,
+        std::collections::BTreeSet<String>,
+    ) {
+        let (mut literal, mut bound) = (
+            std::collections::BTreeSet::new(),
+            std::collections::BTreeSet::new(),
+        );
+        let src = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
+        // Built at run time, so this scan does not find its own patterns.
+        let opens = ["counter", "gauge", "histogram"].map(|kind| format!("{kind}!("));
+        for source in rust_sources(src) {
+            for open in &opens {
+                let mut rest = source.as_str();
+                while let Some(at) = rest.find(open.as_str()) {
+                    let described = rest[..at].ends_with("describe_");
+                    rest = rest[at + open.len()..].trim_start();
+                    if described {
+                        continue;
+                    }
+                    if let Some(quoted) = rest.strip_prefix('"') {
+                        let end = quoted.find('"').expect("a closed string literal");
+                        literal.insert(quoted[..end].to_string());
+                    } else {
+                        let end = rest.find([',', ')']).unwrap_or(rest.len());
+                        bound.insert(rest[..end].trim().to_string());
+                    }
+                }
+            }
+        }
+        (literal, bound)
+    }
+
+    /// The names the flow handler's adapters are built with.
+    fn flow_adapter_names() -> Vec<String> {
+        let source = include_str!("../server/flow/metrics.rs");
+        source
+            .split("name: \"")
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next())
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    /// Every metric the receiver records is in the manifest `metrics-manifest`
+    /// prints, so no series reaches Prometheus undescribed.
     #[test]
-    fn a_request_counts_once_in_records_received_total() {
+    fn every_metric_the_receiver_records_is_in_the_manifest() {
         let manager = MetricsManager::with_config(scalo::metrics::MetricsConfig::offline(""));
-        let hits = counted("records_received_total", || {
+        let _metrics = Metrics::register_on(
+            Arc::new(crate::config::ScalingConfig::default().build_pressure()),
+            &manager,
+        );
+        let manifest: std::collections::BTreeSet<String> = manager
+            .registry()
+            .manifest()
+            .metrics
+            .into_iter()
+            .map(|descriptor| descriptor.name)
+            .collect();
+
+        let (mut recorded, bound) = recorded_names();
+        assert_eq!(
+            bound,
+            ["SEND_FAILURES_TOTAL", "self.name"]
+                .map(ToString::to_string)
+                .into(),
+            "a metric named through a new binding needs a place in this test"
+        );
+        recorded.insert(crate::sink::grpc::SEND_FAILURES_TOTAL.to_string());
+        recorded.extend(flow_adapter_names());
+        assert!(recorded.len() > 30, "the scan found {recorded:?}");
+
+        let missing: Vec<&String> = recorded
+            .iter()
+            .filter(|name| !manifest.contains(*name))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "recorded but not in the manifest: {missing:?}"
+        );
+    }
+
+    /// A request is not a record: the requests counters leave every
+    /// `records_*` series alone.
+    #[test]
+    fn requests_leave_the_record_counters_alone() {
+        let manager = MetricsManager::with_config(scalo::metrics::MetricsConfig::offline(""));
+        let totals = CounterTotals::default();
+        metrics::with_local_recorder(&totals, || {
             let metrics = Metrics::register_on(
                 Arc::new(crate::config::ScalingConfig::default().build_pressure()),
                 &manager,
             );
-            for _ in 0..3 {
-                metrics.inc_requests_total("http");
-            }
+            metrics.inc_requests_total("http");
+            metrics.inc_requests_success("http");
+            metrics.inc_requests_error("http");
         });
-        assert_eq!(hits, 3, "three requests received read as three");
+
+        assert_eq!(totals.total("receiver_requests_total"), 1);
+        for name in [
+            "records_received_total",
+            "records_processed_total",
+            "records_delivered_total",
+            "records_error_total",
+        ] {
+            assert_eq!(totals.total(name), 0, "{name}");
+        }
+    }
+
+    /// Records count one each, received and then taken or refused.
+    #[test]
+    fn records_count_one_each() {
+        let manager = MetricsManager::with_config(scalo::metrics::MetricsConfig::offline(""));
+        let totals = CounterTotals::default();
+        let metrics = metrics::with_local_recorder(&totals, || {
+            let metrics = Metrics::register_on(
+                Arc::new(crate::config::ScalingConfig::default().build_pressure()),
+                &manager,
+            );
+            metrics.add_records_received(5);
+            metrics.add_records_settled(3, 1);
+            metrics
+        });
+
+        assert_eq!(totals.total("records_received_total"), 5);
+        assert_eq!(totals.total("records_processed_total"), 3);
+        assert_eq!(totals.total("records_delivered_total"), 3);
+        assert_eq!(totals.total("records_error_total"), 1);
+        assert_eq!(metrics.get_records_received(), 5);
+        assert_eq!(metrics.get_records_taken(), 3);
+        assert_eq!(metrics.get_records_refused(), 1);
+    }
+
+    /// The buffers' running totals reach their counters, and a lower reading
+    /// never takes a counter backwards.
+    #[test]
+    fn buffered_totals_reach_their_counters() {
+        let metrics = Metrics::default();
+        let totals = CounterTotals::default();
+        metrics::with_local_recorder(&totals, || {
+            metrics.set_buffered_totals(7, 4);
+            metrics.set_buffered_totals(6, 3);
+        });
+
+        assert_eq!(totals.total("receiver_messages_spilled_total"), 7);
+        assert_eq!(totals.total("receiver_messages_drained_total"), 4);
     }
 
     #[test]

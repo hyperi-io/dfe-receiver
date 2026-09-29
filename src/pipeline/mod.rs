@@ -247,6 +247,15 @@ enum DestinationSink {
     Discard,
 }
 
+/// Whether a batch reaches the pipeline for the first time or again.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Offer {
+    /// First offered, so its records count as received.
+    First,
+    /// Offered again by a listener holding it for a retry: already counted.
+    Again,
+}
+
 /// Where a batch's records go.
 #[derive(Clone, Copy)]
 enum Target<'a> {
@@ -307,7 +316,8 @@ pub struct PipelineState {
     sink_confirmation: SinkConfirmation,
     /// The listeners readiness waits on, `None` until the server declares them.
     listeners: RwLock<Option<Vec<BoundAddr>>>,
-    /// Counts records refused before validation; `None` in tests built without it.
+    /// Counts every record received and settled, and those refused before
+    /// validation; `None` in tests built without it.
     metrics: Option<Arc<Metrics>>,
 }
 
@@ -648,6 +658,16 @@ impl PipelineState {
     /// This is a HOT PATH function.
     #[inline]
     pub async fn process(&self, payload: Bytes) -> Result<()> {
+        self.count_received(1);
+        let mut outcome = BatchOutcome::default();
+        let _ = outcome.record(self.process_one(payload).await);
+        self.count_settled(&outcome);
+        outcome.into_error().map_or(Ok(()), Err)
+    }
+
+    /// [`process`](Self::process), uncounted.
+    #[inline]
+    async fn process_one(&self, payload: Bytes) -> Result<()> {
         self.brake()?;
 
         // Tracked for the life of this future.
@@ -666,7 +686,7 @@ impl PipelineState {
     /// good does not stop the rest; a retryable failure does, see
     /// [`BatchOutcome`].
     pub async fn process_batch(&self, payloads: &[Bytes]) -> BatchOutcome {
-        self.run(payloads, Target::Routed, None).await
+        self.run(payloads, Target::Routed, None, Offer::First).await
     }
 
     /// Process a batch for a listener with the setting `acks`, whose sender
@@ -681,7 +701,24 @@ impl PipelineState {
         acks: &Acks,
         sender_deadline: Option<Duration>,
     ) -> BatchOutcome {
-        self.run(payloads, Target::Routed, Some((acks, sender_deadline)))
+        self.run(
+            payloads,
+            Target::Routed,
+            Some((acks, sender_deadline)),
+            Offer::First,
+        )
+        .await
+    }
+
+    /// [`process_batch_acked`](Self::process_batch_acked) with no sender
+    /// deadline, for a listener that may offer the same records again.
+    pub(crate) async fn offer_batch_acked(
+        &self,
+        payloads: &[Bytes],
+        acks: &Acks,
+        offer: Offer,
+    ) -> BatchOutcome {
+        self.run(payloads, Target::Routed, Some((acks, None)), offer)
             .await
     }
 
@@ -695,12 +732,48 @@ impl PipelineState {
         topic: &str,
         acks: &Acks,
     ) -> BatchOutcome {
-        self.run(payloads, Target::Topic(topic), Some((acks, None)))
-            .await
+        self.run(
+            payloads,
+            Target::Topic(topic),
+            Some((acks, None)),
+            Offer::First,
+        )
+        .await
+    }
+
+    /// Count a batch's records as received on its first offer, and what the
+    /// pipeline made of them on every offer.
+    async fn run(
+        &self,
+        payloads: &[Bytes],
+        target: Target<'_>,
+        hold: Option<(&Acks, Option<Duration>)>,
+        offer: Offer,
+    ) -> BatchOutcome {
+        if matches!(offer, Offer::First) {
+            self.count_received(payloads.len());
+        }
+        let outcome = self.run_batch(payloads, target, hold).await;
+        self.count_settled(&outcome);
+        outcome
+    }
+
+    /// Count records a listener offered for the first time.
+    fn count_received(&self, records: usize) {
+        if let Some(ref metrics) = self.metrics {
+            metrics.add_records_received(records as u64);
+        }
+    }
+
+    /// Count the records `outcome` settled, taken or refused for good.
+    fn count_settled(&self, outcome: &BatchOutcome) {
+        if let Some(ref metrics) = self.metrics {
+            metrics.add_records_settled(outcome.accepted as u64, outcome.rejected as u64);
+        }
     }
 
     /// Run a batch to `target`, held on a ticket when `hold` admits one.
-    async fn run(
+    async fn run_batch(
         &self,
         payloads: &[Bytes],
         target: Target<'_>,
@@ -1159,23 +1232,31 @@ impl PipelineState {
 
         // Kafka sink stats
         let mut total_queue = 0u64;
+        let (mut spilled, mut drained) = (0u64, 0u64);
         if let Some(ref kafka) = self.kafka
             && let Some(stats) = kafka.stats().await
         {
             total_queue += stats.queue_size as u64;
+            spilled += stats.queued_total;
+            drained += stats.drained_total;
             metrics.set_circuit_state(stats.circuit_state, stats.consecutive_failures);
         }
 
         // Named destination stats
         for sink in self.destinations.values() {
-            let queue = match sink {
-                DestinationSink::Bus { .. } | DestinationSink::Discard => 0,
-                DestinationSink::Grpc(s) => s.stats().await.map_or(0, |stats| stats.queue_size),
+            let stats = match sink {
+                DestinationSink::Bus { .. } | DestinationSink::Discard => None,
+                DestinationSink::Grpc(s) => s.stats().await,
             };
-            total_queue += queue as u64;
+            if let Some(stats) = stats {
+                total_queue += stats.queue_size as u64;
+                spilled += stats.queued_total;
+                drained += stats.drained_total;
+            }
         }
 
         metrics.set_batch_queue_size(total_queue);
+        metrics.set_buffered_totals(spilled, drained);
 
         // EPS gauge -- events per second from the rate window
         metrics::gauge!("receiver_events_per_second").set(metrics.request_rate());
@@ -1496,6 +1577,7 @@ impl Orchestrator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metrics::testing::CounterTotals;
 
     fn test_config() -> Config {
         let mut config = Config::default();
@@ -2439,6 +2521,142 @@ mod tests {
     // ---------------------------------------------------------------------
     // Additional edge-case tests (non-trivial paths)
     // ---------------------------------------------------------------------
+
+    /// A pipeline counting on the receiver's metrics, as the orchestrator
+    /// builds it, on `guard` when one is given.
+    ///
+    /// Call with the test's recorder already in place: the app metric group
+    /// binds its handles when it is built.
+    async fn counting_state(
+        config: Config,
+        guard: Option<Arc<MemoryGuard>>,
+    ) -> (PipelineState, Arc<Metrics>) {
+        let manager =
+            scalo::metrics::MetricsManager::with_config(scalo::metrics::MetricsConfig::offline(""));
+        let metrics = Arc::new(Metrics::register_on(
+            Arc::new(config.scaling.build_pressure()),
+            &manager,
+        ));
+        let state = Box::pin(PipelineState::build(
+            SharedConfig::new(config),
+            CancellationToken::new(),
+            None,
+            guard,
+            Some(Arc::clone(&metrics)),
+        ))
+        .await
+        .unwrap();
+        (state, metrics)
+    }
+
+    /// Every record of a batch counts once as received, and each one taken as
+    /// processed and delivered.
+    #[tokio::test]
+    async fn a_batch_counts_every_record_it_carries() {
+        let totals = CounterTotals::default();
+        let _recorder = metrics::set_default_local_recorder(&totals);
+        let (state, _) = counting_state(test_config(), None).await;
+        let payloads: Vec<Bytes> = (1..=5)
+            .map(|i| Bytes::from(format!(r#"{{"id":{i}}}"#)))
+            .collect();
+
+        let outcome = state.process_batch(&payloads).await;
+
+        assert_eq!(outcome.accepted, 5);
+        assert_eq!(totals.total("records_received_total"), 5);
+        assert_eq!(totals.total("records_processed_total"), 5);
+        assert_eq!(totals.total("records_delivered_total"), 5);
+        assert_eq!(totals.total("records_error_total"), 0);
+    }
+
+    /// A record refused for good is received and counted as an error; the
+    /// records around it are taken.
+    #[tokio::test]
+    async fn a_refused_record_counts_as_received_and_as_an_error() {
+        let totals = CounterTotals::default();
+        let _recorder = metrics::set_default_local_recorder(&totals);
+        let mut config = test_config();
+        config.validation.dlq_on_invalid = false;
+        let (state, _) = counting_state(config, None).await;
+        let payloads = vec![
+            Bytes::from(r#"{"ok":1}"#),
+            Bytes::from("not json"),
+            Bytes::from(r#"{"ok":2}"#),
+        ];
+
+        let outcome = state
+            .process_batch_acked(&payloads, &holding(&state), None)
+            .await;
+
+        assert_eq!(outcome.rejected, 1);
+        assert_eq!(totals.total("records_received_total"), 3);
+        assert_eq!(totals.total("records_delivered_total"), 2);
+        assert_eq!(totals.total("records_error_total"), 1);
+    }
+
+    /// A single record through `process` counts once, taken or refused.
+    #[tokio::test]
+    async fn a_single_record_counts_once() {
+        let totals = CounterTotals::default();
+        let _recorder = metrics::set_default_local_recorder(&totals);
+        let (state, _) = counting_state(test_config(), None).await;
+
+        state.process(Bytes::from(r#"{"id":1}"#)).await.unwrap();
+        let _ = state.process(Bytes::from("not json")).await.unwrap_err();
+
+        assert_eq!(totals.total("records_received_total"), 2);
+        assert_eq!(totals.total("records_delivered_total"), 1);
+        assert_eq!(totals.total("records_error_total"), 1);
+    }
+
+    /// Records the pipeline turns away under pressure were still received, and
+    /// none of them was taken.
+    #[tokio::test]
+    async fn records_refused_under_pressure_count_as_received_not_taken() {
+        let totals = CounterTotals::default();
+        let _recorder = metrics::set_default_local_recorder(&totals);
+        let guard = MemoryGuard::with_usage_source(
+            MemoryGuardConfig {
+                limit_bytes: 1000,
+                pressure_threshold: 0.8,
+                ..Default::default()
+            },
+            scalo::memory::UsageSource::Reservations,
+        );
+        let (state, _) = counting_state(test_config(), Some(Arc::new(guard))).await;
+        state.memory_guard().add_bytes(900);
+
+        let outcome = state
+            .process_batch(&[Bytes::from(r#"{"a":1}"#), Bytes::from(r#"{"a":2}"#)])
+            .await;
+
+        assert!(outcome.unavailable.is_some(), "{outcome:?}");
+        assert_eq!(totals.total("records_received_total"), 2);
+        assert_eq!(totals.total("records_delivered_total"), 0);
+        assert_eq!(totals.total("records_error_total"), 0);
+    }
+
+    /// Records a destination's buffer holds back reach
+    /// `receiver_messages_spilled_total` on the next metrics update.
+    #[tokio::test]
+    async fn records_a_buffer_holds_back_reach_the_spilled_counter() {
+        let totals = CounterTotals::default();
+        let _recorder = metrics::set_default_local_recorder(&totals);
+        let mut config = test_config();
+        grpc_destinations(&mut config, &["alpha"]);
+        // An at-enqueue listener is what builds the buffer.
+        config.server.acknowledgements = AcknowledgementsConfig::new(false);
+        let (state, metrics) = counting_state(config, None).await;
+
+        let outcome = state
+            .process_batch(&[Bytes::from(r#"{"a":1}"#), Bytes::from(r#"{"a":2}"#)])
+            .await;
+        state.update_metrics(&metrics).await;
+
+        assert_eq!(outcome.accepted, 2, "taken into the buffer: {outcome:?}");
+        assert_eq!(totals.total("receiver_messages_spilled_total"), 2);
+        assert_eq!(totals.total("receiver_messages_drained_total"), 0);
+    }
 
     #[tokio::test]
     async fn test_pipeline_batch_processes_all() {

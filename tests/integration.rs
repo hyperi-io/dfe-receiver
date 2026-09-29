@@ -60,6 +60,8 @@ mod prometheus_rw;
 mod protocol_kafka_roundtrip;
 #[path = "integration/raw_capture.rs"]
 mod raw_capture;
+#[path = "integration/record_counts.rs"]
+mod record_counts;
 #[path = "integration/refused_records.rs"]
 mod refused_records;
 #[path = "integration/source_routing.rs"]
