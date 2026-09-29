@@ -43,12 +43,8 @@ scalo = { version = ">=2.13.0, <3", features = [
     # through scalo's OpenBao provider, which only compiles in with this on.
     "secrets-vault",
     "scaling",
-    # CEL expression evaluation -- REQUIRED for the scalo ScalingEngine to
-    # build (`#[cfg(all(scaling, expression))]`). Without it the horizontal
-    # scaling-pressure engine, its smart-default `dfe_scaling_pressure`
-    # gauge, and the compound `transport_inbound_pressure_ratio` are NOT emitted
-    # and any `scaling.transport`/`params`/`pressures` YAML is silently inert.
-    # cli-service does not pull this in, so list it explicitly.
+    # The webhook per-caller CEL `filter` compiles and validates through
+    # scalo::expression, and no other feature listed here pulls it in.
     "expression",
     "cli-service",
     "deployment",

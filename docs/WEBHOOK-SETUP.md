@@ -36,7 +36,7 @@ integrity, and no replay protection. Restrict the source addresses with
 
 Authentication runs before the readiness check, so an unauthenticated client
 learns nothing about the pipeline's state. Failures log at debug and count under
-`dfe_receiver_auth_failures_total{reason}`, so a credential spray does not write
+`receiver_auth_failures_total{reason}`, so a credential spray does not write
 a warn line per attempt.
 
 ## Secret references
@@ -149,8 +149,8 @@ curl -sS -o /dev/null -w '%{http_code}\n' \
 ```
 
 Then confirm the record arrived rather than assuming the 202 means delivery:
-read the caller's topic, and check `dfe_receiver_requests_success` moved and
-`dfe_receiver_auth_failures_total` did not. The integration suite covers both
+read the caller's topic, and check `receiver_requests_success_total` moved and
+`receiver_auth_failures_total` did not. The integration suite covers both
 halves -- the intake's behaviour in `tests/integration/webhook.rs`, and the path
 through to a real broker in `tests/integration/protocol_kafka_roundtrip.rs`.
 

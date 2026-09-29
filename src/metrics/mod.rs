@@ -26,6 +26,7 @@
 //! - `receiver_request_timeouts_total` - Request timeouts by transport (slow loris indicator)
 //! - `receiver_body_size_rejected_total` - Oversized body rejections by transport
 //! - `receiver_ip_filter_rejected_total` - Connections and datagrams the IP filter refused, by transport
+//! - `receiver_rate_limited_total` - Requests the per-IP rate limit refused with 429, by transport
 //! - `receiver_tls_handshake_failures_total` - TLS failures
 
 use std::sync::Arc;
@@ -105,6 +106,31 @@ pub enum ValidationFailureReason {
     NestingTooDeep,
 }
 
+impl ValidationFailureReason {
+    /// Every reason, in the order [`index`](Self::index) numbers them.
+    pub const ALL: [Self; 3] = [Self::InvalidJson, Self::MissingField, Self::NestingTooDeep];
+
+    /// The `reason` label on `receiver_validation_failures_total`.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::InvalidJson => "invalid_json",
+            Self::MissingField => "missing_field",
+            Self::NestingTooDeep => "nesting_too_deep",
+        }
+    }
+
+    /// Position in [`ALL`](Self::ALL), for state kept per reason.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        match self {
+            Self::InvalidJson => 0,
+            Self::MissingField => 1,
+            Self::NestingTooDeep => 2,
+        }
+    }
+}
+
 /// Why a record was dropped with no way to tell its sender.
 #[derive(Debug, Clone, Copy)]
 pub enum DropReason {
@@ -159,6 +185,7 @@ pub struct Metrics {
     request_timeouts_total: AtomicU64,
     body_size_rejected_total: AtomicU64,
     ip_filter_rejected_total: AtomicU64,
+    rate_limited_total: AtomicU64,
     tls_handshake_failures_total: AtomicU64,
 
     // Gauge atomics (for scaling read-back)
@@ -241,6 +268,7 @@ impl Metrics {
             request_timeouts_total: AtomicU64::new(0),
             body_size_rejected_total: AtomicU64::new(0),
             ip_filter_rejected_total: AtomicU64::new(0),
+            rate_limited_total: AtomicU64::new(0),
             tls_handshake_failures_total: AtomicU64::new(0),
             batch_queue_size: AtomicU64::new(0),
             batch_queue_bytes: AtomicU64::new(0),
@@ -642,28 +670,26 @@ impl Metrics {
     pub fn inc_validation_failure(&self, reason: ValidationFailureReason) {
         self.validation_failures_total
             .fetch_add(1, Ordering::Relaxed);
-        // Local label string + standardised scalo enum (scalo typed the
-        // validation_failure label). InvalidJson maps to EncodingError (the
-        // input bytes can't be decoded into a JSON value); MissingField maps
-        // exactly to FieldMissing; NestingTooDeep is a bound, so OutOfRange.
-        let (reason_str, dfe_reason) = match reason {
+        // Standardised scalo enum (scalo typed the validation_failure label).
+        // InvalidJson maps to EncodingError (the input bytes can't be decoded
+        // into a JSON value); MissingField maps exactly to FieldMissing;
+        // NestingTooDeep is a bound, so OutOfRange.
+        let dfe_reason = match reason {
             ValidationFailureReason::InvalidJson => {
                 self.validation_failures_invalid_json
                     .fetch_add(1, Ordering::Relaxed);
-                ("invalid_json", RlValidationReason::EncodingError)
+                RlValidationReason::EncodingError
             }
             ValidationFailureReason::MissingField => {
                 self.validation_failures_missing_field
                     .fetch_add(1, Ordering::Relaxed);
-                ("missing_field", RlValidationReason::FieldMissing)
+                RlValidationReason::FieldMissing
             }
-            ValidationFailureReason::NestingTooDeep => {
-                ("nesting_too_deep", RlValidationReason::OutOfRange)
-            }
+            ValidationFailureReason::NestingTooDeep => RlValidationReason::OutOfRange,
         };
         metrics::counter!(
             "receiver_validation_failures_total",
-            "reason" => reason_str.to_string()
+            "reason" => reason.label()
         )
         .increment(1);
         if let Some(ref dfe) = self.dfe {
@@ -702,6 +728,17 @@ impl Metrics {
             .fetch_add(1, Ordering::Relaxed);
         metrics::counter!(
             "receiver_ip_filter_rejected_total",
+            "transport" => transport.to_string()
+        )
+        .increment(1);
+    }
+
+    /// Record a request the per-IP rate limit refused on `transport` (429).
+    #[inline]
+    pub fn inc_rate_limited(&self, transport: &str) {
+        self.rate_limited_total.fetch_add(1, Ordering::Relaxed);
+        metrics::counter!(
+            "receiver_rate_limited_total",
             "transport" => transport.to_string()
         )
         .increment(1);
@@ -801,6 +838,12 @@ impl Metrics {
     #[inline]
     pub fn get_ip_filter_rejected_total(&self) -> u64 {
         self.ip_filter_rejected_total.load(Ordering::Relaxed)
+    }
+
+    /// Get rate-limit refusal count.
+    #[inline]
+    pub fn get_rate_limited_total(&self) -> u64 {
+        self.rate_limited_total.load(Ordering::Relaxed)
     }
 
     /// Get TLS handshake failure count.
@@ -1008,6 +1051,12 @@ const RECEIVER_SERIES: &[SeriesSpec] = &[
         "Connections, and syslog UDP datagrams, the IP filter refused, by transport",
     ),
     (
+        "receiver_rate_limited_total",
+        MetricType::Counter,
+        &["transport"],
+        "Requests the per-IP rate limit (server.rate_limit) refused with 429, by transport",
+    ),
+    (
         "receiver_tls_handshake_failures_total",
         MetricType::Counter,
         &[],
@@ -1108,7 +1157,7 @@ impl Default for Metrics {
     }
 }
 
-/// A recorder for tests that read what a counter recorded.
+/// Test doubles that read what the receiver recorded: counter totals and log lines.
 #[cfg(test)]
 pub(crate) mod testing {
     use std::collections::HashMap;
@@ -1116,6 +1165,36 @@ pub(crate) mod testing {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use parking_lot::Mutex;
+
+    /// Every line a test subscriber writes, for `tracing_subscriber::fmt().with_writer`.
+    #[derive(Clone, Default)]
+    pub(crate) struct LogLines(Arc<Mutex<Vec<u8>>>);
+
+    impl LogLines {
+        /// Everything written so far.
+        pub(crate) fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock()).into_owned()
+        }
+    }
+
+    impl std::io::Write for LogLines {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogLines {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
 
     /// Sums each counter across its label sets, as a `sum()` over the name reads it.
     ///

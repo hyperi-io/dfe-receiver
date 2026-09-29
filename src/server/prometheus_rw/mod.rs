@@ -181,7 +181,7 @@ async fn run_prometheus_rw_server(
         metrics.clone(),
         TRANSPORT,
     );
-    let app = crate::server::http::apply_server_limits(app, &server)?;
+    let app = crate::server::http::apply_server_limits(app, &server, metrics.clone(), TRANSPORT)?;
 
     let addr: SocketAddr = config
         .bind_address

@@ -296,7 +296,8 @@ async fn run_webhook_server(
     };
 
     let app = build_router(webhook, pipeline, metrics.clone()).await?;
-    let app = crate::server::http::apply_server_limits(app, &config.server)?;
+    let app =
+        crate::server::http::apply_server_limits(app, &config.server, metrics.clone(), TRANSPORT)?;
 
     let addr: SocketAddr = bind_address
         .parse()

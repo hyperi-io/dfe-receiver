@@ -307,7 +307,7 @@ Key metrics:
 - `receiver_records_dropped_total` - Records dropped with no way to tell the
   sender (UDP syslog, a record refused on an acknowledgement-only protocol, a
   held record at shutdown), by transport and reason
-- `receiver_scaling_pressure` - Scaling pressure for autoscaling (0-100)
+- `scaling_pressure` - Scaling pressure for autoscaling (0-100)
 
 ## Architecture
 
@@ -448,7 +448,7 @@ not the shipped one.
 | Hand-edit `chart/` or `Dockerfile` | `--emit-helm` / `--emit-dockerfile` | Generated from `src/deployment.rs`, with tests asserting they match |
 | Bump scalo and stop | Bump, regenerate, commit the diff | The generator is in scalo, so the drift guard fails by design |
 | Change `Config::validate()` alone | Update dfe-engine's mirror | It hand-copies this validation, nothing compares them, and they have drifted |
-| Read 202 as delivered on a listener with acknowledgements off | Compare `kafka_sends_total` with `kafka_delivered_total` | That 202 is answered at enqueue |
+| Read 202 as delivered on a listener with acknowledgements off | Compare `receiver_kafka_sends_total` with `receiver_kafka_delivered_total` | That 202 is answered at enqueue |
 | Read a 503 as "not written" | Expect the retry to duplicate | The hold can expire while a broker is writing the record |
 | Set `VAULT_*` on the test OpenBao | Set `BAO_*` | `VAULT_` is ignored, a random root token is minted, everything 403s silently |
 

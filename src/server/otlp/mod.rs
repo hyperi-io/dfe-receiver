@@ -555,7 +555,7 @@ async fn run_http_server(
         metrics.clone(),
         TRANSPORT,
     );
-    let app = crate::server::http::apply_server_limits(app, &server)?;
+    let app = crate::server::http::apply_server_limits(app, &server, metrics.clone(), TRANSPORT)?;
 
     let listener = TcpListener::bind(addr)
         .await

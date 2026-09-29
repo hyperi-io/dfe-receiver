@@ -13,11 +13,11 @@
 //! 2 MiB Tokio worker stack and aborts the whole process. Every payload is
 //! measured here, iteratively, before a lazy sonic-rs call reads it.
 
-use scalo::logger::security;
 pub use scalo::parse_guard::{MAX_PARSE_DEPTH, json_depth_within};
 
 use crate::error::{Error, Result};
 use crate::metrics::{Metrics, ValidationFailureReason};
+use crate::validation::record_validation_failure;
 
 /// Deepest nesting a batch body may reach: its events plus the array around them.
 pub const MAX_BATCH_DEPTH: usize = MAX_PARSE_DEPTH + 1;
@@ -38,12 +38,14 @@ pub fn admit(payload: &[u8], max: usize, metrics: Option<&Metrics>) -> Result<()
 #[cold]
 #[inline(never)]
 fn refuse(metrics: Option<&Metrics>) -> Error {
-    let reason = format!("payload nesting exceeds the maximum parse depth of {MAX_PARSE_DEPTH}");
-    security::input_validation_failure("json_depth", &reason, None);
-    if let Some(metrics) = metrics {
-        metrics.inc_validation_failure(ValidationFailureReason::NestingTooDeep);
-    }
-    Error::Validation(reason)
+    record_validation_failure(
+        metrics,
+        "json_depth",
+        ValidationFailureReason::NestingTooDeep,
+    );
+    Error::Validation(format!(
+        "payload nesting exceeds the maximum parse depth of {MAX_PARSE_DEPTH}"
+    ))
 }
 
 #[cfg(test)]
