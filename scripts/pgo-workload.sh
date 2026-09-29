@@ -243,6 +243,8 @@ syslog:
 lumberjack:
   enabled: true
   bind_address: "127.0.0.1:5044"
+  # Loopback-only load driver, with no client certificates to present.
+  accept_unauthenticated: true
 
 fluent:
   enabled: false
