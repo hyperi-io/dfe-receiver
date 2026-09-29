@@ -332,7 +332,7 @@ pub const PROBE_PATHS: [&str; 2] = ["/livez", "/readyz"];
 /// Record a request refused for its credentials on `transport`.
 ///
 /// Every refusal counts on `receiver_auth_failures_total`. The security event
-/// is written at most once per [`AUTH_LOG_INTERVAL_MS`] per reason, so a
+/// is written at most once per `AUTH_LOG_INTERVAL_MS` per reason, so a
 /// credential spray cannot drive the log at the rate it sends.
 pub fn record_auth_failure(
     metrics: &Metrics,

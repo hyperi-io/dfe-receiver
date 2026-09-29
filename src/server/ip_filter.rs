@@ -92,7 +92,7 @@ impl IpFilter {
     /// handshake on a TLS listener -- so a barred peer costs one trie lookup
     /// and the connection is dropped by the caller returning to the loop. A
     /// refusal counts on `metrics`; the log line naming the listener is
-    /// written at most once per [`REJECTION_LOG_INTERVAL_MS`].
+    /// written at most once per `REJECTION_LOG_INTERVAL_MS`.
     #[must_use]
     pub fn admits(&self, peer: SocketAddr, transport: &str, metrics: &Metrics) -> bool {
         if self.is_allowed(peer.ip()) {
