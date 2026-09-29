@@ -20,24 +20,37 @@
 //!   variable (`env:`)
 
 use std::collections::HashSet;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::http::{Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use parking_lot::RwLock;
 use ring::digest;
 use scalo::SensitiveString;
-use scalo::logger::security;
+use scalo::logger::log_debounced;
+use scalo::logger::security::{self, SecurityEvent, SecurityOutcome};
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
 use crate::config::{AuthConfig, BearerConfig};
 use crate::error::Result;
+use crate::metrics::{AuthFailureReason, Metrics};
+
+/// Shortest gap between two log lines for one failure reason, or one misconfiguration.
+const AUTH_LOG_INTERVAL_MS: u64 = 5_000;
+
+/// When each failure reason last wrote its log line, indexed by [`AuthFailureReason::index`].
+static AUTH_FAILURE_LOGGED: [AtomicU64; AuthFailureReason::ALL.len()] =
+    [const { AtomicU64::new(0) }; AuthFailureReason::ALL.len()];
+
+/// When a request last found the auth configuration unusable.
+static AUTH_MISCONFIGURED_LOGGED: AtomicU64 = AtomicU64::new(0);
 
 /// Authentication mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -316,6 +329,106 @@ fn extract_client_ip(headers: &axum::http::HeaderMap) -> (Option<String>, Option
 /// auth layer wraps, so the exemption has to live here.
 pub const PROBE_PATHS: [&str; 2] = ["/livez", "/readyz"];
 
+/// Record a request refused for its credentials on `transport`.
+///
+/// Every refusal counts on `receiver_auth_failures_total`. The security event
+/// is written at most once per `AUTH_LOG_INTERVAL_MS` per reason, so a
+/// credential spray cannot drive the log at the rate it sends.
+pub fn record_auth_failure(
+    metrics: &Metrics,
+    transport: &str,
+    reason: AuthFailureReason,
+    source_ip: Option<IpAddr>,
+    resource: Option<&str>,
+) {
+    metrics.inc_auth_failure(reason);
+    if !log_debounced(&AUTH_FAILURE_LOGGED[reason.index()], AUTH_LOG_INTERVAL_MS) {
+        return;
+    }
+    let mut event = SecurityEvent::new("auth.failure", transport, SecurityOutcome::Failure)
+        .reason(reason.label());
+    if let Some(ip) = source_ip {
+        event = event.source_ip(ip);
+    }
+    if let Some(resource) = resource {
+        event = event.resource(resource);
+    }
+    event.emit();
+}
+
+/// Record a request refused on `transport` for its credentials, when the
+/// refusal is the client's; a misconfiguration is the operator's and counts
+/// nowhere.
+fn record_refusal(
+    metrics: &Metrics,
+    transport: &str,
+    err: &AuthError,
+    source_ip: Option<IpAddr>,
+    resource: Option<&str>,
+) {
+    if let Some(reason) = err.reason {
+        record_auth_failure(metrics, transport, reason, source_ip, resource);
+    }
+}
+
+/// Log that a request found the auth configuration unusable, at most once per
+/// [`AUTH_LOG_INTERVAL_MS`].
+fn log_misconfigured(detail: &str) {
+    if log_debounced(&AUTH_MISCONFIGURED_LOGGED, AUTH_LOG_INTERVAL_MS) {
+        error!(detail, "authentication is required but cannot be checked");
+    }
+}
+
+/// What [`token_auth_middleware`] checks a request against, and where it
+/// records a refusal.
+#[derive(Clone)]
+pub struct TokenAuth {
+    auth: AuthState,
+    metrics: Arc<Metrics>,
+    transport: &'static str,
+}
+
+impl TokenAuth {
+    /// Check requests against `auth`, recording refusals on `metrics` under `transport`.
+    #[must_use]
+    pub fn new(auth: AuthState, metrics: Arc<Metrics>, transport: &'static str) -> Self {
+        Self {
+            auth,
+            metrics,
+            transport,
+        }
+    }
+}
+
+/// A tonic interceptor checking the `authorization` metadata key against
+/// `auth`'s bearer tokens, recording refusals on `metrics` under `transport`.
+///
+/// Header auth never runs here: a gRPC request carries metadata, not the HTTP
+/// headers `accepted_headers` names.
+pub fn grpc_auth_interceptor(
+    auth: AuthState,
+    metrics: Arc<Metrics>,
+    transport: &'static str,
+) -> impl Fn(tonic::Request<()>) -> std::result::Result<tonic::Request<()>, tonic::Status> + Clone {
+    move |req: tonic::Request<()>| {
+        let mut headers = axum::http::HeaderMap::new();
+        if let Some(auth_value) = req.metadata().get("authorization")
+            && let Ok(s) = auth_value.to_str()
+            && let Ok(hv) = axum::http::HeaderValue::from_str(s)
+        {
+            headers.insert("authorization", hv);
+        }
+
+        if let Some(err) = validate_bearer_auth(&auth, &headers) {
+            let peer = req.remote_addr().map(|addr| addr.ip());
+            record_refusal(&metrics, transport, &err, peer, None);
+            return Err(tonic::Status::unauthenticated(err.message));
+        }
+
+        Ok(req)
+    }
+}
+
 /// Token-based authentication middleware.
 ///
 /// Validates authentication based on the configured mode:
@@ -326,12 +439,13 @@ pub const PROBE_PATHS: [&str; 2] = ["/livez", "/readyz"];
 /// [`PROBE_PATHS`] are exempt: they carry no data and kubelet cannot
 /// authenticate.
 ///
-/// Logs failures at WARN level with structured fields for security monitoring.
+/// A refusal is recorded by [`record_auth_failure`].
 pub async fn token_auth_middleware(
-    State(auth): State<AuthState>,
+    State(gate): State<TokenAuth>,
     request: Request<Body>,
     next: Next,
 ) -> Response {
+    let auth = &gate.auth;
     let mode = AuthMode::from_str(&auth.config.mode);
 
     // Kubelet does not send credentials, so an authenticated probe path fails
@@ -348,16 +462,13 @@ pub async fn token_auth_middleware(
         return next.run(request).await;
     }
 
-    // Extract client IP for logging (before consuming request)
-    let (client_ip_str, client_ip) = extract_client_ip(request.headers());
-
     // Check authentication based on mode
     let auth_result = match mode {
-        AuthMode::Bearer => validate_bearer_auth(&auth, request.headers()),
+        AuthMode::Bearer => validate_bearer_auth(auth, request.headers()),
         AuthMode::Header | AuthMode::Both => {
             // Try bearer first if provider is configured, then fall back to header
             if auth.bearer_provider.is_some() {
-                match validate_bearer_auth(&auth, request.headers()) {
+                match validate_bearer_auth(auth, request.headers()) {
                     None => None,
                     Some(_) => validate_header_auth(&auth.config, request.headers()),
                 }
@@ -371,20 +482,26 @@ pub async fn token_auth_middleware(
     match auth_result {
         None => next.run(request).await,
         Some(err) => {
-            // Log auth failure with structured fields for security monitoring
-            // This uses WARN level - high enough to be captured in production,
-            // but not ERROR (which would trigger alerts for expected traffic)
-            warn!(
+            let (client_ip_str, header_ip) = extract_client_ip(request.headers());
+            let peer = request
+                .extensions()
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|ConnectInfo(addr)| addr.ip());
+            debug!(
+                transport = gate.transport,
                 client_ip = client_ip_str.as_deref().unwrap_or("unknown"),
                 auth_mode = ?mode,
                 failure_reason = %err.message,
                 status_code = err.status.as_u16(),
                 "auth_failure"
             );
-
-            // Emit structured security event (target: "security")
-            security::auth_failure(&err.message, &err.message, client_ip);
-
+            record_refusal(
+                &gate.metrics,
+                gate.transport,
+                &err,
+                header_ip.or(peer),
+                Some(request.uri().path()),
+            );
             err.into_response()
         }
     }
@@ -411,21 +528,18 @@ pub fn validate_bearer_auth(
     headers: &axum::http::HeaderMap,
 ) -> Option<AuthError> {
     let Some(ref provider) = auth.bearer_provider else {
-        error!("Bearer auth required but no token provider configured");
-        return Some(AuthError {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: "server_misconfigured".into(),
-        });
+        log_misconfigured("bearer auth is required but no token provider is configured");
+        return Some(AuthError::misconfigured());
     };
 
     // Check for Authorization header
     let auth_header = headers.get("authorization").and_then(|v| v.to_str().ok());
 
     let Some(auth_value) = auth_header else {
-        return Some(AuthError {
-            status: StatusCode::UNAUTHORIZED,
-            message: "missing_authorization_header".into(),
-        });
+        return Some(AuthError::refused(
+            AuthFailureReason::MissingHeader,
+            "missing_authorization_header",
+        ));
     };
 
     // Parse "Bearer <token>" or "Splunk <token>" format
@@ -438,10 +552,10 @@ pub fn validate_bearer_auth(
     } else if let Some(token) = auth_value.strip_prefix("splunk ") {
         token.trim()
     } else {
-        return Some(AuthError {
-            status: StatusCode::UNAUTHORIZED,
-            message: "invalid_bearer_format".into(),
-        });
+        return Some(AuthError::refused(
+            AuthFailureReason::InvalidToken,
+            "invalid_bearer_format",
+        ));
     };
 
     // Validate token
@@ -449,10 +563,10 @@ pub fn validate_bearer_auth(
         debug!("Bearer token accepted");
         None
     } else {
-        Some(AuthError {
-            status: StatusCode::UNAUTHORIZED,
-            message: "invalid_bearer_token".into(),
-        })
+        Some(AuthError::refused(
+            AuthFailureReason::InvalidToken,
+            "invalid_bearer_token",
+        ))
     }
 }
 
@@ -461,6 +575,29 @@ pub fn validate_bearer_auth(
 pub struct AuthError {
     pub status: StatusCode,
     pub message: String,
+    /// Why the client's credentials failed; `None` when the configuration is
+    /// what failed, which is the operator's to fix and not a client refusal.
+    pub reason: Option<AuthFailureReason>,
+}
+
+impl AuthError {
+    /// A 401 for credentials that failed for `reason`.
+    fn refused(reason: AuthFailureReason, message: &str) -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            message: message.to_string(),
+            reason: Some(reason),
+        }
+    }
+
+    /// A 500 for auth the configuration asks for and cannot check.
+    fn misconfigured() -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: "server_misconfigured".to_string(),
+            reason: None,
+        }
+    }
 }
 
 impl IntoResponse for AuthError {
@@ -489,11 +626,8 @@ pub fn validate_header_auth(
 
     // If no headers configured, reject
     if accepted.is_empty() {
-        error!("No accepted headers configured but header auth required");
-        return Some(AuthError {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: "server_misconfigured".into(),
-        });
+        log_misconfigured("header auth is required but no accepted headers are configured");
+        return Some(AuthError::misconfigured());
     }
 
     // Check each accepted header - any valid one passes
@@ -526,13 +660,10 @@ pub fn validate_header_auth(
     // Check if any expected header is present (but with wrong value)
     let has_header = accepted.iter().any(|h| headers.contains_key(&h.name));
 
-    Some(AuthError {
-        status: StatusCode::UNAUTHORIZED,
-        message: if has_header {
-            "invalid_header_value".into()
-        } else {
-            "missing_auth_header".into()
-        },
+    Some(if has_header {
+        AuthError::refused(AuthFailureReason::InvalidHeader, "invalid_header_value")
+    } else {
+        AuthError::refused(AuthFailureReason::MissingHeader, "missing_auth_header")
     })
 }
 
@@ -1064,5 +1195,80 @@ mod tests {
         provider.update_tokens(&[]);
         assert_eq!(provider.token_count(), 0);
         assert!(!provider.is_valid("d"));
+    }
+
+    /// Every line a test subscriber writes.
+    #[derive(Clone, Default)]
+    struct Captured(Arc<parking_lot::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// A spray of refused requests writes one log line and counts every refusal.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_credential_spray_logs_one_line_and_counts_every_attempt() {
+        let captured = Captured::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(captured.clone())
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+        let _default = tracing::subscriber::set_default(subscriber);
+        AUTH_FAILURE_LOGGED[AuthFailureReason::MissingHeader.index()]
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+
+        let metrics = Arc::new(Metrics::default());
+        let app = axum::Router::new()
+            .route("/ingest", axum::routing::post(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(
+                TokenAuth::new(AuthState::new(test_config()), metrics.clone(), "http"),
+                token_auth_middleware,
+            ));
+        for _ in 0..50 {
+            let request = Request::post("/ingest").body(Body::empty()).unwrap();
+            let response = tower::ServiceExt::oneshot(app.clone(), request)
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        let log = String::from_utf8(captured.0.lock().clone()).unwrap();
+        assert_eq!(
+            log.lines().count(),
+            1,
+            "one line for the whole spray: {log}"
+        );
+        assert!(log.contains("auth.failure"), "{log}");
+        assert!(log.contains("missing_header"), "{log}");
+        assert_eq!(metrics.get_auth_failures_total(), 50);
+    }
+
+    /// A configuration that cannot check credentials is the operator's fault:
+    /// it answers 500 and counts no client failure.
+    #[test]
+    fn a_misconfiguration_is_not_a_client_auth_failure() {
+        let err = validate_bearer_auth(&AuthState::new(bearer_config()), &HeaderMap::new())
+            .expect("a missing provider refuses");
+        assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(err.reason.is_none());
+
+        let metrics = Metrics::default();
+        record_refusal(&metrics, "http", &err, None, None);
+        assert_eq!(metrics.get_auth_failures_total(), 0);
     }
 }

@@ -36,11 +36,15 @@ use crate::config::{OtlpConfig, RawCapture};
 use crate::error::{Error, Result, unavailable_response};
 use crate::metrics::Metrics;
 use crate::pipeline::{Acks, BatchOutcome, PipelineState};
-use crate::server::auth::{AuthMode, AuthState, validate_bearer_auth};
-use crate::server::http::create_auth_state;
+use crate::server::auth::{AuthMode, TokenAuth, grpc_auth_interceptor};
+use crate::server::grpc::{count_connections, count_oversize};
+use crate::server::http::{Accept, create_auth_state};
 use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
 use crate::server::traits::{BoundAddr, Listeners, ProtocolHandler};
 use convert::OtlpMode;
+
+/// The transport label both OTLP listeners count under.
+const TRANSPORT: &str = "otlp";
 
 // ---------------------------------------------------------------------------
 // Generated OTLP proto types
@@ -313,30 +317,6 @@ fn metrics_response(
 }
 
 // ---------------------------------------------------------------------------
-// Auth interceptor (reuse pattern from gRPC/Vector)
-// ---------------------------------------------------------------------------
-
-fn make_auth_interceptor(
-    auth: AuthState,
-) -> impl Fn(Request<()>) -> std::result::Result<Request<()>, Status> + Clone {
-    move |req: Request<()>| {
-        let mut headers = axum::http::HeaderMap::new();
-        if let Some(auth_value) = req.metadata().get("authorization")
-            && let Ok(s) = auth_value.to_str()
-            && let Ok(hv) = axum::http::HeaderValue::from_str(s)
-        {
-            headers.insert("authorization", hv);
-        }
-
-        if let Some(err) = validate_bearer_auth(&auth, &headers) {
-            return Err(Status::unauthenticated(err.message));
-        }
-
-        Ok(req)
-    }
-}
-
-// ---------------------------------------------------------------------------
 // gRPC server runner
 // ---------------------------------------------------------------------------
 
@@ -356,7 +336,7 @@ async fn run_grpc_server(
         .map_err(|e| Error::Config(format!("invalid OTLP gRPC bind address: {e}")))?;
 
     let mode = OtlpMode::from_str(&config.mode);
-    let service = OtlpService::new(pipeline, metrics, mode, raw_capture, acks);
+    let service = OtlpService::new(pipeline, metrics.clone(), mode, raw_capture, acks);
 
     // Build TLS config if enabled
     let tls_config = if config.tls.enabled {
@@ -384,6 +364,7 @@ async fn run_grpc_server(
             .tls_config(tls)
             .map_err(|e| Error::Tls(format!("OTLP gRPC TLS error: {e}")))?;
     }
+    let mut builder = builder.layer(count_oversize(metrics.clone(), TRANSPORT));
 
     // Register all three OTLP services on the same server, sharing one held
     // answer ceiling. tonic requires separate service instances for each trait
@@ -394,7 +375,7 @@ async fn run_grpc_server(
     let metrics_svc = MetricsServiceServer::new(service).max_decoding_message_size(limit);
 
     let router = if let Some(auth) = auth_state {
-        let interceptor = make_auth_interceptor(auth);
+        let interceptor = grpc_auth_interceptor(auth, metrics.clone(), TRANSPORT);
         builder
             .add_service(InterceptedService::new(logs_svc, interceptor.clone()))
             .add_service(InterceptedService::new(traces_svc, interceptor.clone()))
@@ -416,7 +397,10 @@ async fn run_grpc_server(
     info!(addr = %addr, mode = ?mode, "OTLP gRPC server listening");
 
     router
-        .serve_with_incoming_shutdown(incoming, shutdown.cancelled_owned())
+        .serve_with_incoming_shutdown(
+            count_connections(incoming, metrics, TRANSPORT),
+            shutdown.cancelled_owned(),
+        )
         .await
         .map_err(|e| Error::Server(format!("OTLP gRPC server error: {e}")))?;
 
@@ -558,11 +542,19 @@ async fn run_http_server(
         .route("/v1/traces", post(traces_handler))
         .route("/v1/metrics", post(metrics_handler))
         .layer(axum::middleware::from_fn_with_state(
-            auth_state,
+            TokenAuth::new(auth_state, metrics.clone(), TRANSPORT),
             crate::server::auth::token_auth_middleware,
         ))
         .with_state(state);
 
+    // OtlpConfig has no body or time limit of its own, so the server-wide ones apply.
+    let app = crate::server::http::apply_request_limits(
+        app,
+        server.max_body_size,
+        Duration::from_millis(server.request_timeout_ms),
+        metrics.clone(),
+        TRANSPORT,
+    );
     let app = crate::server::http::apply_server_limits(app, &server)?;
 
     let listener = TcpListener::bind(addr)
@@ -584,7 +576,11 @@ async fn run_http_server(
         build_tls_acceptor(&config.tls)?
     };
 
-    let ip_filter = crate::server::ip_filter::IpFilter::from_config(&server.ip_filter);
+    let accept = Accept {
+        ip_filter: crate::server::ip_filter::IpFilter::from_config(&server.ip_filter),
+        metrics,
+        transport: TRANSPORT,
+    };
 
     let acceptor_handle = if let Some(ref provider) = tls_provider {
         Some(provider.acceptor_handle())
@@ -597,13 +593,12 @@ async fn run_http_server(
 
     if let Some(handle) = acceptor_handle {
         info!(addr = %addr, mode = ?mode, tls = true, "OTLP HTTP server listening");
-        crate::server::http::run_tls_server(listener, app, handle, ip_filter, shutdown, metrics)
-            .await?;
+        crate::server::http::run_tls_server(listener, app, handle, accept, shutdown).await?;
     } else {
         info!(addr = %addr, mode = ?mode, tls = false, "OTLP HTTP server listening");
         // The shared accept loop, not `axum::serve`: it runs the IP filter and
         // puts the peer address on each request for the rate limiter.
-        crate::server::http::run_plain_server(listener, app, ip_filter, shutdown).await?;
+        crate::server::http::run_plain_server(listener, app, accept, shutdown).await?;
     }
 
     info!("OTLP HTTP server stopped");

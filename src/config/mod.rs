@@ -650,7 +650,7 @@ impl ApplyFlatEnv for Config {
         }
         if let Some(v) = flat_env::flat_env_string_sensitive(prefix, "KAFKA_SASL_PASSWORD") {
             let sasl = self.kafka.sasl.get_or_insert_with(SaslConfig::default);
-            sasl.password = v;
+            sasl.password = v.into();
         }
 
         // Routing
@@ -931,6 +931,9 @@ impl Default for RateLimitConfig {
 /// Splunk HEC, Prometheus remote write and OTLP HTTP are accepted from. Widen
 /// `cidrs` to cover every sender, or those events are dropped in the accept
 /// loop.
+///
+/// Each refusal counts on `receiver_ip_filter_rejected_total`, labelled with
+/// the listener's transport.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct IpFilterConfig {
@@ -2045,7 +2048,7 @@ impl KafkaConfig {
             config.security_protocol = protocol.to_string();
             config.sasl_mechanism = Some(sasl.mechanism.to_uppercase());
             config.sasl_username = Some(sasl.username.clone());
-            config.sasl_password = Some(sasl.password.clone().into());
+            config.sasl_password = Some(sasl.password.clone());
         }
 
         // TLS
@@ -2314,8 +2317,8 @@ pub struct SaslConfig {
     /// Username.
     pub username: String,
 
-    /// Password (redacted in Debug/Display output).
-    pub password: String,
+    /// Password, redacted wherever it is printed or serialised.
+    pub password: SensitiveString,
 }
 
 impl std::fmt::Debug for SaslConfig {
@@ -2421,25 +2424,23 @@ impl Default for FileSinkConfig {
     }
 }
 
-/// Buffer and memory configuration.
+/// The in-memory queue a destination holds records in while its sink is
+/// unavailable, and its optional disk spillover.
 ///
-/// ## Design Decision: No Disk Spillover
-///
-/// Memory-only buffering is used because:
-/// 1. K8s memory limits trigger OOMKill, which triggers KEDA scale-up
-/// 2. Vector clients have their own disk buffers for retries
-/// 3. Circuit breaker + 503 responses propagate backpressure upstream
-/// 4. Disk I/O would bottleneck the hot path at PB/s scale
+/// These settings bound that queue and nothing else. The 503 a listener
+/// answers under process memory pressure comes from the memory guard, set by
+/// `DFE_RECEIVER_MEMORY_LIMIT_BYTES` and `DFE_RECEIVER_MEMORY_PRESSURE_THRESHOLD`,
+/// and from `self_regulation` when it is on.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct BufferConfig {
-    /// Maximum memory for buffers in bytes (0 = scalo's MemoryGuard auto-detect:
-    /// 85% of the cgroup limit, capped at cgroup v2 `memory.high` when that is
-    /// lower, and total system memory when there is no cgroup).
+    /// Bytes the in-memory queue is sized from. 0 bounds the queue at 1000
+    /// records instead.
     pub memory_limit: usize,
 
-    /// Memory pressure threshold (0.0-1.0).
-    /// When usage exceeds this, backpressure is applied (503 responses).
+    /// Share of `memory_limit` the in-memory queue may hold (0.0-1.0). A record
+    /// past it is refused and its request answered as retryable (HTTP 503,
+    /// gRPC UNAVAILABLE). Unused while `memory_limit` is 0.
     pub pressure_threshold: f64,
 
     /// Optional disk spillover configuration.
@@ -3562,7 +3563,7 @@ webhook:
                 assert!(sasl.enabled);
                 assert_eq!(sasl.mechanism, "SCRAM-SHA-512");
                 assert_eq!(sasl.username, "admin");
-                assert_eq!(sasl.password, "secret");
+                assert_eq!(sasl.password.expose(), "secret");
             },
         );
     }
@@ -3921,7 +3922,7 @@ kafka:
             enabled: true,
             mechanism: "SCRAM-SHA-512".to_string(),
             username: "kafka-admin".to_string(),
-            password: "super-secret-production-password".to_string(),
+            password: "super-secret-production-password".into(),
         };
         let debug_output = format!("{sasl:?}");
 
@@ -3957,7 +3958,7 @@ kafka:
             enabled: false,
             mechanism: String::new(),
             username: String::new(),
-            password: String::new(),
+            password: SensitiveString::default(),
         };
         let debug_output = format!("{sasl:?}");
         assert!(debug_output.contains("REDACTED"));
@@ -3973,7 +3974,7 @@ kafka:
                 enabled: true,
                 mechanism: "PLAIN".to_string(),
                 username: "u".to_string(),
-                password: "leakable-password-xyz".to_string(),
+                password: "leakable-password-xyz".into(),
             }),
             ..KafkaConfig::default()
         };
@@ -4052,5 +4053,35 @@ scaling:
         assert!((config.scaling.memory_gate_threshold - 0.8).abs() < f64::EPSILON);
         // Legacy weighted defaults preserved (the engine keys were ignored).
         assert!((config.scaling.weight_request_rate - 0.30).abs() < f64::EPSILON);
+    }
+
+    /// Every key the example config sets under `scaling:` is one the receiver
+    /// reads, so the example offers no knob that tunes nothing.
+    #[test]
+    fn every_scaling_key_in_the_example_is_read() {
+        let example: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str(include_str!("../../config.example.yaml")).unwrap();
+        let read = serde_yaml_ng::to_value(ScalingConfig::default()).unwrap();
+        let read = read.as_mapping().unwrap();
+        let example = example["scaling"]
+            .as_mapping()
+            .expect("the example has a scaling section");
+
+        let unread: Vec<&serde_yaml_ng::Value> = example
+            .keys()
+            .filter(|key| !read.contains_key(*key))
+            .collect();
+        assert!(
+            unread.is_empty(),
+            "example scaling keys nothing reads: {unread:?}"
+        );
+    }
+
+    /// The example config parses and validates as the receiver loads it.
+    #[test]
+    fn the_example_config_loads() {
+        let config: Config =
+            serde_yaml_ng::from_str(include_str!("../../config.example.yaml")).unwrap();
+        config.validate().unwrap();
     }
 }

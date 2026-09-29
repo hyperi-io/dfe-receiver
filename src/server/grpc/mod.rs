@@ -17,23 +17,32 @@
 
 pub mod convert;
 
+use std::io;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use scalo::transport::grpc::sender_deadline;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::TcpStream;
+use tokio_stream::Stream;
 use tokio_util::sync::CancellationToken;
 use tonic::service::interceptor::InterceptedService;
-use tonic::transport::server::TcpIncoming;
-use tonic::{Request, Response, Status};
+use tonic::transport::server::{Connected, TcpConnectInfo, TcpIncoming};
+use tonic::{Code, Request, Response, Status};
 use tracing::{debug, info, trace};
 
 use crate::config::Config;
 use crate::error::{Error, Result};
-use crate::metrics::Metrics;
+use crate::metrics::{ConnectionGuard, Metrics};
 use crate::pipeline::{Acks, BatchOutcome, PipelineState};
-use crate::server::auth::{AuthMode, AuthState, validate_bearer_auth};
+use crate::server::auth::{AuthMode, AuthState, grpc_auth_interceptor};
 use crate::server::http::create_auth_state;
 use crate::server::traits::{BoundAddr, ProtocolHandler};
+
+/// The transport label the Vector gRPC listener counts under.
+const TRANSPORT: &str = "grpc";
 
 // Include generated proto code.
 // The `event` package types and `vector` package service.
@@ -192,29 +201,95 @@ fn push_answer(
     Ok(Response::new(PushEventsResponse {}))
 }
 
-/// Create a tonic auth interceptor from the shared `AuthState`.
-///
-/// Extracts the `authorization` metadata key from gRPC requests and
-/// validates against the bearer token provider.
-fn make_auth_interceptor(
-    auth: AuthState,
-) -> impl Fn(Request<()>) -> std::result::Result<Request<()>, Status> + Clone {
-    move |req: Request<()>| {
-        // Build an HTTP header map from gRPC metadata for reuse of validate_bearer_auth
-        let mut headers = axum::http::HeaderMap::new();
-        if let Some(auth_value) = req.metadata().get("authorization")
-            && let Ok(s) = auth_value.to_str()
-            && let Ok(hv) = axum::http::HeaderValue::from_str(s)
-        {
-            headers.insert("authorization", hv);
-        }
+/// An accepted gRPC connection, counted open until it drops.
+pub(crate) struct CountedConnection {
+    stream: TcpStream,
+    _open: ConnectionGuard,
+}
 
-        if let Some(err) = validate_bearer_auth(&auth, &headers) {
-            return Err(Status::unauthenticated(err.message));
-        }
+impl Connected for CountedConnection {
+    type ConnectInfo = TcpConnectInfo;
 
-        Ok(req)
+    fn connect_info(&self) -> Self::ConnectInfo {
+        self.stream.connect_info()
     }
+}
+
+impl AsyncRead for CountedConnection {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().stream).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for CountedConnection {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().stream).poll_write(cx, buf)
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().stream).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.stream.is_write_vectored()
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().stream).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().stream).poll_shutdown(cx)
+    }
+}
+
+/// `incoming` with each connection counted open on `metrics` under `transport`.
+pub(crate) fn count_connections(
+    incoming: TcpIncoming,
+    metrics: Arc<Metrics>,
+    transport: &'static str,
+) -> impl Stream<Item = io::Result<CountedConnection>> {
+    tokio_stream::StreamExt::map(incoming, move |conn| {
+        conn.map(|stream| CountedConnection {
+            stream,
+            _open: metrics.open_connection(transport),
+        })
+    })
+}
+
+/// A tonic server layer counting requests refused for their size.
+///
+/// tonic answers an oversized message `OUT_OF_RANGE`, and one that inflates
+/// past the limit `RESOURCE_EXHAUSTED`, before any handler runs, so this is
+/// the only place either is seen. The handlers answer neither code.
+pub(crate) fn count_oversize(
+    metrics: Arc<Metrics>,
+    transport: &'static str,
+) -> tower::util::MapResponseLayer<
+    impl Fn(http::Response<tonic::body::Body>) -> http::Response<tonic::body::Body> + Clone,
+> {
+    tower::util::MapResponseLayer::new(move |response: http::Response<tonic::body::Body>| {
+        let code = response
+            .headers()
+            .get("grpc-status")
+            .map(|status| Code::from_bytes(status.as_bytes()));
+        if matches!(code, Some(Code::OutOfRange | Code::ResourceExhausted)) {
+            metrics.inc_body_size_rejected(transport);
+        }
+        response
+    })
 }
 
 /// gRPC/Vector protocol handler wrapping the existing tonic server.
@@ -316,8 +391,8 @@ async fn serve(
         .parse()
         .map_err(|e| Error::Config(format!("invalid gRPC bind address: {e}")))?;
 
-    let acks = pipeline.acks("grpc", config.grpc.acknowledgements, None);
-    let service = VectorService::new(pipeline, metrics, acks);
+    let acks = pipeline.acks(TRANSPORT, config.grpc.acknowledgements, None);
+    let service = VectorService::new(pipeline, metrics.clone(), acks);
 
     // Build TLS config if enabled
     let tls_config = if config.grpc.tls.enabled {
@@ -335,6 +410,7 @@ async fn serve(
             .tls_config(tls)
             .map_err(|e| Error::Tls(format!("gRPC TLS config error: {e}")))?;
     }
+    let mut builder = builder.layer(count_oversize(metrics.clone(), TRANSPORT));
 
     // Gzip on both directions: scalo's VectorCompatClient compresses
     // unconditionally, and a server without the encoding enabled rejects the RPC.
@@ -344,7 +420,7 @@ async fn serve(
         .max_decoding_message_size(config.grpc.max_message_size);
 
     let router = if let Some(auth) = auth_state {
-        let interceptor = make_auth_interceptor(auth);
+        let interceptor = grpc_auth_interceptor(auth, metrics.clone(), TRANSPORT);
         builder.add_service(InterceptedService::new(vector_server, interceptor))
     } else {
         builder.add_service(vector_server)
@@ -360,7 +436,10 @@ async fn serve(
     info!(addr = %addr, "gRPC server listening");
 
     router
-        .serve_with_incoming_shutdown(incoming, shutdown.cancelled_owned())
+        .serve_with_incoming_shutdown(
+            count_connections(incoming, metrics, TRANSPORT),
+            shutdown.cancelled_owned(),
+        )
         .await
         .map_err(|e| Error::Server(format!("gRPC server error: {e}")))?;
 

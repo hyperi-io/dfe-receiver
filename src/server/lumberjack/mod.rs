@@ -33,12 +33,16 @@ use crate::config::LumberjackConfig;
 use crate::error::{Error, Result};
 use crate::metrics::{DropReason, Metrics};
 use crate::pipeline::{Acks, PipelineState};
+use crate::server::http::Accept;
 use crate::server::ip_filter::IpFilter;
 use crate::server::traits::{BoundAddr, ProtocolHandler};
 use codec::{Frame, decompress_and_parse, encode_ack, read_frame};
 
 /// TLS handshake timeout (matches HTTP handler).
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The transport label the Lumberjack listener counts under.
+const TRANSPORT: &str = "lumberjack";
 
 // ---------------------------------------------------------------------------
 // Per-connection handler
@@ -309,7 +313,11 @@ impl ProtocolHandler for LumberjackHandler {
 
         // A Lumberjack frame carries no credential, so the IP filter and the
         // TLS handshake are the whole admission surface on this port.
-        let ip_filter = IpFilter::from_config(&self.pipeline.config().server.ip_filter);
+        let accept = Accept {
+            ip_filter: IpFilter::from_config(&self.pipeline.config().server.ip_filter),
+            metrics: self.metrics.clone(),
+            transport: TRANSPORT,
+        };
         let acks = self
             .pipeline
             .acks("lumberjack", self.config.acknowledgements, None);
@@ -343,10 +351,10 @@ impl ProtocolHandler for LumberjackHandler {
                     };
 
                     // Reject before the TLS handshake and before any frame is read.
-                    if !ip_filter.admits(peer_addr) {
+                    let Some(open) = accept.admit(peer_addr) else {
                         drop(stream);
                         continue;
-                    }
+                    };
 
                     let pipeline = self.pipeline.clone();
                     let metrics = self.metrics.clone();
@@ -356,6 +364,7 @@ impl ProtocolHandler for LumberjackHandler {
                     if let Some(ref acceptor) = tls_acceptor {
                         let acceptor = acceptor.clone();
                         tokio::spawn(async move {
+                            let _open = open;
                             // TLS handshake with timeout
                             let tls_result = timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await;
                             let tls_stream = match tls_result {
@@ -378,6 +387,7 @@ impl ProtocolHandler for LumberjackHandler {
                         });
                     } else {
                         tokio::spawn(async move {
+                            let _open = open;
                             let intake = Intake { pipeline: &pipeline, metrics: &metrics, acks: &acks, peer_addr };
                             handle_connection(stream, intake, conn_shutdown).await;
                         });

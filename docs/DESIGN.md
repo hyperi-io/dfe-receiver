@@ -311,8 +311,8 @@ kafka:
     linger.ms: "20"
 
 buffer:
-  memory_limit: 0  # Auto (85% of the cgroup limit)
-  pressure_threshold: 0.8
+  memory_limit: 0          # sizes the destination queues; 0 = 1000 records each
+  pressure_threshold: 0.8  # share of memory_limit a queue may hold
 
 metrics:
   address: "0.0.0.0:9090"
@@ -428,7 +428,7 @@ The path names the caller, so a wrong secret is only tried against one secret
 set and callers never share a credential. Authentication runs before the
 readiness check, so an unauthenticated client learns nothing about the
 pipeline. Failures log at debug and count under
-`dfe_receiver_auth_failures_total{reason}`; a credential spray writes no warn
+`receiver_auth_failures_total{reason}`; a credential spray writes no warn
 line per attempt.
 
 Delivery goes through `process_to_topic`, which validates and back-pressures
@@ -494,8 +494,8 @@ readinessProbe:
 | Metric | Type | Description |
 |--------|------|-------------|
 | `receiver_requests_total` | Counter | Total requests received |
-| `receiver_requests_success` | Counter | Total successful requests |
-| `receiver_requests_error` | Counter | Total failed requests |
+| `receiver_requests_success_total` | Counter | Total successful requests |
+| `receiver_requests_error_total` | Counter | Total failed requests |
 | `receiver_bytes_received_total` | Counter | Total bytes ingested |
 | `receiver_records_dropped_total` | Counter | Records dropped with no way to tell the sender, by `transport` and `reason` (`unavailable`, `rejected`, `shutdown`) |
 | `records_received_total` | Counter | Records, counted once when a listener first offers each to the pipeline |
@@ -531,19 +531,11 @@ holds it.
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `receiver_scaling_pressure` | Gauge | Scaling pressure for autoscaling (0-100) |
+| `scaling_pressure` | Gauge | Weighted scaling score (0-100), also served at `/scaling/pressure` on the metrics port (scalo emits this one) |
+| `scaling_memory_pressure` | Gauge | Memory the runtime guard counts, over its limit (0.0-1.0) |
+| `scaling_circuit_open` | Gauge | 1 while the Kafka sink's circuit is open, else 0 |
 
-### Scaling Metric
-
-Composite metric for KEDA scaling:
-
-```
-scaling_metric = max(
-    memory_pressure,
-    queue_depth / max_queue,
-    request_rate / target_rate
-)
-```
+The score is scalo's `ScalingPressure`, refreshed once a second. Each `scaling.*` component adds its weight in proportion to value over saturation, capped at its full weight. An open Kafka circuit forces 0, since more replicas cannot help. Otherwise memory at or past `scaling.memory_gate_threshold` forces 100. `config.example.yaml` lists the components and what feeds each.
 
 ## Testing Strategy
 
@@ -769,14 +761,27 @@ Authentication is enforced **before** body processing to minimize resource usage
 
 This order ensures minimal CPU/memory usage for bot scans and unauthenticated probes.
 
-### What NOT to Implement in dfe-receiver
+### Admission Controls in dfe-receiver
 
-The following are intentionally NOT implemented because edge infrastructure handles them more efficiently:
+The receiver carries its own admission controls, so a listener exposed without
+an edge layer still has them. An edge layer in front is still the place for
+volumetric and reputation-based defence.
+
+| Control | Where it runs | Config |
+|---------|---------------|--------|
+| IP allowlist/denylist | Every accept loop the receiver owns, before TLS or any protocol work; syslog UDP per datagram | `server.ip_filter` |
+| Per-client rate limit | A GCRA limiter per HTTP listener (ingest, webhook, HEC, remote write, OTLP HTTP), answering 429 | `server.rate_limit` |
+| In-flight request cap | Per HTTP listener | `server.max_concurrent_requests` |
+| Body size and request timeout | Every HTTP listener, answering 413 and 408 | `server.*`, `splunk_hec.*`, `prometheus_rw.*`, `webhook.*` |
+
+The rate limiter drops a client's entry once its budget has refilled, checked
+every 5 seconds, so its memory follows the clients seen recently, not every
+client ever seen.
+
+These stay with the edge layer:
 
 | Feature | Reason |
 |---------|--------|
-| Rate limiting | Edge layer handles this with dedicated infrastructure |
-| IP allowlist/blocklist | Edge layer or network policy handles this |
 | Connection limits | Kubernetes or load balancer handles this |
 | Access logging | Edge provides this; duplicating wastes resources |
 | Bot detection | WAF/CDN provides sophisticated detection |
@@ -784,7 +789,8 @@ The following are intentionally NOT implemented because edge infrastructure hand
 
 ### Monitoring and Alerting
 
-Key security metrics to monitor:
+Key security metrics to monitor. Names are bare unless `metrics.namespace`
+sets a prefix.
 
 ```yaml
 # Prometheus alerts
@@ -792,26 +798,44 @@ groups:
   - name: dfe-receiver-security
     rules:
       - alert: HighAuthFailureRate
-        expr: rate(receiver_requests_error[5m]) > 100
+        expr: sum(rate(receiver_auth_failures_total[5m])) > 100
         labels:
           severity: warning
         annotations:
           summary: "High authentication failure rate"
 
       - alert: HighValidationFailureRate
-        expr: rate(receiver_messages_dlq_total[5m]) > 50
+        expr: sum(rate(receiver_validation_failures_total[5m])) > 50
         labels:
           severity: warning
         annotations:
           summary: "High validation failure rate - check DLQ"
 
       - alert: RequestTimeoutSpike
-        expr: rate(receiver_requests_error[5m]) > 10
+        expr: sum by (transport) (rate(receiver_request_timeouts_total[5m])) > 10
         labels:
           severity: info
         annotations:
           summary: "Request timeout spike - possible slow loris attempt"
+
+      - alert: OversizeBodyProbe
+        expr: sum by (transport) (rate(receiver_body_size_rejected_total[5m])) > 10
+        labels:
+          severity: info
+        annotations:
+          summary: "Requests refused for their size"
+
+      - alert: IpFilterRejecting
+        expr: sum by (transport) (rate(receiver_ip_filter_rejected_total[5m])) > 0
+        for: 15m
+        labels:
+          severity: info
+        annotations:
+          summary: "The IP filter is refusing connections - check server.ip_filter covers every sender"
 ```
+
+A refused credential is also written as a `security` target event, at most
+one line per failure reason every 5 seconds; the counter carries every one.
 
 ## Flow (NetFlow + sFlow) -- EXPERIMENTAL
 
@@ -819,7 +843,7 @@ Native UDP ingestion for NetFlow v5/v9, IPFIX, and sFlow v5 with autosense
 dispatch and configurable output modes.
 
 **Status:** EXPERIMENTAL when first enabled. Handler emits a startup `WARN`
-log and sets `dfe_handler_experimental{handler="flow"} 1`. Set
+log and sets `handler_experimental{handler="flow"} 1`. Set
 `flow.experimental: false` once stability is proven.
 
 ### Ports
@@ -862,11 +886,11 @@ See `config.example.yaml` for the full `flow:` block.
   early-2000s Catalyst switches with hybrid L2+L3 flow tracking. Never widely
   adopted; current Cisco gear emits v9 or IPFIX. A v7 packet hitting our
   listener returns a parse error visible in
-  `dfe_transport_decode_err_total{transport="netflow", reason="parse_err"}`.
+  `transport_decode_err_total{transport="netflow", reason="parse_err"}`.
   If a customer ever reports v7 exporters, support can be added reactively
   (~1 day of hand-rolled wire decode like our v5 implementation).
 - Template-miss errors currently conflated with parse errors in metrics
-  (`dfe_transport_decode_err_total{reason="template_miss"}` will be 0)
+  (`transport_decode_err_total{reason="template_miss"}` will be 0)
 - Template cache `max_per_exporter` not yet enforced (netgauze limitation)
 - `t_flow_start`/`t_flow_end` carry relative `sysup:<ms>` strings rather than
   absolute RFC 3339 timestamps (sysUpTime anchor resolution deferred)

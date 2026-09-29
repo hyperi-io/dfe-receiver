@@ -14,12 +14,12 @@ HyperI internal -> see infrastructure standards, PB scale patterns
 
 | Protection | Status | Config |
 |---|---|---|
-| Request body size limit | 10 MiB (HTTP/HEC/RW), per-protocol | `server.max_body_size` |
-| Request timeout (408) | 30s, HTTP/HEC/RW | `server.request_timeout_ms` |
+| Request body size limit (413) | 10 MiB (HTTP, OTLP HTTP, HEC, RW), 1 MiB (webhook); the body extractors read to the same limit | `server.max_body_size` (HTTP, OTLP HTTP), `splunk_hec.max_body_size`, `prometheus_rw.max_body_size`, `webhook.max_body_size` |
+| Request timeout (408) | 30s, every HTTP listener | `server.request_timeout_ms` (HTTP, OTLP HTTP), `splunk_hec.request_timeout_ms`, `prometheus_rw.request_timeout_ms`, `webhook.request_timeout_ms` |
 | Slowloris protection | 5s header_read_timeout, every HTTP listener (hyper) | `HEADER_READ_TIMEOUT` |
 | Connection idle timeout | 60s, HTTP/1 keepalive + HTTP/2 | `CONNECTION_IDLE_TIMEOUT` |
 | Concurrency limit | 10,000 in-flight requests default, per HTTP listener | `server.max_concurrent_requests` |
-| Per-IP rate limiting | GCRA via tower-governor, opt-in, per HTTP listener | `server.rate_limit.*` |
+| Per-IP rate limiting | GCRA via tower-governor, opt-in, per HTTP listener; clients whose budget has refilled are dropped from its key map every 5s | `server.rate_limit.*` |
 | IP filter (allowlist/denylist) | CIDR trie, connection-level reject, every accept loop | `server.ip_filter.*` |
 | 503 backpressure | HTTP + gRPC ingest shed load when pipeline not ready | `Retry-After: 5` |
 | TLS termination | Per-protocol, hot-reloadable | `*.tls.enabled` |
@@ -30,13 +30,13 @@ HyperI internal -> see infrastructure standards, PB scale patterns
 | JSON validation | Global, always on: a body that is not JSON is refused with a 400 | Not configurable |
 | Required field check | Global | `validation.required_fields` |
 | Dead-letter queue | Global | `routing.dlq` |
-| Memory pressure backpressure | Internal, 503 on all ingest endpoints | `buffer.pressure_threshold` |
+| Memory pressure backpressure | 503 / `UNAVAILABLE` on HTTP and gRPC ingest | `DFE_RECEIVER_MEMORY_PRESSURE_THRESHOLD`, `self_regulation.*` (`buffer.*` bounds only the destination queues) |
 | Middleware ordering | Concurrency -> Timeout -> BodyLimit -> Auth -> Handler | Correct for DoS |
 | Frame size validation | GELF 1MB, Syslog 64KB, Fluent 32MB | Per-protocol limits |
 | Zip-bomb rejection | Lumberjack nested compression rejected | Hard-coded |
 | Health/readiness (K8s) | `/livez`, `/readyz`: 503 until every enabled listener serves, once one stops (drain included), and under memory pressure | Metrics port and the HTTP ingest port |
 | Graceful shutdown | CancellationToken + in-flight drain | All handlers |
-| Log spam prevention | Sampled (1/100) + debounced (5s) logging | Per-protocol |
+| Log spam prevention | Sampled (1/100) + debounced (5s) logging; a refused credential logs once per 5s per reason, an IP-filter refusal once per 5s per listener, and a counter carries every one | Per-protocol |
 | `#![forbid(unsafe_code)]` | Entire crate | Cargo.toml lints |
 
 ---
@@ -85,10 +85,11 @@ governs all of them.
 
 A deployment that set an allowlist for its `/ingest` senders and receives syslog,
 Beats, Fluent Forward, GELF, HEC, remote write or OTLP HTTP from a different
-range starts DROPPING those events in the accept loop. The drop is a `debug!`
-line and nothing else. Before upgrading, widen `server.ip_filter.cidrs` to cover
-every sender on every enabled listener, or set `mode: disabled` and restrict at
-the network edge.
+range starts DROPPING those events in the accept loop. Each drop counts on
+`receiver_ip_filter_rejected_total{transport}`, and the filter logs one line
+naming the listener at most every 5 seconds. Before upgrading, widen
+`server.ip_filter.cidrs` to cover every sender on every enabled listener, or set
+`mode: disabled` and restrict at the network edge.
 
 ---
 

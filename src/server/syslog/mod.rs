@@ -36,10 +36,14 @@ use crate::error::{Error, Result};
 use crate::metrics::{DropReason, Metrics};
 use crate::pipeline::{Acks, PipelineState};
 use crate::server::hold::hold_until_settled;
+use crate::server::http::Accept;
 use crate::server::ip_filter::IpFilter;
 use crate::server::traits::{BoundAddr, Listeners, ProtocolHandler};
 use convert::syslog_to_json;
 use framing::SyslogFrameDecoder;
+
+/// The transport label every syslog listener counts under.
+const TRANSPORT: &str = "syslog";
 
 /// TLS handshake timeout.
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -89,7 +93,7 @@ async fn run_udp(
 
                 // UDP has no connection to reject, so the filter runs per
                 // datagram -- before the payload is read.
-                if !ip_filter.admits(peer_addr) {
+                if !ip_filter.admits(peer_addr, TRANSPORT, &metrics) {
                     continue;
                 }
 
@@ -223,6 +227,12 @@ async fn run_tcp(
     let tls_enabled = tls_acceptor.is_some();
     info!(addr = %bind_addr, tls = tls_enabled, "Syslog {label} listener started");
 
+    let accept = Accept {
+        ip_filter,
+        metrics: metrics.clone(),
+        transport: TRANSPORT,
+    };
+
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => {
@@ -239,10 +249,10 @@ async fn run_tcp(
                 };
 
                 // Reject before the TLS handshake and before any framing.
-                if !ip_filter.admits(peer_addr) {
+                let Some(open) = accept.admit(peer_addr) else {
                     drop(stream);
                     continue;
-                }
+                };
 
                 let pipeline = pipeline.clone();
                 let metrics = metrics.clone();
@@ -251,6 +261,7 @@ async fn run_tcp(
                 if let Some(ref acceptor) = tls_acceptor {
                     let acceptor = acceptor.clone();
                     tokio::spawn(async move {
+                        let _open = open;
                         let tls_result = timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await;
                         let tls_stream = match tls_result {
                             Ok(Ok(s)) => s,
@@ -274,6 +285,7 @@ async fn run_tcp(
                     });
                 } else {
                     tokio::spawn(async move {
+                        let _open = open;
                         handle_tcp_connection(
                             stream, pipeline, metrics, conn_shutdown, peer_addr,
                             max_message_size, raw_capture,

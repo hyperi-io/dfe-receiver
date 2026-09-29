@@ -36,19 +36,17 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use rustc_hash::FxHashMap;
-use scalo::logger::security;
 use sonic_rs::get_from_slice;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
-use tower_http::limit::RequestBodyLimitLayer;
-use tower_http::timeout::TimeoutLayer;
 use tracing::{debug, info};
 
 use crate::config::{Config, WebhookBody, WebhookCallerConfig, WebhookConfig};
 use crate::error::{Error, Result, unavailable_response};
 use crate::metrics::Metrics;
 use crate::pipeline::{Acks, PipelineState};
-use crate::server::http::split_json_array;
+use crate::server::auth::record_auth_failure;
+use crate::server::http::{Accept, apply_request_limits, split_json_array};
 use crate::server::ip_filter::IpFilter;
 use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
 use crate::server::traits::{BoundAddr, ProtocolHandler};
@@ -250,23 +248,25 @@ pub async fn build_router(
         metrics: metrics.clone(),
     };
 
-    // Layer order, outermost first: timeout, then the 413 counter, then the
-    // body limit it counts, then the handler.
-    Ok(Router::new()
+    let app = Router::new()
         .route("/webhook/{caller}", post(webhook_handler))
-        .layer(RequestBodyLimitLayer::new(config.max_body_size))
-        .layer(axum::middleware::from_fn_with_state(
-            metrics,
-            count_oversize,
-        ))
-        .layer(TimeoutLayer::with_status_code(
-            StatusCode::REQUEST_TIMEOUT,
-            request_timeout,
-        ))
-        .with_state(state))
+        .with_state(state);
+    let app = apply_request_limits(
+        app,
+        config.max_body_size,
+        request_timeout,
+        metrics.clone(),
+        TRANSPORT,
+    );
+    // Outside the body limit, so a 413 it answers still reaches this counter.
+    Ok(app.layer(axum::middleware::from_fn_with_state(
+        metrics,
+        count_oversize,
+    )))
 }
 
-/// Count a 413 from the body limit, which otherwise leaves no metric behind.
+/// Count a 413 from the body limit as a failed webhook request: the handler,
+/// which counts every other request, never sees it.
 async fn count_oversize(
     State(metrics): State<Arc<Metrics>>,
     request: Request,
@@ -276,7 +276,6 @@ async fn count_oversize(
     if response.status() == StatusCode::PAYLOAD_TOO_LARGE {
         metrics.inc_requests_total(TRANSPORT);
         metrics.inc_requests_error(TRANSPORT);
-        metrics.inc_body_size_rejected();
     }
     response
 }
@@ -306,7 +305,11 @@ async fn run_webhook_server(
         .await
         .map_err(|e| Error::Server(format!("webhook failed to bind: {e}")))?;
 
-    let ip_filter = IpFilter::from_config(&config.server.ip_filter);
+    let accept = Accept {
+        ip_filter: IpFilter::from_config(&config.server.ip_filter),
+        metrics,
+        transport: TRANSPORT,
+    };
 
     let tls_provider = if webhook.tls.enabled && uses_secrets(&webhook.tls) {
         let provider = TlsCertProvider::new(webhook.tls.clone()).await?;
@@ -330,9 +333,8 @@ async fn run_webhook_server(
             listener,
             app,
             provider.acceptor_handle(),
-            ip_filter,
+            accept,
             shutdown,
-            metrics,
         )
         .await
     } else if let Some(acceptor) = tls_acceptor {
@@ -341,14 +343,13 @@ async fn run_webhook_server(
             listener,
             app,
             Arc::new(parking_lot::RwLock::new(acceptor)),
-            ip_filter,
+            accept,
             shutdown,
-            metrics,
         )
         .await
     } else {
         info!(addr = %addr, tls = false, "webhook server listening");
-        crate::server::http::run_plain_server(listener, app, ip_filter, shutdown).await
+        crate::server::http::run_plain_server(listener, app, accept, shutdown).await
     }
 }
 
@@ -396,9 +397,9 @@ async fn webhook_handler(
     };
 
     if let Err(failure) = caller.auth.verify(&headers, &body, SystemTime::now()) {
-        // Per-request detail stays at debug: the counter and the security
-        // event carry the signal, and a credential spray must not write one
-        // warn line per attempt.
+        // Per-request detail stays at debug: the counter carries every
+        // refusal and the security event is written once per interval per
+        // reason, so a credential spray cannot drive the log.
         debug!(
             transport = TRANSPORT,
             caller = %caller.name,
@@ -406,8 +407,13 @@ async fn webhook_handler(
             "webhook request refused"
         );
         state.metrics.inc_requests_error(TRANSPORT);
-        state.metrics.inc_auth_failure(failure.metric_reason());
-        security::auth_failure(&caller.name, failure.label(), None);
+        record_auth_failure(
+            &state.metrics,
+            TRANSPORT,
+            failure.metric_reason(),
+            None,
+            Some(&caller.name),
+        );
         return Error::Auth(failure.label().to_string()).into_response();
     }
 

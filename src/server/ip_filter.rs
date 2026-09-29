@@ -13,17 +13,25 @@
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use ipnet::IpNet;
 use ipnet_trie::IpnetTrie;
-use tracing::{debug, warn};
+use scalo::logger::log_debounced;
+use tracing::{info, warn};
 
 use crate::config::IpFilterConfig;
+use crate::metrics::Metrics;
+
+/// Shortest gap between two rejection log lines from one filter.
+const REJECTION_LOG_INTERVAL_MS: u64 = 5_000;
 
 /// Compiled IP filter for hot-path lookups.
 #[derive(Clone)]
 pub struct IpFilter {
     inner: Arc<IpFilterInner>,
+    /// When this filter last logged a rejection.
+    rejection_logged: Arc<AtomicU64>,
 }
 
 enum IpFilterInner {
@@ -36,8 +44,13 @@ impl IpFilter {
     /// A disabled filter that allows all IPs. Used by protocol handlers
     /// that don't have their own IP filter config.
     pub fn disabled() -> Self {
+        Self::with(IpFilterInner::Disabled)
+    }
+
+    fn with(inner: IpFilterInner) -> Self {
         Self {
-            inner: Arc::new(IpFilterInner::Disabled),
+            inner: Arc::new(inner),
+            rejection_logged: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -45,9 +58,7 @@ impl IpFilter {
     pub fn from_config(config: &IpFilterConfig) -> Self {
         let mode = config.mode.to_lowercase();
         if mode == "disabled" || config.cidrs.is_empty() {
-            return Self {
-                inner: Arc::new(IpFilterInner::Disabled),
-            };
+            return Self::disabled();
         }
 
         let mut trie = IpnetTrie::new();
@@ -71,22 +82,26 @@ impl IpFilter {
             }
         };
 
-        Self {
-            inner: Arc::new(inner),
-        }
+        Self::with(inner)
     }
 
-    /// Whether a freshly accepted connection from `peer` may proceed.
+    /// Whether a freshly accepted connection, or a datagram, from `peer` on
+    /// `transport` may proceed.
     ///
     /// Every accept loop calls this before any protocol work -- before the TLS
     /// handshake on a TLS listener -- so a barred peer costs one trie lookup
-    /// and the connection is dropped by the caller returning to the loop.
+    /// and the connection is dropped by the caller returning to the loop. A
+    /// refusal counts on `metrics`; the log line naming the listener is
+    /// written at most once per `REJECTION_LOG_INTERVAL_MS`.
     #[must_use]
-    pub fn admits(&self, peer: SocketAddr) -> bool {
+    pub fn admits(&self, peer: SocketAddr, transport: &str, metrics: &Metrics) -> bool {
         if self.is_allowed(peer.ip()) {
             return true;
         }
-        debug!(peer = %peer, "connection rejected by IP filter");
+        metrics.inc_ip_filter_rejected(transport);
+        if log_debounced(&self.rejection_logged, REJECTION_LOG_INTERVAL_MS) {
+            info!(peer = %peer, transport, "connection rejected by IP filter");
+        }
         false
     }
 
@@ -173,8 +188,29 @@ mod tests {
     #[test]
     fn admits_ignores_the_peer_port() {
         // Accept loops hand over the whole peer address; only the IP is keyed.
+        let metrics = Metrics::default();
         let filter = make_filter("allowlist", &["10.0.0.0/8"]);
-        assert!(filter.admits("10.0.0.1:54321".parse().unwrap()));
-        assert!(!filter.admits("8.8.8.8:443".parse().unwrap()));
+        assert!(filter.admits("10.0.0.1:54321".parse().unwrap(), "http", &metrics));
+        assert!(!filter.admits("8.8.8.8:443".parse().unwrap(), "http", &metrics));
+    }
+
+    /// Every refusal counts on the listener's label, and an admitted peer counts nothing.
+    #[test]
+    fn a_refused_peer_counts_on_its_listener() {
+        use crate::metrics::testing::CounterTotals;
+
+        let metrics = Metrics::default();
+        let filter = make_filter("denylist", &["10.0.0.0/8"]);
+        let totals = CounterTotals::default();
+        metrics::with_local_recorder(&totals, || {
+            assert!(filter.admits("192.0.2.1:1".parse().unwrap(), "syslog", &metrics));
+            for port in 1..=3 {
+                let peer = SocketAddr::from(([10, 0, 0, 1], port));
+                assert!(!filter.admits(peer, "syslog", &metrics));
+            }
+        });
+
+        assert_eq!(metrics.get_ip_filter_rejected_total(), 3);
+        assert_eq!(totals.total("receiver_ip_filter_rejected_total"), 3);
     }
 }

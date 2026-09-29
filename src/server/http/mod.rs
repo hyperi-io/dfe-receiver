@@ -20,18 +20,18 @@
 //! - **TLS handshake timeout**: Prevents TLS renegotiation attacks
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
 use axum::middleware;
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use tokio::net::TcpListener;
-use tokio::time::timeout;
+use tokio::time::{MissedTickBehavior, timeout};
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 use tower::limit::GlobalConcurrencyLimitLayer;
@@ -46,16 +46,22 @@ use scalo::logger::security::{self, SecurityOutcome};
 
 use crate::config::{AuthConfig, SharedConfig};
 use crate::error::{Error, Result, unavailable_response};
-use crate::metrics::Metrics;
+use crate::metrics::{ConnectionGuard, Metrics};
 use crate::pipeline::{Acks, PipelineState};
-use crate::server::auth::{AuthState, BearerTokenProvider, token_auth_middleware};
+use crate::server::auth::{AuthState, BearerTokenProvider, TokenAuth, token_auth_middleware};
 use crate::server::ip_filter::IpFilter;
 use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
 use crate::server::traits::{BoundAddr, ProtocolHandler};
 use crate::validation::depth::{MAX_BATCH_DEPTH, MAX_PARSE_DEPTH, json_depth_within};
 
+/// The transport label the `/ingest` listener counts under.
+const TRANSPORT: &str = "http";
+
 /// TLS handshake timeout to prevent slow TLS attacks.
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How often each listener's rate limiter forgets the clients whose budget has refilled.
+const RATE_LIMIT_PRUNE_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Time allowed for a client to send request headers after connecting.
 /// Defends against slowloris attacks where clients send headers very slowly.
@@ -281,7 +287,7 @@ async fn serve(
         auth: auth_state.clone(),
         ip_filter: ip_filter.clone(),
         acks: pipeline.acks(
-            "http",
+            TRANSPORT,
             config.server.acknowledgements,
             Some(request_timeout),
         ),
@@ -335,23 +341,22 @@ async fn serve(
     // These are registered HERE rather than inherited from scalo's HttpServer
     // because this server is hand-rolled on hyper's low-level API for
     // connection control -- it will never pick up scalo's routes automatically.
-    let mut app = Router::new()
+    let app = Router::new()
         .route("/ingest", post(ingest_handler))
         .route("/livez", get(liveness_handler))
         .route("/readyz", get(readiness_handler))
-        // Auth middleware
         .layer(middleware::from_fn_with_state(
-            auth_state,
+            TokenAuth::new(auth_state, metrics.clone(), TRANSPORT),
             token_auth_middleware,
         ))
-        // Body size limit
-        .layer(RequestBodyLimitLayer::new(max_body_size))
-        // Request timeout (408 for slow clients)
-        .layer(TimeoutLayer::with_status_code(
-            StatusCode::REQUEST_TIMEOUT,
-            request_timeout,
-        ))
         .with_state(state);
+    let mut app = apply_request_limits(
+        app,
+        max_body_size,
+        request_timeout,
+        metrics.clone(),
+        TRANSPORT,
+    );
 
     // The webhook routes join here, after the auth middleware and body limit
     // above have been applied to the ingest routes, so they keep their own
@@ -385,17 +390,81 @@ async fn serve(
         .map_err(|e| Error::Server(format!("failed to bind: {e}")))?;
     let _serving = bound.publish(&listener.local_addr());
 
+    let accept = Accept {
+        ip_filter,
+        metrics,
+        transport: TRANSPORT,
+    };
     if let Some(ref provider) = tls_provider {
         let acceptor_handle = provider.acceptor_handle();
         info!(addr = %addr, tls = true, hot_reload = true, "HTTP server listening");
-        run_tls_server(listener, app, acceptor_handle, ip_filter, shutdown, metrics).await
+        run_tls_server(listener, app, acceptor_handle, accept, shutdown).await
     } else if let Some(acceptor) = tls_acceptor {
         let acceptor_handle = Arc::new(parking_lot::RwLock::new(acceptor));
         info!(addr = %addr, tls = true, hot_reload = false, "HTTP server listening");
-        run_tls_server(listener, app, acceptor_handle, ip_filter, shutdown, metrics).await
+        run_tls_server(listener, app, acceptor_handle, accept, shutdown).await
     } else {
         info!(addr = %addr, tls = false, "HTTP server listening");
-        run_plain_server(listener, app, ip_filter, shutdown).await
+        run_plain_server(listener, app, accept, shutdown).await
+    }
+}
+
+/// Bound every request on `app` to `max_body_size` bytes and `request_timeout`,
+/// counting each 413 and 408 on `metrics` under `transport`.
+///
+/// Every HTTP listener's own limits go through here. `DefaultBodyLimit` holds
+/// the body extractors to the same limit as the tower layer, which would
+/// otherwise stop at axum's 2 MiB whatever the configuration says.
+pub(crate) fn apply_request_limits(
+    app: Router,
+    max_body_size: usize,
+    request_timeout: Duration,
+    metrics: Arc<Metrics>,
+    transport: &'static str,
+) -> Router {
+    app.layer(DefaultBodyLimit::max(max_body_size))
+        .layer(RequestBodyLimitLayer::new(max_body_size))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            request_timeout,
+        ))
+        .layer(middleware::map_response_with_state(
+            (metrics, transport),
+            count_limit_refusals,
+        ))
+}
+
+/// Count a 413 or a 408 from the layers [`apply_request_limits`] adds: they
+/// answer before any handler runs, so nothing else records them.
+async fn count_limit_refusals(
+    State((metrics, transport)): State<(Arc<Metrics>, &'static str)>,
+    response: Response,
+) -> Response {
+    match response.status() {
+        StatusCode::PAYLOAD_TOO_LARGE => metrics.inc_body_size_rejected(transport),
+        StatusCode::REQUEST_TIMEOUT => metrics.inc_request_timeout(transport),
+        _ => {}
+    }
+    response
+}
+
+/// What an accept loop checks and counts for each connection it takes.
+#[derive(Clone)]
+pub(crate) struct Accept {
+    pub(crate) ip_filter: IpFilter,
+    pub(crate) metrics: Arc<Metrics>,
+    /// The listener, as its connections and refusals are labelled.
+    pub(crate) transport: &'static str,
+}
+
+impl Accept {
+    /// Admit a connection from `peer`, counted open until the guard drops;
+    /// `None` when the IP filter refuses it.
+    #[must_use]
+    pub(crate) fn admit(&self, peer: SocketAddr) -> Option<ConnectionGuard> {
+        self.ip_filter
+            .admits(peer, self.transport, &self.metrics)
+            .then(|| self.metrics.open_connection(self.transport))
     }
 }
 
@@ -413,10 +482,27 @@ async fn serve(
 ///
 /// `requests_per_second` is a rate, and the governor is configured by the
 /// interval between replenishments -- see [`replenish_period`].
+///
+/// The governor holds one entry per client key it has seen, so every
+/// [`RATE_LIMIT_PRUNE_INTERVAL`] it drops the keys whose budget has refilled.
 pub(crate) fn apply_server_limits(
-    mut app: Router,
+    app: Router,
     server: &crate::config::ServerConfig,
 ) -> Result<Router> {
+    limit_server(app, server, RATE_LIMIT_PRUNE_INTERVAL).map(|(app, _)| app)
+}
+
+/// How many client keys a listener's rate limiter holds; 0 with rate limiting off.
+type RateLimitKeys = Box<dyn Fn() -> usize + Send + Sync>;
+
+/// [`apply_server_limits`], pruning the rate limiter every `prune_every`.
+fn limit_server(
+    mut app: Router,
+    server: &crate::config::ServerConfig,
+    prune_every: Duration,
+) -> Result<(Router, RateLimitKeys)> {
+    let mut keys: RateLimitKeys = Box::new(|| 0);
+
     // Concurrency limit (0 = unlimited)
     if server.max_concurrent_requests > 0 {
         app = app.layer(GlobalConcurrencyLimitLayer::new(
@@ -443,6 +529,13 @@ pub(crate) fn apply_server_limits(
             .finish()
             .ok_or_else(|| Error::Config("invalid rate_limit configuration".into()))?;
 
+        let limiter = Arc::downgrade(governor_conf.limiter());
+        spawn_pruner(limiter.clone(), prune_every, |limiter| {
+            limiter.retain_recent();
+            limiter.shrink_to_fit();
+        });
+        keys = Box::new(move || limiter.upgrade().map_or(0, |limiter| limiter.len()));
+
         app = app.layer(GovernorLayer::new(governor_conf));
         info!(
             rps = rate_limit_config.requests_per_second,
@@ -452,7 +545,23 @@ pub(crate) fn apply_server_limits(
         );
     }
 
-    Ok(app)
+    Ok((app, keys))
+}
+
+/// Run `prune` against `limiter` every `interval`, until the last handle to it drops.
+fn spawn_pruner<T: Send + Sync + 'static>(limiter: Weak<T>, interval: Duration, prune: fn(&T)) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(interval);
+        tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            let Some(limiter) = limiter.upgrade() else {
+                break;
+            };
+            prune(&limiter);
+        }
+    });
 }
 
 /// The interval after which the governor replenishes one request of the quota.
@@ -477,13 +586,13 @@ fn replenish_period(requests_per_second: u64) -> Option<Duration> {
 /// `axum::serve` has no native defence.
 ///
 /// Every plaintext HTTP listener runs here rather than on `axum::serve`, so
-/// each gets the accept-loop IP filter, the hardened header-read timeout, and
-/// the peer address the rate limiter keys on when no proxy header names the
-/// client.
+/// each gets the accept-loop IP filter, the connection count, the hardened
+/// header-read timeout, and the peer address the rate limiter keys on when no
+/// proxy header names the client.
 pub(crate) async fn run_plain_server(
     listener: TcpListener,
     app: Router,
-    ip_filter: IpFilter,
+    accept: Accept,
     shutdown: CancellationToken,
 ) -> Result<()> {
     loop {
@@ -502,15 +611,16 @@ pub(crate) async fn run_plain_server(
                 };
 
                 // IP filter at connection level -- reject before any HTTP work
-                if !ip_filter.admits(peer_addr) {
+                let Some(open) = accept.admit(peer_addr) else {
                     drop(stream);
                     continue;
-                }
+                };
 
                 let app = app.clone();
                 let shutdown = shutdown.clone();
 
                 tokio::spawn(async move {
+                    let _open = open;
                     let io = hyper_util::rt::TokioIo::new(stream);
                     let service = connection_service(app, peer_addr);
 
@@ -568,9 +678,8 @@ pub(crate) async fn run_tls_server(
     listener: TcpListener,
     app: Router,
     acceptor: Arc<parking_lot::RwLock<TlsAcceptor>>,
-    ip_filter: IpFilter,
+    accept: Accept,
     shutdown: CancellationToken,
-    metrics: Arc<Metrics>,
 ) -> Result<()> {
     loop {
         tokio::select! {
@@ -588,17 +697,18 @@ pub(crate) async fn run_tls_server(
                 };
 
                 // IP filter at connection level -- reject before TLS handshake
-                if !ip_filter.admits(peer_addr) {
+                let Some(open) = accept.admit(peer_addr) else {
                     drop(stream);
                     continue;
-                }
+                };
 
                 let acceptor = acceptor.read().clone();
                 let app = app.clone();
                 let shutdown = shutdown.clone();
-                let metrics = metrics.clone();
+                let metrics = accept.metrics.clone();
 
                 tokio::spawn(async move {
+                    let _open = open;
                     // TLS handshake with timeout to prevent slow TLS attacks
                     let tls_result = timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await;
 
@@ -1124,6 +1234,66 @@ mod tests {
         // The single rate where the two readings coincide, so a test set here
         // cannot tell them apart.
         assert_eq!(replenish_period(1), Some(Duration::from_secs(1)));
+    }
+
+    /// Send one request per client through `app`, each client named by the
+    /// `X-Forwarded-For` the rate limiter keys on.
+    async fn one_request_per_client(app: &Router, clients: u8) {
+        for client in 0..clients {
+            let request = axum::http::Request::get("/")
+                .header("x-forwarded-for", format!("198.51.100.{client}"))
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let response = tower::ServiceExt::oneshot(app.clone(), request)
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+    }
+
+    /// A client whose budget has refilled leaves the limiter's key map at the
+    /// next prune, and nothing else removes it.
+    #[tokio::test]
+    async fn the_rate_limiter_forgets_clients_whose_budget_refilled() {
+        let server = crate::config::ServerConfig {
+            max_concurrent_requests: 0,
+            // One request per millisecond, so a client's entry is stale 2 ms after it last sent.
+            rate_limit: crate::config::RateLimitConfig {
+                enabled: true,
+                requests_per_second: 1_000,
+                burst: 1,
+            },
+            ..Default::default()
+        };
+        let routes = || Router::new().route("/", get(|| async { "ok" }));
+
+        let (unpruned, unpruned_keys) =
+            limit_server(routes(), &server, Duration::from_secs(3_600)).unwrap();
+        let (pruned, pruned_keys) =
+            limit_server(routes(), &server, Duration::from_millis(20)).unwrap();
+        one_request_per_client(&unpruned, 100).await;
+        one_request_per_client(&pruned, 100).await;
+        assert_eq!(unpruned_keys(), 100);
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert_eq!(
+            unpruned_keys(),
+            100,
+            "a stale client stays in the map until a prune removes it"
+        );
+        assert_eq!(pruned_keys(), 0, "every stale client was pruned");
+    }
+
+    /// With rate limiting off there is no limiter, and nothing to count.
+    #[tokio::test]
+    async fn no_rate_limit_holds_no_client_keys() {
+        let server = crate::config::ServerConfig::default();
+        assert!(!server.rate_limit.enabled);
+        let routes = Router::new().route("/", get(|| async { "ok" }));
+        let (app, keys) = limit_server(routes, &server, RATE_LIMIT_PRUNE_INTERVAL).unwrap();
+        one_request_per_client(&app, 3).await;
+        assert_eq!(keys(), 0);
     }
 
     #[test]

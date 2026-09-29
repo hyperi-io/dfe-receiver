@@ -144,12 +144,14 @@ impl ServiceApp for App {
         // governor's UnifiedPressure latch -- the inbound brake for a push
         // source. Ingest byte tracking lands on the guard that latch watches.
         // When self_regulation.enabled = false the governor is None and the
-        // brake falls back to the bespoke memory-guard threshold check.
+        // brake reads this same runtime guard's own threshold
+        // (DFE_RECEIVER_MEMORY_PRESSURE_THRESHOLD); buffer.* bounds only the
+        // destinations' in-memory queues.
         // Horizontal scaling pressure is driven by the once-per-second
         // `update_scaling` feed on the shared engine above (connections,
-        // queue_depth, request_rate, memory, spill, circuit) -- KEDA scales on
-        // the resulting `/scaling/pressure` gauge -- so the pipeline no longer
-        // pushes a separate per-pod signal feed.
+        // queue_depth, request_rate, memory, spill, circuit) -- served at
+        // `/scaling/pressure` -- so the pipeline no longer pushes a separate
+        // per-pod signal feed.
         let orchestrator = Orchestrator::with_governor(
             config.clone(),
             metrics.clone(),
@@ -443,8 +445,9 @@ mod tests {
             ("receiver_active_connections", Gauge, &["transport"]),
             ("receiver_auth_failures_total", Counter, &["reason"]),
             ("receiver_validation_failures_total", Counter, &["reason"]),
-            ("receiver_request_timeouts_total", Counter, &[]),
-            ("receiver_body_size_rejected_total", Counter, &[]),
+            ("receiver_request_timeouts_total", Counter, &["transport"]),
+            ("receiver_body_size_rejected_total", Counter, &["transport"]),
+            ("receiver_ip_filter_rejected_total", Counter, &["transport"]),
             ("receiver_tls_handshake_failures_total", Counter, &[]),
             ("receiver_records_rejected_total", Counter, &["outcome"]),
             ("receiver_messages_spilled_total", Counter, &[]),

@@ -79,6 +79,46 @@ pub async fn bound_addr<T: std::fmt::Debug>(
     }
 }
 
+/// POST to `path` on `addr` with a body that stops 1000 bytes short of its
+/// Content-Length, and return the status the server answers within `wait`.
+///
+/// `None` when the server has not answered by then, which is how a listener
+/// with no request timeout behaves.
+pub async fn post_stalled_body(
+    addr: std::net::SocketAddr,
+    path: &str,
+    wait: std::time::Duration,
+) -> Option<u16> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut stream = tokio::net::TcpStream::connect(addr).await.ok()?;
+    let head = format!(
+        "POST {path} HTTP/1.1\r\nhost: {addr}\r\ncontent-type: application/x-protobuf\r\n\
+         content-length: 1024\r\n\r\n"
+    );
+    stream.write_all(head.as_bytes()).await.ok()?;
+    stream.write_all(&[0u8; 24]).await.ok()?;
+    let mut answer = vec![0u8; 256];
+    let read = tokio::time::timeout(wait, stream.read(&mut answer))
+        .await
+        .ok()?
+        .ok()?;
+    let status_line = std::str::from_utf8(&answer[..read]).ok()?;
+    status_line.split_whitespace().nth(1)?.parse().ok()
+}
+
+/// Poll `condition` until it holds, for at most `wait`.
+pub async fn eventually(wait: std::time::Duration, condition: impl Fn() -> bool) -> bool {
+    let deadline = tokio::time::Instant::now() + wait;
+    while tokio::time::Instant::now() < deadline {
+        if condition() {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    condition()
+}
+
 /// Start a scalo gRPC Push server on a free loopback port, standing in for a
 /// destination such as dfe-loader, and return its endpoint URL with it.
 ///
@@ -309,7 +349,7 @@ impl KafkaTestConfig {
                 enabled: true,
                 mechanism: mechanism.clone(),
                 username: user.clone(),
-                password: password.clone(),
+                password: password.as_str().into(),
             })
         } else {
             None
@@ -543,8 +583,11 @@ macro_rules! skip_if_no_docker {
 
 /// The JVM image: `apache/kafka-native` before 4.4.0 segfaults in `getpwuid` on ~2% of starts.
 ///
+/// The broker the suite deploys: the Strimzi operator runs Kafka 4.2.0 at most,
+/// and the org Renovate preset holds `apache/kafka` to `<=4.2.0` to match.
+///
 /// renovate: datasource=docker depName=apache/kafka
-const KAFKA_TAG: &str = "4.3.1";
+const KAFKA_TAG: &str = "4.2.0";
 
 /// A JVM broker takes 5-12 s to become ready, longer on a busy runner, so 60 s is too tight.
 const KAFKA_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
