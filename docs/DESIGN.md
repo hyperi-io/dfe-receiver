@@ -498,6 +498,11 @@ readinessProbe:
 | `receiver_requests_error` | Counter | Total failed requests |
 | `receiver_bytes_received_total` | Counter | Total bytes ingested |
 | `receiver_records_dropped_total` | Counter | Records dropped with no way to tell the sender, by `transport` and `reason` (`unavailable`, `rejected`, `shutdown`) |
+| `records_received_total` | Counter | Records, counted once when a listener first offers each to the pipeline |
+| `records_processed_total` / `records_delivered_total` | Counter | Records the pipeline took |
+| `records_error_total` | Counter | Records refused for good |
+| `receiver_messages_spilled_total` | Counter | Records a destination's buffer held back, in memory or on disk |
+| `receiver_messages_drained_total` | Counter | Held-back records since sent on |
 
 ### Kafka Metrics
 

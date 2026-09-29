@@ -111,12 +111,15 @@ impl<S: ReceiverSink + 'static> SinkBackend<S> {
             SinkBackend::Tiered(tiered) => {
                 // Map scalo stats into InMemoryBufferStats for compatibility
                 let circuit_state = tiered.circuit_state().await;
+                let queue_size = tiered.spool_len().await;
+                let queued_total = tiered.cold_path_count();
                 InMemoryBufferStats {
                     circuit_state,
                     consecutive_failures: 0, // scalo doesn't expose this directly
-                    queue_size: tiered.spool_len().await,
-                    queued_total: tiered.cold_path_count(),
-                    drained_total: tiered.hot_path_count(),
+                    queue_size,
+                    queued_total,
+                    // scalo counts no drain, so it is what this process spooled and no longer holds.
+                    drained_total: queued_total.saturating_sub(queue_size as u64),
                 }
             }
         }

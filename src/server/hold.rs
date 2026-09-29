@@ -23,7 +23,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 use crate::metrics::{DropReason, Metrics};
-use crate::pipeline::{Acks, PipelineState};
+use crate::pipeline::{Acks, Offer, PipelineState};
 
 /// Wait before the first re-offer.
 const FIRST_RETRY: Duration = Duration::from_millis(100);
@@ -34,7 +34,8 @@ const LAST_RETRY: Duration = Duration::from_secs(2);
 /// Offer `payloads` to the pipeline until every one is settled -- taken, or
 /// refused for good -- holding the caller, and the socket it reads, until then.
 ///
-/// Counts the request once, and every record dropped. Returns false when
+/// Counts the request once, and every record dropped; the pipeline counts
+/// each record as received on the first offer alone. Returns false when
 /// shutdown came first: the records not yet taken are dropped, and the caller
 /// must stop reading.
 pub(crate) async fn hold_until_settled(
@@ -48,8 +49,10 @@ pub(crate) async fn hold_until_settled(
     let mut pending = payloads;
     let mut rejected = 0;
     let mut wait = FIRST_RETRY;
+    let mut offer = Offer::First;
     loop {
-        let outcome = pipeline.process_batch_acked(pending, acks, None).await;
+        let outcome = pipeline.offer_batch_acked(pending, acks, offer).await;
+        offer = Offer::Again;
         rejected += outcome.rejected;
         let settled = outcome.settled();
         let Some(e) = outcome.unavailable else {
@@ -120,6 +123,72 @@ mod tests {
             .await
             .unwrap(),
         )
+    }
+
+    /// A held record counts as received once, however often it is offered.
+    #[tokio::test]
+    async fn a_held_record_counts_once_however_often_it_is_offered() {
+        let totals = crate::metrics::testing::CounterTotals::default();
+        let _recorder = metrics::set_default_local_recorder(&totals);
+        let manager =
+            scalo::metrics::MetricsManager::with_config(scalo::metrics::MetricsConfig::offline(""));
+        let scaling = Arc::new(crate::config::ScalingConfig::default().build_pressure());
+        let metrics = Arc::new(Metrics::register_on(scaling, &manager));
+        let mut config = Config::default();
+        config.destinations.default = "loader".into();
+        config.loader.transport = "memory".to_string();
+        let guard = MemoryGuard::with_usage_source(
+            MemoryGuardConfig {
+                limit_bytes: 1_000_000,
+                pressure_threshold: 0.8,
+                ..Default::default()
+            },
+            UsageSource::Reservations,
+        );
+        let pipeline = crate::pipeline::Orchestrator::with_governor(
+            config,
+            Arc::clone(&metrics),
+            CancellationToken::new(),
+            None,
+            Some(Arc::new(guard)),
+        )
+        .await
+        .unwrap()
+        .state();
+        pipeline.memory_guard().add_bytes(900_000);
+
+        let held = tokio::spawn({
+            let pipeline = Arc::clone(&pipeline);
+            let metrics = Arc::clone(&metrics);
+            async move {
+                hold_until_settled(
+                    &pipeline,
+                    &[Bytes::from_static(br#"{"held":true}"#)],
+                    &metrics,
+                    "test",
+                    &CancellationToken::new(),
+                    &Acks::at_enqueue(),
+                )
+                .await
+            }
+        });
+        // Each offer the pipeline turns away is one backpressure event.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while totals.total("backpressure_events_total") < 3 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the record was not offered three times");
+        pipeline.memory_guard().release(900_000);
+        let kept_reading = tokio::time::timeout(Duration::from_secs(5), held)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(kept_reading);
+        assert_eq!(totals.total("records_received_total"), 1, "received once");
+        assert_eq!(totals.total("records_delivered_total"), 1, "taken once");
     }
 
     /// A record the pipeline cannot take is held, then taken once it can.

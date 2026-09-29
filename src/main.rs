@@ -412,4 +412,75 @@ mod tests {
             "register_metrics must put the receiver's metric groups in the manifest"
         );
     }
+
+    /// The series the receiver records under its own names reach the manifest
+    /// `metrics-manifest` prints, each with the type and labels it is recorded with.
+    #[test]
+    fn register_metrics_lists_the_receiver_series() {
+        use scalo::metrics::MetricType::{Counter, Gauge, Histogram};
+
+        let manager =
+            scalo::metrics::MetricsManager::with_config(scalo::metrics::MetricsConfig::offline(""));
+        App::parse_from(["dfe-receiver"]).register_metrics(&manager);
+        let manifest = manager.registry().manifest();
+
+        for (name, kind, labels) in [
+            ("receiver_requests_total", Counter, &["transport"][..]),
+            ("receiver_requests_success_total", Counter, &["transport"]),
+            ("receiver_requests_error_total", Counter, &["transport"]),
+            ("receiver_parse_failures_total", Counter, &["transport"]),
+            ("receiver_bytes_received_total", Counter, &["transport"]),
+            (
+                "receiver_records_dropped_total",
+                Counter,
+                &["transport", "reason"],
+            ),
+            (
+                "receiver_request_duration_seconds",
+                Histogram,
+                &["transport"],
+            ),
+            ("receiver_active_connections", Gauge, &["transport"]),
+            ("receiver_auth_failures_total", Counter, &["reason"]),
+            ("receiver_validation_failures_total", Counter, &["reason"]),
+            ("receiver_request_timeouts_total", Counter, &[]),
+            ("receiver_body_size_rejected_total", Counter, &[]),
+            ("receiver_tls_handshake_failures_total", Counter, &[]),
+            ("receiver_records_rejected_total", Counter, &["outcome"]),
+            ("receiver_messages_spilled_total", Counter, &[]),
+            ("receiver_messages_drained_total", Counter, &[]),
+            ("receiver_kafka_send_duration_seconds", Histogram, &[]),
+            ("receiver_kafka_sends_total", Counter, &[]),
+            ("receiver_kafka_bytes_sent_total", Counter, &[]),
+            ("receiver_kafka_send_errors_total", Counter, &[]),
+            ("receiver_kafka_delivered_total", Counter, &[]),
+            (
+                "receiver_kafka_delivery_failures_total",
+                Counter,
+                &["reason"],
+            ),
+            ("receiver_events_per_second", Gauge, &[]),
+            (
+                "receiver_destination_send_failures_total",
+                Counter,
+                &["reason"],
+            ),
+            ("flow_rate_limited_total", Counter, &["transport"]),
+            (
+                "flow_records_emitted_total",
+                Counter,
+                &["transport", "mode"],
+            ),
+            ("transport_drops_total", Counter, &["transport", "reason"]),
+        ] {
+            let entry = manifest
+                .metrics
+                .iter()
+                .find(|m| m.name == name)
+                .unwrap_or_else(|| panic!("{name} is not in the manifest"));
+            assert_eq!(entry.metric_type, kind, "{name}");
+            assert_eq!(entry.labels, labels, "{name}");
+            assert!(!entry.description.is_empty(), "{name} has no description");
+        }
+    }
 }
