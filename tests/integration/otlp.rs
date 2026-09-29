@@ -656,3 +656,159 @@ async fn otlp_http_accepts_a_post_with_the_configured_token() {
 
     otlp.shutdown.cancel();
 }
+
+/// A refused credential counts on the auth-failure counter on either endpoint.
+#[tokio::test]
+async fn otlp_counts_a_refused_credential_on_both_endpoints() {
+    use pb::collector::logs::v1::logs_service_client::LogsServiceClient;
+
+    let otlp = start_otlp_handler(bearer_config()).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/v1/logs", otlp.http))
+        .header("content-type", "application/x-protobuf")
+        .body(build_logs_request().encode_to_vec())
+        .send()
+        .await
+        .expect("Failed to send OTLP HTTP request");
+    assert_eq!(resp.status(), 401);
+
+    let mut client = LogsServiceClient::connect(format!("http://{}", otlp.grpc))
+        .await
+        .expect("Failed to connect to OTLP gRPC");
+    let status = client
+        .export(build_logs_request())
+        .await
+        .expect_err("an export with no token is refused");
+    otlp.shutdown.cancel();
+
+    assert_eq!(status.code(), tonic::Code::Unauthenticated);
+    assert_eq!(otlp.metrics.get_auth_failures_total(), 2);
+}
+
+// =============================================================================
+// Request limits on the HTTP endpoint, and the counters behind them
+// =============================================================================
+
+/// An OTLP HTTP export past `server.max_body_size` is refused with 413 before
+/// any handler runs, and counted.
+#[tokio::test]
+async fn otlp_http_refuses_a_body_past_the_server_limit() {
+    let mut config = test_config();
+    config.server.max_body_size = 1024;
+    let otlp = start_otlp_handler(config).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/v1/logs", otlp.http))
+        .header("content-type", "application/x-protobuf")
+        .body(vec![0u8; 4096])
+        .send()
+        .await
+        .expect("Failed to send OTLP HTTP request");
+    otlp.shutdown.cancel();
+
+    assert_eq!(resp.status(), 413);
+    assert_eq!(otlp.metrics.get_body_size_rejected_total(), 1);
+    assert_eq!(
+        requests_total(&otlp.metrics),
+        0,
+        "the refused export must not reach a handler"
+    );
+}
+
+/// An export larger than axum's own 2 MiB default but inside
+/// `server.max_body_size` is taken: the configured limit is the one that applies.
+#[tokio::test]
+async fn otlp_http_takes_a_body_up_to_the_server_limit() {
+    use pb::common::v1::{AnyValue, any_value};
+
+    let otlp = start_otlp_handler(test_config()).await;
+    let mut request = build_logs_request();
+    request.resource_logs[0].scope_logs[0].log_records[0].body = Some(AnyValue {
+        value: Some(any_value::Value::StringValue("x".repeat(3 * 1024 * 1024))),
+    });
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/v1/logs", otlp.http))
+        .header("content-type", "application/x-protobuf")
+        .body(request.encode_to_vec())
+        .send()
+        .await
+        .expect("Failed to send OTLP HTTP request");
+    otlp.shutdown.cancel();
+
+    assert_eq!(
+        resp.status(),
+        200,
+        "a 3 MiB export under the 10 MiB server limit was refused"
+    );
+}
+
+/// An OTLP HTTP export that stalls mid-body is answered 408 once
+/// `server.request_timeout_ms` passes, and counted.
+#[tokio::test]
+async fn otlp_http_times_out_a_stalled_export() {
+    let mut config = test_config();
+    config.server.request_timeout_ms = 200;
+    let otlp = start_otlp_handler(config).await;
+
+    let status =
+        crate::common::post_stalled_body(otlp.http, "/v1/logs", Duration::from_secs(5)).await;
+    otlp.shutdown.cancel();
+
+    assert_eq!(status, Some(408));
+    assert_eq!(otlp.metrics.get_request_timeouts_total(), 1);
+}
+
+/// A gRPC export past `otlp.max_message_size`, which tonic refuses before any
+/// handler runs, is counted as refused for its size.
+#[tokio::test]
+async fn otlp_grpc_counts_an_export_refused_for_its_size() {
+    use pb::collector::logs::v1::logs_service_client::LogsServiceClient;
+    use pb::common::v1::{AnyValue, any_value};
+
+    let mut config = test_config();
+    config.otlp.max_message_size = 1024;
+    let otlp = start_otlp_handler(config).await;
+    let mut request = build_logs_request();
+    request.resource_logs[0].scope_logs[0].log_records[0].body = Some(AnyValue {
+        value: Some(any_value::Value::StringValue("x".repeat(8 * 1024))),
+    });
+
+    let mut client = LogsServiceClient::connect(format!("http://{}", otlp.grpc))
+        .await
+        .expect("Failed to connect to OTLP gRPC");
+    let status = client
+        .export(request)
+        .await
+        .expect_err("an export past the limit is refused");
+    otlp.shutdown.cancel();
+
+    assert_eq!(status.code(), tonic::Code::OutOfRange);
+    assert_eq!(otlp.metrics.get_body_size_rejected_total(), 1);
+}
+
+/// A connection open on either OTLP endpoint counts in the active-connection
+/// gauge until it closes.
+#[tokio::test]
+async fn otlp_counts_open_connections_on_both_endpoints() {
+    let otlp = start_otlp_handler(test_config()).await;
+    let wait = Duration::from_secs(5);
+
+    let grpc = tokio::net::TcpStream::connect(otlp.grpc).await.unwrap();
+    let http = tokio::net::TcpStream::connect(otlp.http).await.unwrap();
+    assert!(
+        crate::common::eventually(wait, || otlp.metrics.get_active_connections() == 2).await,
+        "two open connections, counted {}",
+        otlp.metrics.get_active_connections()
+    );
+
+    drop(grpc);
+    drop(http);
+    assert!(
+        crate::common::eventually(wait, || otlp.metrics.get_active_connections() == 0).await,
+        "both closed, counted {}",
+        otlp.metrics.get_active_connections()
+    );
+    otlp.shutdown.cancel();
+}

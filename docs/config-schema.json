@@ -649,7 +649,7 @@
       }
     },
     "IpFilterConfig": {
-      "description": "IP filter (allowlist / denylist) configuration.\n\nEnforced in the accept loop, before the TLS handshake and before any\nprotocol work: `/ingest`, the webhook intake, Splunk HEC, Prometheus remote\nwrite, OTLP HTTP, syslog (UDP per datagram, TCP and TLS per connection),\nLumberjack, Fluent Forward and GELF.\n\nIt does not reach the gRPC ports (`grpc`, and OTLP on 4317): tonic owns\nthose accept loops, so authenticate them with `auth.mode: bearer`, or\n`mtls` with `tls.client_auth: required`. Flow has its own optional\n`flow.ip_filter` per listener.\n\nUPGRADE: this list used to be `/ingest` and the webhook intake alone. One\nfilter now governs every listener, so an allowlist written for the `/ingest`\nsenders also decides which sources syslog, Lumberjack, Fluent Forward, GELF,\nSplunk HEC, Prometheus remote write and OTLP HTTP are accepted from. Widen\n`cidrs` to cover every sender, or those events are dropped in the accept\nloop.",
+      "description": "IP filter (allowlist / denylist) configuration.\n\nEnforced in the accept loop, before the TLS handshake and before any\nprotocol work: `/ingest`, the webhook intake, Splunk HEC, Prometheus remote\nwrite, OTLP HTTP, syslog (UDP per datagram, TCP and TLS per connection),\nLumberjack, Fluent Forward and GELF.\n\nIt does not reach the gRPC ports (`grpc`, and OTLP on 4317): tonic owns\nthose accept loops, so authenticate them with `auth.mode: bearer`, or\n`mtls` with `tls.client_auth: required`. Flow has its own optional\n`flow.ip_filter` per listener.\n\nUPGRADE: this list used to be `/ingest` and the webhook intake alone. One\nfilter now governs every listener, so an allowlist written for the `/ingest`\nsenders also decides which sources syslog, Lumberjack, Fluent Forward, GELF,\nSplunk HEC, Prometheus remote write and OTLP HTTP are accepted from. Widen\n`cidrs` to cover every sender, or those events are dropped in the accept\nloop.\n\nEach refusal counts on `receiver_ip_filter_rejected_total`, labelled with\nthe listener's transport.",
       "type": "object",
       "properties": {
         "mode": {
@@ -2253,8 +2253,10 @@
           "type": "string"
         },
         "password": {
-          "description": "Password (redacted in Debug/Display output).",
-          "type": "string"
+          "description": "Password, redacted wherever it is printed or serialised.",
+          "type": "string",
+          "x-dfe-secret": true,
+          "writeOnly": true
         }
       },
       "required": [
@@ -2331,18 +2333,18 @@
       }
     },
     "BufferConfig": {
-      "description": "Buffer and memory configuration.\n\n## Design Decision: No Disk Spillover\n\nMemory-only buffering is used because:\n1. K8s memory limits trigger OOMKill, which triggers KEDA scale-up\n2. Vector clients have their own disk buffers for retries\n3. Circuit breaker + 503 responses propagate backpressure upstream\n4. Disk I/O would bottleneck the hot path at PB/s scale",
+      "description": "The in-memory queue a destination holds records in while its sink is\nunavailable, and its optional disk spillover.\n\nThese settings bound that queue and nothing else. The 503 a listener\nanswers under process memory pressure comes from the memory guard, set by\n`DFE_RECEIVER_MEMORY_LIMIT_BYTES` and `DFE_RECEIVER_MEMORY_PRESSURE_THRESHOLD`,\nand from `self_regulation` when it is on.",
       "type": "object",
       "properties": {
         "memory_limit": {
-          "description": "Maximum memory for buffers in bytes (0 = scalo's MemoryGuard auto-detect:\n85% of the cgroup limit, capped at cgroup v2 `memory.high` when that is\nlower, and total system memory when there is no cgroup).",
+          "description": "Bytes the in-memory queue is sized from. 0 bounds the queue at 1000\nrecords instead.",
           "type": "integer",
           "format": "uint",
           "minimum": 0,
           "default": 0
         },
         "pressure_threshold": {
-          "description": "Memory pressure threshold (0.0-1.0).\nWhen usage exceeds this, backpressure is applied (503 responses).",
+          "description": "Share of `memory_limit` the in-memory queue may hold (0.0-1.0). A record\npast it is refused and its request answered as retryable (HTTP 503,\ngRPC UNAVAILABLE). Unused while `memory_limit` is 0.",
           "type": "number",
           "format": "double",
           "default": 0.8

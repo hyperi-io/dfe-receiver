@@ -33,19 +33,21 @@ use axum::routing::post;
 use prost::Message;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
-use tower_http::limit::RequestBodyLimitLayer;
-use tower_http::timeout::TimeoutLayer;
 use tracing::{debug, info, warn};
 
 use crate::config::{PrometheusRwConfig, RawCapture};
 use crate::error::{Error, RETRY_AFTER_SECS, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::{Acks, PipelineState};
-use crate::server::http::create_auth_state;
+use crate::server::auth::TokenAuth;
+use crate::server::http::{Accept, create_auth_state};
 use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
 use crate::server::traits::{BoundAddr, ProtocolHandler};
 
 use self::convert::{PrometheusRwMode, write_request_to_json};
+
+/// The transport label the remote-write listener counts under.
+const TRANSPORT: &str = "prometheus_rw";
 
 /// Prometheus Remote Write protocol handler.
 pub struct PrometheusRwHandler {
@@ -167,16 +169,18 @@ async fn run_prometheus_rw_server(
     let app = Router::new()
         .route("/api/v1/write", post(write_handler))
         .layer(axum::middleware::from_fn_with_state(
-            auth_state,
+            TokenAuth::new(auth_state, metrics.clone(), TRANSPORT),
             crate::server::auth::token_auth_middleware,
-        ))
-        .layer(RequestBodyLimitLayer::new(max_body_size))
-        .layer(TimeoutLayer::with_status_code(
-            StatusCode::REQUEST_TIMEOUT,
-            request_timeout,
         ))
         .with_state(state);
 
+    let app = crate::server::http::apply_request_limits(
+        app,
+        max_body_size,
+        request_timeout,
+        metrics.clone(),
+        TRANSPORT,
+    );
     let app = crate::server::http::apply_server_limits(app, &server)?;
 
     let addr: SocketAddr = config
@@ -203,7 +207,11 @@ async fn run_prometheus_rw_server(
         build_tls_acceptor(&config.tls)?
     };
 
-    let ip_filter = crate::server::ip_filter::IpFilter::from_config(&server.ip_filter);
+    let accept = Accept {
+        ip_filter: crate::server::ip_filter::IpFilter::from_config(&server.ip_filter),
+        metrics,
+        transport: TRANSPORT,
+    };
 
     // Published once TLS is ready, so a failed TLS setup never reads as serving.
     let _serving = bound.publish(&listener.local_addr());
@@ -211,32 +219,16 @@ async fn run_prometheus_rw_server(
     if let Some(ref provider) = tls_provider {
         let acceptor_handle = provider.acceptor_handle();
         info!(addr = %addr, tls = true, hot_reload = true, "Prometheus Remote Write server listening");
-        crate::server::http::run_tls_server(
-            listener,
-            app,
-            acceptor_handle,
-            ip_filter,
-            shutdown,
-            metrics,
-        )
-        .await
+        crate::server::http::run_tls_server(listener, app, acceptor_handle, accept, shutdown).await
     } else if let Some(acceptor) = tls_acceptor {
         let acceptor_handle = Arc::new(parking_lot::RwLock::new(acceptor));
         info!(addr = %addr, tls = true, hot_reload = false, "Prometheus Remote Write server listening");
-        crate::server::http::run_tls_server(
-            listener,
-            app,
-            acceptor_handle,
-            ip_filter,
-            shutdown,
-            metrics,
-        )
-        .await
+        crate::server::http::run_tls_server(listener, app, acceptor_handle, accept, shutdown).await
     } else {
         info!(addr = %addr, tls = false, "Prometheus Remote Write server listening");
         // The shared accept loop, not `axum::serve`: it runs the IP filter and
         // puts the peer address on each request for the rate limiter.
-        crate::server::http::run_plain_server(listener, app, ip_filter, shutdown).await?;
+        crate::server::http::run_plain_server(listener, app, accept, shutdown).await?;
         info!("Prometheus Remote Write server stopped");
         Ok(())
     }

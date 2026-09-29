@@ -306,8 +306,7 @@ pub struct PipelineState {
     /// ingest brake (HTTP 503 / gRPC `UNAVAILABLE`) consults this unified,
     /// hysteretic pressure signal -- the HARD memory source is the never-OOM
     /// authority. `None` when `self_regulation.enabled = false`, in which case
-    /// the brake falls back to the bespoke memory-guard `under_pressure()`
-    /// check (byte-identical to pre-governor behaviour).
+    /// the brake reads `memory_guard`'s own `under_pressure()` threshold.
     pressure: Option<Arc<UnifiedPressure>>,
     dlq: Option<Arc<Dlq>>,
     /// Where a record a destination refuses for good goes.
@@ -322,12 +321,13 @@ pub struct PipelineState {
 }
 
 impl PipelineState {
-    /// Create new pipeline state with self-regulation disabled.
+    /// Create pipeline state with no governor and no injected memory guard, so
+    /// it builds its own guard from `buffer.memory_limit` and
+    /// `buffer.pressure_threshold`.
     ///
-    /// The ingest brake falls back to the bespoke YAML-configured memory-guard
-    /// threshold check (byte-identical to pre-governor behaviour). Used by
-    /// tests and the `self_regulation.enabled = false` path. Production wires
-    /// the governor via [`with_governor`](Self::with_governor).
+    /// Only tests take this path: production always injects the runtime's
+    /// guard through [`with_governor`](Self::with_governor), with
+    /// self-regulation on or off.
     pub async fn new(shared_config: SharedConfig, shutdown: CancellationToken) -> Result<Self> {
         Self::with_governor(shared_config, shutdown, None, None).await
     }
@@ -338,10 +338,12 @@ impl PipelineState {
     /// source of truth). When `Some`, the pipeline tracks ingest bytes on the
     /// governor's OWN memory guard so the governor's HARD memory source -- and
     /// thus the `UnifiedPressure` latch the ingest brake consults -- actually
-    /// reacts to in-flight load. When `None` (self-regulation disabled, or
-    /// tests) the pipeline builds the bespoke YAML-configured guard and the
-    /// brake falls back to its threshold check (byte-identical to pre-governor
-    /// behaviour).
+    /// reacts to in-flight load. When `None` (self-regulation disabled) the
+    /// brake reads `runtime_memory_guard`'s own threshold.
+    ///
+    /// Production always passes `runtime_memory_guard`. Only with it `None`,
+    /// which tests alone do, does the pipeline build a guard of its own from
+    /// `buffer.memory_limit` and `buffer.pressure_threshold`.
     pub async fn with_governor(
         shared_config: SharedConfig,
         shutdown: CancellationToken,
@@ -379,10 +381,10 @@ impl PipelineState {
         );
         // Memory guard + pressure source of truth.
         //
-        // With self-regulation ON, reuse the runtime's guard (the one the
-        // governor's HARD memory source watches) so ingest byte reservations
-        // feed the UnifiedPressure latch. Otherwise build the bespoke
-        // YAML-configured guard (env > YAML > cgroup auto-detect).
+        // Production injects the runtime's guard (the one the governor's HARD
+        // memory source watches) so ingest byte reservations feed the
+        // UnifiedPressure latch. The buffer-configured guard is built only
+        // when no guard is injected, which tests alone do.
         let (memory_guard, pressure) = match (governor, runtime_memory_guard) {
             (Some(gov), Some(guard)) => (guard, Some(gov.pressure())),
             // An injected guard is the caller's whether a governor came with it
@@ -618,8 +620,7 @@ impl PipelineState {
     ///
     /// When self-regulation is enabled, this is the runtime governor's unified,
     /// hysteretic pressure latch (HARD memory source = never-OOM authority).
-    /// When disabled, it falls back to the bespoke memory-guard threshold
-    /// check, byte-identical to pre-governor behaviour.
+    /// When disabled, it is the memory guard's own threshold check.
     ///
     /// This is an INBOUND brake only. Under pressure the HTTP/gRPC ingest
     /// handlers shed (503 / `UNAVAILABLE`) BEFORE accepting -- relying on

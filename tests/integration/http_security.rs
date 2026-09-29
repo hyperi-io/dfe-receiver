@@ -1605,3 +1605,159 @@ async fn test_metrics_security_counters() {
         "Should have 1 TLS failure"
     );
 }
+
+// =============================================================================
+// Security counters, driven through the real listener
+// =============================================================================
+
+/// Start the `/ingest` listener, handing back its address and the metrics it records on.
+async fn start_counted_server(
+    config: Config,
+) -> (std::net::SocketAddr, CancellationToken, Arc<Metrics>) {
+    let metrics = Arc::new(Metrics::default());
+    let shutdown = CancellationToken::new();
+    let pipeline = Arc::new(
+        PipelineState::new(SharedConfig::new(config.clone()), CancellationToken::new())
+            .await
+            .expect("Failed to create pipeline"),
+    );
+    let handler = HttpHandler::new(
+        config.server.bind_address.clone(),
+        pipeline,
+        metrics.clone(),
+    );
+    let bound = handler.bound_addr();
+    let server_shutdown = shutdown.clone();
+    let mut server = tokio::spawn(async move { handler.start(server_shutdown).await });
+    let addr = crate::common::bound_addr("HTTP", &bound, &mut server).await;
+    (addr, shutdown, metrics)
+}
+
+/// How long a test waits for a counter the server moves on another task.
+const COUNTER_WAIT: Duration = Duration::from_secs(5);
+
+/// A refused credential counts on the auth-failure counter.
+#[tokio::test]
+async fn a_refused_credential_is_counted() {
+    let mut config = test_config(10_000, 30_000, "header");
+    config.server.auth.accepted_headers = vec![AcceptedHeader {
+        name: "x-api-key".to_string(),
+        values: vec!["secret-key".into()],
+    }];
+    let (addr, shutdown, metrics) = start_counted_server(config).await;
+
+    let client = reqwest::Client::new();
+    for key in [None, Some("wrong-key")] {
+        let mut request = client.post(format!("http://{addr}/ingest")).body("{}");
+        if let Some(key) = key {
+            request = request.header("x-api-key", key);
+        }
+        assert_eq!(request.send().await.unwrap().status(), 401);
+    }
+    shutdown.cancel();
+
+    assert_eq!(metrics.get_auth_failures_total(), 2);
+}
+
+/// A body past `server.max_body_size` is refused with 413 and counted.
+#[tokio::test]
+async fn an_oversized_body_is_counted() {
+    let (addr, shutdown, metrics) = start_counted_server(test_config(100, 30_000, "none")).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{addr}/ingest"))
+        .body(format!(r#"{{"data":"{}"}}"#, "x".repeat(500)))
+        .send()
+        .await
+        .unwrap();
+    shutdown.cancel();
+
+    assert_eq!(response.status(), 413);
+    assert_eq!(metrics.get_body_size_rejected_total(), 1);
+}
+
+/// A body larger than axum's own 2 MiB default but inside `server.max_body_size`
+/// is taken: the configured limit is the one that applies.
+#[tokio::test]
+async fn a_body_up_to_the_configured_limit_is_taken() {
+    let config = test_config(10 * 1024 * 1024, 30_000, "none");
+    let (addr, shutdown, metrics) = start_counted_server(config).await;
+
+    let body = format!(r#"{{"data":"{}"}}"#, "x".repeat(3 * 1024 * 1024));
+    let response = reqwest::Client::new()
+        .post(format!("http://{addr}/ingest"))
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    shutdown.cancel();
+
+    assert_eq!(
+        response.status(),
+        202,
+        "a 3 MiB body under a 10 MiB limit was refused"
+    );
+    assert_eq!(metrics.get_body_size_rejected_total(), 0);
+}
+
+/// A request whose body stalls is answered 408 once the request timeout
+/// passes, and counted.
+#[tokio::test]
+async fn a_stalled_request_is_timed_out_and_counted() {
+    let (addr, shutdown, metrics) = start_counted_server(test_config(10_000, 200, "none")).await;
+
+    let status = crate::common::post_stalled_body(addr, "/ingest", COUNTER_WAIT).await;
+    shutdown.cancel();
+
+    assert_eq!(status, Some(408));
+    assert_eq!(metrics.get_request_timeouts_total(), 1);
+}
+
+/// An open connection counts in the active-connection gauge until it closes.
+#[tokio::test]
+async fn an_open_connection_is_counted_until_it_closes() {
+    let (addr, shutdown, metrics) = start_counted_server(test_config(10_000, 30_000, "none")).await;
+
+    let first = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let second = tokio::net::TcpStream::connect(addr).await.unwrap();
+    assert!(
+        crate::common::eventually(COUNTER_WAIT, || metrics.get_active_connections() == 2).await,
+        "two open connections, counted {}",
+        metrics.get_active_connections()
+    );
+
+    drop(first);
+    drop(second);
+    assert!(
+        crate::common::eventually(COUNTER_WAIT, || metrics.get_active_connections() == 0).await,
+        "both closed, counted {}",
+        metrics.get_active_connections()
+    );
+    shutdown.cancel();
+}
+
+/// A connection the IP filter refuses is counted, and is never counted as open.
+#[tokio::test]
+async fn an_ip_filter_refusal_is_counted() {
+    use tokio::io::AsyncReadExt;
+
+    let mut config = test_config(10_000, 30_000, "none");
+    config.server.ip_filter.mode = "denylist".to_string();
+    config.server.ip_filter.cidrs = vec!["127.0.0.0/8".to_string()];
+    let (addr, shutdown, metrics) = start_counted_server(config).await;
+
+    let mut refused = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let mut buf = [0u8; 16];
+    let read = tokio::time::timeout(COUNTER_WAIT, refused.read(&mut buf))
+        .await
+        .expect("the refused connection is closed");
+    shutdown.cancel();
+
+    assert!(
+        matches!(read, Ok(0) | Err(_)),
+        "the server closed the connection"
+    );
+    assert_eq!(metrics.get_ip_filter_rejected_total(), 1);
+    assert_eq!(metrics.get_active_connections(), 0);
+}

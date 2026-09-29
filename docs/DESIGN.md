@@ -311,8 +311,8 @@ kafka:
     linger.ms: "20"
 
 buffer:
-  memory_limit: 0  # Auto (85% of the cgroup limit)
-  pressure_threshold: 0.8
+  memory_limit: 0          # sizes the destination queues; 0 = 1000 records each
+  pressure_threshold: 0.8  # share of memory_limit a queue may hold
 
 metrics:
   address: "0.0.0.0:9090"
@@ -769,14 +769,27 @@ Authentication is enforced **before** body processing to minimize resource usage
 
 This order ensures minimal CPU/memory usage for bot scans and unauthenticated probes.
 
-### What NOT to Implement in dfe-receiver
+### Admission Controls in dfe-receiver
 
-The following are intentionally NOT implemented because edge infrastructure handles them more efficiently:
+The receiver carries its own admission controls, so a listener exposed without
+an edge layer still has them. An edge layer in front is still the place for
+volumetric and reputation-based defence.
+
+| Control | Where it runs | Config |
+|---------|---------------|--------|
+| IP allowlist/denylist | Every accept loop the receiver owns, before TLS or any protocol work; syslog UDP per datagram | `server.ip_filter` |
+| Per-client rate limit | A GCRA limiter per HTTP listener (ingest, webhook, HEC, remote write, OTLP HTTP), answering 429 | `server.rate_limit` |
+| In-flight request cap | Per HTTP listener | `server.max_concurrent_requests` |
+| Body size and request timeout | Every HTTP listener, answering 413 and 408 | `server.*`, `splunk_hec.*`, `prometheus_rw.*`, `webhook.*` |
+
+The rate limiter drops a client's entry once its budget has refilled, checked
+every 5 seconds, so its memory follows the clients seen recently, not every
+client ever seen.
+
+These stay with the edge layer:
 
 | Feature | Reason |
 |---------|--------|
-| Rate limiting | Edge layer handles this with dedicated infrastructure |
-| IP allowlist/blocklist | Edge layer or network policy handles this |
 | Connection limits | Kubernetes or load balancer handles this |
 | Access logging | Edge provides this; duplicating wastes resources |
 | Bot detection | WAF/CDN provides sophisticated detection |
@@ -784,7 +797,8 @@ The following are intentionally NOT implemented because edge infrastructure hand
 
 ### Monitoring and Alerting
 
-Key security metrics to monitor:
+Key security metrics to monitor. Names are bare unless `metrics.namespace`
+sets a prefix.
 
 ```yaml
 # Prometheus alerts
@@ -792,26 +806,44 @@ groups:
   - name: dfe-receiver-security
     rules:
       - alert: HighAuthFailureRate
-        expr: rate(receiver_requests_error[5m]) > 100
+        expr: sum(rate(receiver_auth_failures_total[5m])) > 100
         labels:
           severity: warning
         annotations:
           summary: "High authentication failure rate"
 
       - alert: HighValidationFailureRate
-        expr: rate(receiver_messages_dlq_total[5m]) > 50
+        expr: sum(rate(receiver_validation_failures_total[5m])) > 50
         labels:
           severity: warning
         annotations:
           summary: "High validation failure rate - check DLQ"
 
       - alert: RequestTimeoutSpike
-        expr: rate(receiver_requests_error[5m]) > 10
+        expr: sum by (transport) (rate(receiver_request_timeouts_total[5m])) > 10
         labels:
           severity: info
         annotations:
           summary: "Request timeout spike - possible slow loris attempt"
+
+      - alert: OversizeBodyProbe
+        expr: sum by (transport) (rate(receiver_body_size_rejected_total[5m])) > 10
+        labels:
+          severity: info
+        annotations:
+          summary: "Requests refused for their size"
+
+      - alert: IpFilterRejecting
+        expr: sum by (transport) (rate(receiver_ip_filter_rejected_total[5m])) > 0
+        for: 15m
+        labels:
+          severity: info
+        annotations:
+          summary: "The IP filter is refusing connections - check server.ip_filter covers every sender"
 ```
+
+A refused credential is also written as a `security` target event, at most
+one line per failure reason every 5 seconds; the counter carries every one.
 
 ## Flow (NetFlow + sFlow) -- EXPERIMENTAL
 

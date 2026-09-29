@@ -574,6 +574,9 @@ $defs:
       Splunk HEC, Prometheus remote write and OTLP HTTP are accepted from. Widen
       `cidrs` to cover every sender, or those events are dropped in the accept
       loop.
+
+      Each refusal counts on `receiver_ip_filter_rejected_total`, labelled with
+      the listener's transport.
     type: object
     properties:
       mode:
@@ -2026,8 +2029,10 @@ $defs:
         description: Username.
         type: string
       password:
-        description: Password (redacted in Debug/Display output).
+        description: Password, redacted wherever it is printed or serialised.
         type: string
+        x-dfe-secret: true
+        writeOnly: true
     required:
     - enabled
     - mechanism
@@ -2091,30 +2096,28 @@ $defs:
         default: null
   BufferConfig:
     description: |-
-      Buffer and memory configuration.
+      The in-memory queue a destination holds records in while its sink is
+      unavailable, and its optional disk spillover.
 
-      ## Design Decision: No Disk Spillover
-
-      Memory-only buffering is used because:
-      1. K8s memory limits trigger OOMKill, which triggers KEDA scale-up
-      2. Vector clients have their own disk buffers for retries
-      3. Circuit breaker + 503 responses propagate backpressure upstream
-      4. Disk I/O would bottleneck the hot path at PB/s scale
+      These settings bound that queue and nothing else. The 503 a listener
+      answers under process memory pressure comes from the memory guard, set by
+      `DFE_RECEIVER_MEMORY_LIMIT_BYTES` and `DFE_RECEIVER_MEMORY_PRESSURE_THRESHOLD`,
+      and from `self_regulation` when it is on.
     type: object
     properties:
       memory_limit:
         description: |-
-          Maximum memory for buffers in bytes (0 = scalo's MemoryGuard auto-detect:
-          85% of the cgroup limit, capped at cgroup v2 `memory.high` when that is
-          lower, and total system memory when there is no cgroup).
+          Bytes the in-memory queue is sized from. 0 bounds the queue at 1000
+          records instead.
         type: integer
         format: uint
         minimum: 0
         default: 0
       pressure_threshold:
         description: |-
-          Memory pressure threshold (0.0-1.0).
-          When usage exceeds this, backpressure is applied (503 responses).
+          Share of `memory_limit` the in-memory queue may hold (0.0-1.0). A record
+          past it is refused and its request answered as retryable (HTTP 503,
+          gRPC UNAVAILABLE). Unused while `memory_limit` is 0.
         type: number
         format: double
         default: 0.8

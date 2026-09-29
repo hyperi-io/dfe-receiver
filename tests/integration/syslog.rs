@@ -464,3 +464,59 @@ async fn test_syslog_bytes_received_tracked() {
     syslog.shutdown.cancel();
     tokio::time::sleep(Duration::from_millis(100)).await;
 }
+
+// ---------------------------------------------------------------------------
+// Admission counters
+// ---------------------------------------------------------------------------
+
+/// An open syslog TCP connection counts in the active-connection gauge until it closes.
+#[tokio::test]
+async fn a_syslog_tcp_connection_is_counted_until_it_closes() {
+    let syslog = start_syslog_handler(test_config()).await;
+    let wait = Duration::from_secs(5);
+
+    let connection = tokio::net::TcpStream::connect(syslog.tcp).await.unwrap();
+    assert!(
+        crate::common::eventually(wait, || syslog.metrics.get_active_connections() == 1).await,
+        "one open connection, counted {}",
+        syslog.metrics.get_active_connections()
+    );
+
+    drop(connection);
+    assert!(
+        crate::common::eventually(wait, || syslog.metrics.get_active_connections() == 0).await,
+        "closed, counted {}",
+        syslog.metrics.get_active_connections()
+    );
+    syslog.shutdown.cancel();
+}
+
+/// A datagram and a connection the IP filter refuses each count, and neither
+/// reaches the pipeline.
+#[tokio::test]
+async fn a_syslog_ip_filter_refusal_is_counted() {
+    let mut config = test_config();
+    config.server.ip_filter.mode = "denylist".to_string();
+    config.server.ip_filter.cidrs = vec!["127.0.0.0/8".to_string()];
+    let syslog = start_syslog_handler(config).await;
+
+    let sender = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    sender
+        .send_to(b"<14>Sep 25 10:00:00 host app: refused", syslog.udp)
+        .await
+        .unwrap();
+    let _refused = tokio::net::TcpStream::connect(syslog.tcp).await.unwrap();
+
+    assert!(
+        crate::common::eventually(Duration::from_secs(5), || {
+            syslog.metrics.get_ip_filter_rejected_total() == 2
+        })
+        .await,
+        "a datagram and a connection refused, counted {}",
+        syslog.metrics.get_ip_filter_rejected_total()
+    );
+    syslog.shutdown.cancel();
+
+    assert_eq!(requests_total(&syslog.metrics), 0);
+    assert_eq!(syslog.metrics.get_active_connections(), 0);
+}

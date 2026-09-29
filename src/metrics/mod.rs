@@ -23,8 +23,9 @@
 //! Security-related metrics for alerting on potential attacks:
 //! - `receiver_auth_failures_total` - Authentication failures by reason
 //! - `receiver_validation_failures_total` - Validation failures by reason
-//! - `receiver_request_timeouts_total` - Request timeouts (slow loris indicator)
-//! - `receiver_body_size_rejected_total` - Oversized body rejections
+//! - `receiver_request_timeouts_total` - Request timeouts by transport (slow loris indicator)
+//! - `receiver_body_size_rejected_total` - Oversized body rejections by transport
+//! - `receiver_ip_filter_rejected_total` - Connections and datagrams the IP filter refused, by transport
 //! - `receiver_tls_handshake_failures_total` - TLS failures
 
 use std::sync::Arc;
@@ -56,6 +57,41 @@ pub enum AuthFailureReason {
     /// A webhook signature was valid but its timestamp fell outside the
     /// replay window.
     StaleSignature,
+}
+
+impl AuthFailureReason {
+    /// Every reason, in the order [`index`](Self::index) numbers them.
+    pub const ALL: [Self; 5] = [
+        Self::MissingHeader,
+        Self::InvalidToken,
+        Self::InvalidHeader,
+        Self::InvalidSignature,
+        Self::StaleSignature,
+    ];
+
+    /// The `reason` label on `receiver_auth_failures_total`.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::MissingHeader => "missing_header",
+            Self::InvalidToken => "invalid_token",
+            Self::InvalidHeader => "invalid_header",
+            Self::InvalidSignature => "invalid_signature",
+            Self::StaleSignature => "stale_signature",
+        }
+    }
+
+    /// Position in [`ALL`](Self::ALL), for state kept per reason.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        match self {
+            Self::MissingHeader => 0,
+            Self::InvalidToken => 1,
+            Self::InvalidHeader => 2,
+            Self::InvalidSignature => 3,
+            Self::StaleSignature => 4,
+        }
+    }
 }
 
 /// Reason for validation failure (for metrics labels).
@@ -122,6 +158,7 @@ pub struct Metrics {
     validation_failures_missing_field: AtomicU64,
     request_timeouts_total: AtomicU64,
     body_size_rejected_total: AtomicU64,
+    ip_filter_rejected_total: AtomicU64,
     tls_handshake_failures_total: AtomicU64,
 
     // Gauge atomics (for scaling read-back)
@@ -203,6 +240,7 @@ impl Metrics {
             validation_failures_missing_field: AtomicU64::new(0),
             request_timeouts_total: AtomicU64::new(0),
             body_size_rejected_total: AtomicU64::new(0),
+            ip_filter_rejected_total: AtomicU64::new(0),
             tls_handshake_failures_total: AtomicU64::new(0),
             batch_queue_size: AtomicU64::new(0),
             batch_queue_bytes: AtomicU64::new(0),
@@ -500,29 +538,44 @@ impl Metrics {
         }
     }
 
-    /// Increment active connections.
-    #[inline]
-    pub fn inc_active_connections(&self, transport: &str) {
-        let count = self.active_connections.fetch_add(1, Ordering::Relaxed) + 1;
-        metrics::gauge!(
-            "receiver_active_connections",
-            "transport" => transport.to_string()
-        )
-        .set(count as f64);
+    /// Count an inbound connection open on `transport` until the returned
+    /// guard drops.
+    #[must_use = "the connection counts as open only while the guard lives"]
+    pub fn open_connection(self: &Arc<Self>, transport: &'static str) -> ConnectionGuard {
+        self.inc_active_connections(transport);
+        ConnectionGuard {
+            metrics: Arc::clone(self),
+            transport,
+        }
     }
 
-    /// Decrement active connections.
+    /// Increment active connections.
+    ///
+    /// The gauge moves per transport; the atomic behind the scaling score's
+    /// `connections` component holds the total across every listener.
     #[inline]
-    pub fn dec_active_connections(&self, transport: &str) {
-        let count = self
-            .active_connections
-            .fetch_sub(1, Ordering::Relaxed)
-            .saturating_sub(1);
+    pub fn inc_active_connections(&self, transport: &str) {
+        self.active_connections.fetch_add(1, Ordering::Relaxed);
         metrics::gauge!(
             "receiver_active_connections",
             "transport" => transport.to_string()
         )
-        .set(count as f64);
+        .increment(1.0);
+    }
+
+    /// Decrement active connections, never below zero.
+    #[inline]
+    pub fn dec_active_connections(&self, transport: &str) {
+        let _ = self
+            .active_connections
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+                Some(n.saturating_sub(1))
+            });
+        metrics::gauge!(
+            "receiver_active_connections",
+            "transport" => transport.to_string()
+        )
+        .decrement(1.0);
     }
 
     /// Record request duration.
@@ -553,34 +606,30 @@ impl Metrics {
     #[inline]
     pub fn inc_auth_failure(&self, reason: AuthFailureReason) {
         self.auth_failures_total.fetch_add(1, Ordering::Relaxed);
-        // Local label string for the bespoke receiver_* metric, plus the
-        // standardised scalo enum for ServiceMetrics. scalo typed the
-        // auth_failure label (RFC 6749 codes); our fine-grained local reasons
-        // map to the closest scalo variant.
-        let (reason_str, dfe_reason) = match reason {
+        // scalo typed the ServiceMetrics auth_failure label (RFC 6749 codes);
+        // each local reason maps to the closest scalo variant.
+        let dfe_reason = match reason {
             AuthFailureReason::MissingHeader => {
                 self.auth_failures_missing_header
                     .fetch_add(1, Ordering::Relaxed);
-                ("missing_header", RlAuthReason::Unauthorized)
+                RlAuthReason::Unauthorized
             }
             AuthFailureReason::InvalidToken => {
                 self.auth_failures_invalid_token
                     .fetch_add(1, Ordering::Relaxed);
-                ("invalid_token", RlAuthReason::MalformedToken)
+                RlAuthReason::MalformedToken
             }
             AuthFailureReason::InvalidHeader => {
                 self.auth_failures_invalid_header
                     .fetch_add(1, Ordering::Relaxed);
-                ("invalid_header", RlAuthReason::MalformedToken)
+                RlAuthReason::MalformedToken
             }
-            AuthFailureReason::InvalidSignature => {
-                ("invalid_signature", RlAuthReason::InvalidSignature)
-            }
-            AuthFailureReason::StaleSignature => ("stale_signature", RlAuthReason::Expired),
+            AuthFailureReason::InvalidSignature => RlAuthReason::InvalidSignature,
+            AuthFailureReason::StaleSignature => RlAuthReason::Expired,
         };
         metrics::counter!(
             "receiver_auth_failures_total",
-            "reason" => reason_str.to_string()
+            "reason" => reason.label()
         )
         .increment(1);
         if let Some(ref dfe) = self.dfe {
@@ -622,19 +671,40 @@ impl Metrics {
         }
     }
 
-    /// Record a request timeout.
+    /// Record a request timed out on `transport` (408).
     #[inline]
-    pub fn inc_request_timeout(&self) {
+    pub fn inc_request_timeout(&self, transport: &str) {
         self.request_timeouts_total.fetch_add(1, Ordering::Relaxed);
-        metrics::counter!("receiver_request_timeouts_total").increment(1);
+        metrics::counter!(
+            "receiver_request_timeouts_total",
+            "transport" => transport.to_string()
+        )
+        .increment(1);
     }
 
-    /// Record a body size rejection (413).
+    /// Record a request refused on `transport` for its size: 413 over HTTP,
+    /// `OUT_OF_RANGE` or `RESOURCE_EXHAUSTED` over gRPC.
     #[inline]
-    pub fn inc_body_size_rejected(&self) {
+    pub fn inc_body_size_rejected(&self, transport: &str) {
         self.body_size_rejected_total
             .fetch_add(1, Ordering::Relaxed);
-        metrics::counter!("receiver_body_size_rejected_total").increment(1);
+        metrics::counter!(
+            "receiver_body_size_rejected_total",
+            "transport" => transport.to_string()
+        )
+        .increment(1);
+    }
+
+    /// Record a connection, or a datagram, the IP filter refused on `transport`.
+    #[inline]
+    pub fn inc_ip_filter_rejected(&self, transport: &str) {
+        self.ip_filter_rejected_total
+            .fetch_add(1, Ordering::Relaxed);
+        metrics::counter!(
+            "receiver_ip_filter_rejected_total",
+            "transport" => transport.to_string()
+        )
+        .increment(1);
     }
 
     /// Record a TLS handshake failure.
@@ -719,6 +789,18 @@ impl Metrics {
     #[inline]
     pub fn get_body_size_rejected_total(&self) -> u64 {
         self.body_size_rejected_total.load(Ordering::Relaxed)
+    }
+
+    /// Get request timeout count.
+    #[inline]
+    pub fn get_request_timeouts_total(&self) -> u64 {
+        self.request_timeouts_total.load(Ordering::Relaxed)
+    }
+
+    /// Get IP-filter rejection count.
+    #[inline]
+    pub fn get_ip_filter_rejected_total(&self) -> u64 {
+        self.ip_filter_rejected_total.load(Ordering::Relaxed)
     }
 
     /// Get TLS handshake failure count.
@@ -825,6 +907,18 @@ impl Metrics {
     }
 }
 
+/// An inbound connection counted on `receiver_active_connections` until dropped.
+pub struct ConnectionGuard {
+    metrics: Arc<Metrics>,
+    transport: &'static str,
+}
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        self.metrics.dec_active_connections(self.transport);
+    }
+}
+
 /// One series as the manifest describes it: name, type, label keys, description.
 pub(crate) type SeriesSpec = (
     &'static str,
@@ -898,14 +992,20 @@ const RECEIVER_SERIES: &[SeriesSpec] = &[
     (
         "receiver_request_timeouts_total",
         MetricType::Counter,
-        &[],
-        "Request timeouts (slow loris indicator)",
+        &["transport"],
+        "Requests answered 408 for taking longer than the request timeout, by transport (slow loris indicator)",
     ),
     (
         "receiver_body_size_rejected_total",
         MetricType::Counter,
-        &[],
-        "Oversized body rejections",
+        &["transport"],
+        "Requests refused for their size, by transport (HTTP 413, gRPC OUT_OF_RANGE or RESOURCE_EXHAUSTED)",
+    ),
+    (
+        "receiver_ip_filter_rejected_total",
+        MetricType::Counter,
+        &["transport"],
+        "Connections, and syslog UDP datagrams, the IP filter refused, by transport",
     ),
     (
         "receiver_tls_handshake_failures_total",
@@ -1377,6 +1477,69 @@ mod tests {
         assert_eq!(metrics.get_auth_failures_total(), 2);
         assert_eq!(metrics.get_validation_failures_total(), 1);
         assert_eq!(metrics.get_tls_handshake_failures_total(), 1);
+    }
+
+    /// A connection counts from its guard's creation to its drop, and a stray
+    /// decrement never wraps the count.
+    #[test]
+    fn a_connection_counts_until_its_guard_drops() {
+        let metrics = Arc::new(Metrics::default());
+        let first = metrics.open_connection("http");
+        let second = metrics.open_connection("grpc");
+        assert_eq!(metrics.get_active_connections(), 2);
+
+        drop(first);
+        assert_eq!(metrics.get_active_connections(), 1);
+        drop(second);
+        assert_eq!(metrics.get_active_connections(), 0);
+
+        metrics.dec_active_connections("http");
+        assert_eq!(metrics.get_active_connections(), 0);
+    }
+
+    /// Open connections feed the scaling score's `connections` component,
+    /// which reaches its full weight at `saturation_connections`.
+    #[test]
+    fn open_connections_feed_the_connections_component() {
+        let config = crate::config::ScalingConfig::default();
+        let metrics = Arc::new(Metrics::default());
+        metrics.update_scaling();
+        assert!(
+            metrics.scaling_pressure().abs() < 1e-9,
+            "an idle receiver scores 0"
+        );
+
+        let open: Vec<ConnectionGuard> = (0..config.saturation_connections as usize)
+            .map(|_| metrics.open_connection("http"))
+            .collect();
+        metrics.update_scaling();
+        let expected = config.weight_connections * 100.0;
+        assert!(
+            (metrics.scaling_pressure() - expected).abs() < 1e-9,
+            "a saturated connections component scores its weight: {}",
+            metrics.scaling_pressure()
+        );
+
+        drop(open);
+        metrics.update_scaling();
+        assert!(metrics.scaling_pressure().abs() < 1e-9);
+    }
+
+    /// The timeout and size counters carry the transport they happened on.
+    #[test]
+    fn refusals_count_under_their_transport() {
+        let metrics = Metrics::default();
+        let totals = CounterTotals::default();
+        metrics::with_local_recorder(&totals, || {
+            metrics.inc_request_timeout("otlp");
+            metrics.inc_body_size_rejected("splunk_hec");
+            metrics.inc_body_size_rejected("grpc");
+        });
+
+        assert_eq!(metrics.get_request_timeouts_total(), 1);
+        assert_eq!(metrics.get_body_size_rejected_total(), 2);
+        assert_eq!(totals.total("receiver_request_timeouts_total"), 1);
+        assert_eq!(totals.total("receiver_body_size_rejected_total"), 2);
     }
 
     #[test]

@@ -384,6 +384,11 @@ mod tests {
                 "{def}.{field}"
             );
         }
+        assert_eq!(
+            schema["$defs"]["SaslConfig"]["properties"]["password"]["x-dfe-secret"],
+            serde_json::Value::Bool(true),
+            "SaslConfig.password"
+        );
     }
 
     #[test]
