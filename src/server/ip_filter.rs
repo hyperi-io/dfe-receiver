@@ -18,7 +18,7 @@ use std::sync::atomic::AtomicU64;
 use ipnet::IpNet;
 use ipnet_trie::IpnetTrie;
 use scalo::logger::log_debounced;
-use tracing::{info, warn};
+use tracing::{error, info};
 
 use crate::config::IpFilterConfig;
 use crate::metrics::Metrics;
@@ -38,6 +38,21 @@ enum IpFilterInner {
     Disabled,
     Allowlist(IpnetTrie<()>),
     Denylist(IpnetTrie<()>),
+    /// A configuration that did not parse: nothing is admitted.
+    DenyAll,
+}
+
+/// Parse `cidrs` into a trie, refusing the first entry that is not a CIDR.
+pub(crate) fn parse_cidrs(cidrs: &[String]) -> Result<IpnetTrie<()>, String> {
+    let mut trie = IpnetTrie::new();
+    for cidr in cidrs {
+        let net = cidr
+            .trim()
+            .parse::<IpNet>()
+            .map_err(|e| format!("'{cidr}' is not a CIDR ({e})"))?;
+        trie.insert(net, ());
+    }
+    Ok(trie)
 }
 
 impl IpFilter {
@@ -54,35 +69,38 @@ impl IpFilter {
         }
     }
 
-    /// Build from config. Parses CIDRs once at startup.
-    pub fn from_config(config: &IpFilterConfig) -> Self {
-        let mode = config.mode.to_lowercase();
-        if mode == "disabled" || config.cidrs.is_empty() {
-            return Self::disabled();
-        }
-
-        let mut trie = IpnetTrie::new();
-        for cidr in &config.cidrs {
-            match cidr.parse::<IpNet>() {
-                Ok(net) => {
-                    trie.insert(net, ());
-                }
-                Err(e) => {
-                    warn!(cidr = %cidr, error = %e, "invalid CIDR in ip_filter config, skipping");
-                }
+    /// Compile `config`, refusing an unknown mode, an entry in `cidrs` that is
+    /// not a CIDR, and an allowlist with no CIDRs.
+    pub fn parse(config: &IpFilterConfig) -> Result<Self, String> {
+        let trie = parse_cidrs(&config.cidrs)?;
+        let inner = match config.mode.to_ascii_lowercase().as_str() {
+            "disabled" => IpFilterInner::Disabled,
+            "allowlist" if config.cidrs.is_empty() => {
+                return Err("mode is 'allowlist' but cidrs is empty, which admits no \
+                            one -- list the CIDRs to admit, or set mode: disabled"
+                    .into());
             }
-        }
-
-        let inner = match mode.as_str() {
             "allowlist" => IpFilterInner::Allowlist(trie),
             "denylist" => IpFilterInner::Denylist(trie),
-            other => {
-                warn!(mode = %other, "unknown ip_filter mode, disabling");
-                IpFilterInner::Disabled
+            _ => {
+                return Err(format!(
+                    "mode is '{}', which is not one of disabled, allowlist, denylist",
+                    config.mode
+                ));
             }
         };
+        Ok(Self::with(inner))
+    }
 
-        Self::with(inner)
+    /// Build from config, admitting nothing when it does not [`parse`](Self::parse).
+    ///
+    /// `Config::validate` refuses such a config at load, so only a caller that
+    /// skips validation reaches the refusal.
+    pub fn from_config(config: &IpFilterConfig) -> Self {
+        Self::parse(config).unwrap_or_else(|e| {
+            error!(error = %e, "ip_filter does not parse; refusing every connection");
+            Self::with(IpFilterInner::DenyAll)
+        })
     }
 
     /// Whether a freshly accepted connection, or a datagram, from `peer` on
@@ -118,6 +136,7 @@ impl IpFilter {
                 let net = IpNet::from(ip);
                 trie.longest_match(&net).is_none()
             }
+            IpFilterInner::DenyAll => false,
         }
     }
 }
@@ -127,11 +146,15 @@ impl IpFilter {
 mod tests {
     use super::*;
 
-    fn make_filter(mode: &str, cidrs: &[&str]) -> IpFilter {
-        IpFilter::from_config(&IpFilterConfig {
+    fn filter_config(mode: &str, cidrs: &[&str]) -> IpFilterConfig {
+        IpFilterConfig {
             mode: mode.to_string(),
             cidrs: cidrs.iter().map(ToString::to_string).collect(),
-        })
+        }
+    }
+
+    fn make_filter(mode: &str, cidrs: &[&str]) -> IpFilter {
+        IpFilter::from_config(&filter_config(mode, cidrs))
     }
 
     #[test]
@@ -166,22 +189,48 @@ mod tests {
         assert!(!filter.is_allowed("2001:db8::1".parse().unwrap()));
     }
 
+    /// Each of these reads as a filter and would admit what it names as barred.
     #[test]
-    fn test_invalid_cidr_skipped() {
-        let filter = make_filter("allowlist", &["not-a-cidr", "10.0.0.0/8"]);
-        assert!(filter.is_allowed("10.0.0.1".parse().unwrap()));
-        assert!(!filter.is_allowed("8.8.8.8".parse().unwrap()));
+    fn a_config_that_reads_as_filtering_and_would_not_is_refused() {
+        for (config, says) in [
+            (
+                filter_config("allowlist", &["not-a-cidr", "10.0.0.0/8"]),
+                "not-a-cidr",
+            ),
+            (filter_config("denylist", &["10.0.0.0/33"]), "10.0.0.0/33"),
+            (filter_config("allowlist", &[]), "cidrs is empty"),
+            (filter_config("foobar", &["10.0.0.0/8"]), "'foobar'"),
+        ] {
+            let Err(err) = IpFilter::parse(&config) else {
+                panic!("{config:?} parsed");
+            };
+            assert!(err.contains(says), "{config:?}: {err}");
+        }
+    }
+
+    /// A filter built from a config that does not parse admits no one.
+    #[test]
+    fn an_unparsed_filter_admits_no_one() {
+        for filter in [
+            make_filter("allowlist", &["not-a-cidr", "10.0.0.0/8"]),
+            make_filter("allowlist", &[]),
+            make_filter("foobar", &["10.0.0.0/8"]),
+        ] {
+            assert!(!filter.is_allowed("10.0.0.1".parse().unwrap()));
+            assert!(!filter.is_allowed("1.2.3.4".parse().unwrap()));
+        }
     }
 
     #[test]
-    fn test_empty_cidrs_disables() {
-        let filter = make_filter("allowlist", &[]);
-        assert!(filter.is_allowed("1.2.3.4".parse().unwrap()));
+    fn the_modes_parse_case_insensitively() {
+        assert!(IpFilter::parse(&filter_config("AllowList", &["10.0.0.0/8"])).is_ok());
+        assert!(IpFilter::parse(&filter_config("DISABLED", &[])).is_ok());
     }
 
+    /// A denylist with no CIDRs bars nobody, which is what it reads as.
     #[test]
-    fn test_unknown_mode_disables() {
-        let filter = make_filter("foobar", &["10.0.0.0/8"]);
+    fn an_empty_denylist_parses_and_admits_everyone() {
+        let filter = IpFilter::parse(&filter_config("denylist", &[])).unwrap();
         assert!(filter.is_allowed("1.2.3.4".parse().unwrap()));
     }
 

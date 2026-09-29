@@ -15,6 +15,7 @@ properties:
         enabled: false
         requests_per_second: 100
         burst: 500
+      trusted_proxies: []
       ip_filter:
         mode: disabled
         cidrs: []
@@ -131,6 +132,7 @@ properties:
         include_common_header: true
         header_name: ''
         header_values: []
+      accept_unauthenticated: false
       acknowledgements:
         enabled: true
   splunk_hec:
@@ -196,6 +198,7 @@ properties:
         include_common_header: true
         header_name: ''
         header_values: []
+      accept_unauthenticated: false
       raw_capture:
         enabled: null
         max_bytes: null
@@ -252,6 +255,7 @@ properties:
         key_secret: null
         ca_secret: null
         refresh_interval_secs: 3600
+      accept_unauthenticated: false
       raw_capture:
         enabled: null
         max_bytes: null
@@ -275,6 +279,7 @@ properties:
         key_secret: null
         ca_secret: null
         refresh_interval_secs: 3600
+      accept_unauthenticated: false
       raw_capture:
         enabled: null
         max_bytes: null
@@ -478,6 +483,20 @@ $defs:
           enabled: false
           requests_per_second: 100
           burst: 500
+      trusted_proxies:
+        description: |-
+          Proxies, as CIDRs, whose `X-Forwarded-For` or `X-Real-IP` names the
+          client on every HTTP listener. Empty (the default) believes neither
+          header from anyone: a request is the TCP peer's.
+
+          The rate limit keys on that client and auth-failure events report it.
+          List only proxies that append `X-Forwarded-For` or overwrite
+          `X-Real-IP`; a listed proxy that passes a client's own header through
+          lets that client pick its rate-limit bucket.
+        type: array
+        items:
+          type: string
+        default: []
       ip_filter:
         description: |-
           IP filter (allowlist/denylist) for every listener the receiver owns an
@@ -526,6 +545,12 @@ $defs:
       Applies to `/ingest`, the webhook intake, Splunk HEC, Prometheus remote
       write and OTLP HTTP. Each listener keeps its own budget, so the figures
       below are per source IP per listener, not a receiver-wide total.
+
+      The source IP is the TCP peer, or the client a `server.trusted_proxies`
+      peer names. On Kubernetes a Service with `externalTrafficPolicy: Cluster`
+      (the default) rewrites every external source to a node address, so each
+      node's clients share one budget; set `externalTrafficPolicy: Local`, or
+      front the receiver with a proxy listed in `server.trusted_proxies`.
 
       It cannot apply to the raw TCP and UDP listeners (syslog, Lumberjack, Fluent
       Forward, GELF) or to the gRPC ports: there is no HTTP request there to count
@@ -577,6 +602,9 @@ $defs:
 
       Each refusal counts on `receiver_ip_filter_rejected_total`, labelled with
       the listener's transport.
+
+      Startup is refused for an unknown `mode`, an entry in `cidrs` that is not a
+      CIDR, or an `allowlist` with no `cidrs`.
     type: object
     properties:
       mode:
@@ -676,9 +704,9 @@ $defs:
           refresh_interval_secs: 300
       include_common_header:
         description: |-
-          Include the common `x-hyperi-agent` header in accepted headers.
-          Also gates source rule evaluation and timestamp enrichment.
-          Default: true
+          Enrichment switch, read from `server.auth` alone: stamps
+          `_timestamp_receiver` and evaluates `routing.source_rules` on routed
+          records. It adds no accepted header. Default: true
         type: boolean
         default: true
       header_name:
@@ -986,6 +1014,13 @@ $defs:
           include_common_header: true
           header_name: ''
           header_values: []
+      accept_unauthenticated:
+        description: |-
+          Start without client certificates, accepting every client that can
+          reach the port. Without it, an enabled listener refuses to start unless
+          `tls.client_auth` is `required`.
+        type: boolean
+        default: false
       acknowledgements:
         description: |-
           Acknowledge a window only once every destination confirmed its events
@@ -1122,6 +1157,13 @@ $defs:
           include_common_header: true
           header_name: ''
           header_values: []
+      accept_unauthenticated:
+        description: |-
+          Start the UDP and plain TCP listeners, which accept every sender that
+          can reach them. Required whenever syslog is enabled: neither has a
+          handshake to authenticate at.
+        type: boolean
+        default: false
       raw_capture:
         description: |-
           Raw-payload capture override (inherits the common `raw_capture` block).
@@ -1219,7 +1261,8 @@ $defs:
 
       There is no `auth` block: the Forward frames this handler reads carry no
       credential. Close the port at the handshake with `tls.client_auth:
-      required`, or restrict the senders with a `server.ip_filter` allowlist.
+      required`, or set `accept_unauthenticated` and restrict the senders with a
+      `server.ip_filter` allowlist.
     type: object
     properties:
       enabled:
@@ -1249,6 +1292,13 @@ $defs:
           key_secret: null
           ca_secret: null
           refresh_interval_secs: 3600
+      accept_unauthenticated:
+        description: |-
+          Start without client certificates, accepting every client that can
+          reach the port. Without it, an enabled listener refuses to start unless
+          `tls.client_auth` is `required`.
+        type: boolean
+        default: false
       raw_capture:
         description: |-
           Raw-payload capture override (inherits the common `raw_capture` block).
@@ -1277,8 +1327,9 @@ $defs:
       on the standard port 12201.
 
       There is no `auth` block: GELF has no in-protocol authentication. Close the
-      port at the handshake with `tls.client_auth: required`, or restrict the
-      senders with a `server.ip_filter` allowlist.
+      port at the handshake with `tls.client_auth: required`, or set
+      `accept_unauthenticated` and restrict the senders with a `server.ip_filter`
+      allowlist.
     type: object
     properties:
       enabled:
@@ -1308,6 +1359,13 @@ $defs:
           key_secret: null
           ca_secret: null
           refresh_interval_secs: 3600
+      accept_unauthenticated:
+        description: |-
+          Start without client certificates, accepting every client that can
+          reach the port. Without it, an enabled listener refuses to start unless
+          `tls.client_auth` is `required`.
+        type: boolean
+        default: false
       raw_capture:
         description: |-
           Raw-payload capture override (inherits the common `raw_capture` block).

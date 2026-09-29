@@ -19,14 +19,15 @@ HyperI internal -> see infrastructure standards, PB scale patterns
 | Slowloris protection | 5s header_read_timeout, every HTTP listener (hyper) | `HEADER_READ_TIMEOUT` |
 | Connection idle timeout | 60s, HTTP/1 keepalive + HTTP/2 | `CONNECTION_IDLE_TIMEOUT` |
 | Concurrency limit | 10,000 in-flight requests default, per HTTP listener | `server.max_concurrent_requests` |
-| Per-IP rate limiting | GCRA via tower-governor, opt-in, per HTTP listener; clients whose budget has refilled are dropped from its key map every 5s | `server.rate_limit.*` |
-| IP filter (allowlist/denylist) | CIDR trie, connection-level reject, every accept loop | `server.ip_filter.*` |
+| Per-IP rate limiting | GCRA via tower-governor, opt-in, per HTTP listener, keyed on the TCP peer (forwarding headers only from `server.trusted_proxies`); clients whose budget has refilled are dropped from its key map every 5s | `server.rate_limit.*`, `server.trusted_proxies` |
+| IP filter (allowlist/denylist) | CIDR trie, connection-level reject, every accept loop; an unknown mode, a bad CIDR or an empty allowlist refuses to start | `server.ip_filter.*` |
 | 503 backpressure | HTTP + gRPC ingest shed load when pipeline not ready | `Retry-After: 5` |
 | TLS termination | Per-protocol, hot-reloadable | `*.tls.enabled` |
 | TLS handshake timeout | 10s hard-coded, all TCP handlers | `TLS_HANDSHAKE_TIMEOUT` |
 | mTLS client auth | Per-protocol | `*.tls.client_auth: required` |
 | Bearer token auth | Per-protocol, hot-reloadable | `*.auth.mode: bearer` |
-| Header auth | HTTP | `server.auth.mode: header` |
+| Header auth | HTTP, against `accepted_headers` only; an unknown `*.auth.mode` refuses to start | `server.auth.mode: header` |
+| Credential-less listeners | Refuse to start without client certificates required or the opt-out | `*.accept_unauthenticated` |
 | JSON validation | Global, always on: a body that is not JSON is refused with a 400 | Not configurable |
 | Required field check | Global | `validation.required_fields` |
 | Dead-letter queue | Global | `routing.dlq` |
@@ -56,6 +57,11 @@ rate is per source IP PER LISTENER, not a receiver-wide total.
 request of the quota every `1/requests_per_second` of a second, with
 `server.rate_limit.burst` on top of it.
 
+The limiter keys on the TCP peer; forwarding headers count only from
+`server.trusted_proxies`. On Kubernetes, `externalTrafficPolicy: Cluster` (the
+default) makes every client behind one node share its budget: set
+`externalTrafficPolicy: Local`, or list the fronting proxy as trusted.
+
 | Listener | `server.ip_filter` | `server.rate_limit` | Client authentication |
 |---|---|---|---|
 | HTTP `/ingest` | yes | yes | `server.auth` |
@@ -65,17 +71,16 @@ request of the quota every `1/requests_per_second` of a second, with
 | OTLP HTTP (4318) | yes | yes | `otlp.auth` |
 | OTLP gRPC (4317) | no -- tonic runs the accept loop | no -- no HTTP layer there | `otlp.auth`, bearer or mTLS |
 | gRPC / Vector | no -- tonic runs the accept loop | no -- no HTTP layer there | `grpc.auth`, bearer or mTLS |
-| Syslog UDP / TCP / TLS | yes (per datagram on UDP) | no -- no HTTP request to count | TLS listener only, `client_auth: required` |
-| Lumberjack / Beats | yes | no -- no HTTP request to count | `lumberjack.tls.client_auth: required` |
-| Fluent Forward | yes | no -- no HTTP request to count | none -- the Forward frames carry no credential |
-| GELF | yes | no -- no HTTP request to count | none -- GELF has no in-protocol authentication |
+| Syslog UDP / TCP / TLS | yes (per datagram on UDP) | no -- no HTTP request to count | TLS listener only, `client_auth: required`; starts only with `syslog.accept_unauthenticated: true` |
+| Lumberjack / Beats | yes | no -- no HTTP request to count | `lumberjack.tls.client_auth: required`, or `lumberjack.accept_unauthenticated: true` |
+| Fluent Forward | yes | no -- no HTTP request to count | `fluent.tls.client_auth: required`, or `fluent.accept_unauthenticated: true` |
+| GELF | yes | no -- no HTTP request to count | `gelf.tls.client_auth: required`, or `gelf.accept_unauthenticated: true` |
 | Flow (NetFlow / sFlow) | own `flow.ip_filter` | own `flow.rate_limit` | none -- UDP, restrict by source |
 
 An IP allowlist is network admission, not authentication: it says where a client
 may connect from, not who the client is, which is why it is not in the last
-column. Fluent Forward and GELF have nothing in that column at all, so close
-those ports with `tls.client_auth: required`, an allowlist, or both -- an
-allowlist alone admits anything inside the range.
+column. The opt-out says in the config that anyone who can reach the port is
+accepted, so pair it with an allowlist.
 
 ### Upgrade note: one IP filter, every listener
 

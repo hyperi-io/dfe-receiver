@@ -17,6 +17,7 @@
           "requests_per_second": 100,
           "burst": 500
         },
+        "trusted_proxies": [],
         "ip_filter": {
           "mode": "disabled",
           "cidrs": []
@@ -156,6 +157,7 @@
           "header_name": "",
           "header_values": []
         },
+        "accept_unauthenticated": false,
         "acknowledgements": {
           "enabled": true
         }
@@ -234,6 +236,7 @@
           "header_name": "",
           "header_values": []
         },
+        "accept_unauthenticated": false,
         "raw_capture": {
           "enabled": null,
           "max_bytes": null,
@@ -301,6 +304,7 @@
           "ca_secret": null,
           "refresh_interval_secs": 3600
         },
+        "accept_unauthenticated": false,
         "raw_capture": {
           "enabled": null,
           "max_bytes": null,
@@ -329,6 +333,7 @@
           "ca_secret": null,
           "refresh_interval_secs": 3600
         },
+        "accept_unauthenticated": false,
         "raw_capture": {
           "enabled": null,
           "max_bytes": null,
@@ -575,6 +580,14 @@
             "burst": 500
           }
         },
+        "trusted_proxies": {
+          "description": "Proxies, as CIDRs, whose `X-Forwarded-For` or `X-Real-IP` names the\nclient on every HTTP listener. Empty (the default) believes neither\nheader from anyone: a request is the TCP peer's.\n\nThe rate limit keys on that client and auth-failure events report it.\nList only proxies that append `X-Forwarded-For` or overwrite\n`X-Real-IP`; a listed proxy that passes a client's own header through\nlets that client pick its rate-limit bucket.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
         "ip_filter": {
           "description": "IP filter (allowlist/denylist) for every listener the receiver owns an\naccept loop for.",
           "$ref": "#/$defs/IpFilterConfig",
@@ -624,7 +637,7 @@
       }
     },
     "RateLimitConfig": {
-      "description": "Per-IP rate limiting configuration using GCRA (token bucket variant).\n\nApplies to `/ingest`, the webhook intake, Splunk HEC, Prometheus remote\nwrite and OTLP HTTP. Each listener keeps its own budget, so the figures\nbelow are per source IP per listener, not a receiver-wide total.\n\nIt cannot apply to the raw TCP and UDP listeners (syslog, Lumberjack, Fluent\nForward, GELF) or to the gRPC ports: there is no HTTP request there to count\nand tonic owns its own accept loop. Flow has its own per-source packet limit\nunder `flow.rate_limit`.",
+      "description": "Per-IP rate limiting configuration using GCRA (token bucket variant).\n\nApplies to `/ingest`, the webhook intake, Splunk HEC, Prometheus remote\nwrite and OTLP HTTP. Each listener keeps its own budget, so the figures\nbelow are per source IP per listener, not a receiver-wide total.\n\nThe source IP is the TCP peer, or the client a `server.trusted_proxies`\npeer names. On Kubernetes a Service with `externalTrafficPolicy: Cluster`\n(the default) rewrites every external source to a node address, so each\nnode's clients share one budget; set `externalTrafficPolicy: Local`, or\nfront the receiver with a proxy listed in `server.trusted_proxies`.\n\nIt cannot apply to the raw TCP and UDP listeners (syslog, Lumberjack, Fluent\nForward, GELF) or to the gRPC ports: there is no HTTP request there to count\nand tonic owns its own accept loop. Flow has its own per-source packet limit\nunder `flow.rate_limit`.",
       "type": "object",
       "properties": {
         "enabled": {
@@ -649,7 +662,7 @@
       }
     },
     "IpFilterConfig": {
-      "description": "IP filter (allowlist / denylist) configuration.\n\nEnforced in the accept loop, before the TLS handshake and before any\nprotocol work: `/ingest`, the webhook intake, Splunk HEC, Prometheus remote\nwrite, OTLP HTTP, syslog (UDP per datagram, TCP and TLS per connection),\nLumberjack, Fluent Forward and GELF.\n\nIt does not reach the gRPC ports (`grpc`, and OTLP on 4317): tonic owns\nthose accept loops, so authenticate them with `auth.mode: bearer`, or\n`mtls` with `tls.client_auth: required`. Flow has its own optional\n`flow.ip_filter` per listener.\n\nUPGRADE: this list used to be `/ingest` and the webhook intake alone. One\nfilter now governs every listener, so an allowlist written for the `/ingest`\nsenders also decides which sources syslog, Lumberjack, Fluent Forward, GELF,\nSplunk HEC, Prometheus remote write and OTLP HTTP are accepted from. Widen\n`cidrs` to cover every sender, or those events are dropped in the accept\nloop.\n\nEach refusal counts on `receiver_ip_filter_rejected_total`, labelled with\nthe listener's transport.",
+      "description": "IP filter (allowlist / denylist) configuration.\n\nEnforced in the accept loop, before the TLS handshake and before any\nprotocol work: `/ingest`, the webhook intake, Splunk HEC, Prometheus remote\nwrite, OTLP HTTP, syslog (UDP per datagram, TCP and TLS per connection),\nLumberjack, Fluent Forward and GELF.\n\nIt does not reach the gRPC ports (`grpc`, and OTLP on 4317): tonic owns\nthose accept loops, so authenticate them with `auth.mode: bearer`, or\n`mtls` with `tls.client_auth: required`. Flow has its own optional\n`flow.ip_filter` per listener.\n\nUPGRADE: this list used to be `/ingest` and the webhook intake alone. One\nfilter now governs every listener, so an allowlist written for the `/ingest`\nsenders also decides which sources syslog, Lumberjack, Fluent Forward, GELF,\nSplunk HEC, Prometheus remote write and OTLP HTTP are accepted from. Widen\n`cidrs` to cover every sender, or those events are dropped in the accept\nloop.\n\nEach refusal counts on `receiver_ip_filter_rejected_total`, labelled with\nthe listener's transport.\n\nStartup is refused for an unknown `mode`, an entry in `cidrs` that is not a\nCIDR, or an `allowlist` with no `cidrs`.",
       "type": "object",
       "properties": {
         "mode": {
@@ -765,7 +778,7 @@
           }
         },
         "include_common_header": {
-          "description": "Include the common `x-hyperi-agent` header in accepted headers.\nAlso gates source rule evaluation and timestamp enrichment.\nDefault: true",
+          "description": "Enrichment switch, read from `server.auth` alone: stamps\n`_timestamp_receiver` and evaluates `routing.source_rules` on routed\nrecords. It adds no accepted header. Default: true",
           "type": "boolean",
           "default": true
         },
@@ -1095,6 +1108,11 @@
             "header_values": []
           }
         },
+        "accept_unauthenticated": {
+          "description": "Start without client certificates, accepting every client that can\nreach the port. Without it, an enabled listener refuses to start unless\n`tls.client_auth` is `required`.",
+          "type": "boolean",
+          "default": false
+        },
         "acknowledgements": {
           "description": "Acknowledge a window only once every destination confirmed its events\n(default on). Off acknowledges once they are queued.",
           "$ref": "#/$defs/AcknowledgementsConfig",
@@ -1243,6 +1261,11 @@
             "header_values": []
           }
         },
+        "accept_unauthenticated": {
+          "description": "Start the UDP and plain TCP listeners, which accept every sender that\ncan reach them. Required whenever syslog is enabled: neither has a\nhandshake to authenticate at.",
+          "type": "boolean",
+          "default": false
+        },
         "raw_capture": {
           "description": "Raw-payload capture override (inherits the common `raw_capture` block).\n\nThe strongest case for capture: `_raw` holds the wire line including\nthe PRI and header, none of which survives into the parsed envelope.",
           "$ref": "#/$defs/RawCaptureConfig",
@@ -1337,7 +1360,7 @@
       }
     },
     "FluentConfig": {
-      "description": "Fluent Forward protocol configuration.\n\nAccepts data from Fluentd and Fluent Bit agents over the Forward\nprotocol (msgpack over TCP) on the standard port 24224.\n\nThere is no `auth` block: the Forward frames this handler reads carry no\ncredential. Close the port at the handshake with `tls.client_auth:\nrequired`, or restrict the senders with a `server.ip_filter` allowlist.",
+      "description": "Fluent Forward protocol configuration.\n\nAccepts data from Fluentd and Fluent Bit agents over the Forward\nprotocol (msgpack over TCP) on the standard port 24224.\n\nThere is no `auth` block: the Forward frames this handler reads carry no\ncredential. Close the port at the handshake with `tls.client_auth:\nrequired`, or set `accept_unauthenticated` and restrict the senders with a\n`server.ip_filter` allowlist.",
       "type": "object",
       "properties": {
         "enabled": {
@@ -1372,6 +1395,11 @@
             "refresh_interval_secs": 3600
           }
         },
+        "accept_unauthenticated": {
+          "description": "Start without client certificates, accepting every client that can\nreach the port. Without it, an enabled listener refuses to start unless\n`tls.client_auth` is `required`.",
+          "type": "boolean",
+          "default": false
+        },
         "raw_capture": {
           "description": "Raw-payload capture override (inherits the common `raw_capture` block).\n\nForward arrives as msgpack, so `_raw` carries the record's verbatim\nmsgpack-to-JSON decode, before the tag, timestamp and `_source` this\nhandler adds.",
           "$ref": "#/$defs/RawCaptureConfig",
@@ -1391,7 +1419,7 @@
       }
     },
     "GelfConfig": {
-      "description": "GELF (Graylog Extended Log Format) receiver configuration.\n\nAccepts GELF messages over TCP (null-byte delimited JSON)\non the standard port 12201.\n\nThere is no `auth` block: GELF has no in-protocol authentication. Close the\nport at the handshake with `tls.client_auth: required`, or restrict the\nsenders with a `server.ip_filter` allowlist.",
+      "description": "GELF (Graylog Extended Log Format) receiver configuration.\n\nAccepts GELF messages over TCP (null-byte delimited JSON)\non the standard port 12201.\n\nThere is no `auth` block: GELF has no in-protocol authentication. Close the\nport at the handshake with `tls.client_auth: required`, or set\n`accept_unauthenticated` and restrict the senders with a `server.ip_filter`\nallowlist.",
       "type": "object",
       "properties": {
         "enabled": {
@@ -1425,6 +1453,11 @@
             "ca_secret": null,
             "refresh_interval_secs": 3600
           }
+        },
+        "accept_unauthenticated": {
+          "description": "Start without client certificates, accepting every client that can\nreach the port. Without it, an enabled listener refuses to start unless\n`tls.client_auth` is `required`.",
+          "type": "boolean",
+          "default": false
         },
         "raw_capture": {
           "description": "Raw-payload capture override (inherits the common `raw_capture` block).\n\n`_raw` holds the GELF message exactly as it arrived, before the\n`message`, `severity` and `_source` fields this handler derives.",

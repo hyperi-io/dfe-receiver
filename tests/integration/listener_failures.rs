@@ -585,6 +585,7 @@ fn spawn_receiver(
 fluent:
   enabled: true
   bind_address: "{fluent}"
+  accept_unauthenticated: true
 kafka:
   brokers:
     - "127.0.0.1:9092"
@@ -687,4 +688,80 @@ async fn the_readiness_probe_passes_once_every_listener_binds() {
     }
     let log = std::fs::read_to_string(&log_path).unwrap_or_default();
     panic!("/readyz never passed with every port free:\n{log}");
+}
+
+// ---------------------------------------------------------------------------
+// The binary: configs that read as closed and are not refuse to start
+// ---------------------------------------------------------------------------
+
+/// Run `dfe-receiver config-check` on a config of `extra` YAML plus a broker,
+/// and return whether it passed and what it printed.
+fn config_check(extra: &str) -> (bool, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("receiver.yaml");
+    std::fs::write(
+        &config_path,
+        format!("kafka:\n  brokers:\n    - \"127.0.0.1:9092\"\n{extra}"),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_dfe-receiver"))
+        .arg("--config")
+        .arg(&config_path)
+        .arg("config-check")
+        .output()
+        .expect("receiver binary should run");
+    let printed = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    (output.status.success(), printed)
+}
+
+/// Each config is refused with a message naming the key that fixes it.
+#[test]
+fn a_config_that_reads_as_closed_and_is_not_refuses_to_start() {
+    for (extra, names) in [
+        (
+            "server:\n  auth:\n    mode: bearrer\n",
+            "server.auth.mode is 'bearrer'",
+        ),
+        (
+            "server:\n  ip_filter:\n    mode: allowlist\n    cidrs: []\n",
+            "server.ip_filter",
+        ),
+        (
+            "server:\n  ip_filter:\n    mode: allowlist\n    cidrs: [\"10.0.0/8\"]\n",
+            "'10.0.0/8'",
+        ),
+        (
+            "server:\n  trusted_proxies: [\"proxy.internal\"]\n",
+            "server.trusted_proxies",
+        ),
+        (
+            "gelf:\n  enabled: true\n",
+            "gelf.accept_unauthenticated: true",
+        ),
+        (
+            "syslog:\n  enabled: true\n",
+            "syslog.accept_unauthenticated: true",
+        ),
+    ] {
+        let (passed, printed) = config_check(extra);
+        assert!(!passed, "config-check passed:\n{extra}\n{printed}");
+        assert!(
+            printed.contains(names),
+            "{names} is missing from:\n{printed}"
+        );
+    }
+}
+
+/// The positive control: the same listeners start once the opt-out is written.
+#[test]
+fn a_credential_less_listener_starts_with_the_opt_out() {
+    let (passed, printed) = config_check(
+        "gelf:\n  enabled: true\n  accept_unauthenticated: true\n\
+         syslog:\n  enabled: true\n  accept_unauthenticated: true\n",
+    );
+    assert!(passed, "config-check refused the opt-out:\n{printed}");
 }
