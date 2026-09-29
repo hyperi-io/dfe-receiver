@@ -541,8 +541,13 @@ macro_rules! skip_if_no_docker {
 // correctly reports the crate current, and never sees the image. Hoisting the
 // tags out is what puts them back under review, hence the annotations.
 
-/// renovate: datasource=docker depName=apache/kafka-native
+/// The JVM image: `apache/kafka-native` before 4.4.0 segfaults in `getpwuid` on ~2% of starts.
+///
+/// renovate: datasource=docker depName=apache/kafka
 const KAFKA_TAG: &str = "4.3.1";
+
+/// A JVM broker takes 5-12 s to become ready, longer on a busy runner, so 60 s is too tight.
+const KAFKA_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 
 /// OpenBao, not hashicorp/vault. The estate runs OpenBao and so does the
 /// sibling fetcher's harness; testing the secrets path against the product we
@@ -774,9 +779,11 @@ pub async fn start_kafka_container(
 
     let name = claim_container_name(&container_name(Some(test), "kafka"));
     let node = apache::Kafka::default()
+        .with_jvm_image()
         .with_tag(KAFKA_TAG)
         .with_container_name(&name)
         .with_labels(test_labels("kafka"))
+        .with_startup_timeout(KAFKA_STARTUP_TIMEOUT)
         .start()
         .await
         .map_err(|e| format!("failed to start Kafka container: {e}"))?;
