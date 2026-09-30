@@ -27,7 +27,7 @@ use bytes::Bytes;
 use parking_lot::RwLock;
 use rustc_hash::{FxHashMap, FxHashSet};
 use scalo::UnifiedPressure;
-use scalo::dlq::{Dlq, DlqEntry};
+use scalo::dlq::{Dlq, DlqEntry, DlqError};
 use scalo::logger::security;
 use scalo::transport::AcknowledgementsConfig;
 use scalo::transport::DeliveryStatus;
@@ -403,7 +403,7 @@ impl PipelineState {
             }
         };
 
-        let dlq = spawn_dlq(&config, &shutdown);
+        let dlq = spawn_dlq(&config, &shutdown)?;
         // Records a destination refuses for good go to the same DLQ.
         let rejects = Rejects::new(dlq.clone(), metrics.clone());
 
@@ -1320,23 +1320,47 @@ impl PipelineState {
 /// backend. A Kafka backend there queues every entry for a broker nobody
 /// configured, and scalo's cascade never hands a queued entry on to the file
 /// backend.
-fn dlq_backends(config: &Config) -> (scalo::dlq::DlqConfig, Option<scalo::transport::KafkaConfig>) {
+///
+/// # Errors
+///
+/// [`Error::Config`] when the Kafka config names an unknown provider or a
+/// transport scalo refuses.
+fn dlq_backends(
+    config: &Config,
+) -> Result<(scalo::dlq::DlqConfig, Option<scalo::transport::KafkaConfig>)> {
     let mut dlq = config.routing.dlq.to_scalo_config();
     if config.kafka.brokers.is_empty() {
         dlq.kafka.enabled = false;
-        return (dlq, None);
+        return Ok((dlq, None));
     }
-    (dlq, Some(config.kafka.to_scalo_kafka_config()))
+    Ok((dlq, Some(config.kafka.to_scalo_kafka_config()?)))
+}
+
+/// The DLQ backend whose start failed, for `receiver_dlq_start_failures_total`.
+fn dlq_start_failure_backend(err: &DlqError) -> &'static str {
+    match err {
+        DlqError::Kafka(_) => "kafka",
+        DlqError::File(_) | DlqError::Io(_) => "file",
+        _ => "other",
+    }
 }
 
 /// Start the DLQ the config asks for, or `None` when it is disabled or fails
 /// to start.
-fn spawn_dlq(config: &Config, shutdown: &CancellationToken) -> Option<Arc<Dlq>> {
+///
+/// A DLQ that fails to start leaves the receiver running without one, since
+/// a transport failure never stops the app.
+///
+/// # Errors
+///
+/// [`Error::Config`] when the Kafka config is refused, before any client is
+/// built: the main producer shares it and would be refused next.
+fn spawn_dlq(config: &Config, shutdown: &CancellationToken) -> Result<Option<Arc<Dlq>>> {
     if !config.routing.dlq.enabled {
         debug!("DLQ disabled by config");
-        return None;
+        return Ok(None);
     }
-    let (dlq_config, kafka) = dlq_backends(config);
+    let (dlq_config, kafka) = dlq_backends(config)?;
     match Dlq::spawn(&dlq_config, "receiver", kafka.as_ref(), shutdown.clone()) {
         Ok(d) => {
             info!(
@@ -1345,11 +1369,19 @@ fn spawn_dlq(config: &Config, shutdown: &CancellationToken) -> Option<Arc<Dlq>> 
                 file_backend = dlq_config.file.enabled,
                 "DLQ enabled"
             );
-            Some(Arc::new(d))
+            Ok(Some(Arc::new(d)))
         }
         Err(e) => {
-            warn!(error = %e, "Failed to create DLQ, disabled");
-            None
+            let backend = dlq_start_failure_backend(&e);
+            metrics::counter!("receiver_dlq_start_failures_total", "backend" => backend)
+                .increment(1);
+            error!(
+                error = %e,
+                backend,
+                "DLQ failed to start; running without one, so a record a destination \
+                 refuses for good is dropped"
+            );
+            Ok(None)
         }
     }
 }
@@ -1966,7 +1998,7 @@ mod tests {
         assert_eq!(config.routing.dlq.mode, "cascade", "the shipped default");
         assert!(config.routing.dlq.kafka_enabled, "the shipped default");
 
-        let (dlq_config, kafka) = dlq_backends(&config);
+        let (dlq_config, kafka) = dlq_backends(&config).unwrap();
         assert!(
             kafka.is_none(),
             "a Kafka client config reached Dlq::spawn with no brokers"
@@ -1996,12 +2028,107 @@ mod tests {
         let mut config = test_config();
         unroutable_bus(&mut config);
 
-        let (dlq_config, kafka) = dlq_backends(&config);
+        let (dlq_config, kafka) = dlq_backends(&config).unwrap();
         assert!(dlq_config.kafka.enabled);
         assert!(
             kafka.is_some(),
             "the Kafka DLQ backend lost its client config"
         );
+    }
+
+    /// A bus config sending a PLAIN password over a plaintext transport.
+    fn plain_over_plaintext() -> Config {
+        let mut config = test_config();
+        unroutable_bus(&mut config);
+        config.kafka.sasl = Some(crate::config::SaslConfig {
+            enabled: true,
+            mechanism: "PLAIN".to_string(),
+            username: "dfe".to_string(),
+            password: scalo::SensitiveString::new("secret"),
+        });
+        config
+    }
+
+    /// A Kafka config scalo refuses stops the build before any Kafka client
+    /// exists: the DLQ, built first, never gets a client config.
+    #[tokio::test]
+    async fn a_refused_kafka_config_stops_the_build_before_the_dlq() {
+        let config = plain_over_plaintext();
+        assert!(
+            config.routing.dlq.enabled && config.routing.dlq.kafka_enabled,
+            "the shipped default"
+        );
+
+        assert!(
+            matches!(dlq_backends(&config), Err(Error::Config(_))),
+            "the DLQ got a client config for a refused transport"
+        );
+        let built = PipelineState::new(SharedConfig::new(config), CancellationToken::new()).await;
+        let Err(Error::Config(message)) = built else {
+            panic!("expected a config refusal, got {:?}", built.err());
+        };
+        assert!(message.contains("SASL PLAIN"), "{message}");
+    }
+
+    /// A config whose DLQ cannot start: its file backend's directory would sit
+    /// under a regular file.
+    fn unstartable_dlq(dir: &Path) -> Config {
+        let blocker = dir.join("not-a-directory");
+        std::fs::write(&blocker, b"").unwrap();
+        let mut config = test_config();
+        config.routing.dlq = crate::config::DlqConfig {
+            mode: "file_only".to_string(),
+            file_path: blocker.display().to_string(),
+            kafka_enabled: false,
+            ..crate::config::DlqConfig::default()
+        };
+        config
+    }
+
+    /// A DLQ that fails to start is counted by the backend that failed and
+    /// logged at error with the reason.
+    #[test]
+    fn a_dlq_that_fails_to_start_is_counted_and_logged_at_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = unstartable_dlq(dir.path());
+        let recorder = crate::buffer::rejects::CountedKeys::default();
+        let lines = crate::metrics::testing::LogLines::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(lines.clone())
+            .finish();
+
+        let dlq = tracing::subscriber::with_default(subscriber, || {
+            metrics::with_local_recorder(&recorder, || {
+                spawn_dlq(&config, &CancellationToken::new())
+            })
+        });
+
+        assert!(
+            dlq.expect("a DLQ that fails to start is not fatal")
+                .is_none()
+        );
+        assert_eq!(
+            recorder.get("receiver_dlq_start_failures_total{backend=file}"),
+            1
+        );
+        let log = lines.text();
+        assert!(log.contains("ERROR"), "{log}");
+        assert!(!log.contains("WARN"), "{log}");
+        assert!(log.contains("DLQ failed to start"), "{log}");
+        assert!(
+            log.contains("failed to create DLQ writer"),
+            "the reason is not in the log: {log}"
+        );
+    }
+
+    /// The receiver builds and takes records with a DLQ that failed to start.
+    #[tokio::test]
+    async fn a_dlq_that_fails_to_start_leaves_the_receiver_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state_with(unstartable_dlq(dir.path())).await;
+
+        assert!(state.dlq.is_none());
+        state.process(Bytes::from(r#"{"id":1}"#)).await.unwrap();
     }
 
     /// An archived source's records also reach the archiver, whose direct

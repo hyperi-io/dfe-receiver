@@ -364,6 +364,11 @@ impl Config {
             ));
         }
 
+        // Every Kafka client, the DLQ's included, is built only when brokers are set.
+        if !self.kafka.brokers.is_empty() {
+            self.kafka.to_scalo_kafka_config_for_producer()?;
+        }
+
         self.validate_auth()?;
         self.validate_ip_filters()?;
         crate::server::client_ip::TrustedProxies::parse(&self.server.trusted_proxies)
@@ -2223,15 +2228,51 @@ impl KafkaConfig {
         config
     }
 
-    /// Convert to scalo transport KafkaConfig for the main producer sink.
-    pub fn to_scalo_kafka_config_for_producer(&self) -> scalo::transport::KafkaConfig {
-        self.to_scalo_config_with_suffix("")
+    /// The scalo client config for the main producer sink, checked as
+    /// [`checked_client_config`] checks it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Config`] when the config names an unknown provider or a
+    /// transport scalo refuses.
+    pub fn to_scalo_kafka_config_for_producer(&self) -> Result<scalo::transport::KafkaConfig> {
+        checked_client_config(self.to_scalo_config_with_suffix(""))
     }
 
-    /// Convert to scalo transport KafkaConfig for DLQ producer.
-    pub fn to_scalo_kafka_config(&self) -> scalo::transport::KafkaConfig {
-        self.to_scalo_config_with_suffix("-dlq")
+    /// The scalo client config for the DLQ producer, checked as
+    /// [`checked_client_config`] checks it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Config`] when the config names an unknown provider or a
+    /// transport scalo refuses.
+    pub fn to_scalo_kafka_config(&self) -> Result<scalo::transport::KafkaConfig> {
+        checked_client_config(self.to_scalo_config_with_suffix("-dlq"))
     }
+}
+
+/// Apply `config`'s provider preset and refuse what scalo's `KafkaTransport`
+/// refuses, before any client is built from it: a client built first could
+/// send a PLAIN password in the clear before a later check refused it.
+///
+/// # Errors
+///
+/// [`Error::Config`] for an unknown provider, SASL PLAIN on anything but
+/// `sasl_ssl` in any environment, and in production (`scalo::env::is_production`)
+/// `ssl_skip_verify` or an unencrypted transport.
+pub fn checked_client_config(
+    mut config: scalo::transport::KafkaConfig,
+) -> Result<scalo::transport::KafkaConfig> {
+    config
+        .apply_provider()
+        .map_err(|e| Error::Config(format!("kafka: {e}")))?;
+    config.validate(scalo::env::is_production()).map_err(|e| {
+        Error::Config(format!(
+            "{e} (the receiver sets security_protocol from kafka.tls.enabled and \
+                 kafka.sasl.enabled)"
+        ))
+    })?;
+    Ok(config)
 }
 
 /// The named destination set: where a matched record goes.
@@ -2848,7 +2889,7 @@ mod tests {
     fn a_leftover_producer_block_changes_nothing() {
         let with_block: KafkaConfig =
             serde_yaml_ng::from_str("producer:\n  compression: lz4\n  linger_ms: 20\n").unwrap();
-        let client = with_block.to_scalo_kafka_config_for_producer();
+        let client = with_block.to_scalo_kafka_config_for_producer().unwrap();
         assert_eq!(
             client.librdkafka_overrides,
             KafkaConfig::default().librdkafka_overrides
@@ -4189,7 +4230,7 @@ webhook:
             .librdkafka_overrides
             .insert("message.max.bytes".to_string(), "2097152".to_string());
 
-        let scalo = config.to_scalo_kafka_config_for_producer();
+        let scalo = config.to_scalo_kafka_config_for_producer().unwrap();
         assert_eq!(
             scalo.librdkafka_overrides.get("statistics.interval.ms"),
             Some(&"0".to_string()),
@@ -4210,11 +4251,136 @@ kafka:
     statistics.interval.ms: "5000"
 "#;
         let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
-        let scalo = config.kafka.to_scalo_kafka_config_for_producer();
+        let scalo = config.kafka.to_scalo_kafka_config_for_producer().unwrap();
         assert_eq!(
             scalo.librdkafka_overrides.get("statistics.interval.ms"),
             Some(&"5000".to_string()),
             "user config must override the default"
+        );
+    }
+
+    /// Run `f` with scalo's app environment resolving from `app_env` alone.
+    fn in_app_env<R>(app_env: Option<&str>, f: impl FnOnce() -> R) -> R {
+        temp_env::with_vars(
+            [("APP_ENV", app_env), ("ENVIRONMENT", None), ("ENV", None)],
+            f,
+        )
+    }
+
+    /// A bus config authenticating with SASL `mechanism`, over TLS or not.
+    fn sasl_bus(mechanism: &str, tls: bool) -> Config {
+        let mut config = Config::default();
+        config.kafka.brokers = vec!["kafka:9092".to_string()];
+        config.kafka.sasl = Some(SaslConfig {
+            enabled: true,
+            mechanism: mechanism.to_string(),
+            username: "dfe".to_string(),
+            password: SensitiveString::new("secret"),
+        });
+        config.kafka.tls.enabled = tls;
+        config
+    }
+
+    /// A PLAIN password never crosses a plaintext transport, whatever the
+    /// environment: startup refuses it and names the setting that fixes it.
+    #[test]
+    fn plain_over_a_plaintext_transport_is_refused_in_any_environment() {
+        for app_env in [None, Some("development"), Some("production")] {
+            in_app_env(app_env, || {
+                let message = sasl_bus("plain", false)
+                    .validate()
+                    .expect_err("PLAIN over sasl_plaintext")
+                    .to_string();
+                assert!(
+                    message.contains("SASL PLAIN requires security_protocol=sasl_ssl"),
+                    "{app_env:?}: {message}"
+                );
+                assert!(message.contains("kafka.tls.enabled"), "{message}");
+                assert!(
+                    sasl_bus("plain", true).validate().is_ok(),
+                    "{app_env:?}: PLAIN over TLS"
+                );
+            });
+        }
+    }
+
+    /// SCRAM over a plaintext transport starts outside production. In
+    /// production the unencrypted transport is refused, and the receiver has no
+    /// `allow_insecure_transport` to opt back in.
+    #[test]
+    fn an_unencrypted_transport_is_refused_only_in_production() {
+        in_app_env(None, || {
+            assert!(sasl_bus("SCRAM-SHA-512", false).validate().is_ok());
+        });
+        in_app_env(Some("production"), || {
+            let message = sasl_bus("SCRAM-SHA-512", false)
+                .validate()
+                .expect_err("sasl_plaintext in production")
+                .to_string();
+            assert!(message.contains("not permitted in production"), "{message}");
+            assert!(sasl_bus("SCRAM-SHA-512", true).validate().is_ok());
+        });
+    }
+
+    /// No brokers builds no Kafka client, so there is nothing to refuse.
+    #[test]
+    fn a_brokerless_config_skips_the_kafka_check() {
+        let mut config = sasl_bus("plain", false);
+        config.kafka.brokers.clear();
+        config.destinations.default = "loader".into();
+        config.loader.transport = "grpc".to_string();
+        in_app_env(None, || assert!(config.validate().is_ok()));
+    }
+
+    /// The chart's shipped config, a plaintext broker with no SASL, still
+    /// starts and builds a plaintext client.
+    #[test]
+    fn the_shipped_chart_default_still_starts() {
+        let values: serde_json::Value =
+            serde_yaml_ng::from_str(include_str!("../../chart/values.yaml")).unwrap();
+        let config: Config = serde_json::from_value(values["config"].clone()).unwrap();
+        assert_eq!(
+            config.kafka.brokers,
+            ["kafka:9092"],
+            "the chart default moved"
+        );
+        assert!(config.kafka.sasl.is_none(), "the chart default moved");
+
+        in_app_env(None, || {
+            config.validate().expect("the shipped default starts");
+            let client = config.kafka.to_scalo_kafka_config_for_producer().unwrap();
+            assert_eq!(client.security_protocol, "plaintext");
+            assert_eq!(client.sasl_mechanism, None);
+        });
+    }
+
+    /// A provider preset replaces the transport the receiver derived.
+    #[test]
+    fn a_provider_preset_is_applied() {
+        let mut client = KafkaConfig {
+            brokers: vec!["kafka:9092".to_string()],
+            ..KafkaConfig::default()
+        }
+        .to_scalo_config_with_suffix("");
+        assert_eq!(client.security_protocol, "plaintext");
+        client.provider = Some("strimzi".to_string());
+
+        let checked = in_app_env(None, || checked_client_config(client)).unwrap();
+        assert_eq!(checked.security_protocol, "sasl_ssl");
+        assert_eq!(checked.sasl_mechanism.as_deref(), Some("SCRAM-SHA-512"));
+    }
+
+    #[test]
+    fn an_unknown_provider_is_refused() {
+        let mut client = KafkaConfig::default().to_scalo_config_with_suffix("");
+        client.provider = Some("kinesis".to_string());
+
+        let message = in_app_env(None, || checked_client_config(client))
+            .expect_err("an unknown provider")
+            .to_string();
+        assert!(
+            message.contains(r#"unknown kafka provider "kinesis""#),
+            "{message}"
         );
     }
 

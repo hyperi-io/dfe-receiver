@@ -1117,6 +1117,12 @@ const RECEIVER_SERIES: &[SeriesSpec] = &[
         "Records no broker confirmed, by librdkafka error code; a timed-out record may still have been written",
     ),
     (
+        "receiver_dlq_start_failures_total",
+        MetricType::Counter,
+        &["backend"],
+        "DLQ starts that failed, by the backend that refused (kafka, file or other); the receiver runs on without a DLQ",
+    ),
+    (
         "receiver_events_per_second",
         MetricType::Gauge,
         &[],
