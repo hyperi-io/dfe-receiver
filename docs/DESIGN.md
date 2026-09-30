@@ -53,7 +53,7 @@ dfe-receiver is a high-performance HTTP/gRPC receiver for PB/s scale data ingest
 
 ## Architecture
 
-```
+```text
                                    ┌─────────────────┐
                                    │   Config File   │
                                    │  (7-layer       │
@@ -896,7 +896,7 @@ See `config.example.yaml` for the full `flow:` block.
 - `t_flow_start`/`t_flow_end` carry relative `sysup:<ms>` strings rather than
   absolute RFC 3339 timestamps (sysUpTime anchor resolution deferred)
 - `recvmmsg(2)` batch syscall deferred. Linux listener uses `AsyncFd::readable`
-  + per-packet `recv_from` drain loop (capped at 256 packets per readiness
+  \+ per-packet `recv_from` drain loop (capped at 256 packets per readiness
   event). Functionally equivalent below ~100K pps.
 
 ## Completed Milestones
