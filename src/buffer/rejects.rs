@@ -308,7 +308,8 @@ pub(crate) mod test_dlq {
             brokers: vec!["192.0.2.1:9092".to_string()],
             ..crate::config::KafkaConfig::default()
         }
-        .to_scalo_kafka_config();
+        .to_scalo_kafka_config()
+        .unwrap();
         Arc::new(Dlq::spawn(&config, "receiver", Some(&kafka), CancellationToken::new()).unwrap())
     }
 
