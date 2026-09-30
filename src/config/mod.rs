@@ -2210,7 +2210,8 @@ impl KafkaConfig {
                 "sasl_plaintext"
             };
             config.security_protocol = protocol.to_string();
-            config.sasl_mechanism = Some(sasl.mechanism.to_uppercase());
+            // librdkafka names mechanisms with hyphens, and the config documents underscores.
+            config.sasl_mechanism = Some(sasl.mechanism.to_ascii_uppercase().replace('_', "-"));
             config.sasl_username = Some(sasl.username.clone());
             config.sasl_password = Some(sasl.password.clone());
         }
@@ -4320,6 +4321,26 @@ kafka:
             assert!(message.contains("not permitted in production"), "{message}");
             assert!(sasl_bus("SCRAM-SHA-512", true).validate().is_ok());
         });
+    }
+
+    /// The documented underscore spellings reach librdkafka as its hyphenated names.
+    #[test]
+    fn the_sasl_mechanism_reaches_librdkafka_in_its_own_spelling() {
+        for (configured, expected) in [
+            ("scram_sha_512", "SCRAM-SHA-512"),
+            ("scram_sha_256", "SCRAM-SHA-256"),
+            ("SCRAM-SHA-512", "SCRAM-SHA-512"),
+            ("plain", "PLAIN"),
+        ] {
+            let client = sasl_bus(configured, true)
+                .kafka
+                .to_scalo_config_with_suffix("");
+            assert_eq!(
+                client.sasl_mechanism.as_deref(),
+                Some(expected),
+                "{configured}"
+            );
+        }
     }
 
     /// No brokers builds no Kafka client, so there is nothing to refuse.

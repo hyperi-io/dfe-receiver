@@ -33,6 +33,8 @@ test:
   coverage: false
   rust:
     features: default
+    # The APP_ENV tests rely on nextest running each test in its own process.
+    nextest: true
 build:
   enabled: true
   # PGO and BOLT are off for the rc.14 workstream: each adds 30-60 min per arch
