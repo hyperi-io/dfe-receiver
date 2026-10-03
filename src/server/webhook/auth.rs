@@ -618,7 +618,7 @@ mod tests {
             AuthFailure::InvalidHeader,
         ] {
             let label = failure.label();
-            assert!(!label.is_empty());
+            assert_ne!(label, "");
             assert!(label.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'));
         }
         assert_eq!(AuthFailure::StaleSignature.label(), "stale_signature");

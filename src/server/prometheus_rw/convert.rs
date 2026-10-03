@@ -502,7 +502,7 @@ mod tests {
 
         let events =
             write_request_to_json(request, PrometheusRwMode::Native, RawCapture::OFF).unwrap();
-        assert!(events.is_empty());
+        assert_eq!(events, [] as [bytes::Bytes; 0]);
     }
 
     #[test]
@@ -514,7 +514,7 @@ mod tests {
 
         let events =
             write_request_to_json(request, PrometheusRwMode::Native, RawCapture::OFF).unwrap();
-        assert!(events.is_empty());
+        assert_eq!(events, [] as [bytes::Bytes; 0]);
     }
 
     #[test]
@@ -627,7 +627,7 @@ mod tests {
 
         let events =
             write_request_to_json(request, PrometheusRwMode::OTel, RawCapture::OFF).unwrap();
-        assert!(events.is_empty());
+        assert_eq!(events, [] as [bytes::Bytes; 0]);
     }
 
     // -----------------------------------------------------------------------

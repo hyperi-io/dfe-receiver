@@ -548,7 +548,7 @@ mod tests {
         async fn send(&self, _topic: &str, _payload: Bytes) -> Result<()> {
             if self
                 .remaining
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
                 .is_err()
             {
                 return Err(Error::Transport("cap reached".into()));
