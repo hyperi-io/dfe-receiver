@@ -117,6 +117,6 @@ mod tests {
     #[test]
     fn empty_port_list_returns_empty() {
         let result = read_drop_counts(&[]);
-        assert!(result.is_empty());
+        assert_eq!(result, [] as [(u16, u64); 0]);
     }
 }

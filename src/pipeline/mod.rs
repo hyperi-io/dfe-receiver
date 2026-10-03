@@ -1994,7 +1994,7 @@ mod tests {
         grpc_destinations(&mut config, &["loader_leg"]);
         config.routing.dlq.file_path = dir.path().display().to_string();
         config.validation.required_fields = vec!["org_id".to_string()];
-        assert!(config.kafka.brokers.is_empty());
+        assert_eq!(config.kafka.brokers, [] as [std::string::String; 0]);
         assert_eq!(config.routing.dlq.mode, "cascade", "the shipped default");
         assert!(config.routing.dlq.kafka_enabled, "the shipped default");
 

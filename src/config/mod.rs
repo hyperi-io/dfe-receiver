@@ -3582,7 +3582,10 @@ mod tests {
 
     #[test]
     fn trusted_proxies_default_to_none_and_parse_from_yaml() {
-        assert!(Config::default().server.trusted_proxies.is_empty());
+        assert_eq!(
+            Config::default().server.trusted_proxies,
+            [] as [std::string::String; 0]
+        );
         let config: Config =
             serde_yaml_ng::from_str("server:\n  trusted_proxies: [\"10.0.0.0/8\"]\n").unwrap();
         assert_eq!(config.server.trusted_proxies, ["10.0.0.0/8"]);

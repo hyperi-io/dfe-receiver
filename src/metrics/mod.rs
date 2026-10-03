@@ -596,7 +596,7 @@ impl Metrics {
     pub fn dec_active_connections(&self, transport: &str) {
         let _ = self
             .active_connections
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
                 Some(n.saturating_sub(1))
             });
         metrics::gauge!(

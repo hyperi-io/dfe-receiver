@@ -1177,7 +1177,7 @@ mod tests {
 
     #[test]
     fn an_empty_array_carries_no_events() {
-        assert!(split_ok(&Bytes::from("[]")).is_empty());
+        assert_eq!(split_ok(&Bytes::from("[]")), [] as [bytes::Bytes; 0]);
     }
 
     #[test]

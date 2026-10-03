@@ -348,7 +348,7 @@ mod tests {
     fn parses_minimal_datagram() {
         let pkt = build_header_only();
         let (rest, dg) = parse_datagram(&pkt).expect("parse ok");
-        assert!(rest.is_empty());
+        assert_eq!(rest, [] as [u8; 0]);
         assert_eq!(dg.version, 5);
         assert_eq!(dg.agent_address, "10.0.0.1".parse::<IpAddr>().unwrap());
         assert_eq!(dg.sub_agent_id, 7);
@@ -431,7 +431,7 @@ mod tests {
         pkt.extend_from_slice(&sample);
 
         let (rest, dg) = parse_datagram(&pkt).expect("parse ok");
-        assert!(rest.is_empty());
+        assert_eq!(rest, [] as [u8; 0]);
         assert_eq!(dg.samples.len(), 1);
         match &dg.samples[0] {
             Sample::Flow(fs) => {
@@ -506,7 +506,7 @@ mod tests {
         pkt.extend_from_slice(&sample);
 
         let (rest, dg) = parse_datagram(&pkt).expect("parse ok");
-        assert!(rest.is_empty());
+        assert_eq!(rest, [] as [u8; 0]);
         assert_eq!(dg.samples.len(), 1);
         match &dg.samples[0] {
             Sample::Counter(cs) => {
@@ -590,7 +590,7 @@ mod tests {
         pkt.extend_from_slice(&sample);
 
         let (rest, dg) = parse_datagram(&pkt).expect("parses with opaque sample");
-        assert!(rest.is_empty());
+        assert_eq!(rest, [] as [u8; 0]);
         assert_eq!(dg.samples.len(), 1);
         match &dg.samples[0] {
             Sample::Opaque { format, data } => {

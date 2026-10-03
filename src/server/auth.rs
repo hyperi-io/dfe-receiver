@@ -1085,7 +1085,7 @@ mod tests {
     fn the_enrichment_switch_accepts_no_header() {
         let config = AuthConfig::default();
         assert!(config.include_common_header);
-        assert!(config.effective_headers().is_empty());
+        assert_eq!(config.effective_headers(), [] as [AcceptedHeader; 0]);
     }
 
     /// `x-hyperi-agent: 1.0` is a published constant, so it authenticates no
