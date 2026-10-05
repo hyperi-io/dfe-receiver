@@ -245,10 +245,11 @@ pub fn contract() -> DeploymentContract {
         oci_labels: OciLabels {
             title: "dfe-receiver".into(),
             description: "High-performance HTTP/gRPC receiver for PB/s scale data ingestion".into(),
-            // BUSL-1.1 drives the OCI `org.opencontainers.image.licenses`
-            // label and the Dockerfile `# License` header. Copyright stays
-            // the scalo default (the right HYPERI line).
+            vendor: "HYPERI PTY LIMITED".into(),
+            label_namespace: "io.hyperi".into(),
+            // Drive the OCI licence label and the Dockerfile `# License:` and `# Copyright:` headers.
             licenses: "BUSL-1.1".into(),
+            copyright: "(c) 2026 HYPERI PTY LIMITED".into(),
             ..OciLabels::default()
         },
         keda: Some(
@@ -266,7 +267,7 @@ pub fn contract() -> DeploymentContract {
         ),
         // Reflectable config (scalo-rs#6): the derived JSON Schema of the full
         // Config (all ingest protocols + destinations, secret fields marked
-        // x-dfe-secret) plus a capability catalog of the ingest protocols the
+        // x-scalo-secret) plus a capability catalog of the ingest protocols the
         // receiver accepts and the destinations it writes to.
         config_schema: Some(scalo::deployment::config_schema_json::<crate::config::Config>()),
         capabilities: capabilities(),
@@ -379,13 +380,13 @@ mod tests {
         ] {
             let items = &schema["$defs"][def]["properties"][field]["items"];
             assert_eq!(
-                items["x-dfe-secret"],
+                items["x-scalo-secret"],
                 serde_json::Value::Bool(true),
                 "{def}.{field}"
             );
         }
         assert_eq!(
-            schema["$defs"]["SaslConfig"]["properties"]["password"]["x-dfe-secret"],
+            schema["$defs"]["SaslConfig"]["properties"]["password"]["x-scalo-secret"],
             serde_json::Value::Bool(true),
             "SaslConfig.password"
         );

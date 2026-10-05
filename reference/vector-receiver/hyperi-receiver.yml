@@ -69,7 +69,7 @@ transforms:
       - 002_hypercollector
     source: |
       is_mapped = false
-       # Check for remaps in hyperi-receiver-event-category-map csv  
+       # Check for remaps in hyperi-receiver-event-category-map csv
       category_map = find_enrichment_table_records("event_category_map",
         {
           "iteration_group": "${FIELD_SETTER_ITERATION_GROUP:?err}",
@@ -110,7 +110,7 @@ transforms:
       .tags.event.category = replace!(.tags.event.category, ".", "_")
 
 
-sinks:      
+sinks:
   201_prometheus_exporter:
     type: prometheus_exporter
     inputs:
@@ -152,7 +152,7 @@ sinks:
       #    Local queue & memory guard‑rails
       # -------------------------------------------------------------------------
       queue.buffering.max.kbytes: "1048576" # 1 GiB; keeps ~120 batches in flight
-      
+
       # -------------------------------------------------------------------------
       #    Compression & wire efficiency
       # -------------------------------------------------------------------------

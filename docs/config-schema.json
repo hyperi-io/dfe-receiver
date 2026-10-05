@@ -792,6 +792,7 @@
           "type": "array",
           "items": {
             "type": "string",
+            "x-scalo-secret": true,
             "x-dfe-secret": true,
             "writeOnly": true
           },
@@ -812,6 +813,7 @@
           "type": "array",
           "items": {
             "type": "string",
+            "x-scalo-secret": true,
             "x-dfe-secret": true,
             "writeOnly": true
           },
@@ -831,6 +833,7 @@
           "type": "array",
           "items": {
             "type": "string",
+            "x-scalo-secret": true,
             "x-dfe-secret": true,
             "writeOnly": true
           },
@@ -2288,6 +2291,7 @@
         "password": {
           "description": "Password, redacted wherever it is printed or serialised.",
           "type": "string",
+          "x-scalo-secret": true,
           "x-dfe-secret": true,
           "writeOnly": true
         }

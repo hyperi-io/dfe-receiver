@@ -35,7 +35,7 @@ sources:
     encoding: json
     tls:
       enabled: ${ENABLE_TLS:-true}
-      # These files sourced from Secrets Manager or Hashicorp Vault 
+      # These files sourced from Secrets Manager or Hashicorp Vault
       # https://docs.aws.amazon.com/secretsmanager/latest/userguide/integrating_csi_driver.html
       ca_file: "${VECTOR_MTLS_PATH:?err}/vector-receiver-ca.crt"
       key_file: "${VECTOR_MTLS_PATH:?err}/vector-receiver.key"
