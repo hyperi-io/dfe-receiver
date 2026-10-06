@@ -2,7 +2,7 @@
 
 March 2026
 
-**dfe-receiver is the only direct internet-facing component in the DFE stack.**
+**dfe-receiver is the internet-facing ingest component in the DFE stack. dfe-ui is the other component that takes untrusted input.**
 
 This document covers application-level hardening (80/20 effort) and cost-effective infrastructure fronting for K8s and AWS deployments. It answers the questions cloud architects and security reviews ask most often.
 
