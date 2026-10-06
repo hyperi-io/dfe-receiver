@@ -1,6 +1,6 @@
 # Project:   dfe-receiver
 # File:      docker-compose.test.yaml
-# Purpose:   Test environment with Kafka (Strimzi/KRaft)
+# Purpose:   Test environment with Kafka (KRaft)
 # Language:  Docker Compose
 #
 # License:   BUSL-1.1
@@ -8,45 +8,45 @@
 #
 # Usage:
 #   docker compose -f docker-compose.test.yaml up -d
-#   cargo test --test integration_kafka -- --ignored
+#   env TEST_MODE=docker cargo nextest run --test integration
 #   docker compose -f docker-compose.test.yaml down -v
 #
-# Note: Uses quay.io/strimzi/kafka in KRaft mode (no Zookeeper required).
+# The broker is the JVM apache/kafka image the testcontainers fixture runs, set up
+# for single-node KRaft through its environment. Tests in docker mode connect to
+# the host listener on localhost:19092, the same port the dfe-docker stack uses.
 
 services:
   kafka:
-    image: quay.io/strimzi/kafka:0.45.2-kafka-3.8.1@sha256:4f52fd8232e61385f928539f6e2aa2d23c9ba9ce18390ee735f55f9ae110ecdc
+    # renovate: datasource=docker depName=apache/kafka
+    image: apache/kafka:4.3.1@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837
     container_name: dfe-receiver-kafka
-    command:
-      - sh
-      - -c
-      - |
-        export CLUSTER_ID=$$(bin/kafka-storage.sh random-uuid) && \
-        bin/kafka-storage.sh format -t $$CLUSTER_ID -c config/kraft/server.properties && \
-        bin/kafka-server-start.sh config/kraft/server.properties \
-          --override advertised.listeners=PLAINTEXT://localhost:9092 \
-          --override listeners=PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093 \
-          --override listener.security.protocol.map=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT \
-          --override inter.broker.listener.name=PLAINTEXT \
-          --override controller.quorum.voters=1@localhost:9093 \
-          --override controller.listener.names=CONTROLLER \
-          --override node.id=1 \
-          --override process.roles=broker,controller \
-          --override log.dirs=/tmp/kraft-combined-logs \
-          --override auto.create.topics.enable=true \
-          --override num.partitions=3 \
-          --override default.replication.factor=1
-    ports:
-      - "9092:9092"
     environment:
-      LOG_DIR: /tmp/logs
+      # A KRaft cluster id is a base64-encoded 16-byte UUID.
+      CLUSTER_ID: 4L6g3nShT-eMCtK--X86sw
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENERS: PLAINTEXT://:9092,PLAINTEXT_HOST://:19092,CONTROLLER://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:19092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_HEAP_OPTS: "-Xmx512M -Xms256M"
+    ports:
+      - "127.0.0.1:19092:19092"
     healthcheck:
-      test: ["CMD-SHELL", "bin/kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
-      interval: 10s
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 5s
       timeout: 10s
-      retries: 10
-      start_period: 30s
+      retries: 20
+      start_period: 15s
     networks:
       - dfe-test
 
