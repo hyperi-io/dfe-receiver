@@ -1,12 +1,10 @@
 # Internet-Facing Hardening & Fronting Architecture
-March 2026  
 
-**dfe-receiver is the only direct internet-facing component in the DFE stack.**  
+March 2026
 
-This document covers application-level hardening (80/20 effort) and cost-effective infrastructure fronting for K8s and AWS deployments.  
-Based on the July-September 2026 PB/day stress tests and DFE 2.1/2.0 customer deployments  
-Answers for common customer deployment questions (cloud architects, security reviews)  
-HyperI internal -> see infrastructure standards, PB scale patterns  
+**dfe-receiver is the only direct internet-facing component in the DFE stack.**
+
+This document covers application-level hardening (80/20 effort) and cost-effective infrastructure fronting for K8s and AWS deployments. It answers the questions cloud architects and security reviews ask most often.
 
 ---
 
@@ -117,14 +115,14 @@ The two NGINX ingress controllers are often confused:
 | `nginxinc/kubernetes-ingress` (F5) | Active. Apache 2.0. NGINX Plus features require JWT license. |
 | Envoy Gateway | Active. CNCF project. Gateway API native. Recommended for new deployments. |
 
-**Per HyperI K8s standards: prefer Gateway API (Envoy-based) over Ingress.**
+**Prefer Gateway API (Envoy-based) over Ingress for new deployments.**
 
 ### 2.2 Recommended: Envoy Gateway
 
 [Envoy Gateway](https://gateway.envoyproxy.io/) is the CNCF reference
 implementation of the Kubernetes Gateway API, built on Envoy Proxy.
 Reached v1.2 (stable) -- production-ready for all use cases described here.
-Cost: **$0** (open source, Apache 2.0).
+Open source, Apache 2.0.
 
 **Future path:** If service mesh features are ever needed (mTLS between
 services, traffic shifting, canary deployments), Istio ambient mesh
@@ -219,7 +217,7 @@ spec:
 community-driven IP reputation engine. MIT-licensed, Go-based (60x faster
 than fail2ban), with a community blocklist updated by thousands of nodes.
 
-**Cost: $0** (free tier includes community blocklist)
+The free tier includes the community blocklist.
 
 **Envoy Gateway integration:** A community [envoy-proxy-crowdsec-bouncer](https://github.com/kdwils/envoy-proxy-crowdsec-bouncer)
 exists (Go, updated Feb 2026). It works as an Envoy `ext_authz` filter via
@@ -282,59 +280,47 @@ spec:
           - name: ingest-tls
 ```
 
-This is free (just resource allocation) and prevents cross-service impact.
+This costs only the extra resource allocation and prevents cross-service impact.
 
 ---
 
 ## Part 3: AWS Fronting Architecture (Cost-Conscious)
 
-**The cardinal rule: cost scales with traffic volume.** At PB/s ingestion
-scale, per-GB and per-request charges compound horrifically. Every layer
-that touches traffic must be evaluated on $/GB.
+**The cardinal rule: cost scales with traffic volume.** At high ingestion
+volume, per-GB and per-request charges compound. Every layer that touches
+traffic must be evaluated on its cost per GB.
 
-### 3.1 Estimated Cost Table
+### 3.1 What Each Layer Is Billed On
 
-Here's what things actually cost at scale, not the marketing pitch.
-Prices are US East (Virginia) as of March 2026 -- verify before deploying.
+This table names the billing unit, not a price. Prices differ by region and
+change often: check the pricing pages linked under References before sizing a
+deployment. The billing models below are as of March 2026.
 
-**Estimated Monthly cost at 10 TB/month ingestion (a modest production workload):**
-
-| Service | Monthly Cost | $/GB | Notes |
-|---|---|---|---|
-| NLB (same-AZ) | ~$76 | ~$0.006 | $16.43 base + ~$60 NLCU |
-| NLB (cross-AZ) | ~$276 | ~$0.026 | + $0.01/GB each way cross-zone |
-| ALB | ~$96 | ~$0.008 | $16.43 base + ~$80 LCU |
-| AWS WAF (10 rules) | ~$21 | ~$0.006/M req | $5 ACL + $10 rules + $6 requests |
-| AWS WAF + Bot Control | ~$41+ | varies | + $10 ACL + request charges |
-| Shield Standard | $0 | free | L3/L4 only, no L7 |
-| Shield Advanced | $3,000 | flat | Includes WAF. 12-month commitment. |
-| CloudFront (PAYG) | ~$850 | ~$0.085 | First 10 TB tier. Drops with volume. |
-| CloudFront (flat-rate Pro) | $15/mo | ~$0.0003 | Up to 50 TB included, degraded perf after |
-| Cloudflare Free | $0 | $0 | Unlimited DDoS + 5 WAF rules |
-| Cloudflare Pro | $20/mo | $0 | Managed WAF + 20 rules |
-| Cloudflare Spectrum (TCP) | $1/GB | $1.00 | After 5-10 GB free tier. Prohibitive. |
-| CrowdSec | $0 | $0 | Community blocklist, K8s native |
-
-**Monthly cost at 100 TB/month (serious production):**
-
-| Service | Monthly Cost | Notes |
+| Service | Billed on | Notes |
 |---|---|---|
-| NLB (same-AZ) | ~$620 | Dominated by NLCU data processing |
-| ALB | ~$820 | Higher LCU rate |
-| AWS WAF (10 rules, 100M req) | ~$75 | Scales with request count |
-| CloudFront (PAYG) | ~$6,500 | Brutal at volume. |
-| Cloudflare Pro | $20/mo | Still $20. Unlimited HTTP traffic. |
+| NLB | Per hour, plus capacity units for data processed | Cheaper per GB than ALB. Cross-zone traffic adds a per-GB charge each way. |
+| ALB | Per hour, plus capacity units for data and requests | Higher capacity-unit rate than NLB. |
+| AWS WAF | Per web ACL, per rule, per million requests | Bot Control adds a further ACL charge and request charges. |
+| Shield Standard | Free | L3/L4 only, no L7. |
+| Shield Advanced | Flat monthly fee | Includes WAF. 12-month commitment. |
+| CloudFront (pay as you go) | Per GB out, per request, in volume tiers | Tiers cheapen with volume but stay the largest line at ingestion volume. |
+| CloudFront (flat-rate plans) | Flat monthly fee with a traffic allowance | Performance degrades once the allowance is exceeded. |
+| Cloudflare Free | Flat | Unlimited DDoS mitigation, 5 WAF rules. |
+| Cloudflare Pro | Flat per domain | Managed WAF, 20 rules. Not billed per GB of HTTP traffic. |
+| Cloudflare Spectrum (TCP) | Per GB, after a small free allowance | Prohibitive at ingestion volume. |
+| CrowdSec | Free tier | Community blocklist, K8s native. |
 
 ### 3.2 Why CloudFront is Wrong for Ingestion
 
 CloudFront is a CDN. It's designed to **serve** content, not **receive** it.
 
 **Problems for data ingestion:**
-- PAYG pricing is $0.085/GB at first tier -- brutal at ingestion volume
+
+- Pay-as-you-go pricing is per GB transferred -- brutal at ingestion volume
 - Designed to cache and serve, not proxy POST requests to origin
 - Adds latency (edge -> origin hop) for non-cacheable traffic
-- The flat-rate plans (Pro $15/mo for 50 TB) degrade performance
-  (fewer edge locations) when you exceed the allowance
+- The flat-rate plans degrade performance (fewer edge locations) when you
+  exceed the allowance
 - You're paying for CDN features (caching, edge compute) you don't use
 
 **The one exception:** If you need AWS WAF (which only attaches to
@@ -343,22 +329,22 @@ intermediary. But question whether you need AWS WAF at all (see 3.4).
 
 ### 3.3 Recommended AWS Architecture (Cost-Optimised)
 
-```
+```text
 Internet
     |
-    +-- [Cloudflare DNS + Proxy]  <- $0-20/mo, unlimited DDoS
+    +-- [Cloudflare DNS + Proxy]  <- flat-rate plan, unlimited DDoS
     |     L3/L4/L7 DDoS mitigation
     |     WAF rules (free tier: 5, Pro: 20)
     |     IP reputation, bot mitigation
     |
-    +-- [AWS NLB]  <- ~$0.006/GB, same-AZ preferred
+    +-- [AWS NLB]  <- same-AZ preferred
           L4 load balancing
           Static IP (for Cloudflare origin)
           Health checks
           |
           +-- [K8s Service]
                 |
-                +-- [Envoy Gateway]  <- $0
+                +-- [Envoy Gateway]  <- open source
                       Rate limiting (local or global)
                       Connection limits
                       Request timeout (slowloris)
@@ -371,36 +357,28 @@ Internet
                             Concurrency limits
 ```
 
-**Total monthly cost (10 TB/month):**
+**Cost drivers:** the recurring charges are the Cloudflare plan (flat rate)
+and the NLB (per hour plus data processed). Envoy Gateway and CrowdSec are
+open source.
 
-| Component | Cost |
-|---|---|
-| Cloudflare Pro | $20 |
-| AWS NLB (same-AZ) | ~$76 |
-| Envoy Gateway | $0 |
-| CrowdSec | $0 |
-| **Total** | **~$96/mo** |
+**Compare to the "just use AWS" approach** (ALB, AWS WAF, Shield Standard):
+the bill is ALB hours and data, plus WAF per-ACL, per-rule and per-request
+charges. It still lacks L7 DDoS mitigation, IP reputation and bot mitigation.
 
-**Compare to the "just use AWS" approach:**
-
-| Component | Cost |
-|---|---|
-| ALB | ~$96 |
-| AWS WAF (10 rules) | ~$21 |
-| Shield Standard | $0 |
-| **Total** | **~$117/mo** |
-| **...but without:** | L7 DDoS, IP reputation, bot mitigation |
-
-The Cloudflare + NLB approach is cheaper AND provides better protection.
+Cloudflare's HTTP plans are flat-rate rather than per GB or per request, so
+the Cloudflare + NLB approach gets cheaper than ALB + WAF as volume grows AND
+provides better protection.
 
 ### 3.4 When You DON'T Need AWS WAF
 
 AWS WAF is the right choice when:
+
 - Compliance requires AWS-native security controls
 - You need deep integration with AWS services (API Gateway, AppSync)
-- You're already on Shield Advanced ($3K/mo) which includes WAF free
+- You're already on Shield Advanced, which includes WAF
 
 AWS WAF is **overkill** when:
+
 - Cloudflare (or similar) already handles L7 filtering upstream
 - Your traffic is API/machine-to-machine (not browsers, less attack surface)
 - You have rate limiting + auth at the application/gateway layer
@@ -415,37 +393,41 @@ application auth covers the 80/20.
 
 #### Variant A: Minimum Viable (Dev/Staging)
 
-```
+```text
 Internet -> NLB -> K8s Service -> dfe-receiver
 ```
-- Cost: ~$16/mo (NLB base)
+
+- Cost driver: the NLB base charge only
 - Protection: Application-level only (auth, body limits, timeouts)
 - Suitable for: Dev, staging, internal networks
 
 #### Variant B: Production Standard
 
-```
+```text
 Internet -> Cloudflare -> NLB -> Envoy Gateway -> dfe-receiver
 ```
-- Cost: ~$96/mo at 10 TB
+
+- Cost driver: NLB data processing, plus a flat Cloudflare plan
 - Protection: DDoS, WAF, rate limiting, IP reputation, auth
 - Suitable for: Most production deployments
 
 #### Variant C: High-Security / Compliance
 
-```
+```text
 Internet -> CloudFront + AWS WAF -> ALB -> Envoy Gateway -> dfe-receiver
 ```
-- Cost: ~$950+/mo at 10 TB (CloudFront dominates)
+
+- Cost driver: CloudFront data transfer dominates
 - Protection: Full AWS-native stack, compliance-ready
 - Suitable for: Regulated industries, AWS-mandated security controls
 
 #### Variant D: Maximum Protection
 
-```
+```text
 Internet -> Cloudflare Enterprise -> NLB -> Envoy Gateway + CrowdSec -> dfe-receiver
 ```
-- Cost: Custom (Cloudflare Enterprise pricing)
+
+- Cost driver: a Cloudflare Enterprise contract (custom pricing)
 - Protection: Dedicated DDoS team, custom WAF rules, SLA
 - Suitable for: Tier-1 production, SLA-bound deployments
 
@@ -470,6 +452,7 @@ TCP protocols need different treatment.
 | GELF | 12201 | TCP | NLB only |
 
 **For TCP protocols:**
+
 - NLB handles L4 load balancing natively (TCP/UDP/TLS)
 - No L7 inspection, no WAF, no rate limiting at this layer
 - **Defence-in-depth:** Application-level auth + TLS + connection limits
@@ -477,13 +460,13 @@ TCP protocols need different treatment.
 - Consider: mTLS for Beats/syslog/fluent clients (known agent fleet)
 - Consider: IP allowlisting for TCP protocols (senders are usually known)
 
-**Cloudflare Spectrum** proxies arbitrary TCP/UDP but costs **$1/GB** after a
-tiny free tier (5-10 GB). At ingestion scale, this is prohibitively expensive
+**Cloudflare Spectrum** proxies arbitrary TCP/UDP but is billed per GB after a
+tiny free allowance. At ingestion volume, this is prohibitively expensive
 and not recommended.
 
 ### 3.7 NLB Configuration Notes
 
-**Same-AZ targeting:** To avoid the $0.01/GB cross-zone surcharge, configure
+**Same-AZ targeting:** To avoid the per-GB cross-zone data charge, configure
 the NLB target group to use same-AZ routing. This requires your receiver
 pods to be spread across AZs (which they should be for HA anyway).
 
@@ -497,7 +480,7 @@ metadata:
     service.beta.kubernetes.io/aws-load-balancer-type: "external"
     service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: "ip"
     service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
-    # Disable cross-zone to avoid $0.01/GB surcharge
+    # Disable cross-zone to avoid the per-GB cross-zone data charge
     service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled: "false"
 spec:
   type: LoadBalancer
@@ -523,7 +506,7 @@ spec:
 
 The complete protection stack, from outer to inner:
 
-```
+```text
 Layer 0: DNS          Cloudflare DNS (proxy mode) -- free DDoS + WAF
 Layer 1: Cloud LB     AWS NLB -- L4 load balancing, health checks
 Layer 2: K8s Gateway  Envoy Gateway -- rate limit, conn limit, request timeout
@@ -536,6 +519,7 @@ Layer 6: Kafka        Circuit breaker, backpressure -- downstream protection
 **Each layer catches what the previous layer missed.**
 
 No single layer is perfect. The value is in the combination:
+
 - Cloudflare stops volumetric DDoS and known-bad IPs
 - Envoy Gateway stops rate abuse, slow clients, connection floods
 - CrowdSec stops emerging threats via community intelligence
@@ -556,13 +540,13 @@ These are configured during deployment, not in application code:
 | Cloudflare DNS proxy | DNS config change | Internet-facing deployments |
 | CrowdSec + Envoy ext_authz bouncer | Helm + SecurityPolicy CRDs | High-security deployments |
 
-See Parts 2 and 3 above for configuration details and cost analysis.
+See Parts 2 and 3 above for configuration details and cost drivers.
 
 ---
 
 ## Fact-Check Log
 
-Items verified during document creation (March 2026):
+Claims checked against the linked sources in March 2026:
 
 | Claim | Verified | Source |
 |---|---|---|
@@ -577,23 +561,23 @@ Items verified during document creation (March 2026):
 | tower-governor 0.6.0 supports axum 0.8 | Yes | [crates.io deps](https://crates.io/crates/tower_governor/0.6.0/dependencies) |
 | CrowdSec Envoy bouncer exists | Yes | [GitHub](https://github.com/kdwils/envoy-proxy-crowdsec-bouncer) (updated Feb 2026) |
 | CrowdSec Envoy bouncer is not production-tested | Yes | Author's own README |
-| NLB base cost ~$16.43/mo (US East) | Yes | [AWS ELB pricing](https://aws.amazon.com/elasticloadbalancing/pricing/) |
-| NLB cross-zone surcharge $0.01/GB | Yes | [AWS blog](https://aws.amazon.com/blogs/networking-and-content-delivery/exploring-data-transfer-costs-for-aws-network-load-balancers/) |
-| AWS WAF $5/ACL + $1/rule + $0.60/M req | Yes | [AWS WAF pricing](https://aws.amazon.com/waf/pricing/) |
-| Shield Advanced $3,000/mo | Yes | [AWS WAF pricing](https://aws.amazon.com/waf/pricing/) |
+| NLB is billed per hour plus data processed | Yes | [AWS ELB pricing](https://aws.amazon.com/elasticloadbalancing/pricing/) |
+| NLB cross-zone traffic is billed per GB | Yes | [AWS blog](https://aws.amazon.com/blogs/networking-and-content-delivery/exploring-data-transfer-costs-for-aws-network-load-balancers/) |
+| AWS WAF is billed per ACL, per rule and per request | Yes | [AWS WAF pricing](https://aws.amazon.com/waf/pricing/) |
+| Shield Advanced is a flat monthly fee | Yes | [AWS WAF pricing](https://aws.amazon.com/waf/pricing/) |
 | Cloudflare Free: unlimited DDoS + 5 WAF rules | Yes | [Cloudflare plans](https://www.cloudflare.com/plans/) |
-| Cloudflare Pro: $20/mo + managed WAF | Yes | [Cloudflare Pro](https://www.cloudflare.com/plans/pro/) |
-| Cloudflare Spectrum: $1/GB after free tier | Yes | [Cloudflare billing](https://support.cloudflare.com/hc/en-us/articles/360041721872-Billing-for-Spectrum) |
-| CloudFront first 10 TB: $0.085/GB (US) | Yes | [CloudFront pricing](https://aws.amazon.com/cloudfront/pricing/) |
+| Cloudflare Pro includes a managed WAF | Yes | [Cloudflare Pro](https://www.cloudflare.com/plans/pro/) |
+| Cloudflare Spectrum is billed per GB after a free allowance | Yes | [Cloudflare billing](https://support.cloudflare.com/hc/en-us/articles/360041721872-Billing-for-Spectrum) |
+| CloudFront pay-as-you-go is billed per GB in volume tiers | Yes | [CloudFront pricing](https://aws.amazon.com/cloudfront/pricing/) |
 | axum slowloris vulnerability | Yes | [GH issue #2741](https://github.com/tokio-rs/axum/issues/2741) |
 | Envoy `request_headers_timeout` for slowloris | Yes | [Envoy docs](https://www.envoyproxy.io/docs/envoy/latest/faq/configuration/timeouts) |
-| HyperI standard: Gateway API over Ingress | Yes | Project K8s standards |
 
 ---
 
 ## References
 
 ### Axum/Tower Security
+
 - [axum Slowloris issue #2741](https://github.com/tokio-rs/axum/issues/2741)
 - [axum idle connection timeout discussion #2938](https://github.com/tokio-rs/axum/discussions/2938)
 - [axum connection limit discussion #2561](https://github.com/tokio-rs/axum/discussions/2561)
@@ -601,12 +585,14 @@ Items verified during document creation (March 2026):
 - [axum-server-timeout example](https://github.com/josecelano/axum-server-timeout)
 
 ### K8s Ingress/Gateway Lifecycle
+
 - [Ingress NGINX Retirement announcement (K8s blog)](https://kubernetes.io/blog/2025/11/11/ingress-nginx-retirement/)
 - [F5 NGINX Ingress Controller (Apache 2.0)](https://blog.nginx.org/blog/the-ingress-nginx-alternative-open-source-nginx-ingress-controller-for-the-long-term)
 - [Ingress NGINX EOL analysis](https://medium.com/@h.stoychev87/nginx-ingress-end-of-life-2026-f30e53e14a2e)
 - [Fastly on Chainguard EmeritOSS fork](https://www.fastly.com/blog/ingress-nginx-controller-kubernetes-retires-where-to-go-from-here)
 
 ### Envoy Gateway
+
 - [Envoy Gateway docs](https://gateway.envoyproxy.io/)
 - [ClientTrafficPolicy](https://gateway.envoyproxy.io/latest/tasks/traffic/client-traffic-policy/)
 - [Connection Limit](https://gateway.envoyproxy.io/docs/tasks/traffic/connection-limit/)
@@ -616,6 +602,7 @@ Items verified during document creation (March 2026):
 - [Envoy timeout configuration](https://www.envoyproxy.io/docs/envoy/latest/faq/configuration/timeouts)
 
 ### AWS Pricing (Verify Before Use)
+
 - [AWS ELB pricing](https://aws.amazon.com/elasticloadbalancing/pricing/)
 - [AWS WAF pricing](https://aws.amazon.com/waf/pricing/)
 - [AWS CloudFront pricing](https://aws.amazon.com/cloudfront/pricing/)
@@ -623,12 +610,14 @@ Items verified during document creation (March 2026):
 - [ALB vs NLB cost analysis](https://www.oreateai.com/blog/aws-alb-vs-nlb-navigating-the-pricing-maze-for-your-eks-workloads/dec6782f4606b47df064a6c245e1cd97)
 
 ### Cloudflare
+
 - [Cloudflare plans](https://www.cloudflare.com/plans/)
 - [Cloudflare Pro features](https://www.cloudflare.com/plans/pro/)
 - [Cloudflare Spectrum pricing](https://support.cloudflare.com/hc/en-us/articles/360041721872-Billing-for-Spectrum)
 - [Cloudflare vs AWS WAF comparison](https://inventivehq.com/blog/cloudflare-vs-aws-shield-vs-azure-ddos-vs-google-cloud-armor-web-security-comparison)
 
 ### Open Source Security
+
 - [CrowdSec](https://github.com/crowdsecurity/crowdsec)
 - [CrowdSec Envoy bouncer](https://github.com/kdwils/envoy-proxy-crowdsec-bouncer)
 - [CrowdSec + Envoy blog post](https://blog.kyledev.co/posts/wring-a-crowdsec-envoy-proxy-bouncer/)
