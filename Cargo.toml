@@ -21,9 +21,9 @@ path = "src/lib.rs"
 doctest = false
 
 [dependencies]
-# scalo shared library (crates.io). The floor is the first release with
-# scalo::transport::ack and the public scalo::parse_guard.
-scalo = { version = ">=2.13.0, <3", features = [
+# scalo shared library (crates.io). The floor is the first release whose
+# contract carries no vendor defaults, so the app names its own.
+scalo = { version = "2.14.0", features = [
     "config",
     "config-reload",
     "config-schema",
@@ -193,7 +193,7 @@ sha2 = ">=0.11.0, <0.12"
 # transport-grpc-vector-compat is test-only: it gives VectorCompatClient, the
 # same PushEvents client dfe-fetcher and Vector use, so the gRPC ingest path can
 # be driven in-process. Dev-dep features do not reach a release build.
-scalo = { version = ">=2.13.0, <3", features = [
+scalo = { version = "2.14.0", features = [
     "deployment-test-support",
     "transport-grpc-vector-compat",
 ] }

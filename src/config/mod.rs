@@ -2171,7 +2171,7 @@ impl DlqConfig {
             kafka: KafkaDlqConfig {
                 enabled: self.kafka_enabled,
                 topic_suffix: self.topic_suffix.clone(),
-                common_topic: self.topic.clone(),
+                common_topic: Some(self.topic.clone()),
                 routing: if self.topic.is_empty() {
                     scalo::dlq::DlqRouting::PerTable
                 } else {
@@ -4025,7 +4025,7 @@ webhook:
             ..DlqConfig::default()
         };
         let rc = cfg.to_scalo_config();
-        assert_eq!(rc.kafka.common_topic, "dfe_receiver_dlq");
+        assert_eq!(rc.kafka.common_topic.as_deref(), Some("dfe_receiver_dlq"));
         assert_eq!(rc.kafka.routing, scalo::dlq::DlqRouting::Common);
     }
 
@@ -4037,6 +4037,8 @@ webhook:
         };
         let rc = cfg.to_scalo_config();
         assert_eq!(rc.kafka.routing, scalo::dlq::DlqRouting::PerTable);
+        // An empty topic stays set, so scalo does not swap in its `<service>.dlq` default.
+        assert_eq!(rc.kafka.common_topic.as_deref(), Some(""));
     }
 
     #[test]
