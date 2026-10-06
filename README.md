@@ -17,8 +17,8 @@ It is built on the [scalo](https://github.com/hyperi-io/scalo-rs) data-plane run
 (config cascade, logging, metrics, transport, TieredSink, health probes).
 
 **11 protocol handlers** (HTTP, gRPC, OTLP, Lumberjack/Beats, Splunk HEC,
-Syslog, Fluent Forward, GELF, Prometheus Remote Write, Webhook, Flow [NetFlow
-+ sFlow -- **EXPERIMENTAL**]).
+Syslog, Fluent Forward, GELF, Prometheus Remote Write, Webhook, Flow [NetFlow +
+sFlow -- **EXPERIMENTAL**]).
 
 **Supported protocols:**
 

@@ -98,6 +98,7 @@ breaker state, disk full, transport unhealthy). Log the transition, not the
 state.
 
 **Pattern for circuit breaker:**
+
 ```rust
 // Log once on open, once on close — not every failed send
 if circuit_state_changed {
