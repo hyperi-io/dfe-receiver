@@ -28,7 +28,7 @@ Deploy Vector in the same Kubernetes pod or Docker Compose service.
 It collects from the source protocol and pushes to receiver's gRPC
 ingest port (`:6000`).
 
-```
+```text
 [Source Protocol] --> Vector (sidecar) --> gRPC :6000 --> dfe-receiver --> Kafka
 ```
 
@@ -199,7 +199,7 @@ address = "localhost:6000"
 [Fluent Bit](https://fluentbit.io/) is a lightweight log processor that
 can push to receiver's Fluent Forward endpoint (`:24224`).
 
-```
+```text
 [Source Protocol] --> Fluent Bit (sidecar) --> Forward :24224 --> dfe-receiver --> Kafka
 ```
 
@@ -220,6 +220,7 @@ can push to receiver's Fluent Forward endpoint (`:24224`).
 ```
 
 Fluent Bit is a good choice when:
+
 - You need a very small memory footprint (<1 MB)
 - You're already in a Fluent ecosystem (Fluentd/Fluent Bit)
 - The source is file-based (tail, systemd) rather than network protocol
@@ -230,7 +231,7 @@ For fully custom protocols where neither Vector nor Fluent Bit has a
 source, write a small program in any language that speaks your protocol
 and POSTs JSON to receiver's HTTP ingest.
 
-```
+```text
 [Custom Protocol] --> your-collector --> POST :8080 --> dfe-receiver --> Kafka
 ```
 
@@ -319,6 +320,7 @@ The sidecar communicates with receiver via `localhost:6000` (gRPC) or
 Receiver's default `max_body_size` is 16 MiB per request. Large batches from Vector's `batch.max_bytes` can exceed this.
 
 Options:
+
 - Increase receiver's limit: set `server.max_body_size: "64MiB"` in receiver config.
 - Reduce Vector's batch size: set `batch.max_bytes = 8388608` (8 MiB) in the sink.
 
@@ -344,6 +346,7 @@ key_file = "/etc/ssl/private/sidecar-client.key"
 ### When one sidecar is enough
 
 A single Vector sidecar handles most workloads up to roughly:
+
 - ~50,000 events/sec on a modern CPU core
 - ~100 MB/s of log throughput
 
@@ -366,6 +369,7 @@ Increase `cpu` limit if you see throttling under load. Increase `memory` limit i
 ### Backpressure behaviour
 
 When receiver is overloaded it returns `503 Service Unavailable`. Vector responds by:
+
 1. Pausing event ingestion from the source.
 2. Buffering events to its disk buffer (configure `data_dir` and `buffer.max_size`).
 3. Retrying delivery with exponential backoff.

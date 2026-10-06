@@ -36,7 +36,7 @@ and PagerDuty/OpsGenie alerting.
 
 Metric names carry no prefix unless `metrics.namespace` sets one, and it is empty by default. Service differentiation comes from the Prometheus `job` label (set by scrape config), NOT from the metric name.
 
-```
+```text
 {domain}_{metric_name}_{unit}
 ```
 
@@ -56,6 +56,7 @@ Metric names carry no prefix unless `metrics.namespace` sets one, and it is empt
 | `protocol` | `http`, `grpc`, `otlp`, `syslog`, `splunk_hec`, etc. | dfe-receiver ingest metrics |
 
 **Cardinality rules:**
+
 - Labels MUST have bounded cardinality (< 100 unique values per label)
 - NEVER use request IDs, IP addresses, or user-supplied strings as label values
 - Topic names are acceptable (bounded by Kafka topic count, typically < 50)
