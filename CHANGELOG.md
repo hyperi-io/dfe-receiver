@@ -3,6 +3,26 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.15.42](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.41...v1.15.42) (2026-10-06)
+
+### Bug Fixes
+
+* bound the receiver's edge and make its security signals real ([#169](https://github.com/hyperi-io/dfe-receiver/issues/169)) ([347ffc4](https://github.com/hyperi-io/dfe-receiver/commit/347ffc480abbcd2c869982c09f5410a843e74adb))
+* **ci:** pass optimize-tier through to rust-ci ([#165](https://github.com/hyperi-io/dfe-receiver/issues/165)) ([cc07306](https://github.com/hyperi-io/dfe-receiver/commit/cc07306cf042f5a6538b981657d5e31ed41a4c40)), closes [hyperi-io/hyperi-ci#262](https://github.com/hyperi-io/hyperi-ci/issues/262)
+* clear clippy 1.99 lints and rename fetch_update ([#176](https://github.com/hyperi-io/dfe-receiver/issues/176)) ([c1d1f0b](https://github.com/hyperi-io/dfe-receiver/commit/c1d1f0b176e3ac0412f838e56c60ca4c550e4cc9))
+* close the receiver's fail-open auth paths ([#173](https://github.com/hyperi-io/dfe-receiver/issues/173)) ([d07a1e2](https://github.com/hyperi-io/dfe-receiver/commit/d07a1e2957eabae529daee76e34b82df575c10cd)), closes [#126](https://github.com/hyperi-io/dfe-receiver/issues/126) [#127](https://github.com/hyperi-io/dfe-receiver/issues/127)
+* **deps:** update dependencies for GA ([#178](https://github.com/hyperi-io/dfe-receiver/issues/178)) ([73c2f2e](https://github.com/hyperi-io/dfe-receiver/commit/73c2f2ea4b4744ee6b16905a99635e8e4817456f))
+* drop a stale publishing spec and internal refs ([#159](https://github.com/hyperi-io/dfe-receiver/issues/159)) ([0c9af4b](https://github.com/hyperi-io/dfe-receiver/commit/0c9af4bb5020006b2531cbb7ee5f72f4bb6ceb81))
+* drop the JFrog registry from the cargo config ([#158](https://github.com/hyperi-io/dfe-receiver/issues/158)) ([b0e6a08](https://github.com/hyperi-io/dfe-receiver/commit/b0e6a081af43cf991a18851422e4ade68c68e190))
+* honour the version-check opt-out ([#164](https://github.com/hyperi-io/dfe-receiver/issues/164)) ([4e5794e](https://github.com/hyperi-io/dfe-receiver/commit/4e5794e4f625bc6869d564b24670c237707dd893)), closes [#163](https://github.com/hyperi-io/dfe-receiver/issues/163)
+* **metrics:** count records, list every series ([#167](https://github.com/hyperi-io/dfe-receiver/issues/167)) ([0828dec](https://github.com/hyperi-io/dfe-receiver/commit/0828dec5b83419d4bdd96cdab4492d71cbc9cc15))
+* move to scalo 2.14.0 and turn PGO and BOLT on for GA ([#177](https://github.com/hyperi-io/dfe-receiver/issues/177)) ([b831189](https://github.com/hyperi-io/dfe-receiver/commit/b831189f1689bcb2626754edaeef9e993aaea1ec))
+* pgo workload drives real ingest to kafka ([#172](https://github.com/hyperi-io/dfe-receiver/issues/172)) ([c65d6ac](https://github.com/hyperi-io/dfe-receiver/commit/c65d6ac5761b9f5007317f81c5a5a8858314b331))
+* run the test broker on the kafka dfe deploys ([#170](https://github.com/hyperi-io/dfe-receiver/issues/170)) ([46dc838](https://github.com/hyperi-io/dfe-receiver/commit/46dc8383c34e3eafbe24dc7fb82df26004584637))
+* **test:** run the Kafka test broker on the JVM image ([#166](https://github.com/hyperi-io/dfe-receiver/issues/166)) ([7ee1d47](https://github.com/hyperi-io/dfe-receiver/commit/7ee1d47e356ccdcd0cb31e58c02fd54f3eb9086a))
+* throttle validation logs and count 429s ([#171](https://github.com/hyperi-io/dfe-receiver/issues/171)) ([4440e2d](https://github.com/hyperi-io/dfe-receiver/commit/4440e2d0632f0c1d8b415cac0c7aef4a849cf010))
+* validate the kafka config before building the producer ([#174](https://github.com/hyperi-io/dfe-receiver/issues/174)) ([cad24a1](https://github.com/hyperi-io/dfe-receiver/commit/cad24a13aa10732b324ec8f582189dedc9e3df0a))
+
 ## [1.15.41](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.40...v1.15.41) (2026-09-27)
 
 ### Bug Fixes
