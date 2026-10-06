@@ -90,7 +90,7 @@ tower = "0.5.3"
 tower-http = { version = "0.7.1", features = ["timeout", "compression-zstd", "limit"] }
 http = "1.5.0"
 hyper = { version = "1.11.1", features = ["server", "http1", "http2"] }
-hyper-util = { version = "0.1.20", features = ["tokio", "server", "server-auto", "service"] }
+hyper-util = { version = "0.1.21", features = ["tokio", "server", "server-auto", "service"] }
 
 # gRPC server
 tonic = { version = "0.14.6", features = ["tls-ring"] }
@@ -104,7 +104,7 @@ rustls = "0.23.45"
 # PEM parsing via rustls-pki-types PemObject (rustls-pemfile is unmaintained,
 # RUSTSEC-2025-0134). Mirrors scalo src/tls.rs. `std` enables the reader/file iters.
 rustls-pki-types = { version = ">=1.15.1, <2", features = ["std"] }
-tokio-rustls = "0.26.5"
+tokio-rustls = "0.26.6"
 
 # Rate limiting
 tower_governor = { version = "0.8", features = ["axum"] }
@@ -128,7 +128,7 @@ compact_str = "0.10"
 parking_lot = "0.12.5"
 
 # Error handling
-thiserror = "2.0.20"
+thiserror = "2.0.21"
 anyhow = "1.0.104"
 
 # CLI
@@ -178,7 +178,7 @@ tonic-prost-build = "0.14.6"
 criterion = { version = "0.8.2", features = ["html_reports"] }
 tempfile = "3.27.0"
 proptest = "1.11.0"
-tokio-test = "0.4.5"
+tokio-test = "0.4.6"
 reqwest = { version = "0.13.5", features = ["json"] }
 dotenvy = "0.15.7"
 rdkafka = { version = "0.39", features = ["cmake-build", "ssl", "sasl"] }
