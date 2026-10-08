@@ -24,7 +24,7 @@ doctest = false
 # scalo shared library (crates.io). The floor is the first release that writes
 # contract schema version 4. The contract carries no vendor defaults, so the
 # app names its own.
-scalo = { version = "2.14.3", features = [
+scalo = { version = "2.14.4", features = [
     "config",
     "config-reload",
     "config-schema",
@@ -194,7 +194,7 @@ sha2 = ">=0.11.0, <0.12"
 # transport-grpc-vector-compat is test-only: it gives VectorCompatClient, the
 # same PushEvents client dfe-fetcher and Vector use, so the gRPC ingest path can
 # be driven in-process. Dev-dep features do not reach a release build.
-scalo = { version = "2.14.3", features = [
+scalo = { version = "2.14.4", features = [
     "deployment-test-support",
     "transport-grpc-vector-compat",
 ] }
