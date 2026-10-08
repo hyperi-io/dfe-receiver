@@ -38,7 +38,6 @@ test:
     nextest: true
 build:
   enabled: true
-  type: app
   strategies:
     - native
   rust:
@@ -46,6 +45,11 @@ build:
     targets:
       - x86_64-unknown-linux-gnu
       - aarch64-unknown-linux-gnu
+# The thin chart is assembled from the emitted contract and ships beside the image.
 release:
   enabled: true
-  binaries: both
+  # Keep `library` at the scalo version in Cargo.toml: the library renders only the contract version its scalo release writes.
+  helm:
+    enabled: true
+    contract: emit
+    library: "2.14.3"

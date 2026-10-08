@@ -296,11 +296,9 @@ async fn main() {
 
     if let Some(output) = &app.emit_helm {
         let contract = deployment::contract();
-        // scalo's generate_chart takes a third `Option<&ContractIdentity>`
-        // parameter. Passing None preserves the plain chart (no contract
-        // identity annotations). The canonical generate-artefacts path stamps
-        // identity via the CI-orchestrated invocation in scripts/, not via this
-        // one-off --emit-helm flag.
+        // None writes the plain chart with no contract identity annotations.
+        // The released chart is assembled from `generate-artefacts`, not from
+        // this local-only flag.
         if let Err(e) = scalo::deployment::generate_chart(&contract, output, None) {
             eprintln!("fatal: {e}");
             std::process::exit(1);

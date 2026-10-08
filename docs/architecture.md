@@ -151,17 +151,9 @@ wrong does.
    held. The default holds the answer until the destination confirmed it; a
    change that answers earlier, or buffers a held record, gives that away.
 
-2. **`chart/` and `Dockerfile` are generated, not written.** Both come from the
-   deployment contract in `src/deployment.rs`, and two unit tests assert the
-   committed files still match the generator. A hand edit is reverted the next
-   time anything regenerates. Regenerate with `dfe-receiver --emit-helm chart`
-   and `dfe-receiver --emit-dockerfile Dockerfile`. A scalo bump can change the
-   generator, so a scalo bump without a regenerate fails this repo's own suite --
-   that is the guard working, not a spurious failure.
+2. **The `Dockerfile` is generated, not written.** It comes from the deployment contract in `src/deployment.rs`, and a unit test fails when the committed file no longer matches. Regenerate with `dfe-receiver --emit-dockerfile Dockerfile`. A scalo bump can change the generator, so a bump without a regenerate fails this repo's own suite by design.
 
-3. **`chart/` is not the chart that deploys this service.** It is the standalone
-   artefact. The suite deploys the receiver from dfe-infra's own chart, which
-   pins the built image.
+3. **No chart is committed.** At release, hyperi-ci emits the contract with `generate-artefacts` and assembles a thin chart from it on the scalo-service library chart at `release.helm.library`, which moves with the scalo version in `Cargo.toml`. A deployment wires the receiver's listeners by port name, so a renamed port breaks it.
 
 4. **dfe-engine hand-mirrors `Config::validate()`.** The copy lives at
    `dfe-engine/src/dfe_engine/services/plugins_builtin/receiver.py` and no script

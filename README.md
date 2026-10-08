@@ -346,6 +346,14 @@ cargo nextest run --test e2e --run-ignored all
 docker compose -f docker-compose.test.yaml down -v
 ```
 
+### Helm chart
+
+No chart is committed here. At release, hyperi-ci runs the binary's `generate-artefacts` for the deployment contract and assembles a thin chart from it on the scalo-service library chart, at the version `release.helm.library` names in `.hyperi-ci.yaml`. Keep that version at the scalo version in `Cargo.toml`: a library renders only the contract version its scalo release writes.
+
+To see the chart a release would ship, build the binary and run `hyperi-ci chart assemble --binary target/debug/dfe-receiver --image ghcr.io/hyperi-io/dfe-receiver:<tag>@sha256:<digest> --version <version>`. It prints the chart directory it wrote. `dfe-receiver --emit-helm <dir>` still writes scalo's full chart for local use.
+
+The contract marks every ingest port public and the gRPC hop internal. The library exposes the public ports only when a deployment sets `publicService.enabled`, as `<fullname>-public` for TCP and `<fullname>-public-udp` for UDP.
+
 ### Working with Kafka
 
 [kcat](https://github.com/edenhill/kcat) (formerly kafkacat) is the essential
@@ -406,7 +414,7 @@ normalised to JSON, stamped, routed to Kafka or straight to dfe-loader over
 gRPC. It and dfe-ui are the only components reading untrusted input, so an
 advisory here outranks the same one in dfe-loader -- reachability first, per
 `dfe-infra/docs/THREAT-MODEL.md`. It is NOT a transform stage (that is
-dfe-loader), and `chart/` here is NOT what deploys it.
+dfe-loader).
 
 ### Where things live
 
@@ -418,8 +426,8 @@ dfe-loader), and `chart/` here is NOT what deploys it.
 | `src/pipeline/acks.rs` | The held answer: admission, hold budget, next-hop deadline |
 | `src/buffer/` | `SinkBackend` for answers at enqueue: in-memory, or scalo `TieredSink` with a disk spool |
 | `src/sink/` | `kafka/`, `grpc/`, `file/`. Kafka owns its producer so delivery reports are visible |
-| `src/config/mod.rs`, `src/deployment.rs` | `Config::validate()`, and the contract plus its drift guards |
-| `chart/`, `proto/` | Generated or vendored. Do not hand-edit |
+| `src/config/mod.rs`, `src/deployment.rs` | `Config::validate()`, and the contract the Dockerfile and the released chart are generated from |
+| `Dockerfile`, `proto/` | Generated or vendored. Do not hand-edit |
 | `tests/` | Targets `smoke`, `integration`, `e2e`. `common/mod.rs` is the container harness |
 | `docs/architecture.md` | Why it is shaped this way, and the invariants |
 
@@ -445,8 +453,9 @@ not the shipped one.
 | Read `Cargo.toml` for the version | Read `VERSION` | semantic-release writes only `CHANGELOG.md` and `VERSION`. `Cargo.toml` sits at `1.15.10` while `VERSION` is `1.15.36` |
 | `cargo test --test integration_kafka` | `--test e2e --run-ignored all` | No such target. This README and `tests/e2e/kafka.rs` both carried it |
 | Trust green after Docker was down | Check the skip count, or set `CI=1` | A bad third-party URL shipped this way -- skipped locally, never re-checked |
-| Hand-edit `chart/` or `Dockerfile` | `--emit-helm` / `--emit-dockerfile` | Generated from `src/deployment.rs`, with tests asserting they match |
-| Bump scalo and stop | Bump, regenerate, commit the diff | The generator is in scalo, so the drift guard fails by design |
+| Hand-edit `Dockerfile`, or commit a chart | Fix `src/deployment.rs`, then `--emit-dockerfile Dockerfile` | The Dockerfile is generator output with a test asserting it matches, and the release assembles the chart from the contract, so a hand edit is reverted or never ships |
+| Bump scalo and stop | Bump, regenerate, move `release.helm.library` in `.hyperi-ci.yaml` to the same version, commit the diff | The generator is in scalo, so the drift guard fails by design, and a scalo-service release renders only the contract version its scalo release writes |
+| Rename a port in `src/deployment.rs` | Keep the name | Deployments name the receiver's ports to wire its listeners, and a rename breaks every one that names the old port |
 | Change `Config::validate()` alone | Update dfe-engine's mirror | It hand-copies this validation, nothing compares them, and they have drifted |
 | Read 202 as delivered on a listener with acknowledgements off | Compare `receiver_kafka_sends_total` with `receiver_kafka_delivered_total` | That 202 is answered at enqueue |
 | Read a 503 as "not written" | Expect the retry to duplicate | The hold can expire while a broker is writing the record |
@@ -454,9 +463,7 @@ not the shipped one.
 
 ### Where this sits
 
-Inbound: **scalo-rs** (crate `scalo`) by `cargo-dep` -- a runtime range plus a
-dev-dependency range for test support, which move together, and a
-`generated-file` lockstep edge through the `Dockerfile`.
+Inbound: **scalo-rs** (crate `scalo`) by `cargo-dep` -- a runtime range plus a dev-dependency range for test support, which move together, and a `generated-file` lockstep edge through the `Dockerfile`, at contract schema version 4. The released chart is assembled on the scalo-service library chart at `release.helm.library`, which moves with the scalo version in `Cargo.toml`.
 
 Outbound: **dfe-infra** by `image-pin` lockstep -- its
 `helm/charts/dfe-receiver/Chart.yaml` pins the image built here and is what

@@ -9,20 +9,26 @@
 //! Deployment contract for dfe-receiver.
 //!
 //! Defines the single source of truth used by scalo's deployment generators
-//! to produce Dockerfile, Helm chart, and Docker Compose fragments.
+//! to produce the Dockerfile and Docker Compose fragments, and that the
+//! release emits for the thin chart it assembles on the scalo-service library
+//! chart.
 
 use scalo::deployment::{
-    DeploymentContract, HealthContract, ImageProfile, KafkaLagTrigger, KedaConfig, KedaContract,
-    NativeDepsContract, OciLabels, PortContract, SecretEnvContract, SecretGroupContract,
-    base_image_from_cascade,
+    CONTRACT_SCHEMA_VERSION, DeploymentContract, HealthContract, ImageProfile, KafkaLagTrigger,
+    KedaConfig, KedaContract, NativeDepsContract, OciLabels, PortCondition, PortContract,
+    ResourceList, ResourcesContract, SecretEnvContract, SecretGroupContract, SecurityContract,
+    WritablePath, base_image_from_cascade,
 };
+
+use crate::config::DEFAULT_SPILLOVER_PATH;
 
 /// Build the deployment contract for dfe-receiver.
 ///
 /// Captures all deployment-facing configuration: ports, health paths,
-/// secrets, KEDA scaling, and default config. Artefact generators
-/// (`generate_dockerfile`, `generate_chart`, `generate_compose_fragment`)
-/// use this contract as their single source of truth.
+/// secrets, writable paths, resources, KEDA scaling, and default config.
+/// Artefact generators (`generate_dockerfile`, `generate_chart`,
+/// `generate_compose_fragment`) and the released thin chart use this
+/// contract as their single source of truth.
 #[allow(clippy::too_many_lines)]
 pub fn contract() -> DeploymentContract {
     // Resolve the base image via the scalo cascade helper so the org-wide
@@ -58,98 +64,86 @@ pub fn contract() -> DeploymentContract {
         description: "High-performance HTTP/gRPC receiver for PB/s scale data ingestion".into(),
         metrics_port: 9090,
         health: HealthContract {
-            liveness_path: "/livez".into(),
-            readiness_path: "/readyz".into(),
-            metrics_path: "/metrics".into(),
+            startup_budget_seconds: 60,
+            ..HealthContract::default()
         },
         env_prefix: "DFE_RECEIVER".into(),
         metric_prefix: "receiver".into(),
         config_mount_path: "/etc/dfe-receiver/config.yaml".into(),
         image_registry: "ghcr.io/hyperi-io".into(),
-        // Every listener but HTTP binds only while its section's `enabled` switch is on.
+        // Every listener but HTTP binds only while its section's `enabled` switch
+        // is on. The ingest listeners are public, and gRPC is the in-cluster hop.
         extra_ports: vec![
-            PortContract::tcp("http", 8080).bound_from("server.bind_address"),
+            PortContract::tcp("http", 8080)
+                .bound_from("server.bind_address")
+                .public(),
+            // Cleartext gRPC, so a proxy in front of it must speak h2c.
             PortContract::tcp("grpc", 6000)
                 .when_equals("config.grpc.enabled", "true")
-                .bound_from("grpc.bind_address"),
+                .bound_from("grpc.bind_address")
+                .app_protocol("kubernetes.io/h2c"),
             PortContract::tcp("otlp-grpc", 4317)
                 .when_equals("config.otlp.enabled", "true")
-                .bound_from("otlp.grpc_bind_address"),
+                .bound_from("otlp.grpc_bind_address")
+                .public(),
             PortContract::tcp("otlp-http", 4318)
                 .when_equals("config.otlp.enabled", "true")
-                .bound_from("otlp.http_bind_address"),
+                .bound_from("otlp.http_bind_address")
+                .public(),
             PortContract::tcp("beats", 5044)
                 .when_equals("config.lumberjack.enabled", "true")
-                .bound_from("lumberjack.bind_address"),
+                .bound_from("lumberjack.bind_address")
+                .public(),
             PortContract::tcp("hec", 8088)
                 .when_equals("config.splunk_hec.enabled", "true")
-                .bound_from("splunk_hec.bind_address"),
+                .bound_from("splunk_hec.bind_address")
+                .public(),
             PortContract::tcp("prometheus-rw", 9091)
                 .when_equals("config.prometheus_rw.enabled", "true")
-                .bound_from("prometheus_rw.bind_address"),
+                .bound_from("prometheus_rw.bind_address")
+                .public(),
             PortContract::tcp("webhook", 8090)
                 .when_equals("config.webhook.enabled", "true")
-                .bound_from("webhook.bind_address"),
+                .bound_from("webhook.bind_address")
+                .public(),
             PortContract::tcp("syslog", 514)
                 .when_equals("config.syslog.enabled", "true")
-                .bound_from("syslog.tcp_bind_address"),
+                .bound_from("syslog.tcp_bind_address")
+                .public(),
             PortContract::udp("syslog-udp", 514)
                 .when_equals("config.syslog.enabled", "true")
-                .bound_from("syslog.udp_bind_address"),
+                .bound_from("syslog.udp_bind_address")
+                .public(),
             // Binds only when syslog.tls.enabled is also on; one gate path cannot say both.
             PortContract::tcp("syslog-tls", 6514)
                 .when_equals("config.syslog.enabled", "true")
-                .bound_from("syslog.tls_bind_address"),
+                .bound_from("syslog.tls_bind_address")
+                .public(),
             PortContract::tcp("fluent", 24224)
                 .when_equals("config.fluent.enabled", "true")
-                .bound_from("fluent.bind_address"),
+                .bound_from("fluent.bind_address")
+                .public(),
             PortContract::tcp("gelf", 12201)
                 .when_equals("config.gelf.enabled", "true")
-                .bound_from("gelf.bind_address"),
+                .bound_from("gelf.bind_address")
+                .public(),
             // Unified flow mode only: split mode binds its own operator-chosen ports.
             PortContract::udp("netflow", 2055)
                 .when_equals("config.flow.enabled", "true")
-                .bound_from("flow.bind_address"),
+                .bound_from("flow.bind_address")
+                .public(),
             PortContract::udp("netflow-ipfix", 4739)
                 .when_equals("config.flow.enabled", "true")
-                .bound_from("flow.bind_address"),
+                .bound_from("flow.bind_address")
+                .public(),
             PortContract::udp("sflow", 6343)
                 .when_equals("config.flow.enabled", "true")
-                .bound_from("flow.bind_address"),
+                .bound_from("flow.bind_address")
+                .public(),
         ],
         unbound_listen_paths: vec![],
         entrypoint_args: vec!["--config".into(), "/etc/dfe-receiver/config.yaml".into()],
-        secrets: vec![
-            SecretGroupContract {
-                group_name: "kafka".into(),
-                env_vars: vec![
-                    // apply_flat_env reads these; flat_env joins prefix and key
-                    // with ONE underscore, and the key is USER, not USERNAME.
-                    SecretEnvContract {
-                        env_var: "DFE_RECEIVER_KAFKA_SASL_USER".into(),
-                        key_name: "username".into(),
-                        secret_key: "kafka-username".into(),
-                    },
-                    SecretEnvContract {
-                        env_var: "DFE_RECEIVER_KAFKA_SASL_PASSWORD".into(),
-                        key_name: "password".into(),
-                        secret_key: "kafka-password".into(),
-                    },
-                ],
-            },
-            SecretGroupContract {
-                group_name: "auth".into(),
-                // apply_flat_env reads this one; flat_env joins the prefix and
-                // the key with ONE underscore. entrypoint_args pass --config,
-                // which reads the receiver's own sections from the file and
-                // apply_flat_env, never from the cascade's double-underscore form.
-                env_vars: vec![SecretEnvContract {
-                    env_var: "DFE_RECEIVER_BEARER_TOKENS".into(),
-                    key_name: "bearer-tokens".into(),
-                    secret_key: "bearer-tokens".into(),
-                }],
-            },
-        ],
+        secrets: secrets(),
         default_config: Some(serde_json::json!({
             "server": {
                 "bind_address": "0.0.0.0:8080",
@@ -241,7 +235,7 @@ pub fn contract() -> DeploymentContract {
             }
         })),
         depends_on: vec!["kafka".into()],
-        schema_version: 3,
+        schema_version: CONTRACT_SCHEMA_VERSION,
         oci_labels: OciLabels {
             title: "dfe-receiver".into(),
             description: "High-performance HTTP/gRPC receiver for PB/s scale data ingestion".into(),
@@ -271,7 +265,71 @@ pub fn contract() -> DeploymentContract {
         // receiver accepts and the destinations it writes to.
         config_schema: Some(scalo::deployment::config_schema_json::<crate::config::Config>()),
         capabilities: capabilities(),
+        // The spillover spool is the one directory the app writes under a read-only root.
+        writable_paths: vec![
+            WritablePath::new("spool", DEFAULT_SPILLOVER_PATH)
+                .size_limit("10Gi")
+                .when(PortCondition::Equals {
+                    path: "config.buffer.spillover.enabled".into(),
+                    value: "true".into(),
+                }),
+        ],
+        termination_grace_seconds: 45,
+        resources: ResourcesContract {
+            requests: ResourceList {
+                cpu: "200m".into(),
+                memory: "256Mi".into(),
+            },
+            limits: ResourceList {
+                cpu: "1".into(),
+                memory: "512Mi".into(),
+            },
+        },
+        security: SecurityContract::default(),
+        singleton: false,
     }
+}
+
+/// The Secrets the chart mounts as env vars.
+///
+/// `Config::apply_flat_env` reads these names: flat env joins the prefix and
+/// the key with ONE underscore, and the user key is `USER`, not `USERNAME`.
+/// `entrypoint_args` pass `--config`, which never reads the cascade's
+/// double-underscore form. The `auth` group is optional because only bearer
+/// auth reads it.
+fn secrets() -> Vec<SecretGroupContract> {
+    let env = |env_var: &str, key_name: &str, secret_key: &str| SecretEnvContract {
+        env_var: env_var.into(),
+        key_name: key_name.into(),
+        secret_key: secret_key.into(),
+    };
+    vec![
+        SecretGroupContract::new(
+            "kafka",
+            vec![
+                env("DFE_RECEIVER_KAFKA_SASL_USER", "username", "kafka-username"),
+                env(
+                    "DFE_RECEIVER_KAFKA_SASL_PASSWORD",
+                    "password",
+                    "kafka-password",
+                ),
+                env(
+                    "DFE_RECEIVER_KAFKA_SASL_MECHANISM",
+                    "mechanism",
+                    "kafka-sasl-mechanism",
+                ),
+            ],
+        ),
+        SecretGroupContract::new(
+            "auth",
+            vec![env(
+                "DFE_RECEIVER_BEARER_TOKENS",
+                "bearer-tokens",
+                "bearer-tokens",
+            )],
+        )
+        .optional(),
+    ]
 }
 
 /// Capability catalog for dfe-receiver: the ingest protocols it accepts and the
@@ -350,7 +408,7 @@ mod tests {
     #[test]
     fn test_contract_carries_reflectable_config() {
         let c = contract();
-        assert_eq!(c.schema_version, 3);
+        assert_eq!(c.schema_version, CONTRACT_SCHEMA_VERSION);
         assert!(c.config_schema.is_some());
         let recv = c
             .capabilities
@@ -408,27 +466,33 @@ mod tests {
         );
     }
 
+    /// A deployment names these ports to wire its own listeners, so a rename
+    /// breaks every deployment that refers to the old name.
     #[test]
     fn test_contract_ports() {
         let c = contract();
-        assert_eq!(c.extra_ports.len(), 16);
         let port_names: Vec<&str> = c.extra_ports.iter().map(|p| p.name.as_str()).collect();
-        assert!(port_names.contains(&"http"));
-        assert!(port_names.contains(&"grpc"));
-        assert!(port_names.contains(&"otlp-grpc"));
-        assert!(port_names.contains(&"otlp-http"));
-        assert!(port_names.contains(&"beats"));
-        assert!(port_names.contains(&"hec"));
-        assert!(port_names.contains(&"prometheus-rw"));
-        assert!(port_names.contains(&"webhook"));
-        assert!(port_names.contains(&"syslog"));
-        assert!(port_names.contains(&"syslog-udp"));
-        assert!(port_names.contains(&"syslog-tls"));
-        assert!(port_names.contains(&"fluent"));
-        assert!(port_names.contains(&"gelf"));
-        assert!(port_names.contains(&"netflow"));
-        assert!(port_names.contains(&"netflow-ipfix"));
-        assert!(port_names.contains(&"sflow"));
+        assert_eq!(
+            port_names,
+            [
+                "http",
+                "grpc",
+                "otlp-grpc",
+                "otlp-http",
+                "beats",
+                "hec",
+                "prometheus-rw",
+                "webhook",
+                "syslog",
+                "syslog-udp",
+                "syslog-tls",
+                "fluent",
+                "gelf",
+                "netflow",
+                "netflow-ipfix",
+                "sflow",
+            ]
+        );
 
         let udp: Vec<&str> = c
             .extra_ports
@@ -437,6 +501,74 @@ mod tests {
             .map(|p| p.name.as_str())
             .collect();
         assert_eq!(udp, ["syslog-udp", "netflow", "netflow-ipfix", "sflow"]);
+    }
+
+    /// The public ports are the ingest surface a load balancer may expose, so
+    /// the in-cluster gRPC hop stays off it.
+    #[test]
+    fn every_ingest_port_is_public_and_grpc_is_not() {
+        let c = contract();
+        let internal: Vec<&str> = c
+            .extra_ports
+            .iter()
+            .filter(|p| !p.public)
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(internal, ["grpc"]);
+
+        let grpc = c
+            .extra_ports
+            .iter()
+            .find(|p| p.name == "grpc")
+            .expect("the gRPC listener is a declared port");
+        // The gRPC listener is cleartext, so a proxy in front of it must speak h2c.
+        assert_eq!(grpc.app_protocol, "kubernetes.io/h2c");
+        for port in c.extra_ports.iter().filter(|p| p.name != "grpc") {
+            assert_eq!(port.app_protocol, "", "{} names an app protocol", port.name);
+        }
+    }
+
+    /// The root filesystem is read-only, so the default spool directory must
+    /// sit under a writable path mounted exactly while spillover is on.
+    #[test]
+    fn the_spool_has_somewhere_to_write_while_spillover_is_on() {
+        let c = contract();
+        assert!(c.security.read_only_root_filesystem);
+
+        let spool = &Config::default().buffer.spillover.path;
+        let spillover_on = PortCondition::Equals {
+            path: "config.buffer.spillover.enabled".into(),
+            value: "true".into(),
+        };
+        let covering: Vec<&WritablePath> = c
+            .writable_paths
+            .iter()
+            .filter(|writable| spool.starts_with(&writable.path))
+            .collect();
+        assert_eq!(covering.len(), 1, "{:?}", c.writable_paths);
+        assert_eq!(covering[0].when.as_ref(), Some(&spillover_on));
+        assert!(!covering[0].persistent);
+        assert_eq!(covering[0].size_limit, "10Gi");
+
+        // The gate reads the same switch the binary reads.
+        let mut on = c.default_config.clone().expect("default_config present");
+        on["buffer"] = serde_json::json!({ "spillover": { "enabled": true } });
+        assert_eq!(spillover_on.holds_in(&on), Some(true));
+        let read: Config = serde_json::from_value(on).expect("deserialises into Config");
+        assert!(read.buffer.spillover.enabled);
+    }
+
+    /// The startup probe, the grace period and the pod's resources.
+    #[test]
+    fn test_contract_pod_settings() {
+        let c = contract();
+        assert_eq!(c.health.startup_budget_seconds, 60);
+        assert_eq!(c.termination_grace_seconds, 45);
+        assert_eq!(c.resources.requests.cpu, "200m");
+        assert_eq!(c.resources.requests.memory, "256Mi");
+        assert_eq!(c.resources.limits.cpu, "1");
+        assert_eq!(c.resources.limits.memory, "512Mi");
+        assert!(!c.singleton);
     }
 
     /// `generate-artefacts` and `generate_chart` write nothing for a contract
@@ -520,46 +652,102 @@ mod tests {
         assert!(keda.min_replicas >= 1, "CPU alone cannot scale from zero");
     }
 
+    /// The pod cannot produce without its broker credentials, so the Kafka
+    /// group is required. Bearer tokens matter only under bearer auth.
     #[test]
     fn test_contract_secrets() {
         let c = contract();
-        assert_eq!(c.secrets.len(), 2);
-        assert_eq!(c.secrets[0].group_name, "kafka");
-        assert_eq!(c.secrets[1].group_name, "auth");
+        let groups: Vec<(&str, bool)> = c
+            .secrets
+            .iter()
+            .map(|g| (g.group_name.as_str(), g.optional))
+            .collect();
+        assert_eq!(groups, [("kafka", false), ("auth", true)]);
+
+        let kafka: Vec<(&str, &str, &str)> = c.secrets[0]
+            .env_vars
+            .iter()
+            .map(|e| {
+                (
+                    e.env_var.as_str(),
+                    e.key_name.as_str(),
+                    e.secret_key.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            kafka,
+            [
+                ("DFE_RECEIVER_KAFKA_SASL_USER", "username", "kafka-username"),
+                (
+                    "DFE_RECEIVER_KAFKA_SASL_PASSWORD",
+                    "password",
+                    "kafka-password"
+                ),
+                (
+                    "DFE_RECEIVER_KAFKA_SASL_MECHANISM",
+                    "mechanism",
+                    "kafka-sasl-mechanism"
+                ),
+            ]
+        );
     }
 
-    /// Every env var the contract declares must reach the config.
+    /// The config field each Secret env var the contract declares must fill.
     ///
-    /// The chart is generated from these names, so one the app does not read
-    /// mounts a Secret into the pod environment and is ignored, with nothing
-    /// failing to say so.
+    /// The flat names do not spell their fields (`..._SASL_USER` fills
+    /// `kafka.sasl.username`), so the field is named here rather than derived.
+    const SECRET_FIELDS: &[(&str, &str)] = &[
+        ("DFE_RECEIVER_KAFKA_SASL_USER", "/kafka/sasl/username"),
+        ("DFE_RECEIVER_KAFKA_SASL_PASSWORD", "/kafka/sasl/password"),
+        ("DFE_RECEIVER_KAFKA_SASL_MECHANISM", "/kafka/sasl/mechanism"),
+        ("DFE_RECEIVER_BEARER_TOKENS", "/server/auth/bearer/tokens/0"),
+    ];
+
+    /// Every Secret env var the contract declares lands on the one config
+    /// field it fills.
+    ///
+    /// The chart mounts a Secret under every declared name, so a name the
+    /// config never reads leaves the credential silently unused, and a name
+    /// read into another field connects with the wrong value.
     #[test]
     fn every_declared_secret_env_var_reaches_the_config() {
-        // A declared name the binary never reads mounts a Secret that is
-        // silently ignored; the per-field mapping is pinned by the config tests.
-        for group in &contract().secrets {
-            for env in &group.env_vars {
-                assert!(
-                    env.env_var
-                        .starts_with(&format!("{}_", crate::config::ENV_PREFIX)),
-                    "{} does not carry the app prefix",
-                    env.env_var
-                );
+        let contract = contract();
+        let declared: std::collections::BTreeSet<&str> = contract
+            .secrets
+            .iter()
+            .flat_map(|group| group.env_vars.iter().map(|env| env.env_var.as_str()))
+            .collect();
+        let named: std::collections::BTreeSet<&str> =
+            SECRET_FIELDS.iter().map(|(env_var, _)| *env_var).collect();
+        assert_eq!(
+            declared, named,
+            "every env var the contract declares needs its field in SECRET_FIELDS"
+        );
 
+        for group in &contract.secrets {
+            for env in &group.env_vars {
+                let field = SECRET_FIELDS
+                    .iter()
+                    .find(|(env_var, _)| *env_var == env.env_var)
+                    .map(|(_, field)| *field)
+                    .expect("checked against SECRET_FIELDS above");
                 let sentinel = format!("sentinel-{}", env.key_name);
                 let mut config = Config::default();
                 temp_env::with_var(&env.env_var, Some(sentinel.as_str()), || {
-                    config.apply_flat_env(crate::config::ENV_PREFIX);
+                    config.apply_flat_env(&contract.env_prefix);
                 });
 
-                // Secrets serialise redacted outside `expose_during`.
-                let applied = scalo::expose_during(|| serde_json::to_string(&config))
+                // A credential field redacts on every other serialise path.
+                let applied = scalo::expose_during(|| serde_json::to_value(&config))
                     .expect("config serialises");
+                let reached = applied.pointer(field).and_then(serde_json::Value::as_str)
+                    == Some(sentinel.as_str());
+                // The message carries the env var and group names only, never a value.
                 assert!(
-                    applied.contains(&sentinel),
-                    "{} ({}) was set and no config field read it",
-                    env.env_var,
-                    group.group_name
+                    reached,
+                    "{} ({}) was set and the config field it fills did not read it",
+                    env.env_var, group.group_name
                 );
             }
         }
@@ -593,52 +781,6 @@ mod tests {
             dockerfile.contains("COPY dfe-receiver /usr/local/bin/dfe-receiver"),
             "missing binary COPY in Dockerfile",
         );
-    }
-
-    /// Map a chart directory to relative path -> file body.
-    fn chart_files(root: &std::path::Path) -> std::collections::BTreeMap<String, String> {
-        let mut files = std::collections::BTreeMap::new();
-        let mut stack = vec![root.to_path_buf()];
-        while let Some(dir) = stack.pop() {
-            for entry in std::fs::read_dir(&dir).expect("read_dir") {
-                let path = entry.expect("dir entry").path();
-                if path.is_dir() {
-                    stack.push(path);
-                } else {
-                    let rel = path.strip_prefix(root).expect("relative path");
-                    let body = std::fs::read_to_string(&path).expect("read chart file");
-                    files.insert(rel.display().to_string(), body);
-                }
-            }
-        }
-        files
-    }
-
-    #[test]
-    fn checked_in_chart_matches_generate_chart() {
-        // The chart is emitted from contract(), so a hand edit here is silently
-        // reverted the next time anything regenerates it.
-        const REGEN: &str = "regenerate with: `dfe-receiver --emit-helm chart`";
-
-        let tmp = tempfile::tempdir().expect("tempdir");
-        scalo::deployment::generate_chart(&contract(), tmp.path(), None).expect("generate_chart");
-        let expected = chart_files(tmp.path());
-        let committed =
-            chart_files(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("chart"));
-
-        let expected_names: Vec<&String> = expected.keys().collect();
-        let committed_names: Vec<&String> = committed.keys().collect();
-        assert_eq!(
-            committed_names, expected_names,
-            "chart/ file list differs from generate_chart() -- {REGEN}"
-        );
-        for (name, want) in &expected {
-            assert_eq!(
-                committed.get(name),
-                Some(want),
-                "chart/{name} differs from generate_chart() -- {REGEN}"
-            );
-        }
     }
 
     #[test]

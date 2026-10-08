@@ -456,10 +456,7 @@ examples and the statuses a sender sees -- is in
 
 ### Kubernetes with KEDA
 
-The chart in this repo scales on CPU alone: 80% utilisation, 1 to 10 replicas,
-set under `keda.*` in `chart/values.yaml`. The suite's shared chart library adds
-the ScalingPressure trigger on top. The receiver never scales on raw Kafka
-consumer lag.
+The chart a release assembles from the deployment contract scales on CPU alone: 80% utilisation, 1 to 10 replicas, from the contract's `keda` block. A deployment adds the ScalingPressure trigger with the library's `keda.extraTriggers` value. The receiver never scales on raw Kafka consumer lag.
 
 ```yaml
 triggers:
