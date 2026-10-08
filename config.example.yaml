@@ -2,7 +2,11 @@
 # Copy to config.yaml and customise for your environment
 #
 # Environment variables: DFE_RECEIVER_* prefix
-# Nesting: DFE_RECEIVER_SERVER__BIND_ADDRESS=0.0.0.0:8080
+# Nesting: DFE_RECEIVER_SERVER__BIND_ADDRESS=0.0.0.0:8080, only when no
+#   --config file is given. Under --config the flat names apply, e.g.
+#   DFE_RECEIVER_BIND_ADDRESS.
+# .env: read from the working directory only, never a parent's, and only when
+#   no --config file is given.
 # Config reload: send SIGHUP to reload routing/validation/enrichment
 
 server:

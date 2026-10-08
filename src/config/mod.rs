@@ -11,7 +11,8 @@
 //! Priority (highest to lowest):
 //! 1. CLI arguments
 //! 2. Environment variables (DFE_RECEIVER_*)
-//! 3. .env file
+//! 3. `./.env` in the working directory, never a parent's, when no `--config`
+//!    is given
 //! 4. settings.{env}.yaml
 //! 5. settings.yaml
 //! 6. defaults.yaml
@@ -154,7 +155,8 @@ impl Config {
     /// Priority (highest to lowest):
     /// 1. CLI arguments (handled by caller, merged after)
     /// 2. Environment variables (DFE_RECEIVER_ prefix)
-    /// 3. .env file (loaded by dotenvy via scalo)
+    /// 3. `.env`: with no `config_path`, scalo's cascade reads `./.env` and no
+    ///    parent directory's. A `config_path` load reads none
     /// 4. Config file (YAML)
     /// 5. Hard-coded defaults
     pub fn load(config_path: Option<&str>) -> Result<Self> {
@@ -2717,8 +2719,12 @@ pub struct SpilloverConfig {
     pub poll_interval_secs: u64,
 }
 
+/// Where the disk spillover spools by default, and where the deployment
+/// contract mounts a writable volume for it while spillover is on.
+pub const DEFAULT_SPILLOVER_PATH: &str = "/var/spool/dfe-receiver";
+
 fn default_spillover_path() -> std::path::PathBuf {
-    std::path::PathBuf::from("/var/spool/dfe-receiver")
+    std::path::PathBuf::from(DEFAULT_SPILLOVER_PATH)
 }
 
 fn default_max_usage_percent() -> f64 {
@@ -4358,19 +4364,20 @@ kafka:
         in_app_env(None, || assert!(config.validate().is_ok()));
     }
 
-    /// The chart's shipped config, a plaintext broker with no SASL, still
-    /// starts and builds a plaintext client.
+    /// The contract's published default config, a plaintext broker with no
+    /// SASL, still starts and builds a plaintext client.
     #[test]
-    fn the_shipped_chart_default_still_starts() {
-        let values: serde_json::Value =
-            serde_yaml_ng::from_str(include_str!("../../chart/values.yaml")).unwrap();
-        let config: Config = serde_json::from_value(values["config"].clone()).unwrap();
+    fn the_published_default_config_still_starts() {
+        let published = crate::deployment::contract()
+            .default_config
+            .expect("the contract publishes a default config");
+        let config: Config = serde_json::from_value(published).unwrap();
         assert_eq!(
             config.kafka.brokers,
             ["kafka:9092"],
-            "the chart default moved"
+            "the published default moved"
         );
-        assert!(config.kafka.sasl.is_none(), "the chart default moved");
+        assert!(config.kafka.sasl.is_none(), "the published default moved");
 
         in_app_env(None, || {
             config.validate().expect("the shipped default starts");

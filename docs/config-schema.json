@@ -793,7 +793,6 @@
           "items": {
             "type": "string",
             "x-scalo-secret": true,
-            "x-dfe-secret": true,
             "writeOnly": true
           },
           "default": []
@@ -814,7 +813,6 @@
           "items": {
             "type": "string",
             "x-scalo-secret": true,
-            "x-dfe-secret": true,
             "writeOnly": true
           },
           "default": []
@@ -834,7 +832,6 @@
           "items": {
             "type": "string",
             "x-scalo-secret": true,
-            "x-dfe-secret": true,
             "writeOnly": true
           },
           "default": []
@@ -2292,7 +2289,6 @@
           "description": "Password, redacted wherever it is printed or serialised.",
           "type": "string",
           "x-scalo-secret": true,
-          "x-dfe-secret": true,
           "writeOnly": true
         }
       },
