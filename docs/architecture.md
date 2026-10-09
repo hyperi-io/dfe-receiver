@@ -163,12 +163,7 @@ wrong does.
    rate-limit and spillover rules the engine copy has never heard of. A
    validation change here is only half the change.
 
-5. **`auth.mode` defaults to `none`.** A deployment that has not configured auth
-   accepts unauthenticated posts. Body size, request timeout, the IP filter and
-   the rate limiter are the only other limits, and a default deploy is
-   internet-facing with an empty `loadBalancerSourceRanges`, which means every
-   address on earth. The receiver is built to sit behind edge protection, never
-   directly on the internet.
+5. **`auth.mode` defaults to `none`.** A deployment that has not configured auth accepts unauthenticated posts, limited only by body size, request timeout, the IP filter and the rate limiter. The chart's default is an in-cluster Service only: a load balancer exists once a deployment sets `publicService.enabled`, and an empty `publicService.loadBalancerSourceRanges` leaves it open to every address. The receiver is built to sit behind edge protection, never directly on the internet.
 
 6. **`_raw` holds the payload before redaction.** Anything stripped from the
    parsed fields downstream is still in `_raw`, indexed for full-text search.

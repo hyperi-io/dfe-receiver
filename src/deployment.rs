@@ -20,7 +20,7 @@ use scalo::deployment::{
     WritablePath, base_image_from_cascade,
 };
 
-use crate::config::DEFAULT_SPILLOVER_PATH;
+use crate::config::{DEFAULT_DLQ_FILE_PATH, DEFAULT_SPILLOVER_PATH};
 
 /// Build the deployment contract for dfe-receiver.
 ///
@@ -265,7 +265,7 @@ pub fn contract() -> DeploymentContract {
         // receiver accepts and the destinations it writes to.
         config_schema: Some(scalo::deployment::config_schema_json::<crate::config::Config>()),
         capabilities: capabilities(),
-        // The spillover spool is the one directory the app writes under a read-only root.
+        // The spool and the file DLQ: the directories the app writes under a read-only root.
         writable_paths: vec![
             WritablePath::new("spool", DEFAULT_SPILLOVER_PATH)
                 .size_limit("10Gi")
@@ -273,6 +273,8 @@ pub fn contract() -> DeploymentContract {
                     path: "config.buffer.spillover.enabled".into(),
                     value: "true".into(),
                 }),
+            // Ungated: three dlq settings decide the file backend, and a gate reads one path.
+            WritablePath::new("dlq", DEFAULT_DLQ_FILE_PATH).size_limit("1Gi"),
         ],
         termination_grace_seconds: 45,
         resources: ResourcesContract {
@@ -391,6 +393,7 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use scalo::config::flat_env::ApplyFlatEnv;
+    use scalo::dlq::DlqMode;
 
     #[test]
     fn test_contract_fields() {
@@ -556,6 +559,73 @@ mod tests {
         assert_eq!(spillover_on.holds_in(&on), Some(true));
         let read: Config = serde_json::from_value(on).expect("deserialises into Config");
         assert!(read.buffer.spillover.enabled);
+    }
+
+    /// The root filesystem is read-only, so every DLQ mode that writes the file
+    /// backend needs a writable path over the DLQ directory, mounted while that
+    /// mode is set.
+    #[test]
+    fn every_file_dlq_mode_has_somewhere_to_write() {
+        let c = contract();
+        assert!(c.security.read_only_root_filesystem);
+        let published = c.default_config.clone().expect("default_config present");
+
+        // The modes scalo builds a file backend for. An unknown mode runs as cascade.
+        let file_modes = [DlqMode::Cascade, DlqMode::FanOut, DlqMode::FileOnly];
+        // `None` is the published default, which sets no mode at all.
+        let modes = [
+            None,
+            Some("cascade"),
+            Some("fan_out"),
+            Some("file_only"),
+            Some("kafka_only"),
+            Some(""),
+            Some("not-a-mode"),
+        ];
+        let mut writing = Vec::new();
+        for mode in modes {
+            let mut values = published.clone();
+            if let Some(mode) = mode {
+                values["routing"]["dlq"] = serde_json::json!({ "mode": mode });
+            }
+            let read: Config =
+                serde_json::from_value(values.clone()).expect("deserialises into Config");
+            let dlq = read.routing.dlq.to_scalo_config();
+            if !(dlq.enabled && dlq.file.enabled && file_modes.contains(&dlq.mode)) {
+                continue;
+            }
+            writing.push(mode);
+
+            let mounted: Vec<&WritablePath> = c
+                .writable_paths
+                .iter()
+                .filter(|writable| dlq.file.path.starts_with(&writable.path))
+                .filter(|writable| {
+                    writable
+                        .when
+                        .as_ref()
+                        .is_none_or(|gate| gate.holds_in(&values) == Some(true))
+                })
+                .collect();
+            assert_eq!(
+                mounted.len(),
+                1,
+                "dlq.mode {mode:?}: {:?}",
+                c.writable_paths
+            );
+            assert!(!mounted[0].persistent);
+        }
+        assert_eq!(
+            writing,
+            [
+                None,
+                Some("cascade"),
+                Some("fan_out"),
+                Some("file_only"),
+                Some(""),
+                Some("not-a-mode")
+            ]
+        );
     }
 
     /// The startup probe, the grace period and the pod's resources.

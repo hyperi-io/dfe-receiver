@@ -2128,6 +2128,10 @@ pub struct DlqConfig {
     pub kafka_send_timeout_ms: Option<u64>,
 }
 
+/// Where the file DLQ writes by default, and where the deployment contract
+/// mounts a writable volume for it.
+pub const DEFAULT_DLQ_FILE_PATH: &str = "/var/spool/dfe/dlq";
+
 impl Default for DlqConfig {
     fn default() -> Self {
         Self {
@@ -2136,7 +2140,7 @@ impl Default for DlqConfig {
             topic: "dfe_receiver_dlq".to_string(),
             topic_suffix: ".dlq".to_string(),
             file_enabled: true,
-            file_path: "/var/spool/dfe/dlq".to_string(),
+            file_path: DEFAULT_DLQ_FILE_PATH.to_string(),
             kafka_enabled: true,
             kafka_send_timeout_ms: None,
         }
@@ -2154,8 +2158,7 @@ impl DlqConfig {
             "kafka_only" => DlqMode::KafkaOnly,
             "cascade" | "" => DlqMode::Cascade,
             other => {
-                // A typo'd mode must not silently pick a backend -- cascade
-                // includes the file backend, which is an EROFS no-op deployed.
+                // A typo'd mode runs the default cascade, so it must not pass without a warning.
                 tracing::warn!(mode = %other, "unknown dlq.mode, using cascade");
                 DlqMode::Cascade
             }
