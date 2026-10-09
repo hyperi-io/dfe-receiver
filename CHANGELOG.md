@@ -3,6 +3,14 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.15.43](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.42...v1.15.43) (2026-10-09)
+
+### Bug Fixes
+
+* emit deployment contract v4 ([#182](https://github.com/hyperi-io/dfe-receiver/issues/182)) ([72baec6](https://github.com/hyperi-io/dfe-receiver/commit/72baec6c4cbbf922ec710ba88276945975a9fd94))
+* give the file DLQ a writable path under the read-only root ([#184](https://github.com/hyperi-io/dfe-receiver/issues/184)) ([f0da60a](https://github.com/hyperi-io/dfe-receiver/commit/f0da60a6168a5479de806aae5b78f3879958f045))
+* move to scalo 2.14.4 so the UDP public Service takes its own address ([#183](https://github.com/hyperi-io/dfe-receiver/issues/183)) ([9e9f829](https://github.com/hyperi-io/dfe-receiver/commit/9e9f829b52e4c9f02baaf6401c2b619f8ba64607))
+
 ## [1.15.42](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.41...v1.15.42) (2026-10-06)
 
 ### Bug Fixes
