@@ -350,7 +350,7 @@ docker compose -f docker-compose.test.yaml down -v
 
 No chart is committed here. At release, hyperi-ci runs the binary's `generate-artefacts` for the deployment contract and assembles a thin chart from it on the scalo-service library chart, at the version `release.helm.library` names in `.hyperi-ci.yaml`. Keep that version at the scalo version in `Cargo.toml`: a library renders only the contract version its scalo release writes.
 
-To see the chart a release would ship, build the binary and run `hyperi-ci chart assemble --binary target/debug/dfe-receiver --image ghcr.io/hyperi-io/dfe-receiver:<tag>@sha256:<digest> --version <version>`. It prints the chart directory it wrote. `dfe-receiver --emit-helm <dir>` still writes scalo's full chart for local use.
+To see the chart a release would ship, build the binary and run `hyperi-ci chart assemble --binary target/debug/dfe-receiver --image ghcr.io/hyperi-io/dfe-receiver:<tag>@sha256:<digest> --version <version>`. It prints the chart directory it wrote.
 
 The contract marks every ingest port public and the gRPC hop internal. The library exposes the public ports only when a deployment sets `publicService.enabled`, as `<fullname>-public` for TCP and `<fullname>-public-udp` for UDP.
 
@@ -465,9 +465,9 @@ not the shipped one.
 
 Inbound: **scalo-rs** (crate `scalo`) by `cargo-dep` -- a runtime range plus a dev-dependency range for test support, which move together, and a `generated-file` lockstep edge through the `Dockerfile`, at contract schema version 4. The released chart is assembled on the scalo-service library chart at `release.helm.library`, which moves with the scalo version in `Cargo.toml`.
 
-Outbound: **dfe-infra** by `image-pin` lockstep -- its
-`helm/charts/dfe-receiver/Chart.yaml` pins the image built here and is what
-actually deploys the receiver. **dfe-engine** by `mirrored-logic` -- it
+Outbound: **dfe-infra** by `image-pin` lockstep -- its `versions.yaml` pins
+the image and the thin chart released here, and Argo deploys that published
+chart. **dfe-engine** by `mirrored-logic` -- it
 reimplements `Config::validate()` by hand, so only a human closes that edge.
 
 ```bash

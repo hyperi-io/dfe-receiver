@@ -11,8 +11,8 @@
 //! Aligned with dfe-loader's pattern: `command: Option<StandardCommand>`
 //! delegates the standard subcommand surface (run, version, config-check,
 //! generate-artefacts, metrics-manifest) to scalo's `run_app()`. The
-//! `--emit-helm` / `--emit-dockerfile` flags exist for one-off local
-//! diagnostics; the canonical artefact production path is
+//! `--emit-dockerfile` flag exists for one-off local diagnostics; the
+//! canonical artefact production path is
 //! `dfe-receiver generate-artefacts --output-dir ci/`.
 
 #![forbid(unsafe_code)]
@@ -53,11 +53,6 @@ struct App {
 
     #[command(subcommand)]
     command: Option<StandardCommand>,
-
-    /// Generate Helm chart from deployment contract and exit (default output: ./chart).
-    /// Quick local-dev shortcut; the canonical CI path is `generate-artefacts`.
-    #[arg(long, value_name = "DIR", default_missing_value = "chart", num_args = 0..=1)]
-    emit_helm: Option<PathBuf>,
 
     /// Generate Dockerfile from deployment contract and exit (default output: ./Dockerfile).
     /// Quick local-dev shortcut; the canonical CI path is `generate-artefacts`.
@@ -293,19 +288,6 @@ impl ServiceApp for App {
 #[tokio::main]
 async fn main() {
     let app = App::parse();
-
-    if let Some(output) = &app.emit_helm {
-        let contract = deployment::contract();
-        // None writes the plain chart with no contract identity annotations.
-        // The released chart is assembled from `generate-artefacts`, not from
-        // this local-only flag.
-        if let Err(e) = scalo::deployment::generate_chart(&contract, output, None) {
-            eprintln!("fatal: {e}");
-            std::process::exit(1);
-        }
-        eprintln!("Helm chart written to {}/", output.display());
-        return;
-    }
 
     if let Some(output) = &app.emit_dockerfile {
         // Single source of truth: deployment::emit_dockerfile() is what the
