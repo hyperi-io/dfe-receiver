@@ -13,7 +13,7 @@ edition = "2024"
 description = "Ingest endpoint for OTLP, Splunk HEC and Prometheus remote-write, writing straight to Kafka. Runs standalone or as part of the HyperI Data Fusion Engine."
 license-file = "LICENSE"
 repository = "https://github.com/hyperi-io/dfe-receiver"
-exclude = [".github/", "chart/", "docs/", "reference/", "scripts/", "benches/"]
+exclude = [".github/", "docs/", "reference/", "scripts/", "benches/"]
 
 [lib]
 name = "dfe_receiver"
@@ -21,10 +21,11 @@ path = "src/lib.rs"
 doctest = false
 
 [dependencies]
-# scalo shared library (crates.io). The floor is the first release that writes
-# contract schema version 4. The contract carries no vendor defaults, so the
-# app names its own.
-scalo = { version = "2.14.4", features = [
+# scalo shared library (crates.io). The floor moves with `release.helm.library`
+# in .hyperi-ci.yaml: the library renders only the contract version its scalo
+# release writes. The contract carries no vendor defaults, so the app names its
+# own.
+scalo = { version = "2.14.6", features = [
     "config",
     "config-reload",
     "config-schema",
@@ -190,11 +191,11 @@ pcap-file = ">=2.0, <3"
 sha2 = ">=0.11.0, <0.12"
 
 # Contract artefact e2e (tests/e2e/contract_artefacts.rs) -- pulls in
-# probe/skip/cluster helpers from scalo's test_support module.
+# probe/skip helpers from scalo's test_support module.
 # transport-grpc-vector-compat is test-only: it gives VectorCompatClient, the
 # same PushEvents client dfe-fetcher and Vector use, so the gRPC ingest path can
 # be driven in-process. Dev-dep features do not reach a release build.
-scalo = { version = "2.14.4", features = [
+scalo = { version = "2.14.6", features = [
     "deployment-test-support",
     "transport-grpc-vector-compat",
 ] }

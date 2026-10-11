@@ -17,7 +17,7 @@ use scalo::deployment::{
     CONTRACT_SCHEMA_VERSION, DeploymentContract, HealthContract, ImageProfile, KafkaLagTrigger,
     KedaConfig, KedaContract, NativeDepsContract, OciLabels, PortCondition, PortContract,
     ResourceList, ResourcesContract, SecretEnvContract, SecretGroupContract, SecurityContract,
-    WritablePath, base_image_from_cascade,
+    ServiceAccount, WritablePath, base_image_from_cascade,
 };
 
 use crate::config::{DEFAULT_DLQ_FILE_PATH, DEFAULT_SPILLOVER_PATH};
@@ -26,9 +26,9 @@ use crate::config::{DEFAULT_DLQ_FILE_PATH, DEFAULT_SPILLOVER_PATH};
 ///
 /// Captures all deployment-facing configuration: ports, health paths,
 /// secrets, writable paths, resources, KEDA scaling, and default config.
-/// Artefact generators (`generate_dockerfile`, `generate_chart`,
-/// `generate_compose_fragment`) and the released thin chart use this
-/// contract as their single source of truth.
+/// Artefact generators (`generate_dockerfile`, `generate_compose_fragment`)
+/// and the released thin chart use this contract as their single source of
+/// truth.
 #[allow(clippy::too_many_lines)]
 pub fn contract() -> DeploymentContract {
     // Resolve the base image via the scalo cascade helper so the org-wide
@@ -289,6 +289,7 @@ pub fn contract() -> DeploymentContract {
         },
         security: SecurityContract::default(),
         singleton: false,
+        service_account: ServiceAccount::Own,
     }
 }
 
@@ -641,8 +642,8 @@ mod tests {
         assert!(!c.singleton);
     }
 
-    /// `generate-artefacts` and `generate_chart` write nothing for a contract
-    /// that fails these checks.
+    /// `generate-artefacts` writes nothing for a contract that fails these
+    /// checks.
     #[test]
     fn test_contract_passes_the_generate_artefacts_checks() {
         let c = contract();

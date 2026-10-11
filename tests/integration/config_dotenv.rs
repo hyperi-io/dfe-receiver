@@ -9,6 +9,8 @@
 //! Which `.env` the binary reads, proved through `config-check` on the binary
 //! itself rather than a library call.
 
+#![allow(clippy::expect_used)]
+
 use std::path::Path;
 
 /// The flat env names the two `.env` files set. Each lands in the config dump

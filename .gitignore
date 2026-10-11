@@ -28,8 +28,6 @@ out/
 test-results/
 coverage/
 ci
-# written by `dfe-receiver --emit-helm`; the release assembles the chart from the contract
-/chart/
 
 # Rust artefacts
 **/*.rs.bk
