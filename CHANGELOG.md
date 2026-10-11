@@ -3,6 +3,12 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.15.44](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.43...v1.15.44) (2026-10-11)
+
+### Bug Fixes
+
+* move to scalo 2.14.6, drop --emit-helm ([bb22c3a](https://github.com/hyperi-io/dfe-receiver/commit/bb22c3ad1284273d7edc6995644fcc33e5f2d126))
+
 ## [1.15.43](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.42...v1.15.43) (2026-10-09)
 
 ### Bug Fixes
