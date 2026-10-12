@@ -442,7 +442,7 @@ sinks:
     type: vector
     inputs: ["demo"]
     address: "127.0.0.1:{grpc_port}"
-    compression: false
+    compression: none
     healthcheck:
       enabled: false
 "#
@@ -537,7 +537,7 @@ sinks:
     type: vector
     inputs: ["demo"]
     address: "127.0.0.1:{grpc_port}"
-    compression: false
+    compression: none
     tls:
       enabled: true
       ca_file: "{cert_path_str}"
