@@ -904,7 +904,8 @@ impl Metrics {
     ///
     /// Called from the metrics update cycle (every 1 second) to feed
     /// current component values into the scalo `ScalingPressure` engine.
-    /// Also emits standard `dfe_scaling_*` gauges when `ServiceMetrics` is active.
+    /// The scalo runtime writes that engine's value into the `scaling_pressure`
+    /// gauge; this writes the circuit and memory gauges when `ServiceMetrics` is active.
     pub fn update_scaling(&self) {
         self.scaling
             .set_component("request_rate", self.request_rate());
@@ -928,10 +929,7 @@ impl Metrics {
         let circuit_open = self.is_circuit_open();
         self.scaling.set_circuit_open(circuit_open);
 
-        // Dual-emit scaling gauges via ServiceMetrics
         if let Some(ref dfe) = self.dfe {
-            let pressure = self.scaling.calculate();
-            dfe.scaling_pressure(pressure);
             dfe.scaling_circuit_open(circuit_open);
             let mem_ratio = if mem_limit > 0 {
                 mem_used as f64 / mem_limit as f64
