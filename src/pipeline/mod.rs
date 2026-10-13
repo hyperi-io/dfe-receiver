@@ -23,6 +23,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use bytes::Bytes;
 use parking_lot::{Mutex, RwLock};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -414,6 +415,14 @@ struct Routes {
     destinations: DestinationSet,
 }
 
+/// A destination whose buffer spools to disk, rewired by a reload: its sender
+/// moves from `from` to `wiring`, on the spool `from` holds.
+struct SpoolMove {
+    name: Arc<str>,
+    from: Arc<Destination>,
+    wiring: Wiring,
+}
+
 /// What every destination's delivery is built with, fixed at startup: the
 /// listeners, and so where they answer, do not change on a reload.
 struct DeliverySettings {
@@ -487,7 +496,7 @@ pub struct PipelineState {
     shared_config: SharedConfig,
     validator: RwLock<Validator>,
     /// The routing rules and the destination set, swapped whole by a reload.
-    routes: RwLock<Arc<Routes>>,
+    routes: ArcSwap<Routes>,
     kafka: Option<Delivery<KafkaSink>>,
     /// What a destination a reload adds is built with.
     settings: DeliverySettings,
@@ -680,10 +689,10 @@ impl PipelineState {
         Ok(Self {
             shared_config,
             validator: RwLock::new(validator),
-            routes: RwLock::new(Arc::new(Routes {
+            routes: ArcSwap::from_pointee(Routes {
                 router: Arc::new(router),
                 destinations,
-            })),
+            }),
             kafka,
             settings,
             drains: OnceLock::new(),
@@ -713,7 +722,7 @@ impl PipelineState {
 
     /// The routes as they stand.
     fn routes(&self) -> Arc<Routes> {
-        Arc::clone(&self.routes.read())
+        self.routes.load_full()
     }
 
     /// The acknowledgement setting of listener `transport`, holding at most a
@@ -755,7 +764,7 @@ impl PipelineState {
         // Every named destination must be able to take a record: a record the
         // rules send to one of them cannot be served by the others.
         self.routes
-            .read()
+            .load()
             .destinations
             .values()
             .all(|destination| destination.grpc().is_none_or(Delivery::is_healthy))
@@ -1488,8 +1497,11 @@ impl PipelineState {
     /// build is reported, and its records are answered unavailable until a
     /// later reload builds it.
     ///
-    /// The Kafka producer and the DLQ are built at startup only, and so is a
-    /// gRPC destination whose address changes while its buffer spools to disk.
+    /// A gRPC destination whose address changes while its buffer spools to
+    /// disk moves to the new address on the same spool once no request uses
+    /// its old sender, and the reload waits for that; until then its records
+    /// are answered unavailable. The Kafka producer and the DLQ are built at
+    /// startup only.
     pub async fn rebuild_components(&self, new_config: &Config) {
         let _one_at_a_time = self.reloading.lock().await;
         let resolved = new_config.resolved_destinations();
@@ -1498,13 +1510,13 @@ impl PipelineState {
             &resolved,
             new_config.server.auth.include_common_header,
         ));
-        let destinations = self.rebuild_destinations(new_config, &resolved).await;
+        let (destinations, moves) = self.rebuild_destinations(new_config, &resolved).await;
         let next = Arc::new(Routes {
             router,
             destinations,
         });
 
-        let replaced = std::mem::replace(&mut *self.routes.write(), Arc::clone(&next));
+        let replaced = self.routes.swap(Arc::clone(&next));
         *self.validator.write() = Validator::new(new_config.validation.clone());
 
         let retired: Vec<(Arc<str>, Arc<Destination>)> = replaced
@@ -1515,23 +1527,31 @@ impl PipelineState {
                     .destinations
                     .get(*name)
                     .is_some_and(|kept| Arc::ptr_eq(kept, old))
+                    && !moves.iter().any(|moving| moving.name == **name)
             })
             .map(|(name, old)| (Arc::clone(name), Arc::clone(old)))
             .collect();
-        // A retirement waits until nothing else holds the destination, this included.
+        // A retirement or a move waits until nothing else holds the destination, this included.
         drop(replaced);
         for (name, old) in retired {
             self.retire(name, old);
+        }
+        for moving in moves {
+            self.move_spool(moving).await;
         }
     }
 
     /// The destination set `config` asks for: the current sender where a
     /// destination's wiring is unchanged, a new one where it is new or changed.
+    ///
+    /// A rewired destination whose buffer spools to disk is left out of the
+    /// set and returned as a [`SpoolMove`]: its successor can open the spool
+    /// only once the current sender has let it go.
     async fn rebuild_destinations(
         &self,
         config: &Config,
         resolved: &DestinationsConfig,
-    ) -> DestinationSet {
+    ) -> (DestinationSet, Vec<SpoolMove>) {
         let mut wanted: Vec<(Arc<str>, Result<Wiring>)> = Vec::new();
         for name in resolved.referenced_names() {
             if wanted.iter().all(|(seen, _)| seen.as_ref() != name) {
@@ -1541,6 +1561,7 @@ impl PipelineState {
         }
         let current = self.routes();
         let mut next = DestinationSet::default();
+        let mut moves = Vec::new();
         let mut spools = FxHashSet::default();
         let mut to_build = Vec::new();
         for (name, wiring) in wanted {
@@ -1558,19 +1579,18 @@ impl PipelineState {
                     }
                     next.insert(name, Arc::clone(kept));
                 }
-                // scalo's TieredSink cannot release its spool to a successor in-process.
                 Some(kept)
                     if self.settings.spools()
                         && kept.grpc().is_some()
                         && matches!(wiring, Wiring::Grpc { .. }) =>
                 {
-                    warn!(
-                        destination = %name,
-                        "A config reload rewired a destination whose buffer spools to disk; \
-                         it keeps its current sender until a restart"
-                    );
+                    // Claimed here so no destination this reload adds can take the spool.
                     spools.insert(grpc_spool(&name));
-                    next.insert(name, Arc::clone(kept));
+                    moves.push(SpoolMove {
+                        name,
+                        from: Arc::clone(kept),
+                        wiring,
+                    });
                 }
                 Some(_) | None => to_build.push((name, wiring)),
             }
@@ -1578,21 +1598,80 @@ impl PipelineState {
         drop(current);
 
         for (name, wiring) in to_build {
-            match Destination::build(&name, wiring, &self.settings, &self.rejects, &mut spools)
-                .await
-            {
-                Ok(destination) => {
-                    if let (Some(delivery), Some(drains)) = (destination.grpc(), self.drains.get())
-                    {
-                        delivery.start(drains);
-                    }
-                    info!(destination = %name, "Destination sender built by a config reload");
-                    next.insert(name, Arc::new(destination));
-                }
-                Err(e) => report_build_failure(&name, &e),
+            if let Some(destination) = self.build_destination(&name, wiring, &mut spools).await {
+                next.insert(name, destination);
             }
         }
-        next
+        (next, moves)
+    }
+
+    /// Build destination `name` from `wiring` for a reload, its drain started
+    /// once the drains run, or report why it could not be built.
+    async fn build_destination(
+        &self,
+        name: &str,
+        wiring: Wiring,
+        spools: &mut FxHashSet<PathBuf>,
+    ) -> Option<Arc<Destination>> {
+        match Destination::build(name, wiring, &self.settings, &self.rejects, spools).await {
+            Ok(destination) => {
+                if let (Some(delivery), Some(drains)) = (destination.grpc(), self.drains.get()) {
+                    delivery.start(drains);
+                }
+                info!(
+                    destination = name,
+                    "Destination sender built by a config reload"
+                );
+                Some(Arc::new(destination))
+            }
+            Err(e) => {
+                report_build_failure(name, &e);
+                None
+            }
+        }
+    }
+
+    /// Move a destination whose buffer spools to disk to its new wiring, on
+    /// the spool it holds.
+    ///
+    /// A spool directory takes one sender at a time, so the successor is built
+    /// only once no request uses the current sender and its spool is shut
+    /// down; until then a record routed to the destination is answered
+    /// unavailable. The successor replays what the current sender left
+    /// spooled. A sender still in use after [`RETIRE_QUIESCE`] goes back into
+    /// the routes unchanged, for a later reload to move.
+    async fn move_spool(&self, moving: SpoolMove) {
+        let SpoolMove { name, from, wiring } = moving;
+        if !wait_unused(&from, &self.shutdown, Some(RETIRE_QUIESCE)).await {
+            if !self.shutdown.is_cancelled() {
+                warn!(
+                    destination = %name,
+                    "A destination a config reload readdressed is still in use; \
+                     it keeps its current sender until a later reload"
+                );
+                self.install(name, from);
+            }
+            return;
+        }
+        close_spool(from).await;
+        // Claimed against the rest when the reload planned the move.
+        let mut spools = FxHashSet::default();
+        if let Some(destination) = self.build_destination(&name, wiring, &mut spools).await {
+            self.install(name, destination);
+        }
+    }
+
+    /// Add `destination` to the routes as `name`. Only a reload calls this,
+    /// under the reload lock, so no other swap can come between the load and
+    /// the store.
+    fn install(&self, name: Arc<str>, destination: Arc<Destination>) {
+        let current = self.routes.load_full();
+        let mut destinations = current.destinations.clone();
+        destinations.insert(name, destination);
+        self.routes.store(Arc::new(Routes {
+            router: Arc::clone(&current.router),
+            destinations,
+        }));
     }
 
     /// Hand back, in the background, what a destination a reload replaced
@@ -1669,9 +1748,46 @@ const RETIRE_RETRY: Duration = Duration::from_secs(5);
 /// The DLQ reason for a record a retired destination could not send.
 const RETIRED_REASON: &str = "destination retired by a config reload";
 
+/// Wait until no request uses `destination`: true once nothing else holds it,
+/// false at `shutdown` or once `limit`, where given, has passed.
+async fn wait_unused(
+    destination: &Arc<Destination>,
+    shutdown: &CancellationToken,
+    limit: Option<Duration>,
+) -> bool {
+    let mut waited = Duration::ZERO;
+    while Arc::strong_count(destination) > 1 {
+        if shutdown.is_cancelled() || limit.is_some_and(|limit| waited >= limit) {
+            return false;
+        }
+        tokio::select! {
+            () = shutdown.cancelled() => {}
+            () = tokio::time::sleep(RETIRE_POLL) => {}
+        }
+        waited += RETIRE_POLL;
+    }
+    true
+}
+
+/// Shut down the disk spool of `destination`, the last handle on it, so its
+/// directory is free for the next sink opened on it, which replays what the
+/// spool still holds.
+async fn close_spool(destination: Arc<Destination>) {
+    let Some(Destination {
+        sink: DestinationSink::Grpc(delivery),
+        ..
+    }) = Arc::into_inner(destination)
+    else {
+        return;
+    };
+    if let Some(SinkBackend::Tiered(spool)) = delivery.queued.and_then(Arc::into_inner) {
+        spool.shutdown().await;
+    }
+}
+
 /// Retire destination `name` once no request uses it: stop its buffer's
 /// drain, then hand what an in-memory buffer still holds to the destination,
-/// else the DLQ, or give a disk spool time to drain.
+/// else the DLQ, or give a disk spool time to drain and shut it down.
 ///
 /// A record its buffer held was answered at enqueue, so its sender has no
 /// copy: what neither the destination nor the DLQ takes is offered again until
@@ -1682,16 +1798,10 @@ async fn retire_destination(
     dlq: Option<Arc<Dlq>>,
     shutdown: CancellationToken,
 ) {
-    let mut waited = Duration::ZERO;
-    while Arc::strong_count(&destination) > 1 && !shutdown.is_cancelled() {
-        tokio::select! {
-            () = shutdown.cancelled() => {}
-            () = tokio::time::sleep(RETIRE_POLL) => {}
-        }
-        waited += RETIRE_POLL;
-        if waited == RETIRE_QUIESCE {
-            warn!(destination = %name, "A retired destination is still in use; waiting for it");
-        }
+    if !wait_unused(&destination, &shutdown, Some(RETIRE_QUIESCE)).await && !shutdown.is_cancelled()
+    {
+        warn!(destination = %name, "A retired destination is still in use; waiting for it");
+        wait_unused(&destination, &shutdown, None).await;
     }
     let Some(delivery) = destination.grpc() else {
         return;
@@ -1720,10 +1830,10 @@ async fn retire_destination(
                      and replay when a destination of this name is configured again"
                 );
             }
-            // Dropped, not shut down: scalo's shutdown waits on a wake-up its disk poller can take.
         }
         None => {}
     }
+    close_spool(destination).await;
 }
 
 /// Send `held` straight to the retired destination, past its buffer's
@@ -3192,10 +3302,10 @@ mod tests {
     }
 
     /// A destination a reload readdresses while its buffer spools to disk
-    /// keeps its sender, spool and all: the reload neither stalls nor leaves
-    /// it without one.
+    /// gets a sender at the new address, spooling to the same directory, with
+    /// no restart and no stalled reload.
     #[tokio::test]
-    async fn a_readdressed_destination_that_spools_keeps_its_sender() {
+    async fn a_readdressed_destination_that_spools_moves_to_its_new_address() {
         let totals = CounterTotals::default();
         let _recorder = metrics::set_default_local_recorder(&totals);
         let dir = tempfile::tempdir().unwrap();
@@ -3205,15 +3315,15 @@ mod tests {
         // An at-enqueue listener is what builds the spool.
         config.server.acknowledgements = AcknowledgementsConfig::new(false);
         let state = test_state_with(config.clone()).await;
-        let before = Arc::clone(state.routes().destinations.get("alpha").unwrap());
 
+        let moved = "http://127.0.0.1:9".to_string();
         if let Some(grpc) = config
             .destinations
             .named
             .get_mut("alpha")
             .and_then(|spec| spec.grpc.as_mut())
         {
-            grpc.endpoint = "http://127.0.0.1:9".to_string();
+            grpc.endpoint.clone_from(&moved);
         }
         tokio::time::timeout(Duration::from_secs(10), state.reload_config(config))
             .await
@@ -3222,9 +3332,21 @@ mod tests {
 
         assert_eq!(totals.total("receiver_destination_build_failures_total"), 0);
         let routes = state.routes();
+        let alpha = routes
+            .destinations
+            .get("alpha")
+            .expect("alpha has a sender");
         assert!(
-            Arc::ptr_eq(&before, routes.destinations.get("alpha").unwrap()),
-            "the spooling destination lost its sender"
+            matches!(&alpha.wiring, Wiring::Grpc { endpoint, .. } if *endpoint == moved),
+            "alpha is still wired to {:?}",
+            alpha.wiring
+        );
+        assert!(
+            alpha
+                .grpc()
+                .and_then(|delivery| delivery.queued.as_deref())
+                .is_some_and(|queued| matches!(queued, SinkBackend::Tiered(_))),
+            "alpha's new sender does not spool to disk"
         );
     }
 

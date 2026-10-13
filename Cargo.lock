@@ -169,6 +169,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "arc-swap"
+version = "1.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c049c0be4daef0b145cb3555416b3b8ef5b7888a38aea1a3a155801fe7b0810b"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "astral-tokio-tar"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1109,6 +1118,7 @@ name = "dfe-receiver"
 version = "1.15.10"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "async-trait",
  "axum",
  "base64 0.23.1",
@@ -3394,7 +3404,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03da047801ff44bb6a4d407d4860c05fd70bb81714e6b2f3812603d5b145b042"
 dependencies = [
  "heck",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "log",
  "multimap",
  "petgraph",
@@ -3415,7 +3425,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -4179,9 +4189,9 @@ dependencies = [
 
 [[package]]
 name = "scalo"
-version = "2.14.9"
+version = "2.14.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35adc748ce901799bc67ce26c5d17ca13cf7b349b12ede7dec75e865ee61c4ef"
+checksum = "72ce08bd191c1ec54f9dfd6b006b32d47645f96faaa73424146ff1919c8ec470"
 dependencies = [
  "aes-gcm",
  "axum",
