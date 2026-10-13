@@ -23,6 +23,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
@@ -125,17 +126,21 @@ impl<S: ReceiverSink + 'static> SinkBackend<S> {
         }
     }
 
-    /// Start background drain task.
+    /// Start background drain task, returning it where one was spawned.
     ///
-    /// For InMemory: spawns the existing drain loop from `InMemoryBuffer`.
+    /// For InMemory: spawns the existing drain loop from `InMemoryBuffer`, which
+    /// flushes the buffer once `shutdown` is cancelled and then ends.
     /// For Tiered: scalo manages its own drain task internally - this is a no-op.
-    pub fn start_drain_task(self: Arc<Self>, shutdown: CancellationToken) {
+    pub fn start_drain_task(
+        self: Arc<Self>,
+        shutdown: CancellationToken,
+    ) -> Option<JoinHandle<()>> {
         match self.as_ref() {
             SinkBackend::InMemory(_) => {
                 // InMemoryBuffer needs its own drain loop: the tick moves the
                 // queue, and only shutdown flushes the primary as well.
                 let backend = Arc::clone(&self);
-                tokio::spawn(async move {
+                Some(tokio::spawn(async move {
                     let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
                     loop {
                         tokio::select! {
@@ -153,11 +158,10 @@ impl<S: ReceiverSink + 'static> SinkBackend<S> {
                             }
                         }
                     }
-                });
+                }))
             }
-            SinkBackend::Tiered(_) => {
-                // scalo TieredSink starts its own drain task in TieredSink::new()
-            }
+            // scalo TieredSink starts its own drain task in TieredSink::new()
+            SinkBackend::Tiered(_) => None,
         }
     }
 }

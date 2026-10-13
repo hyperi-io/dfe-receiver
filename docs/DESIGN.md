@@ -524,6 +524,8 @@ holds it.
 | Metric | Type | Description |
 |--------|------|-------------|
 | `receiver_destination_send_failures_total` | Counter | Records a gRPC destination did not take, by `reason`: `unavailable` (down, refusing connections, busy or past its deadline) or `failed` (it answered with an error). Both are retried, and each class logs at most once per 10 s per destination |
+| `receiver_destination_build_failures_total` | Counter | Destinations a config reload asked for whose sender failed to build, logged at ERROR with the reason. Their records are answered unavailable until a reload builds the sender |
+| `receiver_retired_records_total` | Counter | Records held by a destination a config reload retired, by `outcome`: `sent` to it, `dead_lettered`, `spooled` (left in its disk spool), or `dropped` (no DLQ backend could hold the entry, or shutdown came first) |
 
 ### Scaling Metrics
 

@@ -66,6 +66,8 @@ mod raw_capture;
 mod record_counts;
 #[path = "integration/refused_records.rs"]
 mod refused_records;
+#[path = "integration/reload_destinations.rs"]
+mod reload_destinations;
 #[path = "integration/source_routing.rs"]
 mod source_routing;
 #[path = "integration/splunk_hec.rs"]
