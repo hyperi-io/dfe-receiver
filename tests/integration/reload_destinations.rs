@@ -28,6 +28,7 @@ use base64::Engine;
 use bytes::Bytes;
 use dfe_receiver::config::{
     Config, DestinationRule, DestinationSpec, DlqConfig, GrpcDestination, SharedConfig,
+    SpilloverConfig,
 };
 use dfe_receiver::metrics::Metrics;
 use dfe_receiver::pipeline::PipelineState;
@@ -186,6 +187,57 @@ async fn a_destination_a_reload_readdresses_sends_to_its_new_address() {
     assert!(status.is_success(), "answered {status}");
     assert_eq!(ids(&at_new), [2], "the new address's records");
     assert!(at_old.is_empty(), "the old address still took records");
+}
+
+/// `config` spilling to disk under `dir`, for a listener that answers at
+/// enqueue: only one of those gets a buffer, and so a spool.
+fn spilling(mut config: Config, dir: &Path) -> Config {
+    config.buffer.spillover = SpilloverConfig {
+        enabled: true,
+        path: dir.to_path_buf(),
+        ..SpilloverConfig::default()
+    };
+    config.server.acknowledgements = AcknowledgementsConfig::new(false);
+    config
+}
+
+/// A destination that spools to disk moves to its new address on a reload,
+/// and what it spooled while its old address was down replays there.
+#[tokio::test]
+async fn a_spooling_destination_a_reload_readdresses_replays_its_spool_at_the_new_address() {
+    let spool_dir = tempfile::tempdir().unwrap();
+    // Held for the whole test, so the first address refuses every connection.
+    let unreachable = crate::common::ClosedPort::loopback().expect("hold a closed port");
+    let (new_endpoint, new) = crate::common::grpc_destination().await;
+    let before = loader_only(&format!("http://{}", unreachable.addr()));
+    let pipeline = pipeline_for(spilling(before, spool_dir.path())).await;
+    let (addr, shutdown) = start_http(Arc::clone(&pipeline)).await;
+
+    for id in 0..3_u64 {
+        let status = post(addr, &format!(r#"{{"id":{id}}}"#)).await;
+        assert!(status.is_success(), "record {id} was answered {status}");
+    }
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        pipeline.reload_config(spilling(loader_only(&new_endpoint), spool_dir.path())),
+    )
+    .await
+    .expect("the reload finished")
+    .expect("the reload applies");
+    let status = post(addr, r#"{"id":3}"#).await;
+    let mut at_new = ids(&drain(&new, 4, Duration::from_secs(30)).await);
+    shutdown.cancel();
+    at_new.sort_unstable();
+
+    assert!(
+        status.is_success(),
+        "a record after the reload was answered {status}"
+    );
+    assert_eq!(
+        at_new,
+        [0, 1, 2, 3],
+        "the spooled records and the new one at the new address"
+    );
 }
 
 /// A file-only DLQ under `dir`.
