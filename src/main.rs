@@ -192,7 +192,7 @@ impl ServiceApp for App {
             tokio::spawn(async move {
                 while config_rx.changed().await.is_ok() {
                     let new_config = reload_state.config();
-                    reload_state.rebuild_components(&new_config);
+                    reload_state.rebuild_components(&new_config).await;
                     info!(
                         version = *config_rx.borrow(),
                         "Pipeline components rebuilt after config reload"

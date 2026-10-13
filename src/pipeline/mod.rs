@@ -19,12 +19,12 @@ pub mod acks;
 
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use bytes::Bytes;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use rustc_hash::{FxHashMap, FxHashSet};
 use scalo::UnifiedPressure;
 use scalo::dlq::{Dlq, DlqEntry, DlqError};
@@ -32,6 +32,7 @@ use scalo::logger::security;
 use scalo::transport::AcknowledgementsConfig;
 use scalo::transport::DeliveryStatus;
 use scalo::transport::ack::{SinkConfirmation, Ticket};
+use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
@@ -42,7 +43,7 @@ use crate::buffer::{
     InMemoryBuffer, InMemoryBufferStats, MemoryGuard, MemoryGuardConfig, MemoryPressure, Rejects,
     SinkBackend,
 };
-use crate::config::{BufferConfig, Config, SharedConfig};
+use crate::config::{BufferConfig, Config, DestinationsConfig, SharedConfig};
 use crate::error::{Error, Result};
 use crate::metrics::{Metrics, ValidationFailureReason};
 use crate::routing::{self, RouteResult, Router};
@@ -161,6 +162,21 @@ struct Delivery<S: Sink + 'static> {
     queued: Option<Arc<SinkBackend<S>>>,
     /// The sink behind `queued` when it is not `primary`.
     enqueue_sink: Option<Arc<S>>,
+    /// The buffer's drain task.
+    drain: Mutex<Drain>,
+}
+
+/// Where a buffer's drain task is in its life.
+enum Drain {
+    /// Not started: the orchestrator starts the drains before the listeners accept.
+    Idle,
+    /// Running until `stop` is cancelled, when it flushes the buffer and ends.
+    Running {
+        stop: CancellationToken,
+        task: JoinHandle<()>,
+    },
+    /// Stopped for good, so a late start cannot bring it back.
+    Stopped,
 }
 
 impl<S: Sink + 'static> Delivery<S> {
@@ -191,6 +207,7 @@ impl<S: Sink + 'static> Delivery<S> {
             primary,
             queued,
             enqueue_sink,
+            drain: Mutex::new(Drain::Idle),
         })
     }
 
@@ -213,10 +230,31 @@ impl<S: Sink + 'static> Delivery<S> {
         }
     }
 
-    /// Start the buffer's drain, where there is a buffer.
-    fn start(&self, shutdown: CancellationToken) {
-        if let Some(queued) = &self.queued {
-            Arc::clone(queued).start_drain_task(shutdown);
+    /// Start the buffer's drain, where there is a buffer, to run until
+    /// `shutdown` or [`stop_drain`](Self::stop_drain). A second start does
+    /// nothing.
+    fn start(&self, shutdown: &CancellationToken) {
+        let Some(queued) = &self.queued else {
+            return;
+        };
+        let mut drain = self.drain.lock();
+        if !matches!(*drain, Drain::Idle) {
+            return;
+        }
+        let stop = shutdown.child_token();
+        if let Some(task) = Arc::clone(queued).start_drain_task(stop.clone()) {
+            *drain = Drain::Running { stop, task };
+        }
+    }
+
+    /// Stop the drain task for good and wait for its last flush.
+    async fn stop_drain(&self) {
+        let drain = std::mem::replace(&mut *self.drain.lock(), Drain::Stopped);
+        if let Drain::Running { stop, task } = drain {
+            stop.cancel();
+            if let Err(e) = task.await {
+                error!(error = %e, "A buffer's drain task ended abnormally");
+            }
         }
     }
 
@@ -247,6 +285,149 @@ enum DestinationSink {
     Discard,
 }
 
+/// What a named destination's sink is built from. A reload rebuilds a
+/// destination only when its wiring changes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Wiring {
+    /// The bus, on the topic the record's source resolves to or a fixed one.
+    Bus { topic: Option<Arc<str>> },
+    /// A scalo Push listener at `endpoint`, each send bounded by `deadline_ms`.
+    Grpc {
+        endpoint: String,
+        deadline_ms: u64,
+        confirms_delivery: bool,
+    },
+    /// The memory transport's loader.
+    Discard,
+}
+
+impl Wiring {
+    /// What destination `name` of `destinations` is built from.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Config`] when its declaration names neither transport.
+    fn of(name: &str, destinations: &DestinationsConfig, loader_timeout_ms: u64) -> Result<Self> {
+        match destinations.named.get(name) {
+            Some(spec) => match (&spec.grpc, &spec.kafka) {
+                (Some(grpc), _) => Ok(Self::Grpc {
+                    endpoint: grpc.endpoint.clone(),
+                    // loader.timeout_ms bounds the loader's own RPC; a declared
+                    // destination has no timeout key of its own.
+                    deadline_ms: if name == crate::config::LOADER_DESTINATION {
+                        loader_timeout_ms
+                    } else {
+                        acks::NEXT_HOP_DEADLINE_MS
+                    },
+                    confirms_delivery: grpc.confirms_delivery,
+                }),
+                (None, Some(bus)) => Ok(Self::Bus {
+                    topic: bus.topic.as_deref().map(Arc::from),
+                }),
+                (None, None) => Err(Error::Config(format!(
+                    "destination '{name}' needs exactly one of grpc or kafka"
+                ))),
+            },
+            // `loader` survives resolution only on the memory transport.
+            None if name == crate::config::LOADER_DESTINATION => Ok(Self::Discard),
+            None => Ok(Self::Bus { topic: None }),
+        }
+    }
+
+    /// What a listener whose records can reach this destination confirms.
+    fn confirms(&self) -> SinkConfirmation {
+        match self {
+            Self::Grpc {
+                confirms_delivery: false,
+                ..
+            }
+            | Self::Discard => SinkConfirmation::None,
+            Self::Grpc { .. } | Self::Bus { .. } => SinkConfirmation::Remote,
+        }
+    }
+}
+
+/// A named destination's sink and the wiring it was built from.
+struct Destination {
+    wiring: Wiring,
+    sink: DestinationSink,
+}
+
+impl Destination {
+    /// Build destination `name` from `wiring`, claiming its spool in `spools`.
+    ///
+    /// # Errors
+    ///
+    /// The gRPC sink, a spool another destination claimed, or the buffer
+    /// failing to build.
+    async fn build(
+        name: &str,
+        wiring: Wiring,
+        settings: &DeliverySettings,
+        rejects: &Rejects,
+        spools: &mut FxHashSet<PathBuf>,
+    ) -> Result<Self> {
+        let sink = match &wiring {
+            Wiring::Bus { topic } => DestinationSink::Bus {
+                topic: topic.clone(),
+            },
+            Wiring::Discard => DestinationSink::Discard,
+            Wiring::Grpc {
+                endpoint,
+                deadline_ms,
+                ..
+            } => {
+                let primary = GrpcSink::new(endpoint, Some(*deadline_ms)).await?;
+                let spool = claim_spool(spools, grpc_spool(name))?;
+                DestinationSink::Grpc(
+                    Delivery::build(
+                        primary,
+                        None,
+                        &spool,
+                        &settings.buffer,
+                        rejects.clone(),
+                        settings.at_enqueue,
+                    )
+                    .await?,
+                )
+            }
+        };
+        Ok(Self { wiring, sink })
+    }
+
+    /// The delivery of a gRPC destination.
+    fn grpc(&self) -> Option<&Delivery<GrpcSink>> {
+        match &self.sink {
+            DestinationSink::Grpc(delivery) => Some(delivery),
+            DestinationSink::Bus { .. } | DestinationSink::Discard => None,
+        }
+    }
+}
+
+/// The named destination set: name -> destination.
+type DestinationSet = FxHashMap<Arc<str>, Arc<Destination>>;
+
+/// What a request routes by: the rules and the destinations they name, swapped
+/// together so a request never routes to a name its set lacks.
+struct Routes {
+    router: Arc<Router>,
+    destinations: DestinationSet,
+}
+
+/// What every destination's delivery is built with, fixed at startup: the
+/// listeners, and so where they answer, do not change on a reload.
+struct DeliverySettings {
+    buffer: BufferConfig,
+    at_enqueue: bool,
+}
+
+impl DeliverySettings {
+    /// Whether a gRPC destination's buffer spools to disk.
+    fn spools(&self) -> bool {
+        self.at_enqueue && self.buffer.spillover.enabled
+    }
+}
+
 /// Whether a batch reaches the pipeline for the first time or again.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Offer {
@@ -265,19 +446,32 @@ enum Target<'a> {
     Topic(&'a str),
 }
 
-/// One request's sends: the ticket its answer is held on, and the records
-/// bound for each gRPC destination, sent together once the request is routed.
+/// One request's sends: the ticket its answer is held on, the routes it was
+/// taken under, and the records bound for each gRPC destination, sent together
+/// once the request is routed.
 struct Dispatch<'t> {
     ticket: Option<&'t Ticket>,
+    /// Fixed for the request, so a reload cannot take a destination from under
+    /// a record already routed to it.
+    routes: Arc<Routes>,
     grpc: Vec<(Arc<str>, Vec<Bytes>)>,
 }
 
 impl<'t> Dispatch<'t> {
-    fn new(ticket: Option<&'t Ticket>) -> Self {
+    fn new(ticket: Option<&'t Ticket>, routes: Arc<Routes>) -> Self {
         Self {
             ticket,
+            routes,
             grpc: Vec::new(),
         }
+    }
+
+    /// Whether the routes hold the memory transport's discard sink.
+    fn discards(&self) -> bool {
+        self.routes
+            .destinations
+            .values()
+            .any(|destination| matches!(destination.sink, DestinationSink::Discard))
     }
 
     fn push_grpc(&mut self, name: &Arc<str>, payload: Bytes) {
@@ -292,12 +486,20 @@ impl<'t> Dispatch<'t> {
 pub struct PipelineState {
     shared_config: SharedConfig,
     validator: RwLock<Validator>,
-    router: RwLock<Router>,
+    /// The routing rules and the destination set, swapped whole by a reload.
+    routes: RwLock<Arc<Routes>>,
     kafka: Option<Delivery<KafkaSink>>,
-    /// The named destination set: name -> sink. Built once at startup, since
-    /// the endpoints are connections and a chart rolls the pod on any config
-    /// change.
-    destinations: FxHashMap<Arc<str>, DestinationSink>,
+    /// What a destination a reload adds is built with.
+    settings: DeliverySettings,
+    /// The token the drains run under, once the orchestrator started them, so
+    /// a destination a reload adds starts its own.
+    drains: OnceLock<CancellationToken>,
+    /// One reload at a time: each builds on the destination set it replaces.
+    reloading: tokio::sync::Mutex<()>,
+    /// Destinations a reload removed, still handing back what they hold.
+    retiring: Mutex<JoinSet<()>>,
+    /// Ends a retirement still holding records nothing would take.
+    shutdown: CancellationToken,
     file_sink: Option<Arc<FileSink>>,
     memory_guard: Arc<MemoryGuard>,
     /// Self-regulation pressure latch from the runtime governor.
@@ -445,57 +647,21 @@ impl PipelineState {
         // actually refers to, so an unused declaration opens no connection.
         // A record can reach any of them, so a listener confirms no more than
         // the weakest does.
-        let mut destinations: FxHashMap<Arc<str>, DestinationSink> = FxHashMap::default();
+        let settings = DeliverySettings {
+            buffer: config.buffer.clone(),
+            at_enqueue,
+        };
+        let mut destinations = DestinationSet::default();
         let mut sink_confirmation = SinkConfirmation::Remote;
         for name in destinations_config.referenced_names() {
             if destinations.contains_key(name) {
                 continue;
             }
-            let sink = match destinations_config.named.get(name) {
-                Some(spec) => match (&spec.grpc, &spec.kafka) {
-                    (Some(grpc), _) => {
-                        if !grpc.confirms_delivery {
-                            sink_confirmation =
-                                acks::weakest(sink_confirmation, SinkConfirmation::None);
-                        }
-                        // loader.timeout_ms bounds the loader's own RPC; a
-                        // declared destination has no timeout key of its own.
-                        let deadline = if name == crate::config::LOADER_DESTINATION {
-                            config.loader.timeout_ms
-                        } else {
-                            acks::NEXT_HOP_DEADLINE_MS
-                        };
-                        let primary = GrpcSink::new(&grpc.endpoint, Some(deadline)).await?;
-                        let spool = claim_spool(&mut spools, grpc_spool(name))?;
-                        DestinationSink::Grpc(
-                            Delivery::build(
-                                primary,
-                                None,
-                                &spool,
-                                &config.buffer,
-                                rejects.clone(),
-                                at_enqueue,
-                            )
-                            .await?,
-                        )
-                    }
-                    (None, Some(bus)) => DestinationSink::Bus {
-                        topic: bus.topic.as_deref().map(Arc::from),
-                    },
-                    (None, None) => {
-                        return Err(Error::Config(format!(
-                            "destination '{name}' needs exactly one of grpc or kafka"
-                        )));
-                    }
-                },
-                // `loader` survives resolution only on the memory transport.
-                None if name == crate::config::LOADER_DESTINATION => {
-                    sink_confirmation = acks::weakest(sink_confirmation, SinkConfirmation::None);
-                    DestinationSink::Discard
-                }
-                None => DestinationSink::Bus { topic: None },
-            };
-            destinations.insert(Arc::from(name), sink);
+            let wiring = Wiring::of(name, &destinations_config, config.loader.timeout_ms)?;
+            sink_confirmation = acks::weakest(sink_confirmation, wiring.confirms());
+            let destination =
+                Destination::build(name, wiring, &settings, &rejects, &mut spools).await?;
+            destinations.insert(Arc::from(name), Arc::new(destination));
         }
 
         // Initialise debug file sink if enabled
@@ -514,9 +680,16 @@ impl PipelineState {
         Ok(Self {
             shared_config,
             validator: RwLock::new(validator),
-            router: RwLock::new(router),
+            routes: RwLock::new(Arc::new(Routes {
+                router: Arc::new(router),
+                destinations,
+            })),
             kafka,
-            destinations,
+            settings,
+            drains: OnceLock::new(),
+            reloading: tokio::sync::Mutex::new(()),
+            retiring: Mutex::new(JoinSet::new()),
+            shutdown,
             file_sink,
             memory_guard,
             pressure,
@@ -536,6 +709,11 @@ impl PipelineState {
     /// Get the shared config handle.
     pub fn shared_config(&self) -> SharedConfig {
         self.shared_config.clone()
+    }
+
+    /// The routes as they stand.
+    fn routes(&self) -> Arc<Routes> {
+        Arc::clone(&self.routes.read())
     }
 
     /// The acknowledgement setting of listener `transport`, holding at most a
@@ -576,10 +754,11 @@ impl PipelineState {
 
         // Every named destination must be able to take a record: a record the
         // rules send to one of them cannot be served by the others.
-        self.destinations.values().all(|sink| match sink {
-            DestinationSink::Bus { .. } | DestinationSink::Discard => true,
-            DestinationSink::Grpc(s) => s.is_healthy(),
-        })
+        self.routes
+            .read()
+            .destinations
+            .values()
+            .all(|destination| destination.grpc().is_none_or(Delivery::is_healthy))
     }
 
     /// What `/readyz` answers: every listener the server enabled is bound and
@@ -674,7 +853,7 @@ impl PipelineState {
         // Tracked for the life of this future.
         let _lease = MemoryLease::acquire(&self.memory_guard, payload.len() as u64);
 
-        let mut dispatch = Dispatch::new(None);
+        let mut dispatch = Dispatch::new(None, self.routes());
         self.process_inner(payload, Target::Routed, &mut dispatch)
             .await?;
         self.send_grpc(dispatch).await
@@ -858,7 +1037,7 @@ impl PipelineState {
         ticket: Option<&Ticket>,
         outcome: &mut BatchOutcome,
     ) {
-        let mut dispatch = Dispatch::new(ticket);
+        let mut dispatch = Dispatch::new(ticket, self.routes());
         for payload in payloads {
             let result = self
                 .process_inner(payload.clone(), target, &mut dispatch)
@@ -960,7 +1139,7 @@ impl PipelineState {
         match target {
             Target::Routed => self.process_routed(payload, dispatch).await,
             // The memory transport has no broker for a topic the listener picked.
-            Target::Topic(_) if self.kafka.is_none() && self.discards() => Ok(()),
+            Target::Topic(_) if self.kafka.is_none() && dispatch.discards() => Ok(()),
             Target::Topic(topic) => self.send_to_kafka(topic, &payload, dispatch).await,
         }
     }
@@ -979,8 +1158,7 @@ impl PipelineState {
             payload
         };
 
-        // Route (read guard dropped before any .await)
-        let (route, routed_source) = self.router.read().route_with_source(&payload);
+        let (route, routed_source) = dispatch.routes.router.route_with_source(&payload);
 
         // The topic carries the source on the Kafka route and nothing carries it
         // on the loader route, so the source is written into the record --
@@ -1059,13 +1237,6 @@ impl PipelineState {
         }
     }
 
-    /// Whether the destination set holds the memory transport's discard sink.
-    fn discards(&self) -> bool {
-        self.destinations
-            .values()
-            .any(|sink| matches!(sink, DestinationSink::Discard))
-    }
-
     /// Deliver one record to every named destination the route chose.
     ///
     /// The first failure propagates, and the ingest handler turns it into
@@ -1086,12 +1257,12 @@ impl PipelineState {
         dispatch: &mut Dispatch<'_>,
     ) -> Result<()> {
         for name in destinations {
-            let Some(sink) = self.destinations.get(name.as_ref()) else {
+            let Some(destination) = dispatch.routes.destinations.get(name.as_ref()) else {
                 return Err(Error::Config(format!(
                     "destination '{name}' is not configured"
                 )));
             };
-            match sink {
+            match &destination.sink {
                 DestinationSink::Bus { topic: fixed } => {
                     let topic = fixed.as_deref().or(topic).ok_or_else(|| {
                         Error::Config(format!("destination '{name}' resolved no topic"))
@@ -1119,9 +1290,17 @@ impl PipelineState {
     /// The first destination's failure; a held answer's piece for it is then
     /// left unreported, which settles it `Errored`.
     async fn send_grpc(&self, dispatch: Dispatch<'_>) -> Result<()> {
-        let Dispatch { ticket, grpc } = dispatch;
+        let Dispatch {
+            ticket,
+            routes,
+            grpc,
+        } = dispatch;
         for (name, payloads) in grpc {
-            let Some(DestinationSink::Grpc(delivery)) = self.destinations.get(name.as_ref()) else {
+            let Some(delivery) = routes
+                .destinations
+                .get(name.as_ref())
+                .and_then(|destination| destination.grpc())
+            else {
                 return Err(Error::Config(format!(
                     "destination '{name}' is not a gRPC destination"
                 )));
@@ -1196,7 +1375,7 @@ impl PipelineState {
             // With no DLQ configured the record follows the routing table, so a
             // brokerless deployment does not need a DLQ topic to reject a bad
             // record.
-            let dlq_route = { self.router.read().route_dlq(reason) };
+            let dlq_route = dispatch.routes.router.route_dlq(reason);
             match dlq_route {
                 RouteResult::Dlq(topic) => self.send_to_kafka(&topic, payload, dispatch).await,
                 RouteResult::Send {
@@ -1239,10 +1418,11 @@ impl PipelineState {
         }
 
         // Named destination stats
-        for sink in self.destinations.values() {
-            let stats = match sink {
-                DestinationSink::Bus { .. } | DestinationSink::Discard => None,
-                DestinationSink::Grpc(s) => s.stats().await,
+        let routes = self.routes();
+        for destination in routes.destinations.values() {
+            let stats = match destination.grpc() {
+                Some(delivery) => delivery.stats().await,
+                None => None,
             };
             if let Some(stats) = stats {
                 total_queue += stats.queue_size as u64;
@@ -1269,19 +1449,23 @@ impl PipelineState {
         metrics.update_scaling();
     }
 
-    /// Reload configuration, rebuilding router and validator.
+    /// Reload configuration, rebuilding the router, the validator and the
+    /// destination senders as [`rebuild_components`](Self::rebuild_components)
+    /// does, then publishing the new config.
     ///
-    /// Called on SIGHUP or periodic reload. Sinks are not rebuilt
-    /// (Kafka/loader connections are long-lived and should not be disrupted).
-    pub fn reload_config(&self, new_config: Config) -> Result<()> {
-        self.rebuild_components(&new_config);
+    /// # Errors
+    ///
+    /// None today: a destination whose sender fails to build is reported and
+    /// skipped, not returned.
+    pub async fn reload_config(&self, new_config: Config) -> Result<()> {
+        self.rebuild_components(&new_config).await;
 
         // Update shared config (bumps version, notifies subscribers)
         self.shared_config.update(new_config);
         security::config_changed(
             "config_reload",
             "system",
-            "pipeline config reloaded (router + validator)",
+            "pipeline config reloaded (router, validator, destinations)",
         );
 
         let version = self.shared_config.version();
@@ -1295,21 +1479,324 @@ impl PipelineState {
     /// externally (e.g., by `ConfigReloader`). Does NOT update `SharedConfig`
     /// itself -- that's already been done by the caller.
     ///
-    /// Routing rules rebuild in place, so a rule pointed at a different
-    /// destination takes effect live. The destination SINKS do not: they are
-    /// live connections, and every app chart rolls the pod on a config change,
-    /// so a new or re-addressed destination arrives with the new pod.
-    pub fn rebuild_components(&self, new_config: &Config) {
-        let new_router = Router::new(
+    /// The routing rules and the destination senders change together, so a
+    /// rule takes effect with the sender it names. A destination the config
+    /// adds gets its sender here, and one whose wiring is unchanged keeps its
+    /// sender and what it has in flight. One the config removes, or whose
+    /// address changes, is retired: what its buffer holds goes to it or else
+    /// the DLQ, never dropped while the process runs. A sender that fails to
+    /// build is reported, and its records are answered unavailable until a
+    /// later reload builds it.
+    ///
+    /// The Kafka producer and the DLQ are built at startup only, and so is a
+    /// gRPC destination whose address changes while its buffer spools to disk.
+    pub async fn rebuild_components(&self, new_config: &Config) {
+        let _one_at_a_time = self.reloading.lock().await;
+        let resolved = new_config.resolved_destinations();
+        let router = Arc::new(Router::new(
             &new_config.routing,
-            &new_config.resolved_destinations(),
+            &resolved,
             new_config.server.auth.include_common_header,
-        );
-        let new_validator = Validator::new(new_config.validation.clone());
+        ));
+        let destinations = self.rebuild_destinations(new_config, &resolved).await;
+        let next = Arc::new(Routes {
+            router,
+            destinations,
+        });
 
-        *self.router.write() = new_router;
-        *self.validator.write() = new_validator;
+        let replaced = std::mem::replace(&mut *self.routes.write(), Arc::clone(&next));
+        *self.validator.write() = Validator::new(new_config.validation.clone());
+
+        let retired: Vec<(Arc<str>, Arc<Destination>)> = replaced
+            .destinations
+            .iter()
+            .filter(|(name, old)| {
+                !next
+                    .destinations
+                    .get(*name)
+                    .is_some_and(|kept| Arc::ptr_eq(kept, old))
+            })
+            .map(|(name, old)| (Arc::clone(name), Arc::clone(old)))
+            .collect();
+        // A retirement waits until nothing else holds the destination, this included.
+        drop(replaced);
+        for (name, old) in retired {
+            self.retire(name, old);
+        }
     }
+
+    /// The destination set `config` asks for: the current sender where a
+    /// destination's wiring is unchanged, a new one where it is new or changed.
+    async fn rebuild_destinations(
+        &self,
+        config: &Config,
+        resolved: &DestinationsConfig,
+    ) -> DestinationSet {
+        let mut wanted: Vec<(Arc<str>, Result<Wiring>)> = Vec::new();
+        for name in resolved.referenced_names() {
+            if wanted.iter().all(|(seen, _)| seen.as_ref() != name) {
+                let wiring = Wiring::of(name, resolved, config.loader.timeout_ms);
+                wanted.push((Arc::from(name), wiring));
+            }
+        }
+        let current = self.routes();
+        let mut next = DestinationSet::default();
+        let mut spools = FxHashSet::default();
+        let mut to_build = Vec::new();
+        for (name, wiring) in wanted {
+            let wiring = match wiring {
+                Ok(wiring) => wiring,
+                Err(e) => {
+                    report_build_failure(&name, &e);
+                    continue;
+                }
+            };
+            match current.destinations.get(&name) {
+                Some(kept) if kept.wiring == wiring => {
+                    if kept.grpc().is_some() {
+                        spools.insert(grpc_spool(&name));
+                    }
+                    next.insert(name, Arc::clone(kept));
+                }
+                // scalo's TieredSink cannot release its spool to a successor in-process.
+                Some(kept)
+                    if self.settings.spools()
+                        && kept.grpc().is_some()
+                        && matches!(wiring, Wiring::Grpc { .. }) =>
+                {
+                    warn!(
+                        destination = %name,
+                        "A config reload rewired a destination whose buffer spools to disk; \
+                         it keeps its current sender until a restart"
+                    );
+                    spools.insert(grpc_spool(&name));
+                    next.insert(name, Arc::clone(kept));
+                }
+                Some(_) | None => to_build.push((name, wiring)),
+            }
+        }
+        drop(current);
+
+        for (name, wiring) in to_build {
+            match Destination::build(&name, wiring, &self.settings, &self.rejects, &mut spools)
+                .await
+            {
+                Ok(destination) => {
+                    if let (Some(delivery), Some(drains)) = (destination.grpc(), self.drains.get())
+                    {
+                        delivery.start(drains);
+                    }
+                    info!(destination = %name, "Destination sender built by a config reload");
+                    next.insert(name, Arc::new(destination));
+                }
+                Err(e) => report_build_failure(&name, &e),
+            }
+        }
+        next
+    }
+
+    /// Hand back, in the background, what a destination a reload replaced
+    /// still holds.
+    fn retire(&self, name: Arc<str>, destination: Arc<Destination>) {
+        // Nothing buffered: a send in flight finishes on its own.
+        if destination
+            .grpc()
+            .is_none_or(|delivery| delivery.queued.is_none())
+        {
+            return;
+        }
+        info!(destination = %name, "Retiring a destination sender a config reload replaced");
+        let dlq = self.dlq.clone();
+        let shutdown = self.shutdown.clone();
+        let mut retiring = self.retiring.lock();
+        while retiring.try_join_next().is_some() {}
+        retiring.spawn(retire_destination(name, destination, dlq, shutdown));
+    }
+
+    /// Wait until every destination a reload retired has handed back what it
+    /// held, or given up at shutdown.
+    async fn retirements_settled(&self) {
+        let mut retiring = std::mem::take(&mut *self.retiring.lock());
+        while let Some(done) = retiring.join_next().await {
+            if let Err(e) = done {
+                error!(error = %e, "A destination retirement ended abnormally");
+            }
+        }
+    }
+
+    /// Start every buffer's drain task, and those of buffers a reload builds
+    /// later, to run until `shutdown`.
+    fn start_drains(&self, shutdown: &CancellationToken) {
+        if let Some(ref kafka) = self.kafka {
+            kafka.start(shutdown);
+        }
+        // Set before the walk below, so a reload either sees it or is seen.
+        let drains = self.drains.get_or_init(|| shutdown.clone());
+        for destination in self.routes().destinations.values() {
+            if let Some(delivery) = destination.grpc() {
+                delivery.start(drains);
+            }
+        }
+    }
+}
+
+/// Report a destination whose sender a reload could not build.
+fn report_build_failure(name: &str, error: &Error) {
+    metrics::counter!("receiver_destination_build_failures_total").increment(1);
+    error!(
+        destination = name,
+        error = %error,
+        "Could not build the sender of a destination a config reload asked for; \
+         its records are answered unavailable until a reload builds it"
+    );
+}
+
+/// How often a retirement checks for requests still using the destination.
+const RETIRE_POLL: Duration = Duration::from_millis(10);
+
+/// Past every send deadline and hold, so a retirement still waiting after
+/// this is reported.
+const RETIRE_QUIESCE: Duration = Duration::from_secs(30);
+
+/// How long a removed destination's spool gets to drain into it before the
+/// spool is closed with what it still holds.
+const RETIRE_SPOOL_DRAIN: Duration = Duration::from_secs(30);
+
+/// How often a retirement offers again what neither its destination nor the
+/// DLQ took.
+const RETIRE_RETRY: Duration = Duration::from_secs(5);
+
+/// The DLQ reason for a record a retired destination could not send.
+const RETIRED_REASON: &str = "destination retired by a config reload";
+
+/// Retire destination `name` once no request uses it: stop its buffer's
+/// drain, then hand what an in-memory buffer still holds to the destination,
+/// else the DLQ, or give a disk spool time to drain.
+///
+/// A record its buffer held was answered at enqueue, so its sender has no
+/// copy: what neither the destination nor the DLQ takes is offered again until
+/// `shutdown`. What a spool still holds stays on disk.
+async fn retire_destination(
+    name: Arc<str>,
+    destination: Arc<Destination>,
+    dlq: Option<Arc<Dlq>>,
+    shutdown: CancellationToken,
+) {
+    let mut waited = Duration::ZERO;
+    while Arc::strong_count(&destination) > 1 && !shutdown.is_cancelled() {
+        tokio::select! {
+            () = shutdown.cancelled() => {}
+            () = tokio::time::sleep(RETIRE_POLL) => {}
+        }
+        waited += RETIRE_POLL;
+        if waited == RETIRE_QUIESCE {
+            warn!(destination = %name, "A retired destination is still in use; waiting for it");
+        }
+    }
+    let Some(delivery) = destination.grpc() else {
+        return;
+    };
+    delivery.stop_drain().await;
+    match delivery.queued.as_deref() {
+        Some(SinkBackend::InMemory(buffer)) => {
+            let held = buffer.take_queued().into_iter().map(|(_, p)| p).collect();
+            hand_back(&name, &delivery.primary, held, dlq.as_deref(), &shutdown).await;
+        }
+        Some(SinkBackend::Tiered(spool)) => {
+            let deadline = tokio::time::Instant::now() + RETIRE_SPOOL_DRAIN;
+            while !spool.spool_is_empty().await
+                && tokio::time::Instant::now() < deadline
+                && !shutdown.is_cancelled()
+            {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            let left = spool.spool_len().await;
+            if left > 0 {
+                count_retired("spooled", left);
+                warn!(
+                    destination = %name,
+                    records = left,
+                    "A retired destination's spool did not drain; its records stay on disk \
+                     and replay when a destination of this name is configured again"
+                );
+            }
+            // Dropped, not shut down: scalo's shutdown waits on a wake-up its disk poller can take.
+        }
+        None => {}
+    }
+}
+
+/// Send `held` straight to the retired destination, past its buffer's
+/// circuit, and dead-letter what it does not take, until shutdown.
+async fn hand_back(
+    name: &str,
+    primary: &GrpcSink,
+    mut held: Vec<Bytes>,
+    dlq: Option<&Dlq>,
+    shutdown: &CancellationToken,
+) {
+    loop {
+        if held.is_empty() {
+            return;
+        }
+        match primary.send_batch("", &held).await {
+            Ok(()) => {
+                count_retired("sent", held.len());
+                return;
+            }
+            Err(e) => {
+                debug!(destination = name, error = %e, "A retired destination did not take its records")
+            }
+        }
+        if let Some(dlq) = dlq {
+            held = dead_letter_retired(name, held, dlq).await;
+            if held.is_empty() {
+                return;
+            }
+        }
+        warn!(
+            destination = name,
+            records = held.len(),
+            "Neither a retired destination nor the DLQ took its records; offering them again"
+        );
+        tokio::select! {
+            () = shutdown.cancelled() => {
+                count_retired("dropped", held.len());
+                error!(
+                    destination = name,
+                    records = held.len(),
+                    "Shutting down with records a retired destination could not hand back; dropped them"
+                );
+                return;
+            }
+            () = tokio::time::sleep(RETIRE_RETRY) => {}
+        }
+    }
+}
+
+/// Dead-letter `held`, returning what the DLQ did not take.
+async fn dead_letter_retired(name: &str, held: Vec<Bytes>, dlq: &Dlq) -> Vec<Bytes> {
+    let mut rest = held.into_iter();
+    while let Some(payload) = rest.next() {
+        let entry =
+            DlqEntry::new("receiver", RETIRED_REASON, payload.to_vec()).with_destination(name);
+        match crate::buffer::rejects::dead_letter_confirmed(dlq, entry).await {
+            Ok(DeadLetter::Written) => count_retired("dead_lettered", 1),
+            // Counted in pipeline_dead_letters_dropped_total, and logged, as it was refused.
+            Ok(DeadLetter::Unwritable) => count_retired("dropped", 1),
+            Err(e) => {
+                debug!(destination = name, error = %e, "The DLQ did not take a retired destination's record");
+                return std::iter::once(payload).chain(rest).collect();
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// Count `records` a retired destination held under `outcome`.
+fn count_retired(outcome: &'static str, records: usize) {
+    metrics::counter!("receiver_retired_records_total", "outcome" => outcome)
+        .increment(records as u64);
 }
 
 /// The scalo DLQ config, and the Kafka client config its Kafka backend is
@@ -1540,16 +2027,7 @@ impl Orchestrator {
     pub fn start(&self) -> Result<()> {
         info!("Pipeline orchestrator running");
 
-        // Start drain tasks for tiered sinks
-        if let Some(ref kafka) = self.state.kafka {
-            kafka.start(self.shutdown.clone());
-        }
-        for sink in self.state.destinations.values() {
-            match sink {
-                DestinationSink::Bus { .. } | DestinationSink::Discard => {}
-                DestinationSink::Grpc(s) => s.start(self.shutdown.clone()),
-            }
-        }
+        self.state.start_drains(&self.shutdown);
 
         // Periodic metrics update (1s interval)
         let metrics_state = Arc::clone(&self.state);
@@ -1581,15 +2059,16 @@ impl Orchestrator {
             error!(error = %e, "Failed to flush Kafka sink");
         }
 
-        for (name, sink) in &self.state.destinations {
-            let flushed = match sink {
-                DestinationSink::Bus { .. } | DestinationSink::Discard => Ok(()),
-                DestinationSink::Grpc(s) => s.flush().await,
-            };
-            if let Err(e) = flushed {
+        let routes = self.state.routes();
+        for (name, destination) in &routes.destinations {
+            if let Some(delivery) = destination.grpc()
+                && let Err(e) = delivery.flush().await
+            {
                 error!(error = %e, destination = %name, "Failed to flush destination sink");
             }
         }
+        drop(routes);
+        self.state.retirements_settled().await;
 
         if let Some(ref fsink) = self.state.file_sink
             && let Err(e) = fsink.flush().await
@@ -1753,7 +2232,8 @@ mod tests {
             0,
             "a spool was opened with every answer held"
         );
-        let Some(DestinationSink::Grpc(delivery)) = state.destinations.get("alpha") else {
+        let routes = state.routes();
+        let Some(delivery) = routes.destinations.get("alpha").and_then(|d| d.grpc()) else {
             panic!("alpha is a gRPC destination");
         };
         assert!(delivery.queued.is_none(), "a buffer was built");
@@ -2633,7 +3113,7 @@ mod tests {
 
         let mut new_config = test_config();
         new_config.routing.default_source = "reloaded".to_string();
-        state.reload_config(new_config).unwrap();
+        state.reload_config(new_config).await.unwrap();
 
         assert_eq!(state.shared_config().version(), 1);
         assert_eq!(state.config().routing.default_source, "reloaded");
@@ -2647,14 +3127,14 @@ mod tests {
         // Disable enrichment via reload
         let mut new_config = test_config();
         new_config.server.auth.include_common_header = false;
-        state.reload_config(new_config).unwrap();
+        state.reload_config(new_config).await.unwrap();
 
         assert!(!state.enrichment_enabled());
 
         // Re-enable via another reload
         let mut re_enable = test_config();
         re_enable.server.auth.include_common_header = true;
-        state.reload_config(re_enable).unwrap();
+        state.reload_config(re_enable).await.unwrap();
 
         assert!(state.enrichment_enabled());
     }
@@ -2670,7 +3150,7 @@ mod tests {
         // Reload config with different default source
         let mut new_config = test_config();
         new_config.routing.default_source = "updated".to_string();
-        state.reload_config(new_config).unwrap();
+        state.reload_config(new_config).await.unwrap();
 
         // Process a message after reload -- should still work
         let result = state.process(Bytes::from(r#"{"b": 2}"#)).await;
@@ -2686,10 +3166,136 @@ mod tests {
         let mut rx = state.shared_config().subscribe();
 
         let new_config = test_config();
-        state.reload_config(new_config).unwrap();
+        state.reload_config(new_config).await.unwrap();
 
         rx.changed().await.expect("should receive notification");
         assert_eq!(*rx.borrow(), 1);
+    }
+
+    /// A reload that leaves a destination's wiring alone keeps its sender, so
+    /// nothing reconnects and nothing in flight is cut off.
+    #[tokio::test]
+    async fn a_reload_keeps_the_sender_of_an_unchanged_destination() {
+        let mut config = test_config();
+        grpc_destinations(&mut config, &["alpha"]);
+        let state = test_state_with(config.clone()).await;
+        let before = Arc::clone(state.routes().destinations.get("alpha").unwrap());
+
+        config.routing.default_source = "reloaded".to_string();
+        state.reload_config(config).await.unwrap();
+
+        let routes = state.routes();
+        assert!(
+            Arc::ptr_eq(&before, routes.destinations.get("alpha").unwrap()),
+            "an unchanged destination was rebuilt"
+        );
+    }
+
+    /// A destination a reload readdresses while its buffer spools to disk
+    /// keeps its sender, spool and all: the reload neither stalls nor leaves
+    /// it without one.
+    #[tokio::test]
+    async fn a_readdressed_destination_that_spools_keeps_its_sender() {
+        let totals = CounterTotals::default();
+        let _recorder = metrics::set_default_local_recorder(&totals);
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_config();
+        grpc_destinations(&mut config, &["alpha"]);
+        spill_to(&mut config, dir.path());
+        // An at-enqueue listener is what builds the spool.
+        config.server.acknowledgements = AcknowledgementsConfig::new(false);
+        let state = test_state_with(config.clone()).await;
+        let before = Arc::clone(state.routes().destinations.get("alpha").unwrap());
+
+        if let Some(grpc) = config
+            .destinations
+            .named
+            .get_mut("alpha")
+            .and_then(|spec| spec.grpc.as_mut())
+        {
+            grpc.endpoint = "http://127.0.0.1:9".to_string();
+        }
+        tokio::time::timeout(Duration::from_secs(10), state.reload_config(config))
+            .await
+            .expect("the reload finished")
+            .unwrap();
+
+        assert_eq!(totals.total("receiver_destination_build_failures_total"), 0);
+        let routes = state.routes();
+        assert!(
+            Arc::ptr_eq(&before, routes.destinations.get("alpha").unwrap()),
+            "the spooling destination lost its sender"
+        );
+    }
+
+    /// A destination a reload adds whose sender cannot be built is counted,
+    /// its records are answered retryable, and every other destination keeps
+    /// taking records.
+    #[tokio::test]
+    async fn a_sender_a_reload_cannot_build_leaves_the_rest_running() {
+        let totals = CounterTotals::default();
+        let _recorder = metrics::set_default_local_recorder(&totals);
+        let mut config = test_config();
+        let state = test_state_with(config.clone()).await;
+
+        config.destinations.named.insert(
+            "broken".to_string(),
+            crate::config::DestinationSpec {
+                grpc: Some(crate::config::GrpcDestination {
+                    // A space is not valid in a URI, so the gRPC client cannot be built.
+                    endpoint: "http://not a uri:6000".to_string(),
+                    ..crate::config::GrpcDestination::default()
+                }),
+                kafka: None,
+            },
+        );
+        config.destinations.rules = vec![crate::config::DestinationRule {
+            match_field: "app".to_string(),
+            match_value: "broken".to_string(),
+            destination: "broken".into(),
+        }];
+        state.reload_config(config).await.unwrap();
+
+        assert_eq!(totals.total("receiver_destination_build_failures_total"), 1);
+        let refused = state.process(Bytes::from(r#"{"app":"broken"}"#)).await;
+        assert!(
+            refused.as_ref().is_err_and(Error::is_retryable),
+            "a record for the unbuilt destination was answered {refused:?}"
+        );
+        state
+            .process(Bytes::from(r#"{"app":"other"}"#))
+            .await
+            .expect("the default destination still takes records");
+    }
+
+    /// With no DLQ to take them, a retired destination's records are held and
+    /// offered again until shutdown, and only then dropped and counted.
+    #[tokio::test]
+    async fn a_retired_destination_holds_its_records_until_shutdown() {
+        let totals = CounterTotals::default();
+        let _recorder = metrics::set_default_local_recorder(&totals);
+        // Port 1 on loopback refuses every connection.
+        let primary = GrpcSink::new("http://127.0.0.1:1", Some(1_000))
+            .await
+            .unwrap();
+        let held = || vec![Bytes::from(r#"{"a":1}"#), Bytes::from(r#"{"a":2}"#)];
+
+        let running = CancellationToken::new();
+        let still_holding = tokio::time::timeout(
+            Duration::from_millis(500),
+            hand_back("gone", &primary, held(), None, &running),
+        )
+        .await;
+        assert!(
+            still_holding.is_err(),
+            "the records were let go while running"
+        );
+        assert_eq!(totals.total("receiver_retired_records_total"), 0);
+
+        let stopping = CancellationToken::new();
+        stopping.cancel();
+        hand_back("gone", &primary, held(), None, &stopping).await;
+        assert_eq!(totals.total("receiver_retired_records_total"), 2);
     }
 
     // ---------------------------------------------------------------------
@@ -3111,7 +3717,7 @@ mod tests {
         assert!(state.is_ready());
 
         let new_config = test_config();
-        state.reload_config(new_config).unwrap();
+        state.reload_config(new_config).await.unwrap();
 
         // Pipeline should remain ready after reload
         assert!(state.is_ready());
@@ -3128,7 +3734,7 @@ mod tests {
         for i in 0..10 {
             let mut cfg = test_config();
             cfg.routing.default_source = format!("src-{i}");
-            state.reload_config(cfg).unwrap();
+            state.reload_config(cfg).await.unwrap();
         }
         // After many reloads, pipeline must still work
         let result = state.process(Bytes::from(r#"{"final":true}"#)).await;

@@ -298,6 +298,19 @@ impl<S: Sink + Send + Sync + 'static> InMemoryBuffer<S> {
     pub async fn drain_queued(&self) {
         self.drain_until_idle().await;
     }
+
+    /// Take every queued record out of the buffer, oldest first, as
+    /// `(topic, payload)`, for a caller that delivers or dead-letters them
+    /// itself.
+    pub(crate) fn take_queued(&self) -> Vec<(String, Bytes)> {
+        let mut queue = self.spill_queue.lock();
+        let count = queue.messages.len();
+        queue
+            .take(count)
+            .into_iter()
+            .map(|msg| (msg.topic, msg.payload))
+            .collect()
+    }
 }
 
 /// Statistics for the tiered sink.
@@ -475,6 +488,27 @@ mod tests {
         let stats = tiered.stats().await;
         assert_eq!(stats.queued_total, 1);
         assert_eq!(stats.queue_size, 1);
+    }
+
+    /// Taking the queue hands back every record in the order it was queued,
+    /// and leaves nothing behind for the drain.
+    #[tokio::test]
+    async fn taking_the_queue_hands_back_every_record_in_order() {
+        let buffer = InMemoryBuffer::new(Arc::new(TestSink::new(usize::MAX)), &test_config());
+        for id in 0..3 {
+            buffer
+                .send("t", Bytes::from(format!("{id}")))
+                .await
+                .unwrap();
+        }
+
+        let taken = buffer.take_queued();
+
+        let payloads: Vec<&[u8]> = taken.iter().map(|(_, p)| p.as_ref()).collect();
+        assert_eq!(payloads, [b"0", b"1", b"2"]);
+        assert!(taken.iter().all(|(topic, _)| topic == "t"));
+        assert_eq!(buffer.stats().await.queue_size, 0);
+        assert_eq!(buffer.take_queued(), Vec::<(String, Bytes)>::new());
     }
 
     #[tokio::test]

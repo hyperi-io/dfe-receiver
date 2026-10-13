@@ -1133,6 +1133,20 @@ const RECEIVER_SERIES: &[SeriesSpec] = &[
         "Records a gRPC destination did not take, by reason (unavailable: down, refusing \
          connections, busy or past its deadline; failed: it answered with an error)",
     ),
+    (
+        "receiver_destination_build_failures_total",
+        MetricType::Counter,
+        &[],
+        "Destinations a config reload asked for whose sender failed to build; their records \
+         are answered unavailable until a reload builds it",
+    ),
+    (
+        "receiver_retired_records_total",
+        MetricType::Counter,
+        &["outcome"],
+        "Records held by a destination a config reload retired, by outcome (sent, \
+         dead_lettered, spooled: left in its disk spool, dropped)",
+    ),
 ];
 
 /// Register every series in `series` on `manager` under `group`, so the

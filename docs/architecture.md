@@ -129,10 +129,7 @@ A buffered record a destination refuses for good leaves once the DLQ confirms th
 
 ## Configuration
 
-A cascade, scalo's: compiled defaults, then `/etc/dfe-receiver/config.yaml`,
-then `./config.yaml`, then `~/.config/dfe-receiver/config.yaml`, then
-`DFE_RECEIVER_*` environment variables, then CLI arguments, then runtime
-overrides. Routing, validation and enrichment reload on SIGHUP.
+A cascade, scalo's: compiled defaults, then `/etc/dfe-receiver/config.yaml`, then `./config.yaml`, then `~/.config/dfe-receiver/config.yaml`, then `DFE_RECEIVER_*` environment variables, then CLI arguments, then runtime overrides. Routing, validation and enrichment reload on SIGHUP, and so do the gRPC destinations: a reload builds the sender of a destination it adds and retires one it removes, whose buffered records go to it or else the DLQ. The Kafka producer and the DLQ change only with a restart.
 
 Secrets are never literals in the config file. Every credential is a
 `provider:path[:key]` reference -- `file:`, `vault:`, `env:` -- resolved through
