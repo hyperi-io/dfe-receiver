@@ -3,6 +3,13 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.15.46](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.45...v1.15.46) (2026-10-13)
+
+### Bug Fixes
+
+* build and retire gRPC senders on reload ([#190](https://github.com/hyperi-io/dfe-receiver/issues/190)) ([fbd03bb](https://github.com/hyperi-io/dfe-receiver/commit/fbd03bb669ae920122fe772741d4aaad5484ce23))
+* readdress spooling destinations on reload ([#191](https://github.com/hyperi-io/dfe-receiver/issues/191)) ([f79fad5](https://github.com/hyperi-io/dfe-receiver/commit/f79fad5dcac151ce159399855f898217e278f384))
+
 ## [1.15.45](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.44...v1.15.45) (2026-10-12)
 
 ### Bug Fixes
