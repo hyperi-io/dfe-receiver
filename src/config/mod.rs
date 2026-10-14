@@ -178,14 +178,11 @@ impl Config {
         // Get the global config and unmarshal to our struct
         let cfg = config::get();
 
-        // Unmarshal config -- warn and fall back to defaults on failure
-        let mut config: Config = match cfg.unmarshal() {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(error = %e, "config unmarshal failed, using defaults -- check YAML syntax");
-                Config::default()
-            }
-        };
+        // A config that does not fit fails startup: running on defaults would
+        // ingest somewhere the operator never configured.
+        let mut config: Config = cfg
+            .unmarshal()
+            .map_err(|e| Error::Config(format!("invalid config: {e}")))?;
 
         // Store config path for reload support
         config.config_path = config_path.map(String::from);
@@ -199,10 +196,7 @@ impl Config {
 
     /// Load configuration from a YAML file directly (for backwards compatibility).
     pub fn load_from_file(path: &str) -> Result<Self> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| Error::Config(format!("failed to read config file: {e}")))?;
-
-        let mut config: Config = serde_yaml_ng::from_str(&content)?;
+        let mut config: Config = scalo::yaml::from_path(path, scalo::yaml::Profile::Config)?;
         config.config_path = Some(path.to_string());
         config.apply_flat_env(ENV_PREFIX);
         config.normalize();
@@ -2897,8 +2891,12 @@ mod tests {
     /// `kafka.producer` block in an old config parses and changes nothing.
     #[test]
     fn a_leftover_producer_block_changes_nothing() {
-        let with_block: KafkaConfig =
-            serde_yaml_ng::from_str("producer:\n  compression: lz4\n  linger_ms: 20\n").unwrap();
+        let with_block: KafkaConfig = scalo::yaml::from_str(
+            "producer:\n  compression: lz4\n  linger_ms: 20\n",
+            "config.yaml",
+            scalo::yaml::Profile::Config,
+        )
+        .unwrap();
         let client = with_block.to_scalo_kafka_config_for_producer().unwrap();
         assert_eq!(
             client.librdkafka_overrides,
@@ -2946,9 +2944,11 @@ mod tests {
         // Unified and split at once: the flow handler refuses this at build, and
         // the pod used to start and report ready without it.
         let mut config = flow_base();
-        config.flow = serde_yaml_ng::from_str(
+        config.flow = scalo::yaml::from_str(
             "enabled: true\nsplit:\n  netflow:\n    ports: [2055]\n    topic: n\n  \
              sflow:\n    ports: [6343]\n    topic: s\n",
+            "config.yaml",
+            scalo::yaml::Profile::Config,
         )
         .expect("flow yaml");
 
@@ -2959,9 +2959,11 @@ mod tests {
     #[test]
     fn overlapping_split_flow_ports_fail_startup() {
         let mut config = flow_base();
-        config.flow = serde_yaml_ng::from_str(
+        config.flow = scalo::yaml::from_str(
             "split:\n  netflow:\n    ports: [2055, 6343]\n    topic: n\n  \
              sflow:\n    ports: [6343]\n    topic: s\n",
+            "config.yaml",
+            scalo::yaml::Profile::Config,
         )
         .expect("flow yaml");
 
@@ -3357,9 +3359,11 @@ mod tests {
 
     #[test]
     fn the_opt_out_parses_from_yaml() {
-        let config: Config = serde_yaml_ng::from_str(
+        let config: Config = scalo::yaml::from_str(
             "fluent:\n  enabled: true\n  accept_unauthenticated: true\n\
              syslog:\n  enabled: true\n  accept_unauthenticated: true\n",
+            "config.yaml",
+            scalo::yaml::Profile::Config,
         )
         .unwrap();
         assert!(config.fluent.accept_unauthenticated);
@@ -3568,10 +3572,12 @@ mod tests {
     #[test]
     fn a_split_flow_listeners_ip_filter_is_checked_too() {
         let mut config = flow_base();
-        config.flow = serde_yaml_ng::from_str(
+        config.flow = scalo::yaml::from_str(
             "split:\n  netflow:\n    ports: [2055]\n    topic: n\n  \
              sflow:\n    ports: [6343]\n    topic: s\n    \
              ip_filter:\n      mode: allowlist\n      cidrs: [\"not-a-cidr\"]\n",
+            "config.yaml",
+            scalo::yaml::Profile::Config,
         )
         .expect("flow yaml");
         let err = config.validate().expect_err("must not start").to_string();
@@ -3595,8 +3601,12 @@ mod tests {
             Config::default().server.trusted_proxies,
             [] as [std::string::String; 0]
         );
-        let config: Config =
-            serde_yaml_ng::from_str("server:\n  trusted_proxies: [\"10.0.0.0/8\"]\n").unwrap();
+        let config: Config = scalo::yaml::from_str(
+            "server:\n  trusted_proxies: [\"10.0.0.0/8\"]\n",
+            "config.yaml",
+            scalo::yaml::Profile::Config,
+        )
+        .unwrap();
         assert_eq!(config.server.trusted_proxies, ["10.0.0.0/8"]);
     }
 
@@ -3782,7 +3792,8 @@ webhook:
       body: array
       filter: 'severity == "high"'
 "#;
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let config: Config =
+            scalo::yaml::from_str(yaml, "config.yaml", scalo::yaml::Profile::Config).unwrap();
         assert!(config.webhook.enabled);
         assert!(config.webhook.bind_address.is_none());
         assert_eq!(config.webhook.max_body_size, 65536);
@@ -4063,8 +4074,12 @@ webhook:
 
     #[test]
     fn dlq_kafka_send_timeout_reaches_the_scalo_kafka_backend() {
-        let config: Config =
-            serde_yaml_ng::from_str("routing:\n  dlq:\n    kafka_send_timeout_ms: 250\n").unwrap();
+        let config: Config = scalo::yaml::from_str(
+            "routing:\n  dlq:\n    kafka_send_timeout_ms: 250\n",
+            "config.yaml",
+            scalo::yaml::Profile::Config,
+        )
+        .unwrap();
         let rc = config.routing.dlq.to_scalo_config();
         assert_eq!(rc.kafka.send_timeout_ms, 250);
     }
@@ -4265,7 +4280,8 @@ kafka:
   librdkafka_overrides:
     statistics.interval.ms: "5000"
 "#;
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let config: Config =
+            scalo::yaml::from_str(yaml, "config.yaml", scalo::yaml::Profile::Config).unwrap();
         let scalo = config.kafka.to_scalo_kafka_config_for_producer().unwrap();
         assert_eq!(
             scalo.librdkafka_overrides.get("statistics.interval.ms"),
@@ -4429,7 +4445,8 @@ validation:
   require_json: false
   required_fields: ["org_id"]
 "#;
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let config: Config =
+            scalo::yaml::from_str(yaml, "config.yaml", scalo::yaml::Profile::Config).unwrap();
         assert_eq!(
             config.validation.required_fields,
             vec!["org_id".to_string()]
@@ -4454,7 +4471,8 @@ kafka:
   librdkafka_overrides:
     message.max.bytes: "2097152"
 "#;
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let config: Config =
+            scalo::yaml::from_str(yaml, "config.yaml", scalo::yaml::Profile::Config).unwrap();
         assert_eq!(
             config
                 .kafka
@@ -4749,7 +4767,8 @@ scaling:
   params:
     cpu_target: 0.70
 ";
-        let config: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        let config: Config =
+            scalo::yaml::from_str(yaml, "config.yaml", scalo::yaml::Profile::Config).unwrap();
         assert!(config.scaling.enabled);
         assert!((config.scaling.memory_gate_threshold - 0.8).abs() < f64::EPSILON);
         // Legacy weighted defaults preserved (the engine keys were ignored).
@@ -4760,15 +4779,19 @@ scaling:
     /// reads, so the example offers no knob that tunes nothing.
     #[test]
     fn every_scaling_key_in_the_example_is_read() {
-        let example: serde_yaml_ng::Value =
-            serde_yaml_ng::from_str(include_str!("../../config.example.yaml")).unwrap();
-        let read = serde_yaml_ng::to_value(ScalingConfig::default()).unwrap();
-        let read = read.as_mapping().unwrap();
+        let example: serde_json::Value = scalo::yaml::from_str(
+            include_str!("../../config.example.yaml"),
+            "config.example.yaml",
+            scalo::yaml::Profile::Config,
+        )
+        .unwrap();
+        let read = serde_json::to_value(ScalingConfig::default()).unwrap();
+        let read = read.as_object().unwrap();
         let example = example["scaling"]
-            .as_mapping()
+            .as_object()
             .expect("the example has a scaling section");
 
-        let unread: Vec<&serde_yaml_ng::Value> = example
+        let unread: Vec<&String> = example
             .keys()
             .filter(|key| !read.contains_key(*key))
             .collect();
@@ -4778,11 +4801,32 @@ scaling:
         );
     }
 
+    /// A cascade value that does not fit its field fails the load rather than
+    /// starting the receiver on defaults.
+    #[test]
+    fn a_config_that_does_not_fit_fails_the_load() {
+        temp_env::with_var(
+            "DFE_RECEIVER__SERVER__MAX_BODY_SIZE",
+            Some("not-a-number"),
+            || {
+                let err = Config::load(None).expect_err("a value that does not fit fails the load");
+                assert!(
+                    matches!(err, Error::Config(ref msg) if msg.starts_with("invalid config")),
+                    "{err}"
+                );
+            },
+        );
+    }
+
     /// The example config parses and validates as the receiver loads it.
     #[test]
     fn the_example_config_loads() {
-        let config: Config =
-            serde_yaml_ng::from_str(include_str!("../../config.example.yaml")).unwrap();
+        let config: Config = scalo::yaml::from_str(
+            include_str!("../../config.example.yaml"),
+            "config.yaml",
+            scalo::yaml::Profile::Config,
+        )
+        .unwrap();
         config.validate().unwrap();
     }
 }

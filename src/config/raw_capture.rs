@@ -237,7 +237,12 @@ mod tests {
 
     #[test]
     fn yaml_round_trip_keeps_unset_fields_unset() {
-        let parsed: RawCaptureConfig = serde_yaml_ng::from_str("enabled: true").unwrap();
+        let parsed: RawCaptureConfig = scalo::yaml::from_str(
+            "enabled: true",
+            "raw_capture.yaml",
+            scalo::yaml::Profile::Config,
+        )
+        .unwrap();
         assert_eq!(parsed.enabled, Some(true));
         assert!(parsed.max_bytes.is_none());
         assert!(parsed.on_oversize.is_none());

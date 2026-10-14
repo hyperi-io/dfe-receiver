@@ -440,7 +440,8 @@ split:
     ports: [6343]
     topic: y
 ";
-        let cfg: FlowConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let cfg: FlowConfig =
+            scalo::yaml::from_str(yaml, "flow.yaml", scalo::yaml::Profile::Config).unwrap();
         let result = FlowHandler::new(
             cfg,
             RawCapture::OFF,
@@ -481,7 +482,8 @@ split:
     ports: [6343]
     topic: sflow_land
 ";
-        let cfg: FlowConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let cfg: FlowConfig =
+            scalo::yaml::from_str(yaml, "flow.yaml", scalo::yaml::Profile::Config).unwrap();
         let handler = FlowHandler::new(
             cfg,
             RawCapture::OFF,
@@ -584,7 +586,8 @@ split:
     ports: [6343, 7343]
     topic: s
 ";
-        let cfg: FlowConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let cfg: FlowConfig =
+            scalo::yaml::from_str(yaml, "flow.yaml", scalo::yaml::Profile::Config).unwrap();
         let handler = FlowHandler::new(
             cfg,
             RawCapture::OFF,
