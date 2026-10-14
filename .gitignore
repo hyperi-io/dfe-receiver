@@ -13,7 +13,7 @@ Thumbs.db
 # stay after the patterns they carve out of.
 .env
 .env.*
-!.env.example
+!.env*.example
 !.env.example.*
 
 # Logs
@@ -70,15 +70,21 @@ tmp/
 # Git worktrees (local dev convenience)
 .worktrees/
 
-# Agent and AI tooling state -- local only, mirrored in .git/info/exclude.
+# Local working files (not committed)
+# Mirrored in .git/info/exclude.
 docs/superpowers/
 hyperi-ai/
 .claude/
 .codex/
 .cursor/
 .gemini/
+.superpowers/
+.playwright-mcp/
 .cursorrules
 .mcp.json
+.hyperi-ai
+.kube/
+.secrets/
 .ai-version
 CLAUDE.md
 AGENTS.md
