@@ -827,9 +827,9 @@ mod tests {
     #[test]
     fn test_contract_serialises() {
         let c = contract();
-        let json = c.to_json();
+        let json = c.to_json().expect("contract serialises to JSON");
         assert!(json.contains("dfe-receiver"));
-        let yaml = c.to_yaml();
+        let yaml = c.to_yaml().expect("contract serialises to YAML");
         assert!(yaml.contains("dfe-receiver"));
     }
 

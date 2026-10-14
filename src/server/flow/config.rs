@@ -342,7 +342,8 @@ mod tests {
         let yaml = r"
 enabled: true
 ";
-        let cfg: FlowConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let cfg: FlowConfig =
+            scalo::yaml::from_str(yaml, "flow.yaml", scalo::yaml::Profile::Config).unwrap();
         assert!(cfg.enabled);
         assert_eq!(cfg.ports, vec![2055, 4739, 6343]);
         assert_eq!(cfg.output.mode, OutputMode::Canonical);
@@ -361,7 +362,8 @@ output:
   mode: exploded
   max_records_per_packet: 500
 ";
-        let cfg: FlowConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let cfg: FlowConfig =
+            scalo::yaml::from_str(yaml, "flow.yaml", scalo::yaml::Profile::Config).unwrap();
         assert_eq!(cfg.output.mode, OutputMode::Exploded);
         assert_eq!(cfg.output.max_records_per_packet, 500);
     }
@@ -378,7 +380,8 @@ split:
     ports: [6343]
     topic: sflow_land
 ";
-        let cfg: FlowConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let cfg: FlowConfig =
+            scalo::yaml::from_str(yaml, "flow.yaml", scalo::yaml::Profile::Config).unwrap();
         assert!(!cfg.enabled);
         assert!(cfg.split.is_some());
         let split = cfg.split.unwrap();
@@ -398,7 +401,8 @@ split:
     ports: [6343]
     topic: y
 ";
-        let cfg: FlowConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let cfg: FlowConfig =
+            scalo::yaml::from_str(yaml, "flow.yaml", scalo::yaml::Profile::Config).unwrap();
         assert!(cfg.validate().is_err());
     }
 
@@ -414,14 +418,20 @@ split:
     ports: [6343]
     topic: s
 ";
-        let cfg: FlowConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let cfg: FlowConfig =
+            scalo::yaml::from_str(yaml, "flow.yaml", scalo::yaml::Profile::Config).unwrap();
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn validate_rejects_enabled_with_no_ports() {
         // No port binds no listener, and readiness passes with nothing to wait on.
-        let cfg: FlowConfig = serde_yaml_ng::from_str("enabled: true\nports: []\n").unwrap();
+        let cfg: FlowConfig = scalo::yaml::from_str(
+            "enabled: true\nports: []\n",
+            "flow.yaml",
+            scalo::yaml::Profile::Config,
+        )
+        .unwrap();
         let err = cfg
             .validate()
             .expect_err("an enabled flow block with no port binds nothing");
@@ -435,7 +445,8 @@ split:
                 "split:\n  netflow:\n    ports: {netflow}\n    topic: n\n  \
                  sflow:\n    ports: {sflow}\n    topic: s\n"
             );
-            let cfg: FlowConfig = serde_yaml_ng::from_str(&yaml).unwrap();
+            let cfg: FlowConfig =
+                scalo::yaml::from_str(&yaml, "flow.yaml", scalo::yaml::Profile::Config).unwrap();
             let err = cfg
                 .validate()
                 .expect_err("an enabled split side with no port binds nothing");
@@ -445,12 +456,19 @@ split:
 
     #[test]
     fn validate_allows_no_ports_where_nothing_is_enabled() {
-        let unified: FlowConfig = serde_yaml_ng::from_str("enabled: false\nports: []\n").unwrap();
+        let unified: FlowConfig = scalo::yaml::from_str(
+            "enabled: false\nports: []\n",
+            "flow.yaml",
+            scalo::yaml::Profile::Config,
+        )
+        .unwrap();
         assert!(unified.validate().is_ok(), "a disabled block binds nothing");
 
-        let split: FlowConfig = serde_yaml_ng::from_str(
+        let split: FlowConfig = scalo::yaml::from_str(
             "split:\n  netflow:\n    enabled: false\n    ports: []\n    topic: n\n  \
              sflow:\n    ports: [6343]\n    topic: s\n",
+            "flow.yaml",
+            scalo::yaml::Profile::Config,
         )
         .unwrap();
         assert!(
@@ -465,7 +483,8 @@ split:
 enabled: true
 experimental: false
 ";
-        let cfg: FlowConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let cfg: FlowConfig =
+            scalo::yaml::from_str(yaml, "flow.yaml", scalo::yaml::Profile::Config).unwrap();
         assert!(!cfg.experimental);
     }
 
@@ -489,8 +508,9 @@ enabled: true
 output:
   mode: canonical_with_raw
 ";
-        let err = serde_yaml_ng::from_str::<FlowConfig>(yaml)
-            .expect_err("removed variant must not deserialise");
+        let err =
+            scalo::yaml::from_str::<FlowConfig>(yaml, "flow.yaml", scalo::yaml::Profile::Config)
+                .expect_err("removed variant must not deserialise");
         assert!(
             err.to_string().contains("canonical_with_raw"),
             "error should name the offending value: {err}"
@@ -503,9 +523,15 @@ output:
         // Default::default() when the map is absent, so the per-field serde
         // defaults never run. Both routes must agree, or turning the limiter on
         // from the environment arms a limiter nobody configured.
-        let absent: FlowConfig = serde_yaml_ng::from_str("enabled: true\n").unwrap();
-        let present: FlowConfig =
-            serde_yaml_ng::from_str("enabled: true\nrate_limit:\n  enabled: true\n").unwrap();
+        let absent: FlowConfig =
+            scalo::yaml::from_str("enabled: true\n", "flow.yaml", scalo::yaml::Profile::Config)
+                .unwrap();
+        let present: FlowConfig = scalo::yaml::from_str(
+            "enabled: true\nrate_limit:\n  enabled: true\n",
+            "flow.yaml",
+            scalo::yaml::Profile::Config,
+        )
+        .unwrap();
 
         assert_eq!(absent.rate_limit.packets_per_second, default_pps());
         assert_eq!(absent.rate_limit.burst, default_burst());
@@ -535,7 +561,8 @@ raw_capture:
   max_bytes: 2048
   on_oversize: omit
 ";
-        let cfg: FlowConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let cfg: FlowConfig =
+            scalo::yaml::from_str(yaml, "flow.yaml", scalo::yaml::Profile::Config).unwrap();
         assert_eq!(cfg.raw_capture.enabled, Some(true));
         assert_eq!(cfg.raw_capture.max_bytes, Some(2048));
         assert_eq!(

@@ -5,7 +5,7 @@ type: object
 properties:
   server:
     description: HTTP server configuration.
-    $ref: '#/$defs/ServerConfig'
+    $ref: "#/$defs/ServerConfig"
     default:
       bind_address: 0.0.0.0:8080
       max_body_size: 10485760
@@ -37,13 +37,13 @@ properties:
           secret_source: null
           refresh_interval_secs: 300
         include_common_header: true
-        header_name: ''
+        header_name: ""
         header_values: []
       acknowledgements:
         enabled: true
   grpc:
     description: gRPC server configuration.
-    $ref: '#/$defs/GrpcConfig'
+    $ref: "#/$defs/GrpcConfig"
     default:
       enabled: false
       bind_address: 0.0.0.0:6000
@@ -65,14 +65,14 @@ properties:
           secret_source: null
           refresh_interval_secs: 300
         include_common_header: true
-        header_name: ''
+        header_name: ""
         header_values: []
       max_message_size: 16777216
       acknowledgements:
         enabled: true
   otlp:
     description: OTLP receiver configuration.
-    $ref: '#/$defs/OtlpConfig'
+    $ref: "#/$defs/OtlpConfig"
     default:
       enabled: false
       grpc_bind_address: 0.0.0.0:4317
@@ -96,7 +96,7 @@ properties:
           secret_source: null
           refresh_interval_secs: 300
         include_common_header: true
-        header_name: ''
+        header_name: ""
         header_values: []
       raw_capture:
         enabled: null
@@ -108,7 +108,7 @@ properties:
       http_max_hold_ms: 9000
   lumberjack:
     description: Lumberjack v2 (Beats) receiver configuration.
-    $ref: '#/$defs/LumberjackConfig'
+    $ref: "#/$defs/LumberjackConfig"
     default:
       enabled: false
       bind_address: 0.0.0.0:5044
@@ -130,14 +130,14 @@ properties:
           secret_source: null
           refresh_interval_secs: 300
         include_common_header: true
-        header_name: ''
+        header_name: ""
         header_values: []
       accept_unauthenticated: false
       acknowledgements:
         enabled: true
   splunk_hec:
     description: Splunk HEC receiver configuration.
-    $ref: '#/$defs/SplunkHecConfig'
+    $ref: "#/$defs/SplunkHecConfig"
     default:
       enabled: false
       bind_address: 0.0.0.0:8088
@@ -161,7 +161,7 @@ properties:
           secret_source: null
           refresh_interval_secs: 300
         include_common_header: true
-        header_name: ''
+        header_name: ""
         header_values: []
       raw_capture:
         enabled: null
@@ -171,7 +171,7 @@ properties:
         enabled: true
   syslog:
     description: Syslog receiver configuration.
-    $ref: '#/$defs/SyslogConfig'
+    $ref: "#/$defs/SyslogConfig"
     default:
       enabled: false
       udp_bind_address: 0.0.0.0:514
@@ -196,7 +196,7 @@ properties:
           secret_source: null
           refresh_interval_secs: 300
         include_common_header: true
-        header_name: ''
+        header_name: ""
         header_values: []
       accept_unauthenticated: false
       raw_capture:
@@ -205,7 +205,7 @@ properties:
         on_oversize: null
   prometheus_rw:
     description: Prometheus Remote Write receiver configuration.
-    $ref: '#/$defs/PrometheusRwConfig'
+    $ref: "#/$defs/PrometheusRwConfig"
     default:
       enabled: false
       bind_address: 0.0.0.0:9091
@@ -230,7 +230,7 @@ properties:
           secret_source: null
           refresh_interval_secs: 300
         include_common_header: true
-        header_name: ''
+        header_name: ""
         header_values: []
       raw_capture:
         enabled: null
@@ -240,7 +240,7 @@ properties:
         enabled: true
   fluent:
     description: Fluent Forward protocol receiver configuration.
-    $ref: '#/$defs/FluentConfig'
+    $ref: "#/$defs/FluentConfig"
     default:
       enabled: false
       bind_address: 0.0.0.0:24224
@@ -264,7 +264,7 @@ properties:
         enabled: true
   gelf:
     description: GELF receiver configuration.
-    $ref: '#/$defs/GelfConfig'
+    $ref: "#/$defs/GelfConfig"
     default:
       enabled: false
       bind_address: 0.0.0.0:12201
@@ -286,10 +286,10 @@ properties:
         on_oversize: null
   flow:
     description: Flow (NetFlow v5/v9 + IPFIX + sFlow v5) receiver configuration.
-    $ref: '#/$defs/FlowConfig'
+    $ref: "#/$defs/FlowConfig"
     default:
       enabled: false
-      bind_address: 0.0.0.0
+      bind_address: "0.0.0.0"
       ports:
       - 2055
       - 4739
@@ -322,7 +322,7 @@ properties:
         on_oversize: null
   webhook:
     description: Generic authenticated webhook intake (`POST /webhook/{caller}`).
-    $ref: '#/$defs/WebhookConfig'
+    $ref: "#/$defs/WebhookConfig"
     default:
       enabled: false
       bind_address: null
@@ -346,20 +346,20 @@ properties:
       Common raw-payload capture default, inherited by every transport that
       supports capture. Per-transport `raw_capture:` blocks override it
       field by field. See [`raw_capture`].
-    $ref: '#/$defs/RawCaptureConfig'
+    $ref: "#/$defs/RawCaptureConfig"
     default:
       enabled: null
       max_bytes: null
       on_oversize: null
   validation:
     description: Validation rules.
-    $ref: '#/$defs/ValidationConfig'
+    $ref: "#/$defs/ValidationConfig"
     default:
       required_fields: []
       dlq_on_invalid: true
   routing:
     description: Routing configuration.
-    $ref: '#/$defs/RoutingConfig'
+    $ref: "#/$defs/RoutingConfig"
     default:
       source_rules: []
       default_source: main
@@ -377,13 +377,13 @@ properties:
         kafka_send_timeout_ms: null
   destinations:
     description: Destination configuration.
-    $ref: '#/$defs/DestinationsConfig'
+    $ref: "#/$defs/DestinationsConfig"
     default:
       default: kafka
       rules: []
   kafka:
     description: Kafka producer configuration.
-    $ref: '#/$defs/KafkaConfig'
+    $ref: "#/$defs/KafkaConfig"
     default:
       brokers: []
       client_id: dfe-receiver
@@ -394,10 +394,10 @@ properties:
         cert_file: null
         key_file: null
       librdkafka_overrides:
-        statistics.interval.ms: '0'
+        statistics.interval.ms: "0"
   loader:
     description: dfe-loader connection configuration.
-    $ref: '#/$defs/LoaderConfig'
+    $ref: "#/$defs/LoaderConfig"
     default:
       address: dfe-loader:6000
       transport: kafka
@@ -405,7 +405,7 @@ properties:
       grpc_endpoint: null
   buffer:
     description: Buffer and memory configuration.
-    $ref: '#/$defs/BufferConfig'
+    $ref: "#/$defs/BufferConfig"
     default:
       memory_limit: 0
       pressure_threshold: 0.8
@@ -416,13 +416,13 @@ properties:
         poll_interval_secs: 5
   metrics:
     description: Metrics configuration.
-    $ref: '#/$defs/MetricsConfig'
+    $ref: "#/$defs/MetricsConfig"
     default:
       enabled: true
       address: 0.0.0.0:9090
   scaling:
     description: Scaling pressure configuration for KEDA autoscaling.
-    $ref: '#/$defs/ScalingConfig'
+    $ref: "#/$defs/ScalingConfig"
     default:
       enabled: true
       memory_gate_threshold: 0.8
@@ -443,7 +443,7 @@ properties:
     default: 0
   file_sink:
     description: Debug file sink -- writes all processed messages to a file.
-    $ref: '#/$defs/FileSinkConfig'
+    $ref: "#/$defs/FileSinkConfig"
     default:
       enabled: false
       path: /tmp/dfe-receiver-debug.ndjson
@@ -478,7 +478,7 @@ $defs:
         default: 10000
       rate_limit:
         description: Per-IP rate limiting for every HTTP listener.
-        $ref: '#/$defs/RateLimitConfig'
+        $ref: "#/$defs/RateLimitConfig"
         default:
           enabled: false
           requests_per_second: 100
@@ -501,13 +501,13 @@ $defs:
         description: |-
           IP filter (allowlist/denylist) for every listener the receiver owns an
           accept loop for.
-        $ref: '#/$defs/IpFilterConfig'
+        $ref: "#/$defs/IpFilterConfig"
         default:
           mode: disabled
           cidrs: []
       tls:
         description: TLS configuration.
-        $ref: '#/$defs/TlsConfig'
+        $ref: "#/$defs/TlsConfig"
         default:
           enabled: false
           cert_file: null
@@ -520,7 +520,7 @@ $defs:
           refresh_interval_secs: 3600
       auth:
         description: Authentication configuration.
-        $ref: '#/$defs/AuthConfig'
+        $ref: "#/$defs/AuthConfig"
         default:
           mode: none
           accepted_headers: []
@@ -529,13 +529,13 @@ $defs:
             secret_source: null
             refresh_interval_secs: 300
           include_common_header: true
-          header_name: ''
+          header_name: ""
           header_values: []
       acknowledgements:
         description: |-
           Answer `/ingest` only once every destination confirmed the records
           (default on). Off answers once they are queued.
-        $ref: '#/$defs/AcknowledgementsConfig'
+        $ref: "#/$defs/AcknowledgementsConfig"
         default:
           enabled: true
   RateLimitConfig:
@@ -608,7 +608,7 @@ $defs:
     type: object
     properties:
       mode:
-        description: 'Filter mode: "disabled", "allowlist", "denylist".'
+        description: "Filter mode: \"disabled\", \"allowlist\", \"denylist\"."
         type: string
         default: disabled
       cidrs:
@@ -629,19 +629,19 @@ $defs:
         description: Path to certificate file (local file path).
         type:
         - string
-        - 'null'
+        - "null"
         default: null
       key_file:
         description: Path to private key file (local file path).
         type:
         - string
-        - 'null'
+        - "null"
         default: null
       ca_file:
         description: Path to CA certificate for client verification (mTLS).
         type:
         - string
-        - 'null'
+        - "null"
         default: null
       client_auth:
         description: Client certificate requirement (none, optional, required).
@@ -653,7 +653,7 @@ $defs:
           Format: "provider:path:key" (e.g., "vault:secret/tls:cert")
         type:
         - string
-        - 'null'
+        - "null"
         default: null
       key_secret:
         description: |-
@@ -661,7 +661,7 @@ $defs:
           Format: "provider:path:key" (e.g., "vault:secret/tls:key")
         type:
         - string
-        - 'null'
+        - "null"
         default: null
       ca_secret:
         description: |-
@@ -669,7 +669,7 @@ $defs:
           Format: "provider:path:key" (e.g., "vault:secret/tls:ca")
         type:
         - string
-        - 'null'
+        - "null"
         default: null
       refresh_interval_secs:
         description: |-
@@ -693,11 +693,11 @@ $defs:
           Each entry defines a header name and its allowed values.
         type: array
         items:
-          $ref: '#/$defs/AcceptedHeader'
+          $ref: "#/$defs/AcceptedHeader"
         default: []
       bearer:
         description: Bearer token configuration.
-        $ref: '#/$defs/BearerConfig'
+        $ref: "#/$defs/BearerConfig"
         default:
           tokens: []
           secret_source: null
@@ -714,7 +714,7 @@ $defs:
           Legacy: Single header name for header-based auth.
           Deprecated: Use `accepted_headers` instead.
         type: string
-        default: ''
+        default: ""
       header_values:
         description: |-
           Legacy: Allowed header values for single header.
@@ -764,7 +764,7 @@ $defs:
           Format: `provider:path[:key]` (e.g. "vault:secret/auth:bearer_tokens").
         type:
         - string
-        - 'null'
+        - "null"
         default: null
       refresh_interval_secs:
         description: |-
@@ -812,7 +812,7 @@ $defs:
         default: 0.0.0.0:6000
       tls:
         description: TLS configuration for gRPC server.
-        $ref: '#/$defs/TlsConfig'
+        $ref: "#/$defs/TlsConfig"
         default:
           enabled: false
           cert_file: null
@@ -825,7 +825,7 @@ $defs:
           refresh_interval_secs: 3600
       auth:
         description: Authentication configuration for gRPC server.
-        $ref: '#/$defs/AuthConfig'
+        $ref: "#/$defs/AuthConfig"
         default:
           mode: none
           accepted_headers: []
@@ -834,7 +834,7 @@ $defs:
             secret_source: null
             refresh_interval_secs: 300
           include_common_header: true
-          header_name: ''
+          header_name: ""
           header_values: []
       max_message_size:
         description: Largest decoded push the server takes, in bytes.
@@ -846,7 +846,7 @@ $defs:
         description: |-
           Answer a push only once every destination confirmed its events
           (default on). Off answers once they are queued.
-        $ref: '#/$defs/AcknowledgementsConfig'
+        $ref: "#/$defs/AcknowledgementsConfig"
         default:
           enabled: true
   OtlpConfig:
@@ -876,7 +876,7 @@ $defs:
         default: hyperdx
       tls:
         description: TLS configuration for OTLP endpoints.
-        $ref: '#/$defs/TlsConfig'
+        $ref: "#/$defs/TlsConfig"
         default:
           enabled: false
           cert_file: null
@@ -889,7 +889,7 @@ $defs:
           refresh_interval_secs: 3600
       auth:
         description: Authentication configuration for OTLP endpoints.
-        $ref: '#/$defs/AuthConfig'
+        $ref: "#/$defs/AuthConfig"
         default:
           mode: none
           accepted_headers: []
@@ -898,7 +898,7 @@ $defs:
             secret_source: null
             refresh_interval_secs: 300
           include_common_header: true
-          header_name: ''
+          header_name: ""
           header_values: []
       raw_capture:
         description: |-
@@ -907,7 +907,7 @@ $defs:
           OTLP arrives as protobuf, so `_raw` carries the `generic`-mode
           rendering of the record -- the least-shaped decode we produce. In
           `generic` mode it is therefore a copy of the event itself.
-        $ref: '#/$defs/RawCaptureConfig'
+        $ref: "#/$defs/RawCaptureConfig"
         default:
           enabled: null
           max_bytes: null
@@ -922,7 +922,7 @@ $defs:
         description: |-
           Answer an export, on either endpoint, only once every destination
           confirmed its records (default on). Off answers once they are queued.
-        $ref: '#/$defs/AcknowledgementsConfig'
+        $ref: "#/$defs/AcknowledgementsConfig"
         default:
           enabled: true
       http_max_hold_ms:
@@ -947,26 +947,26 @@ $defs:
         description: Capture the original payload into `_raw`.
         type:
         - boolean
-        - 'null'
+        - "null"
         default: null
       max_bytes:
         description: Maximum captured bytes; 0 means unlimited.
         type:
         - integer
-        - 'null'
+        - "null"
         format: uint
         minimum: 0
         default: null
       on_oversize:
         description: Behaviour when the payload exceeds `max_bytes`.
         anyOf:
-        - $ref: '#/$defs/OversizePolicy'
-        - type: 'null'
+        - $ref: "#/$defs/OversizePolicy"
+        - type: "null"
         default: null
   OversizePolicy:
     description: What to do with a payload larger than `max_bytes`.
     oneOf:
-    - description: 'Keep the leading `max_bytes` and flag it with `_raw_truncated: true`.'
+    - description: "Keep the leading `max_bytes` and flag it with `_raw_truncated: true`."
       type: string
       const: truncate
     - description: Emit no `_raw` at all for this event.
@@ -990,7 +990,7 @@ $defs:
         default: 0.0.0.0:5044
       tls:
         description: TLS configuration (Beats clients typically require TLS).
-        $ref: '#/$defs/TlsConfig'
+        $ref: "#/$defs/TlsConfig"
         default:
           enabled: false
           cert_file: null
@@ -1003,7 +1003,7 @@ $defs:
           refresh_interval_secs: 3600
       auth:
         description: Authentication configuration.
-        $ref: '#/$defs/AuthConfig'
+        $ref: "#/$defs/AuthConfig"
         default:
           mode: none
           accepted_headers: []
@@ -1012,7 +1012,7 @@ $defs:
             secret_source: null
             refresh_interval_secs: 300
           include_common_header: true
-          header_name: ''
+          header_name: ""
           header_values: []
       accept_unauthenticated:
         description: |-
@@ -1025,7 +1025,7 @@ $defs:
         description: |-
           Acknowledge a window only once every destination confirmed its events
           (default on). Off acknowledges once they are queued.
-        $ref: '#/$defs/AcknowledgementsConfig'
+        $ref: "#/$defs/AcknowledgementsConfig"
         default:
           enabled: true
   SplunkHecConfig:
@@ -1058,7 +1058,7 @@ $defs:
         default: 30000
       tls:
         description: TLS configuration.
-        $ref: '#/$defs/TlsConfig'
+        $ref: "#/$defs/TlsConfig"
         default:
           enabled: false
           cert_file: null
@@ -1071,7 +1071,7 @@ $defs:
           refresh_interval_secs: 3600
       auth:
         description: Authentication configuration.
-        $ref: '#/$defs/AuthConfig'
+        $ref: "#/$defs/AuthConfig"
         default:
           mode: none
           accepted_headers: []
@@ -1080,7 +1080,7 @@ $defs:
             secret_source: null
             refresh_interval_secs: 300
           include_common_header: true
-          header_name: ''
+          header_name: ""
           header_values: []
       raw_capture:
         description: |-
@@ -1089,7 +1089,7 @@ $defs:
           On `/services/collector/event`, `_raw` carries the submitted `event`
           value before HEC metadata is merged in. On `/services/collector/raw`
           it carries the original line bytes.
-        $ref: '#/$defs/RawCaptureConfig'
+        $ref: "#/$defs/RawCaptureConfig"
         default:
           enabled: null
           max_bytes: null
@@ -1098,7 +1098,7 @@ $defs:
         description: |-
           Answer a request only once every destination confirmed its events
           (default on). Off answers once they are queued.
-        $ref: '#/$defs/AcknowledgementsConfig'
+        $ref: "#/$defs/AcknowledgementsConfig"
         default:
           enabled: true
   SyslogConfig:
@@ -1133,7 +1133,7 @@ $defs:
         default: 65536
       tls:
         description: TLS configuration (for secure syslog on port 6514).
-        $ref: '#/$defs/TlsConfig'
+        $ref: "#/$defs/TlsConfig"
         default:
           enabled: false
           cert_file: null
@@ -1146,7 +1146,7 @@ $defs:
           refresh_interval_secs: 3600
       auth:
         description: Authentication configuration.
-        $ref: '#/$defs/AuthConfig'
+        $ref: "#/$defs/AuthConfig"
         default:
           mode: none
           accepted_headers: []
@@ -1155,7 +1155,7 @@ $defs:
             secret_source: null
             refresh_interval_secs: 300
           include_common_header: true
-          header_name: ''
+          header_name: ""
           header_values: []
       accept_unauthenticated:
         description: |-
@@ -1170,7 +1170,7 @@ $defs:
 
           The strongest case for capture: `_raw` holds the wire line including
           the PRI and header, none of which survives into the parsed envelope.
-        $ref: '#/$defs/RawCaptureConfig'
+        $ref: "#/$defs/RawCaptureConfig"
         default:
           enabled: null
           max_bytes: null
@@ -1209,7 +1209,7 @@ $defs:
         default: 30000
       tls:
         description: TLS configuration.
-        $ref: '#/$defs/TlsConfig'
+        $ref: "#/$defs/TlsConfig"
         default:
           enabled: false
           cert_file: null
@@ -1222,7 +1222,7 @@ $defs:
           refresh_interval_secs: 3600
       auth:
         description: Authentication configuration.
-        $ref: '#/$defs/AuthConfig'
+        $ref: "#/$defs/AuthConfig"
         default:
           mode: none
           accepted_headers: []
@@ -1231,7 +1231,7 @@ $defs:
             secret_source: null
             refresh_interval_secs: 300
           include_common_header: true
-          header_name: ''
+          header_name: ""
           header_values: []
       raw_capture:
         description: |-
@@ -1240,7 +1240,7 @@ $defs:
           Remote Write arrives as snappy-framed protobuf, so `_raw` carries the
           `native`-mode rendering of the sample -- the least-shaped decode we
           produce. In `native` mode it is therefore a copy of the event itself.
-        $ref: '#/$defs/RawCaptureConfig'
+        $ref: "#/$defs/RawCaptureConfig"
         default:
           enabled: null
           max_bytes: null
@@ -1249,7 +1249,7 @@ $defs:
         description: |-
           Answer a write only once every destination confirmed its samples
           (default on). Off answers once they are queued.
-        $ref: '#/$defs/AcknowledgementsConfig'
+        $ref: "#/$defs/AcknowledgementsConfig"
         default:
           enabled: true
   FluentConfig:
@@ -1281,7 +1281,7 @@ $defs:
         default: 33554432
       tls:
         description: TLS configuration.
-        $ref: '#/$defs/TlsConfig'
+        $ref: "#/$defs/TlsConfig"
         default:
           enabled: false
           cert_file: null
@@ -1306,7 +1306,7 @@ $defs:
           Forward arrives as msgpack, so `_raw` carries the record's verbatim
           msgpack-to-JSON decode, before the tag, timestamp and `_source` this
           handler adds.
-        $ref: '#/$defs/RawCaptureConfig'
+        $ref: "#/$defs/RawCaptureConfig"
         default:
           enabled: null
           max_bytes: null
@@ -1316,7 +1316,7 @@ $defs:
           Acknowledge a chunk, or read past a message without one, only once
           every destination confirmed its records (default on). Off does so once
           they are queued.
-        $ref: '#/$defs/AcknowledgementsConfig'
+        $ref: "#/$defs/AcknowledgementsConfig"
         default:
           enabled: true
   GelfConfig:
@@ -1348,7 +1348,7 @@ $defs:
         default: 1048576
       tls:
         description: TLS configuration.
-        $ref: '#/$defs/TlsConfig'
+        $ref: "#/$defs/TlsConfig"
         default:
           enabled: false
           cert_file: null
@@ -1372,7 +1372,7 @@ $defs:
 
           `_raw` holds the GELF message exactly as it arrived, before the
           `message`, `severity` and `_source` fields this handler derives.
-        $ref: '#/$defs/RawCaptureConfig'
+        $ref: "#/$defs/RawCaptureConfig"
         default:
           enabled: null
           max_bytes: null
@@ -1389,7 +1389,7 @@ $defs:
       bind_address:
         type: string
         format: ip
-        default: 0.0.0.0
+        default: "0.0.0.0"
       ports:
         type: array
         items:
@@ -1402,7 +1402,7 @@ $defs:
         - 4739
         - 6343
       output:
-        $ref: '#/$defs/FlowOutputConfig'
+        $ref: "#/$defs/FlowOutputConfig"
         default:
           mode: canonical
           max_records_per_packet: 200
@@ -1418,17 +1418,17 @@ $defs:
         default: 8388608
       ip_filter:
         anyOf:
-        - $ref: '#/$defs/IpFilterConfig'
-        - type: 'null'
+        - $ref: "#/$defs/IpFilterConfig"
+        - type: "null"
       rate_limit:
-        $ref: '#/$defs/RateLimitConfig2'
+        $ref: "#/$defs/RateLimitConfig2"
         default:
           enabled: false
           packets_per_second: 5000
           burst: 10000
           cache_size: 4096
       netflow:
-        $ref: '#/$defs/NetflowSubConfig'
+        $ref: "#/$defs/NetflowSubConfig"
         default:
           enabled: true
           template_cache:
@@ -1436,15 +1436,15 @@ $defs:
             max_exporters: 10000
           topic: netflow_land
       sflow:
-        $ref: '#/$defs/SflowSubConfig'
+        $ref: "#/$defs/SflowSubConfig"
         default:
           enabled: true
           topic: sflow_land
       split:
         description: If present, switches to split mode and `flow.enabled` MUST be false.
         anyOf:
-        - $ref: '#/$defs/FlowSplitConfig'
-        - type: 'null'
+        - $ref: "#/$defs/FlowSplitConfig"
+        - type: "null"
       experimental:
         description: |-
           EXPERIMENTAL marker. When true (default), the handler emits a startup
@@ -1458,7 +1458,7 @@ $defs:
 
           `_raw` carries the decoder's verbatim record rendering: a JSON array
           of every record in `canonical` mode, the single record in `exploded`.
-        $ref: '#/$defs/RawCaptureConfig'
+        $ref: "#/$defs/RawCaptureConfig"
         default:
           enabled: null
           max_bytes: null
@@ -1467,7 +1467,7 @@ $defs:
     type: object
     properties:
       mode:
-        $ref: '#/$defs/OutputMode'
+        $ref: "#/$defs/OutputMode"
         default: canonical
       max_records_per_packet:
         type: integer
@@ -1513,7 +1513,7 @@ $defs:
         type: boolean
         default: true
       template_cache:
-        $ref: '#/$defs/TemplateCacheConfig'
+        $ref: "#/$defs/TemplateCacheConfig"
         default:
           max_per_exporter: 1000
           max_exporters: 10000
@@ -1546,9 +1546,9 @@ $defs:
     type: object
     properties:
       netflow:
-        $ref: '#/$defs/FlowListenerConfig'
+        $ref: "#/$defs/FlowListenerConfig"
       sflow:
-        $ref: '#/$defs/FlowListenerConfig'
+        $ref: "#/$defs/FlowListenerConfig"
     required:
     - netflow
     - sflow
@@ -1561,7 +1561,7 @@ $defs:
       bind_address:
         type: string
         format: ip
-        default: 0.0.0.0
+        default: "0.0.0.0"
       ports:
         type: array
         items:
@@ -1570,7 +1570,7 @@ $defs:
           minimum: 0
           maximum: 65535
       output:
-        $ref: '#/$defs/FlowOutputConfig'
+        $ref: "#/$defs/FlowOutputConfig"
         default:
           mode: canonical
           max_records_per_packet: 200
@@ -1586,17 +1586,17 @@ $defs:
         default: 8388608
       ip_filter:
         anyOf:
-        - $ref: '#/$defs/IpFilterConfig'
-        - type: 'null'
+        - $ref: "#/$defs/IpFilterConfig"
+        - type: "null"
       rate_limit:
-        $ref: '#/$defs/RateLimitConfig2'
+        $ref: "#/$defs/RateLimitConfig2"
         default:
           enabled: false
           packets_per_second: 5000
           burst: 10000
           cache_size: 4096
       template_cache:
-        $ref: '#/$defs/TemplateCacheConfig'
+        $ref: "#/$defs/TemplateCacheConfig"
         default:
           max_per_exporter: 1000
           max_exporters: 10000
@@ -1631,7 +1631,7 @@ $defs:
         description: Own listener address. Unset shares the main ingest listener.
         type:
         - string
-        - 'null'
+        - "null"
         default: null
       max_body_size:
         description: |-
@@ -1655,7 +1655,7 @@ $defs:
         description: |-
           TLS for the own listener. Refused when `bind_address` is unset, since
           the shared listener is under `server.tls`.
-        $ref: '#/$defs/TlsConfig'
+        $ref: "#/$defs/TlsConfig"
         default:
           enabled: false
           cert_file: null
@@ -1670,17 +1670,17 @@ $defs:
         description: The callers, one entry per product.
         type: array
         items:
-          $ref: '#/$defs/WebhookCallerConfig'
+          $ref: "#/$defs/WebhookCallerConfig"
         default: []
       acknowledgements:
         description: |-
           Answer a request only once Kafka confirmed its records (default on).
           Off answers once they are queued.
-        $ref: '#/$defs/AcknowledgementsConfig'
+        $ref: "#/$defs/AcknowledgementsConfig"
         default:
           enabled: true
   WebhookCallerConfig:
-    description: 'One webhook caller: a product identity, its secret, its topic.'
+    description: "One webhook caller: a product identity, its secret, its topic."
     type: object
     properties:
       name:
@@ -1688,33 +1688,33 @@ $defs:
           The path segment (`POST /webhook/{name}`) and the `_source` stamped on
           every record. Lowercase letters, digits, `_` and `-` only.
         type: string
-        default: ''
+        default: ""
       topic:
         description: |-
           Kafka topic the caller's records land on, verbatim -- no
           `routing.topic_suffix` is applied.
         type: string
-        default: ''
+        default: ""
       auth:
         description: How the caller authenticates.
-        $ref: '#/$defs/WebhookAuthConfig'
+        $ref: "#/$defs/WebhookAuthConfig"
         default:
           mode: hmac
-          secret_source: ''
+          secret_source: ""
           refresh_interval_secs: 300
           header: x-signature
           timestamp_header: x-timestamp
           tolerance_secs: 300
       body:
         description: Whether a body is one record or a JSON array of records.
-        $ref: '#/$defs/WebhookBody'
+        $ref: "#/$defs/WebhookBody"
         default: single
       filter:
         description: |-
           Optional CEL expression over the record; a false result drops it. An
           empty string keeps every record. Compiled once at load.
         type: string
-        default: ''
+        default: ""
   WebhookAuthConfig:
     description: |-
       Per-caller authentication.
@@ -1729,8 +1729,8 @@ $defs:
     type: object
     properties:
       mode:
-        description: '`hmac` or `header`.'
-        $ref: '#/$defs/WebhookAuthMode'
+        description: "`hmac` or `header`."
+        $ref: "#/$defs/WebhookAuthMode"
         default: hmac
       secret_source:
         description: |-
@@ -1739,7 +1739,7 @@ $defs:
           static secret field on purpose: a secret in YAML surfaces in the
           config-schema dump and in every `config-check`.
         type: string
-        default: ''
+        default: ""
       refresh_interval_secs:
         description: Refresh interval for the secret in seconds.
         type: integer
@@ -1812,7 +1812,7 @@ $defs:
           Only evaluated when `include_common_header` is true.
         type: array
         items:
-          $ref: '#/$defs/SourceRule'
+          $ref: "#/$defs/SourceRule"
         default: []
       default_source:
         description: Default source when no rule matches.
@@ -1836,7 +1836,7 @@ $defs:
         default: false
       dlq:
         description: DLQ configuration.
-        $ref: '#/$defs/DlqConfig'
+        $ref: "#/$defs/DlqConfig"
         default:
           enabled: true
           mode: cascade
@@ -1865,7 +1865,7 @@ $defs:
         description: Value to match against (for `key_value_set` mode only).
         type:
         - string
-        - 'null'
+        - "null"
         default: null
       source:
         description: |-
@@ -1873,7 +1873,7 @@ $defs:
           Ignored for `key_value_use` (uses the field value directly).
         type:
         - string
-        - 'null'
+        - "null"
         default: null
     required:
     - field
@@ -1887,7 +1887,7 @@ $defs:
         type: boolean
         default: true
       mode:
-        description: 'Backend mode: cascade (default), fan_out, file_only, kafka_only.'
+        description: "Backend mode: cascade (default), fan_out, file_only, kafka_only."
         type: string
         default: cascade
       topic:
@@ -1919,7 +1919,7 @@ $defs:
           scalo's default.
         type:
         - integer
-        - 'null'
+        - "null"
         format: uint64
         minimum: 0
         default: null
@@ -1950,16 +1950,16 @@ $defs:
     properties:
       default:
         description: Destination for records no rule matches.
-        $ref: '#/$defs/DestinationRef'
+        $ref: "#/$defs/DestinationRef"
         default: kafka
       rules:
         description: Routing rules for destination selection (first match wins).
         type: array
         items:
-          $ref: '#/$defs/DestinationRule'
+          $ref: "#/$defs/DestinationRule"
         default: []
     additionalProperties:
-      $ref: '#/$defs/DestinationSpec'
+      $ref: "#/$defs/DestinationSpec"
   DestinationRef:
     description: |-
       One destination name, or a list of them to fan a matched record out to.
@@ -1983,14 +1983,14 @@ $defs:
         description: Value to match.
         type: string
       destination:
-        description: 'Destination for matched messages: one name, or a list to fan out.'
-        $ref: '#/$defs/DestinationRef'
+        description: "Destination for matched messages: one name, or a list to fan out."
+        $ref: "#/$defs/DestinationRef"
     required:
     - match_field
     - match_value
     - destination
   DestinationSpec:
-    description: 'A declared destination: exactly one transport block.'
+    description: "A declared destination: exactly one transport block."
     type: object
     properties:
       grpc:
@@ -1998,14 +1998,14 @@ $defs:
           Deliver over gRPC to a scalo Push listener (a transform, the loader, the
           archiver).
         anyOf:
-        - $ref: '#/$defs/GrpcDestination'
-        - type: 'null'
+        - $ref: "#/$defs/GrpcDestination"
+        - type: "null"
         default: null
       kafka:
         description: Deliver over the bus.
         anyOf:
-        - $ref: '#/$defs/KafkaDestination'
-        - type: 'null'
+        - $ref: "#/$defs/KafkaDestination"
+        - type: "null"
         default: null
   GrpcDestination:
     description: A gRPC destination -- the address of a scalo Push listener.
@@ -2034,7 +2034,7 @@ $defs:
           source resolves to, which is what the built-in `kafka` destination does.
         type:
         - string
-        - 'null'
+        - "null"
         default: null
   KafkaConfig:
     description: Kafka producer configuration.
@@ -2053,12 +2053,12 @@ $defs:
       sasl:
         description: SASL configuration.
         anyOf:
-        - $ref: '#/$defs/SaslConfig'
-        - type: 'null'
+        - $ref: "#/$defs/SaslConfig"
+        - type: "null"
         default: null
       tls:
         description: TLS configuration.
-        $ref: '#/$defs/KafkaTlsConfig'
+        $ref: "#/$defs/KafkaTlsConfig"
         default:
           enabled: false
           ca_file: null
@@ -2072,7 +2072,7 @@ $defs:
         additionalProperties:
           type: string
         default:
-          statistics.interval.ms: '0'
+          statistics.interval.ms: "0"
   SaslConfig:
     description: SASL authentication configuration.
     type: object
@@ -2108,19 +2108,19 @@ $defs:
         description: CA certificate file.
         type:
         - string
-        - 'null'
+        - "null"
         default: null
       cert_file:
         description: Client certificate file.
         type:
         - string
-        - 'null'
+        - "null"
         default: null
       key_file:
         description: Client key file.
         type:
         - string
-        - 'null'
+        - "null"
         default: null
   LoaderConfig:
     description: dfe-loader connection configuration.
@@ -2150,7 +2150,7 @@ $defs:
           Defaults to http://{address} if not set.
         type:
         - string
-        - 'null'
+        - "null"
         default: null
   BufferConfig:
     description: |-
@@ -2184,7 +2184,7 @@ $defs:
           Optional disk spillover configuration.
           When enabled, messages are spilled to disk via scalo's TieredSink
           when the primary sink is unavailable (instead of in-memory only).
-        $ref: '#/$defs/SpilloverConfig'
+        $ref: "#/$defs/SpilloverConfig"
         default:
           enabled: false
           path: /var/spool/dfe-receiver
@@ -2204,7 +2204,7 @@ $defs:
     type: object
     properties:
       enabled:
-        description: 'Enable disk spillover (default: false).'
+        description: "Enable disk spillover (default: false)."
         type: boolean
         default: false
       path:

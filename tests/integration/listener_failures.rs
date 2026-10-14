@@ -300,12 +300,16 @@ fn flow_config() -> Config {
 fn split_flow_config(netflow_port: u16, sflow_port: u16) -> Config {
     let mut config = flow_config();
     config.flow.split = Some(
-        serde_yaml_ng::from_str(&format!(
-            "netflow:\n  bind_address: 127.0.0.1\n  ports: [{netflow_port}]\n  \
+        scalo::yaml::from_str(
+            &format!(
+                "netflow:\n  bind_address: 127.0.0.1\n  ports: [{netflow_port}]\n  \
              recv_buffer_bytes: 262144\n  topic: netflow_land\n\
              sflow:\n  bind_address: 127.0.0.1\n  ports: [{sflow_port}]\n  \
              recv_buffer_bytes: 262144\n  topic: sflow_land\n"
-        ))
+            ),
+            "config.yaml",
+            scalo::yaml::Profile::Config,
+        )
         .expect("split flow config"),
     );
     config
