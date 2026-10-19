@@ -366,6 +366,7 @@ properties:
       topic_suffix: _land
       source_to_topic: {}
       legacy_compat: false
+      source_org_id: disallow
       dlq:
         enabled: true
         mode: cascade
@@ -1834,6 +1835,10 @@ $defs:
           Appends `key_value_use` rules for `tags.event.category` and `event_category`.
         type: boolean
         default: false
+      source_org_id:
+        description: Whether a sender may set `_org_id`, the field that picks the tenant downstream.
+        $ref: "#/$defs/SourceOrgId"
+        default: disallow
       dlq:
         description: DLQ configuration.
         $ref: "#/$defs/DlqConfig"
@@ -1878,6 +1883,15 @@ $defs:
     required:
     - field
     - mode
+  SourceOrgId:
+    description: What the receiver does with an `_org_id` the sender put in the record.
+    oneOf:
+    - description: Remove it, so only DFE's own org rules set the tenant.
+      type: string
+      const: disallow
+    - description: Keep it.
+      type: string
+      const: allow
   DlqConfig:
     description: DLQ (Dead Letter Queue) configuration.
     type: object

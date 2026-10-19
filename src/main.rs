@@ -443,6 +443,7 @@ mod tests {
                 &["reason"],
             ),
             ("receiver_dlq_start_failures_total", Counter, &["backend"]),
+            ("receiver_source_org_id_stripped_total", Counter, &[]),
             ("receiver_events_per_second", Gauge, &[]),
             (
                 "receiver_destination_send_failures_total",
