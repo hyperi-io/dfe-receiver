@@ -18,7 +18,7 @@ use bytes::Bytes;
 use rustc_hash::FxHashMap;
 use sonic_rs::{JsonValueTrait, LazyValue, get_from_slice};
 
-use crate::config::{DestinationsConfig, RoutingConfig, SourceRule};
+use crate::config::{DestinationsConfig, RoutingConfig, SourceOrgId, SourceRule};
 
 /// Append `s` to `buf` as a quoted JSON string literal.
 ///
@@ -72,6 +72,28 @@ pub fn stamp_source(payload: Bytes, source: &str) -> Bytes {
     push_json_string(&mut buf, source);
     buf.extend_from_slice(&raw[insert_pos..]);
     Bytes::from(buf)
+}
+
+/// Remove a top-level `_org_id` the sender wrote, so only DFE's org rules pick the tenant.
+///
+/// A record without one, the common case, is returned untouched after one lazy lookup.
+#[must_use]
+pub fn strip_org_id(payload: Bytes) -> Bytes {
+    if get_from_slice(payload.as_ref(), ["_org_id"].as_slice()).is_err() {
+        return payload;
+    }
+    let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&payload) else {
+        return payload;
+    };
+    let Some(object) = value.as_object_mut() else {
+        return payload;
+    };
+    object.remove("_org_id");
+    metrics::counter!("receiver_source_org_id_stripped_total").increment(1);
+    match serde_json::to_vec(&value) {
+        Ok(rewritten) => Bytes::from(rewritten),
+        Err(_) => payload,
+    }
 }
 
 /// The named destinations a record is bound for.
@@ -138,6 +160,8 @@ pub struct Router {
     destination_rules: Vec<DestinationRule>,
     /// Whether enrichment (source rules) is enabled.
     enrichment_enabled: bool,
+    /// Whether a sender's `_org_id` is removed before routing.
+    strips_org_id: bool,
 }
 
 /// A destination list resolved at config time, with whether any member is on
@@ -213,7 +237,14 @@ impl Router {
             default_destination: ResolvedDestinations::new(&destinations.default, destinations),
             destination_rules,
             enrichment_enabled,
+            strips_org_id: routing.source_org_id == SourceOrgId::Disallow,
         }
+    }
+
+    /// Whether a sender's `_org_id` is removed before routing.
+    #[must_use]
+    pub fn strips_org_id(&self) -> bool {
+        self.strips_org_id
     }
 
     /// Route a message to its destination.
@@ -601,6 +632,34 @@ mod tests {
             default: "loader".into(),
             ..DestinationsConfig::default()
         }
+    }
+
+    #[test]
+    fn test_strip_org_id_removes_only_the_top_level_key() {
+        let stripped = strip_org_id(Bytes::from(
+            r#"{"_org_id":"victim","inner":{"_org_id":"nested"},"n":1}"#,
+        ));
+        let parsed: serde_json::Value = serde_json::from_slice(&stripped).expect("valid JSON");
+        assert!(parsed.get("_org_id").is_none());
+        assert_eq!(parsed["inner"]["_org_id"], "nested");
+        assert_eq!(parsed["n"], 1);
+    }
+
+    #[test]
+    fn test_strip_org_id_leaves_a_record_without_one_byte_identical() {
+        let payload = Bytes::from(r#"{"org_id":"legacy",  "n":1}"#);
+        assert_eq!(strip_org_id(payload.clone()), payload);
+    }
+
+    #[test]
+    fn test_router_strips_org_id_unless_allowed() {
+        let destinations = default_destinations_config();
+        assert!(Router::new(&default_routing_config(), &destinations, true).strips_org_id());
+        let allow = RoutingConfig {
+            source_org_id: SourceOrgId::Allow,
+            ..default_routing_config()
+        };
+        assert!(!Router::new(&allow, &destinations, true).strips_org_id());
     }
 
     #[test]

@@ -1145,6 +1145,13 @@ impl PipelineState {
             }
         }
 
+        // Before both targets, so a listener bound to a fixed topic strips it too.
+        let payload = if dispatch.routes.router.strips_org_id() {
+            routing::strip_org_id(payload)
+        } else {
+            payload
+        };
+
         match target {
             Target::Routed => self.process_routed(payload, dispatch).await,
             // The memory transport has no broker for a topic the listener picked.

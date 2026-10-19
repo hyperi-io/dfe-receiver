@@ -2054,8 +2054,25 @@ pub struct RoutingConfig {
     #[serde(default)]
     pub legacy_compat: bool,
 
+    /// Whether a sender may set `_org_id`, the field that picks the tenant downstream.
+    #[serde(default)]
+    pub source_org_id: SourceOrgId,
+
     /// DLQ configuration.
     pub dlq: DlqConfig,
+}
+
+/// What the receiver does with an `_org_id` the sender put in the record.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum SourceOrgId {
+    /// Remove it, so only DFE's own org rules set the tenant.
+    #[default]
+    Disallow,
+    /// Keep it.
+    Allow,
 }
 
 impl Default for RoutingConfig {
@@ -2066,6 +2083,7 @@ impl Default for RoutingConfig {
             topic_suffix: "_land".to_string(),
             source_to_topic: HashMap::new(),
             legacy_compat: false,
+            source_org_id: SourceOrgId::default(),
             dlq: DlqConfig::default(),
         }
     }

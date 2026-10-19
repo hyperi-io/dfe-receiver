@@ -1121,6 +1121,12 @@ const RECEIVER_SERIES: &[SeriesSpec] = &[
         "DLQ starts that failed, by the backend that refused (kafka, file or other); the receiver runs on without a DLQ",
     ),
     (
+        "receiver_source_org_id_stripped_total",
+        MetricType::Counter,
+        &[],
+        "Records whose sender-supplied _org_id was removed (routing.source_org_id: disallow)",
+    ),
+    (
         "receiver_events_per_second",
         MetricType::Gauge,
         &[],

@@ -327,6 +327,54 @@ async fn test_http_ingest_never_overwrites_a_sender_source() {
     assert_eq!(parsed["_source"], "crates_audit");
 }
 
+/// POST one body to `/ingest` and return the record the loader received.
+async fn ingest_one(
+    config: Config,
+    loader: &GrpcTransport,
+    body: &'static str,
+) -> serde_json::Value {
+    let (addr, shutdown) = start_receiver_http(config).await;
+    let response = reqwest::Client::new()
+        .post(format!("http://{addr}/ingest"))
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .expect("POST /ingest");
+    assert!(response.status().is_success());
+
+    let received = drain_loader(loader, 1).await;
+    shutdown.cancel();
+    assert_eq!(received.len(), 1);
+    serde_json::from_slice(&received[0]).expect("loader payload is JSON")
+}
+
+/// A sender's `_org_id` is removed by default, so it cannot pick another org's tenant.
+#[tokio::test]
+async fn test_http_ingest_drops_a_sender_org_id_by_default() {
+    let (loader_endpoint, loader) = crate::common::grpc_destination().await;
+    let body = r#"{"app":"kvproof","_org_id":"victim","org":"kept"}"#;
+    let parsed = ingest_one(kvproof_config(loader_endpoint), &loader, body).await;
+
+    assert!(
+        parsed.get("_org_id").is_none(),
+        "sender _org_id reached the loader: {parsed}"
+    );
+    assert_eq!(parsed["org"], "kept");
+    assert_eq!(parsed["_source"], "kvproof");
+}
+
+/// With `source_org_id: allow` the sender's `_org_id` reaches the loader.
+#[tokio::test]
+async fn test_http_ingest_keeps_a_sender_org_id_when_allowed() {
+    let (loader_endpoint, loader) = crate::common::grpc_destination().await;
+    let mut config = kvproof_config(loader_endpoint);
+    config.routing.source_org_id = dfe_receiver::config::SourceOrgId::Allow;
+    let parsed = ingest_one(config, &loader, r#"{"app":"kvproof","_org_id":"acme"}"#).await;
+
+    assert_eq!(parsed["_org_id"], "acme");
+}
+
 /// With enrichment off, no source rule fires and the record is untouched.
 #[tokio::test]
 async fn test_http_ingest_adds_no_source_when_enrichment_is_disabled() {
