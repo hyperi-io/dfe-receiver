@@ -375,6 +375,85 @@ async fn test_http_ingest_keeps_a_sender_org_id_when_allowed() {
     assert_eq!(parsed["_org_id"], "acme");
 }
 
+/// A key spelled with JSON escapes is the same key once decoded, so it is stripped too.
+#[tokio::test]
+async fn test_http_ingest_drops_a_sender_org_id_spelled_with_escapes() {
+    let (loader_endpoint, loader) = crate::common::grpc_destination().await;
+    let body = "{\"app\":\"kvproof\",\"\\u005forg_id\":\"victim\",\"org\":\"kept\"}";
+    let parsed = ingest_one(kvproof_config(loader_endpoint), &loader, body).await;
+
+    assert!(
+        parsed.get("_org_id").is_none(),
+        "sender _org_id reached the loader: {parsed}"
+    );
+    assert_eq!(parsed["org"], "kept");
+}
+
+/// POST `body`, which carries one record that is not an object and then
+/// `{"app":"kvproof","n":1}`: the request is answered 400 and only the object
+/// reaches the loader.
+async fn assert_only_the_object_reaches_the_loader(body: &'static str) {
+    let (loader_endpoint, loader) = crate::common::grpc_destination().await;
+    let (addr, shutdown) = start_receiver_http(kvproof_config(loader_endpoint)).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{addr}/ingest"))
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .expect("POST /ingest");
+    let status = response.status();
+    let answer = response.text().await.expect("answer body");
+
+    let received = drain_loader(&loader, 1).await;
+    shutdown.cancel();
+
+    assert_eq!(
+        status, 400,
+        "the record that is not an object was taken: {answer}"
+    );
+    assert!(answer.contains("record_not_an_object"), "{answer}");
+    assert_eq!(received.len(), 1, "the object must still be delivered");
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&received[0]).expect("loader payload is JSON");
+    assert!(
+        parsed.is_object(),
+        "loader got a record that is not an object: {parsed}"
+    );
+    assert_eq!(parsed["n"], 1, "loader got the wrong record: {parsed}");
+    assert!(
+        !std::str::from_utf8(&received[0])
+            .expect("utf8")
+            .contains("_org_id"),
+        "a sender _org_id reached the loader: {parsed}"
+    );
+}
+
+/// An array element of an array body is refused.
+#[tokio::test]
+async fn test_http_ingest_refuses_an_array_inside_an_array_body() {
+    assert_only_the_object_reaches_the_loader(
+        r#"[[{"app":"kvproof","_org_id":"victim"}],{"app":"kvproof","n":1}]"#,
+    )
+    .await;
+}
+
+/// An NDJSON line that is an array is refused.
+#[tokio::test]
+async fn test_http_ingest_refuses_an_ndjson_line_that_is_an_array() {
+    assert_only_the_object_reaches_the_loader(
+        "[{\"app\":\"kvproof\",\"_org_id\":\"victim\"}]\n{\"app\":\"kvproof\",\"n\":1}",
+    )
+    .await;
+}
+
+/// An NDJSON line that is a scalar is refused.
+#[tokio::test]
+async fn test_http_ingest_refuses_an_ndjson_line_that_is_a_scalar() {
+    assert_only_the_object_reaches_the_loader("5\n{\"app\":\"kvproof\",\"n\":1}").await;
+}
+
 /// With enrichment off, no source rule fires and the record is untouched.
 #[tokio::test]
 async fn test_http_ingest_adds_no_source_when_enrichment_is_disabled() {

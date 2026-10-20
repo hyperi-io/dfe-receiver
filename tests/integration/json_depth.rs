@@ -215,10 +215,10 @@ fn the_bound_is_64_levels_per_event() {
         assert!(text.contains(TOO_DEEP), "{text}");
 
         // The array around a batch is framing, not nesting in its events.
-        let batch = format!("[{},{}]", nested_array(64), nested_array(64));
+        let batch = format!("[{},{}]", nested_object(64), nested_object(64));
         let (status, text) = post(&started.url, batch).await;
         assert_eq!(status, 202, "a batch of 64-level events: {text}");
-        let batch = format!("[{},{}]", nested_array(64), nested_array(65));
+        let batch = format!("[{},{}]", nested_object(64), nested_object(65));
         let (status, text) = post(&started.url, batch).await;
         assert_eq!(status, 400, "a batch holding a 65-level event: {text}");
         assert!(text.contains(TOO_DEEP), "{text}");

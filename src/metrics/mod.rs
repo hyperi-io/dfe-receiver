@@ -104,11 +104,18 @@ pub enum ValidationFailureReason {
     MissingField,
     /// Payload nests deeper than the parser can take without exhausting its stack.
     NestingTooDeep,
+    /// Payload is JSON but not an object.
+    NotAnObject,
 }
 
 impl ValidationFailureReason {
     /// Every reason, in the order [`index`](Self::index) numbers them.
-    pub const ALL: [Self; 3] = [Self::InvalidJson, Self::MissingField, Self::NestingTooDeep];
+    pub const ALL: [Self; 4] = [
+        Self::InvalidJson,
+        Self::MissingField,
+        Self::NestingTooDeep,
+        Self::NotAnObject,
+    ];
 
     /// The `reason` label on `receiver_validation_failures_total`.
     #[must_use]
@@ -117,6 +124,7 @@ impl ValidationFailureReason {
             Self::InvalidJson => "invalid_json",
             Self::MissingField => "missing_field",
             Self::NestingTooDeep => "nesting_too_deep",
+            Self::NotAnObject => "not_an_object",
         }
     }
 
@@ -127,6 +135,7 @@ impl ValidationFailureReason {
             Self::InvalidJson => 0,
             Self::MissingField => 1,
             Self::NestingTooDeep => 2,
+            Self::NotAnObject => 3,
         }
     }
 }
@@ -686,6 +695,7 @@ impl Metrics {
                 RlValidationReason::FieldMissing
             }
             ValidationFailureReason::NestingTooDeep => RlValidationReason::OutOfRange,
+            ValidationFailureReason::NotAnObject => RlValidationReason::TypeMismatch,
         };
         metrics::counter!(
             "receiver_validation_failures_total",
