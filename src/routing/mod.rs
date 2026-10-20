@@ -42,10 +42,11 @@ fn push_json_string(buf: &mut Vec<u8>, s: &str) {
 /// matched source rule that is never written down is lost on the loader route
 /// and every source lands in the `main` table.
 ///
-/// Returns the payload untouched when it is not a JSON object or already
-/// carries a top-level `_source` -- the sender's value wins, and a second
-/// top-level key of the same name makes the loader's ClickHouse JSON column
-/// reject the whole record.
+/// The key goes in before the last `}`, so `payload` must be a JSON object:
+/// the validator refuses anything else before a record is routed. Returns the
+/// payload untouched when it already carries a top-level `_source` -- the
+/// sender's value wins, and a second top-level key of the same name makes the
+/// loader's ClickHouse JSON column reject the whole record.
 #[must_use]
 pub fn stamp_source(payload: Bytes, source: &str) -> Bytes {
     let raw = payload.as_ref();
@@ -643,6 +644,23 @@ mod tests {
         assert!(parsed.get("_org_id").is_none());
         assert_eq!(parsed["inner"]["_org_id"], "nested");
         assert_eq!(parsed["n"], 1);
+    }
+
+    #[test]
+    fn test_strip_org_id_removes_a_key_spelled_with_escapes() {
+        for record in [
+            "{\"\\u005forg_id\":\"victim\",\"n\":1}",
+            "{\"_org\\u005Fid\":\"victim\",\"n\":1}",
+            "{\"\\u005f\\u006f\\u0072\\u0067\\u005f\\u0069\\u0064\":\"victim\",\"n\":1}",
+        ] {
+            let stripped = strip_org_id(Bytes::from(record));
+            let parsed: serde_json::Value = serde_json::from_slice(&stripped).expect("valid JSON");
+            assert!(
+                parsed.get("_org_id").is_none(),
+                "{record} kept it: {parsed}"
+            );
+            assert_eq!(parsed["n"], 1);
+        }
     }
 
     #[test]

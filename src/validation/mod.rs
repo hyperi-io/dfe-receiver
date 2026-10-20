@@ -11,8 +11,9 @@
 //! Validates incoming payloads for JSON format and required field presence
 //! using on-demand parsing for maximum performance.
 //!
-//! JSON is the only payload format. A body that is not JSON is refused for
-//! good; `dlq_on_invalid` decides only what happens to JSON that fails a
+//! JSON is the only payload format and a record is a JSON object. A body
+//! that is not JSON, or JSON that is not an object, is refused for good.
+//! `dlq_on_invalid` decides only what happens to an object that fails a
 //! required-field check.
 
 pub mod depth;
@@ -29,6 +30,16 @@ use crate::metrics::{Metrics, ValidationFailureReason};
 
 /// Shortest gap between two security lines for one validation failure reason.
 const VALIDATION_LOG_INTERVAL_MS: u64 = 5_000;
+
+/// The refusal a sender is told for a record that is not a JSON object.
+pub(crate) const NOT_AN_OBJECT: &str = "record_not_an_object";
+
+/// Whether the bytes are a JSON object, judged by their outer braces.
+pub(crate) fn is_json_object(record: &[u8]) -> bool {
+    let first = record.iter().find(|b| !b.is_ascii_whitespace());
+    let last = record.iter().rev().find(|b| !b.is_ascii_whitespace());
+    matches!((first, last), (Some(b'{'), Some(b'}')))
+}
 
 /// When each failure reason last wrote its security line, indexed by
 /// [`ValidationFailureReason::index`].
@@ -64,6 +75,9 @@ pub enum ValidationResult {
     Valid,
     /// Payload is not JSON, so it is refused whatever `dlq_on_invalid` says.
     NotJson(String),
+    /// Payload is JSON but not an object, so it is refused whatever
+    /// `dlq_on_invalid` says.
+    NotObject(String),
     /// Payload should go to DLQ.
     Dlq(String),
     /// Payload should be rejected.
@@ -108,6 +122,11 @@ impl Validator {
         // Check JSON format using sonic-rs LazyValue (no full parse)
         if let Err(reason) = Self::validate_json(payload) {
             return ValidationResult::NotJson(reason);
+        }
+
+        // Routing, the `_org_id` strip and the stamps read top-level keys, which only an object has.
+        if !is_json_object(payload) {
+            return ValidationResult::NotObject(NOT_AN_OBJECT.to_string());
         }
 
         // Check required fields (using pre-split paths)
@@ -738,79 +757,45 @@ mod tests {
     }
 
     #[test]
-    fn test_just_null() {
-        let validator = Validator::new(default_config());
-        let payload = Bytes::from("null");
-
-        // "null" is valid JSON
-        assert_eq!(validator.validate(&payload), ValidationResult::Valid);
+    fn json_that_is_not_an_object_is_refused_whatever_dlq_on_invalid_says() {
+        for dlq_on_invalid in [true, false] {
+            let validator = Validator::new(ValidationConfig {
+                required_fields: vec!["org_id".to_string()],
+                dlq_on_invalid,
+            });
+            for payload in [
+                "null",
+                "true",
+                "false",
+                "42",
+                "\"hello\"",
+                "\"\"",
+                "[1, 2, 3]",
+                "[]",
+                r#"[{"_org_id":"victim","org_id":"x"}]"#,
+                " \n[{\"org_id\":\"x\"}]\n",
+            ] {
+                assert_eq!(
+                    validator.validate(&Bytes::from(payload)),
+                    ValidationResult::NotObject(NOT_AN_OBJECT.to_string()),
+                    "{payload}"
+                );
+            }
+        }
     }
 
     #[test]
-    fn test_just_true() {
-        let validator = Validator::new(default_config());
-        let payload = Bytes::from("true");
-
-        // "true" is valid JSON
-        assert_eq!(validator.validate(&payload), ValidationResult::Valid);
-    }
-
-    #[test]
-    fn test_just_false() {
-        let validator = Validator::new(default_config());
-        let payload = Bytes::from("false");
-
-        // "false" is valid JSON
-        assert_eq!(validator.validate(&payload), ValidationResult::Valid);
-    }
-
-    #[test]
-    fn test_just_number() {
-        let validator = Validator::new(default_config());
-        let payload = Bytes::from("42");
-
-        // A number is valid JSON
-        assert_eq!(validator.validate(&payload), ValidationResult::Valid);
-    }
-
-    #[test]
-    fn test_just_string() {
-        let validator = Validator::new(default_config());
-        let payload = Bytes::from("\"hello\"");
-
-        // A string is valid JSON
-        assert_eq!(validator.validate(&payload), ValidationResult::Valid);
-    }
-
-    #[test]
-    fn test_just_array() {
-        let validator = Validator::new(default_config());
-        let payload = Bytes::from("[1, 2, 3]");
-
-        // An array is valid JSON
-        assert_eq!(validator.validate(&payload), ValidationResult::Valid);
+    fn object_detection_ignores_surrounding_whitespace() {
+        assert!(is_json_object(b" \n{\"a\":1}\n"));
+        assert!(!is_json_object(b"[1,2]"));
+        assert!(!is_json_object(b"\"text\""));
+        assert!(!is_json_object(b""));
     }
 
     #[test]
     fn test_empty_object() {
         let validator = Validator::new(default_config());
         let payload = Bytes::from("{}");
-
-        assert_eq!(validator.validate(&payload), ValidationResult::Valid);
-    }
-
-    #[test]
-    fn test_empty_array() {
-        let validator = Validator::new(default_config());
-        let payload = Bytes::from("[]");
-
-        assert_eq!(validator.validate(&payload), ValidationResult::Valid);
-    }
-
-    #[test]
-    fn test_empty_string() {
-        let validator = Validator::new(default_config());
-        let payload = Bytes::from("\"\"");
 
         assert_eq!(validator.validate(&payload), ValidationResult::Valid);
     }

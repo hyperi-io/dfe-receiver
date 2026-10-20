@@ -51,6 +51,7 @@ use crate::server::ip_filter::IpFilter;
 use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
 use crate::server::traits::{BoundAddr, ProtocolHandler};
 use crate::validation::depth::{self, MAX_BATCH_DEPTH, MAX_PARSE_DEPTH};
+use crate::validation::{NOT_AN_OBJECT, is_json_object};
 
 use self::auth::CallerAuth;
 
@@ -157,7 +158,7 @@ impl Caller {
         let mut dropped = 0usize;
         for record in records {
             if !is_json_object(&record) {
-                return Err(Error::Validation("record_not_an_object".into()));
+                return Err(Error::Validation(NOT_AN_OBJECT.into()));
             }
             if !self.keeps(&record) {
                 dropped += 1;
@@ -516,13 +517,6 @@ fn now_millis() -> u128 {
         .as_millis()
 }
 
-/// Whether the bytes are a JSON object, judged by their outer braces.
-fn is_json_object(record: &[u8]) -> bool {
-    let first = record.iter().find(|b| !b.is_ascii_whitespace());
-    let last = record.iter().rev().find(|b| !b.is_ascii_whitespace());
-    matches!((first, last), (Some(b'{'), Some(b'}')))
-}
-
 /// Write `_source` (the caller) and `_timestamp_receiver` into the record.
 ///
 /// The caller's identity wins: a record that already carries either key is
@@ -603,14 +597,6 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&stamped).unwrap();
         assert_eq!(value["_timestamp_receiver"], 1700);
         assert_eq!(value["_source"], "runzero");
-    }
-
-    #[test]
-    fn object_detection_ignores_surrounding_whitespace() {
-        assert!(is_json_object(b" \n{\"a\":1}\n"));
-        assert!(!is_json_object(b"[1,2]"));
-        assert!(!is_json_object(b"\"text\""));
-        assert!(!is_json_object(b""));
     }
 
     fn array_caller(filter: Option<&str>) -> Caller {

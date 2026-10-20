@@ -1081,10 +1081,11 @@ impl PipelineState {
 
     /// Inject `_timestamp_receiver` with the given epoch-millisecond value.
     ///
-    /// Performs byte-level append before the closing `}` to avoid a full
-    /// JSON parse/rewrite on the hot path. The key is appended whether or not
-    /// the payload already carries one; a caller that must not produce a
-    /// duplicate key checks first.
+    /// Performs byte-level append before the last `}` to avoid a full JSON
+    /// parse/rewrite on the hot path, so `payload` must be a JSON object: the
+    /// validator refuses anything else first, and the webhook checks its own
+    /// records. The key is appended whether or not the payload already carries
+    /// one. A caller that must not produce a duplicate key checks first.
     #[inline]
     #[must_use]
     pub fn enrich_payload_at(payload: Bytes, now_ms: u128) -> Bytes {
@@ -1131,6 +1132,11 @@ impl PipelineState {
             ValidationResult::NotJson(reason) => {
                 debug!(reason = %reason, bytes = payload.len(), "Message refused, not JSON");
                 self.count_validation_failure(ValidationFailureReason::InvalidJson);
+                return Err(Error::Validation(reason));
+            }
+            ValidationResult::NotObject(reason) => {
+                debug!(bytes = payload.len(), "Message refused, not a JSON object");
+                self.count_validation_failure(ValidationFailureReason::NotAnObject);
                 return Err(Error::Validation(reason));
             }
             ValidationResult::Dlq(reason) => {
@@ -2914,6 +2920,47 @@ mod tests {
             );
         }
         assert_eq!(metrics.get_validation_failures_total(), 4);
+    }
+
+    /// A record that is JSON but not an object is refused for good and counted
+    /// on both targets.
+    #[tokio::test]
+    async fn a_record_that_is_not_an_object_is_refused_and_counted() {
+        let metrics = Arc::new(Metrics::default());
+        let state = PipelineState::build(
+            SharedConfig::new(test_config()),
+            CancellationToken::new(),
+            None,
+            None,
+            Some(Arc::clone(&metrics)),
+        )
+        .await
+        .unwrap();
+
+        let records = [
+            Bytes::from_static(br#"[{"_org_id":"victim"}]"#),
+            Bytes::from_static(b"[]"),
+            Bytes::from_static(b"5"),
+            Bytes::from_static(br#""text""#),
+            Bytes::from_static(b"null"),
+        ];
+        for record in &records {
+            let err = state
+                .process(record.clone())
+                .await
+                .expect_err("not an object");
+            assert!(matches!(err, Error::Validation(_)), "{err}");
+            assert!(!err.is_retryable(), "a sender must not retry it");
+            let outcome = state
+                .process_batch_to_topic(std::slice::from_ref(record), "t_land", &holding(&state))
+                .await;
+            assert_eq!(outcome.rejected, 1, "{outcome:?}");
+            assert_eq!(outcome.accepted, 0, "{outcome:?}");
+        }
+        assert_eq!(
+            metrics.get_validation_failures_total(),
+            2 * records.len() as u64
+        );
     }
 
     /// A flood of refused records writes one security line per reason, counts
