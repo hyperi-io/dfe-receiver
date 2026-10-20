@@ -3,6 +3,12 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.15.52](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.51...v1.15.52) (2026-10-20)
+
+### Bug Fixes
+
+* refuse non-object records so a nested _org_id cannot pass the strip ([#200](https://github.com/hyperi-io/dfe-receiver/issues/200)) ([53d1721](https://github.com/hyperi-io/dfe-receiver/commit/53d172102df79119e5e89766bbe9c2c25ced687f))
+
 ## [1.15.51](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.50...v1.15.51) (2026-10-19)
 
 ### Bug Fixes
