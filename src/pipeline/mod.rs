@@ -1125,6 +1125,14 @@ impl PipelineState {
 
         // Validate (read guard dropped before any .await)
         let validation = self.validator.read().validate(&payload);
+
+        // Before the DLQ and both targets, so no copy the receiver forwards keeps it.
+        let payload = if dispatch.routes.router.strips_org_id() {
+            routing::strip_org_id(payload)
+        } else {
+            payload
+        };
+
         match validation {
             ValidationResult::Valid => {
                 trace!(bytes = payload.len(), "Message validation passed");
@@ -1150,13 +1158,6 @@ impl PipelineState {
                 return Err(Error::Validation(reason));
             }
         }
-
-        // Before both targets, so a listener bound to a fixed topic strips it too.
-        let payload = if dispatch.routes.router.strips_org_id() {
-            routing::strip_org_id(payload)
-        } else {
-            payload
-        };
 
         match target {
             Target::Routed => self.process_routed(payload, dispatch).await,
@@ -2558,6 +2559,28 @@ mod tests {
             written.contains("missing required field: org_id"),
             "the DLQ does not hold the record: {written:?}"
         );
+    }
+
+    /// A dead letter drops a sender's `_org_id`, the same as a delivered record.
+    #[tokio::test]
+    async fn a_dead_letter_drops_a_sender_org_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_config();
+        file_dlq(&mut config, dir.path());
+        let state = test_state_with(config).await;
+        let spoofed = Bytes::from(r#"{"a":1,"_org_id":"another-org"}"#);
+
+        let outcome = state
+            .process_batch_acked(&[spoofed], &holding(&state), None)
+            .await;
+
+        assert_eq!(outcome.accepted, 1);
+        state.dlq.as_ref().unwrap().flush().await.unwrap();
+        let written =
+            std::fs::read_to_string(dir.path().join("receiver").join("dlq.ndjson")).unwrap();
+        let entry: DlqEntry = serde_json::from_str(written.lines().next().unwrap()).unwrap();
+        let record: serde_json::Value = serde_json::from_slice(&entry.payload).unwrap();
+        assert_eq!(record, serde_json::json!({"a": 1}));
     }
 
     /// Held, a dead letter the DLQ refuses answers retryable: the record is in

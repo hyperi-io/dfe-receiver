@@ -18,6 +18,7 @@ dfe-receiver is a high-performance HTTP/gRPC receiver for PB/s scale data ingest
    - Optionally validate required fields (JSON path)
    - Refuse a body that is not JSON with a 400, counted on `receiver_validation_failures_total{reason="invalid_json"}`; route a record missing a required field to the DLQ or refuse it, per `dlq_on_invalid`
    - Refuse JSON nested deeper than 64 levels with a 400, before any parse reads it
+   - Refuse valid JSON that is not an object (an array, string, number, bool or null) with a 400, counted as `reason="not_an_object"`
 
    JSON is the only payload format. MessagePack, supported in DFE/XDR 2.0 and 2.1, is deprecated in DFE 2.2 and no longer accepted: the JSON path (SIMD parsing with sonic-rs, zstd on the wire) is fast enough that MessagePack gave no CPU saving.
 
