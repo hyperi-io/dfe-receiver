@@ -123,25 +123,60 @@ async fn test_bearer_tokens_loaded_from_file() {
     assert!(!accepts(&provider, "secret-d"));
 }
 
+/// A secret holds one entry per line, and a comma is part of the token on it,
+/// so half of a token never authenticates alone.
 #[tokio::test]
-async fn test_bearer_tokens_newline_and_comma_separated() {
-    // Source format supports both newline and comma separators
-    let mut file = NamedTempFile::new().unwrap();
-    writeln!(file, "token-1,token-2").unwrap();
-    writeln!(file, "token-3").unwrap();
-    file.flush().unwrap();
-
-    let source = format!("file:{}", file.path().display());
+async fn test_a_comma_in_a_bearer_secret_is_part_of_the_token() {
+    let file = write_token_file(&["abc,def", "acme-ingest:x,y", "token-3"]);
     let config = BearerConfig {
         tokens: vec![],
-        secret_source: Some(source),
+        secret_source: Some(format!("file:{}", file.path().display())),
         refresh_interval_secs: 0,
     };
     let provider = BearerTokenProvider::from_config(&config).await.unwrap();
 
     assert_eq!(provider.token_count(), 3);
-    for t in &["token-1", "token-2", "token-3"] {
-        assert!(accepts(&provider, t), "missing token: {t}");
+    assert!(accepts(&provider, "abc,def"));
+    assert!(accepts(&provider, "token-3"));
+    assert_eq!(
+        provider.principal("x,y"),
+        Some(Principal::Credential("acme-ingest".into()))
+    );
+    for half in ["abc", "def", "x", "y"] {
+        assert!(!accepts(&provider, half), "{half} authenticated alone");
+    }
+}
+
+/// A webhook header secret with a comma in it is matched whole, never by half.
+#[tokio::test]
+async fn test_a_comma_in_a_webhook_header_secret_is_part_of_it() {
+    let file = write_token_file(&["abc,def"]);
+    let config = WebhookAuthConfig {
+        mode: WebhookAuthMode::Header,
+        secret_source: format!("file:{}", file.path().display()),
+        refresh_interval_secs: 0,
+        header: "x-webhook-secret".to_string(),
+        ..WebhookAuthConfig::default()
+    };
+    let CallerAuth::Header(verifier) = CallerAuth::from_config("vendor", &config).await.unwrap()
+    else {
+        panic!("header mode builds a header verifier");
+    };
+    let with = |secret: &str| {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-webhook-secret", secret.parse().unwrap());
+        headers
+    };
+
+    assert!(verifier.verify(&with("abc,def")).is_ok());
+    for half in ["abc", "def"] {
+        assert!(
+            matches!(
+                verifier.verify(&with(half)),
+                Err(AuthFailure::InvalidHeader)
+            ),
+            "{half} authenticated alone"
+        );
     }
 }
 

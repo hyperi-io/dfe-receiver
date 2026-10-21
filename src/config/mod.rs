@@ -778,16 +778,11 @@ impl ApplyFlatEnv for Config {
         }
         // Bearer tokens arrive as a mounted Secret in the pod environment, so
         // this is the route the chart takes -- the `auth` secret group in
-        // deployment.rs declares exactly this name. Split on comma and newline,
-        // matching how BearerTokenProvider::load_tokens parses a secret
-        // payload, and read through the sensitive helper so no token reaches a
-        // log line.
+        // deployment.rs declares exactly this name. One entry per line, as
+        // BearerTokenProvider reads a secret source, and read through the
+        // sensitive helper so no token reaches a log line.
         if let Some(v) = flat_env::flat_env_string_sensitive(prefix, "BEARER_TOKENS") {
-            self.server.auth.bearer.tokens = v
-                .lines()
-                .flat_map(|line| line.split(','))
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
+            self.server.auth.bearer.tokens = crate::server::auth::secret_entries(&v)
                 .map(SensitiveString::new)
                 .collect();
         }
@@ -1236,8 +1231,8 @@ pub struct BearerConfig {
 
     /// Secret source for dynamic token loading.
     /// Format: `provider:path[:key]` (e.g. "vault:secret/auth:bearer_tokens").
-    /// The secret holds entries as `tokens` takes them, one per line or comma
-    /// separated.
+    /// The secret holds entries as `tokens` takes them, one per line. A comma
+    /// is part of a token, never a separator.
     pub secret_source: Option<String>,
 
     /// Token refresh interval in seconds (for secret-sourced tokens).
@@ -4020,7 +4015,7 @@ webhook:
         // The only route the chart has: a mounted Secret in the pod
         // environment. Without this reader the auth Secret was mounted and read
         // by nothing, and `auth.mode: bearer` came up with an empty token set.
-        with_env(&[("DFE_RECEIVER_BEARER_TOKENS", "alpha,beta")], || {
+        with_env(&[("DFE_RECEIVER_BEARER_TOKENS", "alpha\nbeta")], || {
             let mut config = Config::default();
             config.apply_flat_env(ENV_PREFIX);
             assert_eq!(
@@ -4030,15 +4025,29 @@ webhook:
         });
     }
 
+    /// A comma is part of a token, so half of one never authenticates alone.
+    #[test]
+    fn a_comma_in_a_bearer_token_from_the_environment_is_part_of_it() {
+        with_env(
+            &[("DFE_RECEIVER_BEARER_TOKENS", "abc,def\nacme:x,y")],
+            || {
+                let mut config = Config::default();
+                config.apply_flat_env(ENV_PREFIX);
+                assert_eq!(
+                    exposed(&config.server.auth.bearer.tokens),
+                    ["abc,def", "acme:x,y"]
+                );
+            },
+        );
+    }
+
     /// The values behind a list of secrets.
     fn exposed(secrets: &[SensitiveString]) -> Vec<&str> {
         secrets.iter().map(SensitiveString::expose).collect()
     }
 
     #[test]
-    fn bearer_tokens_from_the_environment_split_on_newlines_too() {
-        // A K8s Secret holding one token per line is as likely as a CSV, and
-        // BearerTokenProvider::load_tokens accepts both.
+    fn bearer_tokens_from_the_environment_skip_blank_lines() {
         with_env(
             &[("DFE_RECEIVER_BEARER_TOKENS", "alpha\n beta \n\ngamma")],
             || {
@@ -4184,7 +4193,7 @@ webhook:
     #[test]
     fn test_env_override_bearer_tokens() {
         with_env(
-            &[("DFE_RECEIVER_BEARER_TOKENS", "tok-a, tok-b ,,tok-c")],
+            &[("DFE_RECEIVER_BEARER_TOKENS", " tok-a \ntok-b\r\n\ntok-c")],
             || {
                 let mut config = Config::default();
                 config.apply_flat_env(ENV_PREFIX);

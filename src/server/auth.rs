@@ -207,6 +207,17 @@ pub fn parse_token_entries<'a>(
     Ok(parsed)
 }
 
+/// The entries in secret content, one per line, blanks skipped.
+///
+/// A line break is the one separator a minted token cannot hold, so every
+/// other character, a comma included, stays part of the token.
+pub fn secret_entries(content: &str) -> impl Iterator<Item = &str> {
+    content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+}
+
 /// Every valid token's hash, with the credential id it names.
 type TokenTable = HashMap<TokenHash, Option<Arc<str>>>;
 
@@ -344,16 +355,12 @@ impl BearerTokenProvider {
     /// Load tokens from a secret source.
     ///
     /// The source is a `provider:path[:key]` reference as
-    /// [`crate::secrets::read`] accepts. The content is a newline- or
-    /// comma-separated list of token entries. One that does not parse leaves
-    /// the current tokens in place.
+    /// [`crate::secrets::read`] accepts. The content holds one token entry per
+    /// line. One that does not parse leaves the current tokens in place.
     async fn load_tokens(&self, source: &str) -> Result<()> {
         let content = crate::secrets::read(source).await?;
-        let new_hashes = token_table(
-            content.lines().flat_map(|line| line.split(',')),
-            self.entries,
-        )
-        .map_err(|e| crate::error::Error::Config(format!("bearer secret '{source}': {e}")))?;
+        let new_hashes = token_table(secret_entries(&content), self.entries)
+            .map_err(|e| crate::error::Error::Config(format!("bearer secret '{source}': {e}")))?;
 
         let count = new_hashes.len();
         info!(count, source = %source, "Loaded bearer tokens from secret");

@@ -783,8 +783,8 @@ $defs:
         description: |-
           Secret source for dynamic token loading.
           Format: `provider:path[:key]` (e.g. "vault:secret/auth:bearer_tokens").
-          The secret holds entries as `tokens` takes them, one per line or comma
-          separated.
+          The secret holds entries as `tokens` takes them, one per line. A comma
+          is part of a token, never a separator.
         type:
         - string
         - "null"

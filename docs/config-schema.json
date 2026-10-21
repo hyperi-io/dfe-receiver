@@ -854,7 +854,7 @@
           "default": []
         },
         "secret_source": {
-          "description": "Secret source for dynamic token loading.\nFormat: `provider:path[:key]` (e.g. \"vault:secret/auth:bearer_tokens\").\nThe secret holds entries as `tokens` takes them, one per line or comma\nseparated.",
+          "description": "Secret source for dynamic token loading.\nFormat: `provider:path[:key]` (e.g. \"vault:secret/auth:bearer_tokens\").\nThe secret holds entries as `tokens` takes them, one per line. A comma\nis part of a token, never a separator.",
           "type": [
             "string",
             "null"
