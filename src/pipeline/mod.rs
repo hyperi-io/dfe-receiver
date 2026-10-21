@@ -47,12 +47,13 @@ use crate::buffer::{
 use crate::config::{BufferConfig, Config, DestinationsConfig, SharedConfig};
 use crate::error::{Error, Result};
 use crate::metrics::{Metrics, ValidationFailureReason};
-use crate::routing::{self, RouteResult, Router};
+use crate::routing::{self, RouteResult, Routed, Router};
 use crate::server::traits::BoundAddr;
 use crate::sink::Sink;
 use crate::sink::file::FileSink;
 use crate::sink::grpc::GrpcSink;
 use crate::sink::kafka::KafkaSink;
+use crate::tenancy::Ingest;
 use crate::validation::depth::{self, MAX_PARSE_DEPTH};
 use crate::validation::{self, ValidationResult, Validator};
 
@@ -456,22 +457,27 @@ enum Target<'a> {
 }
 
 /// One request's sends: the ticket its answer is held on, the routes it was
-/// taken under, and the records bound for each gRPC destination, sent together
-/// once the request is routed.
-struct Dispatch<'t> {
-    ticket: Option<&'t Ticket>,
+/// taken under, the rows its records fired, and the records bound for each
+/// gRPC destination, sent together once the request is routed.
+struct Dispatch<'a> {
+    ticket: Option<&'a Ticket>,
     /// Fixed for the request, so a reload cannot take a destination from under
     /// a record already routed to it.
-    routes: Arc<Routes>,
+    routes: &'a Routes,
+    /// Counts the rows that fire, added to the rule counters once per request.
+    tally: scalo::rules::Batch<'a>,
     grpc: Vec<(Arc<str>, Vec<Bytes>)>,
+    usage: Usage,
 }
 
-impl<'t> Dispatch<'t> {
-    fn new(ticket: Option<&'t Ticket>, routes: Arc<Routes>) -> Self {
+impl<'a> Dispatch<'a> {
+    fn new(ticket: Option<&'a Ticket>, routes: &'a Routes) -> Self {
         Self {
             ticket,
             routes,
+            tally: routes.router.tally(),
             grpc: Vec::new(),
+            usage: Usage::default(),
         }
     }
 
@@ -487,6 +493,28 @@ impl<'t> Dispatch<'t> {
         match self.grpc.iter_mut().find(|(n, _)| n == name) {
             Some((_, payloads)) => payloads.push(payload),
             None => self.grpc.push((Arc::clone(name), vec![payload])),
+        }
+    }
+}
+
+/// The decoded bytes each org's taken records carried in one batch, counted
+/// on `usage_ingested_bytes_total` only once the batch settles as taken.
+#[derive(Debug, Default)]
+struct Usage(Vec<(String, u64)>);
+
+impl Usage {
+    /// Count a taken record of `bytes` for `org`. A batch carries few orgs.
+    fn add(&mut self, org: &str, bytes: u64) {
+        match self.0.iter_mut().find(|(seen, _)| seen == org) {
+            Some((_, total)) => *total += bytes,
+            None => self.0.push((org.to_string(), bytes)),
+        }
+    }
+
+    /// Add the batch's bytes to each org's counter.
+    fn commit(self) {
+        for (org, bytes) in self.0 {
+            metrics::counter!("usage_ingested_bytes_total", "org_id" => org).increment(bytes);
         }
     }
 }
@@ -585,11 +613,7 @@ impl PipelineState {
         // The built-in `loader` is compiled into a declared destination here, so
         // the router and the sink set below both see one kind of destination.
         let destinations_config = config.resolved_destinations();
-        let router = Router::new(
-            &config.routing,
-            &destinations_config,
-            config.server.auth.include_common_header,
-        );
+        let router = Router::new(&config, &destinations_config)?;
         // Memory guard + pressure source of truth.
         //
         // Production injects the runtime's guard (the one the governor's HARD
@@ -842,44 +866,48 @@ impl PipelineState {
         Ok(())
     }
 
-    /// Process a message through the pipeline, answered at enqueue.
+    /// Process a message from `ingest` through the pipeline, answered at enqueue.
     ///
     /// This is a HOT PATH function.
     #[inline]
-    pub async fn process(&self, payload: Bytes) -> Result<()> {
+    pub async fn process(&self, payload: Bytes, ingest: &Ingest) -> Result<()> {
         self.count_received(1);
         let mut outcome = BatchOutcome::default();
-        let _ = outcome.record(self.process_one(payload).await);
+        let _ = outcome.record(self.process_one(payload, ingest).await);
         self.count_settled(&outcome);
         outcome.into_error().map_or(Ok(()), Err)
     }
 
     /// [`process`](Self::process), uncounted.
     #[inline]
-    async fn process_one(&self, payload: Bytes) -> Result<()> {
+    async fn process_one(&self, payload: Bytes, ingest: &Ingest) -> Result<()> {
         self.brake()?;
 
         // Tracked for the life of this future.
         let _lease = MemoryLease::acquire(&self.memory_guard, payload.len() as u64);
 
-        let mut dispatch = Dispatch::new(None, self.routes());
-        self.process_inner(payload, Target::Routed, &mut dispatch)
+        let routes = self.routes();
+        let mut dispatch = Dispatch::new(None, &routes);
+        self.process_inner(payload, Target::Routed, ingest, &mut dispatch)
             .await?;
-        self.send_grpc(dispatch).await
+        self.send_grpc(&mut dispatch).await?;
+        std::mem::take(&mut dispatch.usage).commit();
+        Ok(())
     }
 
-    /// Process a batch of messages, answered at enqueue.
+    /// Process a batch of messages from `ingest`, answered at enqueue.
     ///
     /// Amortises overhead: single backpressure check, single memory tracking
     /// update, and per-message process_inner() calls. A record refused for
     /// good does not stop the rest; a retryable failure does, see
     /// [`BatchOutcome`].
-    pub async fn process_batch(&self, payloads: &[Bytes]) -> BatchOutcome {
-        self.run(payloads, Target::Routed, None, Offer::First).await
+    pub async fn process_batch(&self, payloads: &[Bytes], ingest: &Ingest) -> BatchOutcome {
+        self.run(payloads, Target::Routed, ingest, None, Offer::First)
+            .await
     }
 
-    /// Process a batch for a listener with the setting `acks`, whose sender
-    /// allows `sender_deadline`.
+    /// Process a batch from `ingest` for a listener with the setting `acks`,
+    /// whose sender allows `sender_deadline`.
     ///
     /// Holding, the outcome counts every record taken only once every
     /// destination confirmed it; anything short of that is a resend of the
@@ -889,10 +917,12 @@ impl PipelineState {
         payloads: &[Bytes],
         acks: &Acks,
         sender_deadline: Option<Duration>,
+        ingest: &Ingest,
     ) -> BatchOutcome {
         self.run(
             payloads,
             Target::Routed,
+            ingest,
             Some((acks, sender_deadline)),
             Offer::First,
         )
@@ -906,24 +936,28 @@ impl PipelineState {
         payloads: &[Bytes],
         acks: &Acks,
         offer: Offer,
+        ingest: &Ingest,
     ) -> BatchOutcome {
-        self.run(payloads, Target::Routed, Some((acks, None)), offer)
+        self.run(payloads, Target::Routed, ingest, Some((acks, None)), offer)
             .await
     }
 
     /// [`process_batch_acked`](Self::process_batch_acked) to a Kafka topic
-    /// the listener chose, with no routing or enrichment. On the test-only
-    /// memory transport (`loader.transport: memory`, refused at startup) there
-    /// is no broker and a valid record is accepted and dropped.
+    /// the listener chose, with no routing or enrichment: each record takes
+    /// only its `_org_id`, held to `ingest`'s binding. On the test-only memory
+    /// transport (`loader.transport: memory`, refused at startup) there is no
+    /// broker and a valid record is accepted and dropped.
     pub async fn process_batch_to_topic(
         &self,
         payloads: &[Bytes],
         topic: &str,
         acks: &Acks,
+        ingest: &Ingest,
     ) -> BatchOutcome {
         self.run(
             payloads,
             Target::Topic(topic),
+            ingest,
             Some((acks, None)),
             Offer::First,
         )
@@ -936,13 +970,14 @@ impl PipelineState {
         &self,
         payloads: &[Bytes],
         target: Target<'_>,
+        ingest: &Ingest,
         hold: Option<(&Acks, Option<Duration>)>,
         offer: Offer,
     ) -> BatchOutcome {
         if matches!(offer, Offer::First) {
             self.count_received(payloads.len());
         }
-        let outcome = self.run_batch(payloads, target, hold).await;
+        let outcome = self.run_batch(payloads, target, ingest, hold).await;
         self.count_settled(&outcome);
         outcome
     }
@@ -962,10 +997,14 @@ impl PipelineState {
     }
 
     /// Run a batch to `target`, held on a ticket when `hold` admits one.
+    ///
+    /// The batch's usage is counted once it settles with records taken: a
+    /// batch answered as a resend of all of it counts nothing.
     async fn run_batch(
         &self,
         payloads: &[Bytes],
         target: Target<'_>,
+        ingest: &Ingest,
         hold: Option<(&Acks, Option<Duration>)>,
     ) -> BatchOutcome {
         let mut outcome = BatchOutcome::default();
@@ -993,16 +1032,18 @@ impl PipelineState {
         };
 
         let Some(ticket) = ticket else {
-            self.dispatch(payloads, target, None, &mut outcome).await;
+            let usage = self
+                .dispatch(payloads, target, ingest, None, &mut outcome)
+                .await;
+            if outcome.accepted > 0 {
+                usage.commit();
+            }
             return outcome;
         };
         // A slow destination must not hold the answer past the sender's deadline.
         let hold_ends = tokio::time::Instant::from_std(ticket.deadline());
-        let dispatched = self.dispatch(payloads, target, Some(&ticket), &mut outcome);
-        if tokio::time::timeout_at(hold_ends, dispatched)
-            .await
-            .is_err()
-        {
+        let dispatched = self.dispatch(payloads, target, ingest, Some(&ticket), &mut outcome);
+        let Ok(usage) = tokio::time::timeout_at(hold_ends, dispatched).await else {
             // A send cut off here may still land: the resend is a duplicate, never a loss.
             ticket.piece().report(DeliveryStatus::Errored);
             let answered = ticket.outcome().await;
@@ -1016,7 +1057,7 @@ impl PipelineState {
                 answered.as_str()
             )));
             return outcome;
-        }
+        };
         // A held answer is all or nothing: the sender resends the whole batch.
         if let Some(e) = outcome.unavailable.take() {
             outcome.retry_all(e);
@@ -1033,81 +1074,37 @@ impl PipelineState {
                 "delivery not confirmed ({})",
                 answered.as_str()
             )));
+            return outcome;
         }
+        usage.commit();
         outcome
     }
 
     /// Route and send each record of a batch, then send the gRPC destinations
-    /// their share, recording in `outcome` what was taken.
+    /// their share, recording in `outcome` what was taken. Returns the usage
+    /// of the records taken, for the caller to count once the batch settles.
     async fn dispatch(
         &self,
         payloads: &[Bytes],
         target: Target<'_>,
+        ingest: &Ingest,
         ticket: Option<&Ticket>,
         outcome: &mut BatchOutcome,
-    ) {
-        let mut dispatch = Dispatch::new(ticket, self.routes());
+    ) -> Usage {
+        let routes = self.routes();
+        let mut dispatch = Dispatch::new(ticket, &routes);
         for payload in payloads {
             let result = self
-                .process_inner(payload.clone(), target, &mut dispatch)
+                .process_inner(payload.clone(), target, ingest, &mut dispatch)
                 .await;
             if outcome.record(result).is_break() {
                 break;
             }
         }
-        if let Err(e) = self.send_grpc(dispatch).await {
+        if let Err(e) = self.send_grpc(&mut dispatch).await {
             outcome.retry_all(e);
         }
-    }
-
-    /// Check if enrichment (timestamp injection, source rules) is enabled.
-    #[inline]
-    fn enrichment_enabled(&self) -> bool {
-        self.shared_config
-            .with(|c| c.server.auth.include_common_header)
-    }
-
-    /// Inject `_timestamp_receiver` (now, epoch ms) into a validated JSON
-    /// object payload.
-    #[inline]
-    #[must_use]
-    pub fn enrich_payload(payload: Bytes) -> Bytes {
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis();
-        Self::enrich_payload_at(payload, now_ms)
-    }
-
-    /// Inject `_timestamp_receiver` with the given epoch-millisecond value.
-    ///
-    /// Performs byte-level append before the last `}` to avoid a full JSON
-    /// parse/rewrite on the hot path, so `payload` must be a JSON object: the
-    /// validator refuses anything else first, and the webhook checks its own
-    /// records. The key is appended whether or not the payload already carries
-    /// one. A caller that must not produce a duplicate key checks first.
-    #[inline]
-    #[must_use]
-    pub fn enrich_payload_at(payload: Bytes, now_ms: u128) -> Bytes {
-        let raw = payload.as_ref();
-        let Some(insert_pos) = raw.iter().rposition(|&b| b == b'}') else {
-            return payload;
-        };
-
-        let mut buf = Vec::with_capacity(raw.len() + 40);
-        buf.extend_from_slice(&raw[..insert_pos]);
-
-        // Add comma if there's content before the closing brace (not empty object)
-        if let Some(pos) = raw[..insert_pos]
-            .iter()
-            .rposition(|b| !b.is_ascii_whitespace())
-            && raw[pos] != b'{'
-        {
-            buf.push(b',');
-        }
-        buf.extend_from_slice(format!("\"_timestamp_receiver\":{now_ms}").as_bytes());
-        buf.extend_from_slice(&raw[insert_pos..]);
-        Bytes::from(buf)
+        std::mem::take(&mut dispatch.usage)
     }
 
     /// Inner processing logic (after backpressure check).
@@ -1116,6 +1113,7 @@ impl PipelineState {
         &self,
         payload: Bytes,
         target: Target<'_>,
+        ingest: &Ingest,
         dispatch: &mut Dispatch<'_>,
     ) -> Result<()> {
         trace!(bytes = payload.len(), "Processing message");
@@ -1127,8 +1125,14 @@ impl PipelineState {
         let validation = self.validator.read().validate(&payload);
 
         // Before the DLQ and both targets, so no copy the receiver forwards keeps it.
-        let payload = if dispatch.routes.router.strips_org_id() {
-            routing::strip_org_id(payload)
+        let forwarded = matches!(
+            validation,
+            ValidationResult::Valid | ValidationResult::Dlq(_)
+        );
+        let payload = if dispatch.routes.router.strips_org_id() && forwarded {
+            routing::strip_org_id(payload).inspect_err(|_| {
+                self.count_validation_failure(ValidationFailureReason::InvalidJson);
+            })?
         } else {
             payload
         };
@@ -1150,7 +1154,7 @@ impl PipelineState {
             ValidationResult::Dlq(reason) => {
                 debug!(reason = %reason, bytes = payload.len(), "Message validation failed, routing to DLQ");
                 self.count_validation_failure(ValidationFailureReason::MissingField);
-                return self.send_to_dlq(&payload, &reason, dispatch).await;
+                return self.send_to_dlq(&payload, &reason, ingest, dispatch).await;
             }
             ValidationResult::Reject(reason) => {
                 debug!(reason = %reason, bytes = payload.len(), "Message rejected by validator");
@@ -1160,37 +1164,44 @@ impl PipelineState {
         }
 
         match target {
-            Target::Routed => self.process_routed(payload, dispatch).await,
+            Target::Routed => self.process_routed(payload, ingest, dispatch).await,
             // The memory transport has no broker for a topic the listener picked.
             Target::Topic(_) if self.kafka.is_none() && dispatch.discards() => Ok(()),
-            Target::Topic(topic) => self.send_to_kafka(topic, &payload, dispatch).await,
+            Target::Topic(topic) => {
+                let decoded = payload.len() as u64;
+                let routes = dispatch.routes;
+                let (payload, org) =
+                    routes
+                        .router
+                        .assign_org(payload, ingest, &mut dispatch.tally)?;
+                self.send_to_kafka(topic, &payload, dispatch).await?;
+                dispatch.usage.add(org, decoded);
+                Ok(())
+            }
         }
     }
 
-    /// Enrich, route and send a validated record.
-    async fn process_routed(&self, payload: Bytes, dispatch: &mut Dispatch<'_>) -> Result<()> {
-        // Enrich (only when common header / enrichment enabled)
-        let payload = if self.enrichment_enabled() {
-            let enriched = Self::enrich_payload(payload);
-            trace!(
-                bytes = enriched.len(),
-                "Enriched payload with receiver timestamp"
-            );
-            enriched
-        } else {
-            payload
-        };
-
-        let (route, routed_source) = dispatch.routes.router.route_with_source(&payload);
-
-        // The topic carries the source on the Kafka route and nothing carries it
-        // on the loader route, so the source is written into the record --
-        // dfe-loader reads `_source` out of the data to pick the table. An
-        // unmatched record carries the catch-all source, not nothing.
-        let payload = match routed_source {
-            Some(source) => routing::stamp_source(payload, &source),
-            None => payload,
-        };
+    /// Route, stamp and send a validated record.
+    ///
+    /// The topic carries the source on the Kafka route and nothing carries it
+    /// on the loader route, so the router writes `_source` into the record --
+    /// dfe-loader reads it out of the data to pick the table -- and `_org_id`
+    /// beside it.
+    async fn process_routed(
+        &self,
+        payload: Bytes,
+        ingest: &Ingest,
+        dispatch: &mut Dispatch<'_>,
+    ) -> Result<()> {
+        let decoded = payload.len() as u64;
+        let routes = dispatch.routes;
+        let Routed {
+            route,
+            payload,
+            org,
+        } = routes
+            .router
+            .route(payload, ingest, now_millis(), &mut dispatch.tally)?;
 
         let dispatch_start = std::time::Instant::now();
         match route {
@@ -1200,6 +1211,8 @@ impl PipelineState {
             } => {
                 self.send_to_destinations(destinations, topic.as_deref(), &payload, dispatch)
                     .await?;
+                // A dead-lettered record is not ingested, so only this arm counts usage.
+                dispatch.usage.add(org, decoded);
                 trace!(
                     destinations = destinations.len(),
                     topic = topic.as_deref().unwrap_or(""),
@@ -1312,13 +1325,10 @@ impl PipelineState {
     ///
     /// The first destination's failure; a held answer's piece for it is then
     /// left unreported, which settles it `Errored`.
-    async fn send_grpc(&self, dispatch: Dispatch<'_>) -> Result<()> {
-        let Dispatch {
-            ticket,
-            routes,
-            grpc,
-        } = dispatch;
-        for (name, payloads) in grpc {
+    async fn send_grpc(&self, dispatch: &mut Dispatch<'_>) -> Result<()> {
+        let ticket = dispatch.ticket;
+        let routes = dispatch.routes;
+        for (name, payloads) in std::mem::take(&mut dispatch.grpc) {
             let Some(delivery) = routes
                 .destinations
                 .get(name.as_ref())
@@ -1369,9 +1379,14 @@ impl PipelineState {
         &self,
         payload: &Bytes,
         reason: &str,
+        ingest: &Ingest,
         dispatch: &mut Dispatch<'_>,
     ) -> Result<()> {
         if let Some(ref dlq) = self.dlq {
+            // A dead letter skips the clamp, so it keeps no `_org_id` the sender
+            // wrote. One that does not parse names no org, and is kept as sent.
+            let payload =
+                routing::strip_org_id(payload.clone()).unwrap_or_else(|_| payload.clone());
             let entry = DlqEntry::new("receiver", reason, payload.to_vec());
             let Some(ticket) = dispatch.ticket else {
                 return dlq
@@ -1397,15 +1412,19 @@ impl PipelineState {
         } else {
             // With no DLQ configured the record follows the routing table, so a
             // brokerless deployment does not need a DLQ topic to reject a bad
-            // record.
-            let dlq_route = dispatch.routes.router.route_dlq(reason);
-            match dlq_route {
-                RouteResult::Dlq(topic) => self.send_to_kafka(&topic, payload, dispatch).await,
+            // record. It lands like any other record, so its org is held too.
+            let routes = dispatch.routes;
+            let (payload, _) =
+                routes
+                    .router
+                    .assign_org(payload.clone(), ingest, &mut dispatch.tally)?;
+            match routes.router.route_dlq(reason) {
+                RouteResult::Dlq(topic) => self.send_to_kafka(&topic, &payload, dispatch).await,
                 RouteResult::Send {
                     ref destinations,
                     ref topic,
                 } => {
-                    self.send_to_destinations(destinations, topic.as_deref(), payload, dispatch)
+                    self.send_to_destinations(destinations, topic.as_deref(), &payload, dispatch)
                         .await
                 }
             }
@@ -1478,12 +1497,13 @@ impl PipelineState {
     ///
     /// # Errors
     ///
-    /// None today: a destination whose sender fails to build is reported and
-    /// skipped, not returned.
+    /// [`Error::Config`] when the router does not build. The routes and the
+    /// published config both stay on the last good version. A destination
+    /// whose sender fails to build is reported and skipped, not returned.
     pub async fn reload_config(&self, new_config: Config) -> Result<()> {
-        self.rebuild_components(&new_config).await;
+        self.rebuild_components(&new_config).await?;
 
-        // Update shared config (bumps version, notifies subscribers)
+        // Published only once the routes it describes are live.
         self.shared_config.update(new_config);
         security::config_changed(
             "config_reload",
@@ -1498,9 +1518,9 @@ impl PipelineState {
 
     /// Rebuild mutable pipeline components from new configuration.
     ///
-    /// Called by the config change subscriber when `SharedConfig` is updated
-    /// externally (e.g., by `ConfigReloader`). Does NOT update `SharedConfig`
-    /// itself -- that's already been done by the caller.
+    /// Does NOT update `SharedConfig`: the caller publishes `new_config` once
+    /// this returns `Ok`, so a failed rebuild leaves the routes and the
+    /// published config on the same version.
     ///
     /// The routing rules and the destination senders change together, so a
     /// rule takes effect with the sender it names. A destination the config
@@ -1516,14 +1536,20 @@ impl PipelineState {
     /// its old sender, and the reload waits for that; until then its records
     /// are answered unavailable. The Kafka producer and the DLQ are built at
     /// startup only.
-    pub async fn rebuild_components(&self, new_config: &Config) {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Config`] when the router does not build. Nothing is swapped.
+    pub async fn rebuild_components(&self, new_config: &Config) -> Result<()> {
         let _one_at_a_time = self.reloading.lock().await;
         let resolved = new_config.resolved_destinations();
-        let router = Arc::new(Router::new(
-            &new_config.routing,
-            &resolved,
-            new_config.server.auth.include_common_header,
-        ));
+        let router = match Router::new(new_config, &resolved) {
+            Ok(router) => Arc::new(router),
+            Err(e) => {
+                error!(error = %e, "A config reload's router did not build; the current routes stay");
+                return Err(e);
+            }
+        };
         let (destinations, moves) = self.rebuild_destinations(new_config, &resolved).await;
         let next = Arc::new(Routes {
             router,
@@ -1553,6 +1579,7 @@ impl PipelineState {
         for moving in moves {
             self.move_spool(moving).await;
         }
+        Ok(())
     }
 
     /// The destination set `config` asks for: the current sender where a
@@ -1731,6 +1758,14 @@ impl PipelineState {
             }
         }
     }
+}
+
+/// Now, in epoch milliseconds: a record's `_timestamp_received`.
+fn now_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
 }
 
 /// Report a destination whose sender a reload could not build.
@@ -2172,6 +2207,55 @@ impl Orchestrator {
         Ok(())
     }
 
+    /// Reload the config from `config_path` on a file change, a SIGHUP or every
+    /// `reload_secs` (0 for never), and rebuild the routes and destinations
+    /// from each reload that validates. The rules and bindings change with no
+    /// restart.
+    ///
+    /// The reloader publishes to a staging copy. The config every reader sees
+    /// moves only once the routes it describes are live, so a rebuild that
+    /// fails leaves both on the last good version.
+    pub fn watch_config(&self, config_path: Option<&str>, reload_secs: u64) {
+        use scalo::config::reloader::{ConfigReloader, ReloaderConfig};
+
+        type BoxError = Box<dyn std::error::Error + Send + Sync>;
+        let path = config_path.map(String::from);
+        let reloader_config = ReloaderConfig {
+            config_path: path.as_ref().map(PathBuf::from),
+            poll_interval: Duration::from_secs(reload_secs.max(5)),
+            periodic_interval: if reload_secs > 0 {
+                Duration::from_secs(reload_secs)
+            } else {
+                Duration::ZERO
+            },
+            debounce: Duration::from_millis(500),
+            enable_sighup: true,
+        };
+        let placeholder = Config {
+            config_path: path,
+            ..Config::default()
+        };
+        let staged = SharedConfig::new(self.shared_config.get());
+        let reloader = ConfigReloader::new(
+            reloader_config,
+            staged.clone(),
+            move || crate::config::reload_config(&placeholder).map_err(|e| Box::new(e) as BoxError),
+            |config: &Config| config.validate().map_err(|e| Box::new(e) as BoxError),
+        );
+        let _reloading = reloader.start();
+
+        let state = Arc::clone(&self.state);
+        let mut changes = staged.subscribe();
+        tokio::spawn(async move {
+            while changes.changed().await.is_ok() {
+                let config = staged.get();
+                if let Err(e) = state.reload_config(config).await {
+                    warn!(error = %e, "Config reload refused; the last good config stays");
+                }
+            }
+        });
+    }
+
     /// Flush every sink once the listeners have stopped.
     pub async fn shutdown(&self) -> Result<()> {
         info!("Pipeline orchestrator shutting down");
@@ -2209,6 +2293,7 @@ impl Orchestrator {
 mod tests {
     use super::*;
     use crate::metrics::testing::CounterTotals;
+    use crate::tenancy::Principal;
 
     fn test_config() -> Config {
         let mut config = Config::default();
@@ -2255,6 +2340,11 @@ mod tests {
     /// The acknowledgement setting a listener with acks on gets.
     fn holding(state: &PipelineState) -> Acks {
         state.acks("test", AcknowledgementsConfig::default(), None)
+    }
+
+    /// A sender's records over an HTTP listener with no credential.
+    fn http() -> Ingest {
+        Ingest::sent(Principal::Listener("http"))
     }
 
     /// Declared gRPC destinations `names`, every record fanned out to all of
@@ -2378,6 +2468,7 @@ mod tests {
                 &[Bytes::from(r#"{"a":1}"#), Bytes::from(r#"{"a":2}"#)],
                 &holding(&state),
                 None,
+                &http(),
             )
             .await;
 
@@ -2426,7 +2517,7 @@ mod tests {
 
         let started = std::time::Instant::now();
         let outcome = state
-            .process_batch_acked(&[Bytes::from(r#"{"a":1}"#)], &acks, None)
+            .process_batch_acked(&[Bytes::from(r#"{"a":1}"#)], &acks, None, &http())
             .await;
         let answered_in = started.elapsed();
         holder.abort();
@@ -2503,13 +2594,13 @@ mod tests {
         let state = test_state_with(config).await;
         let record = [Bytes::from(r#"{"a":1}"#)];
 
-        let at_enqueue = state.process_batch(&record).await;
+        let at_enqueue = state.process_batch(&record, &http()).await;
         assert_eq!(at_enqueue.accepted, 1);
         assert!(at_enqueue.unavailable.is_none());
 
         let held = tokio::time::timeout(
             Duration::from_secs(20),
-            state.process_batch_acked(&record, &holding(&state), None),
+            state.process_batch_acked(&record, &holding(&state), None, &http()),
         )
         .await
         .expect("the delivery report settles the request inside its hold");
@@ -2547,7 +2638,7 @@ mod tests {
         let state = test_state_with(config).await;
 
         let outcome = state
-            .process_batch_acked(&[missing_org_id()], &holding(&state), None)
+            .process_batch_acked(&[missing_org_id()], &holding(&state), None, &http())
             .await;
 
         assert!(outcome.unavailable.is_none(), "{:?}", outcome.unavailable);
@@ -2571,7 +2662,7 @@ mod tests {
         let spoofed = Bytes::from(r#"{"a":1,"_org_id":"another-org"}"#);
 
         let outcome = state
-            .process_batch_acked(&[spoofed], &holding(&state), None)
+            .process_batch_acked(&[spoofed], &holding(&state), None, &http())
             .await;
 
         assert_eq!(outcome.accepted, 1);
@@ -2581,6 +2672,66 @@ mod tests {
         let entry: DlqEntry = serde_json::from_str(written.lines().next().unwrap()).unwrap();
         let record: serde_json::Value = serde_json::from_slice(&entry.payload).unwrap();
         assert_eq!(record, serde_json::json!({"a": 1}));
+    }
+
+    /// Under `allow`, a dead letter skips the clamp, so it leaves with no
+    /// `_org_id` the sender wrote, however the key is spelled.
+    #[tokio::test]
+    async fn under_allow_a_dead_letter_drops_a_sender_org_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_config();
+        file_dlq(&mut config, dir.path());
+        config.routing.source_org_id = crate::config::SourceOrgId::Allow;
+        let state = test_state_with(config).await;
+        let spoofed = [
+            Bytes::from(r#"{"a":1,"_org_id":"another-org"}"#),
+            Bytes::from("{\"a\":1,\"\\u005forg_id\":\"another-org\"}"),
+        ];
+
+        let outcome = state
+            .process_batch_acked(&spoofed, &holding(&state), None, &http())
+            .await;
+
+        assert_eq!(outcome.accepted, 2);
+        state.dlq.as_ref().unwrap().flush().await.unwrap();
+        let written =
+            std::fs::read_to_string(dir.path().join("receiver").join("dlq.ndjson")).unwrap();
+        let records: Vec<serde_json::Value> = written
+            .lines()
+            .map(|line| {
+                let entry: DlqEntry = serde_json::from_str(line).unwrap();
+                serde_json::from_slice(&entry.payload).unwrap()
+            })
+            .collect();
+        assert_eq!(records, vec![serde_json::json!({"a": 1}); 2], "{written}");
+    }
+
+    /// A dead letter whose `_org_id` cannot be removed still reaches the DLQ,
+    /// as sent: it does not parse, so no org it names can be read from it.
+    #[tokio::test]
+    async fn under_allow_a_dead_letter_that_cannot_be_stripped_is_kept_as_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_config();
+        file_dlq(&mut config, dir.path());
+        config.routing.source_org_id = crate::config::SourceOrgId::Allow;
+        let state = test_state_with(config).await;
+        let unparsable = Bytes::from(r#"{"_org_id":"another-org","s":"\ud800"}"#);
+
+        let outcome = state
+            .process_batch_acked(
+                std::slice::from_ref(&unparsable),
+                &holding(&state),
+                None,
+                &http(),
+            )
+            .await;
+
+        assert_eq!(outcome.accepted, 1, "{:?}", outcome.unavailable);
+        state.dlq.as_ref().unwrap().flush().await.unwrap();
+        let written =
+            std::fs::read_to_string(dir.path().join("receiver").join("dlq.ndjson")).unwrap();
+        let entry: DlqEntry = serde_json::from_str(written.lines().next().unwrap()).unwrap();
+        assert_eq!(entry.payload, unparsable.to_vec());
     }
 
     /// Held, a dead letter the DLQ refuses answers retryable: the record is in
@@ -2596,7 +2747,7 @@ mod tests {
         std::fs::write(dir.path().join("receiver"), b"not a directory").unwrap();
 
         let outcome = state
-            .process_batch_acked(&[missing_org_id()], &holding(&state), None)
+            .process_batch_acked(&[missing_org_id()], &holding(&state), None, &http())
             .await;
 
         assert!(
@@ -2636,7 +2787,7 @@ mod tests {
 
         let state = test_state_with(config).await;
         let outcome = state
-            .process_batch_acked(&[missing_org_id()], &holding(&state), None)
+            .process_batch_acked(&[missing_org_id()], &holding(&state), None, &http())
             .await;
 
         assert!(outcome.unavailable.is_none(), "{:?}", outcome.unavailable);
@@ -2754,7 +2905,10 @@ mod tests {
         let state = test_state_with(unstartable_dlq(dir.path())).await;
 
         assert!(state.dlq.is_none());
-        state.process(Bytes::from(r#"{"id":1}"#)).await.unwrap();
+        state
+            .process(Bytes::from(r#"{"id":1}"#), &http())
+            .await
+            .unwrap();
     }
 
     /// An archived source's records also reach the archiver, whose direct
@@ -2803,7 +2957,7 @@ mod tests {
 
         let outcome = tokio::time::timeout(
             Duration::from_secs(10),
-            state.process_batch_acked(&[record], &holding(&state), None),
+            state.process_batch_acked(&[record], &holding(&state), None, &http()),
         )
         .await
         .expect("answered without waiting on the DLQ");
@@ -2896,7 +3050,7 @@ mod tests {
         // A record missing a required field with dlq_on_invalid=true attempts DLQ
         // routing, but no Kafka/DLQ sink is configured in test state -- expect
         // config error from the fallback path
-        let result = state.process(Bytes::from(r#"{"a":1}"#)).await;
+        let result = state.process(Bytes::from(r#"{"a":1}"#), &http()).await;
         assert!(
             result.is_err(),
             "expected error without DLQ sink: {result:?}"
@@ -2928,11 +3082,14 @@ mod tests {
         // MessagePack for {"foo": 1}: DFE takes JSON only.
         let msgpack = Bytes::from_static(&[0x81, 0xA3, b'f', b'o', b'o', 0x01]);
         for body in [Bytes::from("not json"), msgpack] {
-            let err = state.process(body.clone()).await.expect_err("not JSON");
+            let err = state
+                .process(body.clone(), &http())
+                .await
+                .expect_err("not JSON");
             assert!(matches!(err, Error::Validation(_)), "{err}");
             assert!(!err.is_retryable(), "a sender must not retry it");
             let outcome = state
-                .process_batch_to_topic(&[body], "t_land", &holding(&state))
+                .process_batch_to_topic(&[body], "t_land", &holding(&state), &http())
                 .await;
             assert_eq!(outcome.rejected, 1, "{outcome:?}");
             assert!(outcome.unavailable.is_none(), "{:?}", outcome.unavailable);
@@ -2969,13 +3126,18 @@ mod tests {
         ];
         for record in &records {
             let err = state
-                .process(record.clone())
+                .process(record.clone(), &http())
                 .await
                 .expect_err("not an object");
             assert!(matches!(err, Error::Validation(_)), "{err}");
             assert!(!err.is_retryable(), "a sender must not retry it");
             let outcome = state
-                .process_batch_to_topic(std::slice::from_ref(record), "t_land", &holding(&state))
+                .process_batch_to_topic(
+                    std::slice::from_ref(record),
+                    "t_land",
+                    &holding(&state),
+                    &http(),
+                )
                 .await;
             assert_eq!(outcome.rejected, 1, "{outcome:?}");
             assert_eq!(outcome.accepted, 0, "{outcome:?}");
@@ -3016,9 +3178,15 @@ mod tests {
         let too_deep =
             Bytes::from("[".repeat(MAX_PARSE_DEPTH + 1) + &"]".repeat(MAX_PARSE_DEPTH + 1));
         for _ in 0..RECORDS {
-            let err = state.process(not_json.clone()).await.expect_err("not JSON");
+            let err = state
+                .process(not_json.clone(), &http())
+                .await
+                .expect_err("not JSON");
             assert!(err.to_string().contains("XYZZY"), "{err}");
-            let err = state.process(too_deep.clone()).await.expect_err("too deep");
+            let err = state
+                .process(too_deep.clone(), &http())
+                .await
+                .expect_err("too deep");
             assert!(matches!(err, Error::Validation(_)), "{err}");
         }
 
@@ -3042,7 +3210,7 @@ mod tests {
         let state = test_state().await;
 
         let valid_json = Bytes::from(r#"{"test": "data"}"#);
-        let result = state.process(valid_json).await;
+        let result = state.process(valid_json, &http()).await;
         assert!(result.is_ok());
     }
 
@@ -3189,7 +3357,7 @@ mod tests {
             "guard must be idle for this to exercise the accounting"
         );
 
-        let _ = state.process(Bytes::from(vec![b'x'; 4096])).await;
+        let _ = state.process(Bytes::from(vec![b'x'; 4096]), &http()).await;
 
         assert_eq!(state.memory_guard().reserved_bytes(), before);
     }
@@ -3233,7 +3401,8 @@ mod tests {
         let bytes = payload.len() as u64;
         let before = state.memory_guard().reserved_bytes();
 
-        let mut inflight = Box::pin(state.process(payload));
+        let ingest = http();
+        let mut inflight = Box::pin(state.process(payload, &ingest));
         let mut cx = Context::from_waker(Waker::noop());
         assert!(
             inflight.as_mut().poll(&mut cx).is_pending(),
@@ -3256,41 +3425,44 @@ mod tests {
         accepted.abort();
     }
 
-    #[tokio::test]
-    async fn test_enrich_payload_injects_timestamp() {
-        let payload = Bytes::from(r#"{"key": "value"}"#);
-        let enriched = PipelineState::enrich_payload(payload);
-        let enriched_str = std::str::from_utf8(&enriched).unwrap();
-
-        assert!(enriched_str.contains("\"_timestamp_receiver\":"));
-        // Verify it's still valid JSON
-        let parsed: serde_json::Value = serde_json::from_slice(&enriched).unwrap();
-        assert!(parsed.get("_timestamp_receiver").is_some());
-        assert_eq!(parsed.get("key").unwrap(), "value");
+    /// `record` as the routes `state` holds now write it.
+    fn routed(state: &PipelineState, record: &'static str) -> serde_json::Value {
+        let routes = state.routes();
+        let mut tally = routes.router.tally();
+        let written = routes
+            .router
+            .route(Bytes::from(record), &http(), 1_760_000_000_000, &mut tally)
+            .unwrap()
+            .payload;
+        serde_json::from_slice(&written).unwrap()
     }
 
     #[tokio::test]
-    async fn test_enrich_payload_empty_object() {
-        let payload = Bytes::from(r"{}");
-        let enriched = PipelineState::enrich_payload(payload);
+    async fn a_record_takes_the_receivers_own_receive_time() {
+        let state = test_state().await;
 
-        let parsed: serde_json::Value = serde_json::from_slice(&enriched).unwrap();
-        assert!(parsed.get("_timestamp_receiver").is_some());
+        let stamped = routed(&state, r#"{"key": "value"}"#);
+        assert_eq!(stamped[routing::RECEIVED_FIELD], 1_760_000_000_000_u64);
+        assert_eq!(stamped["key"], "value");
+        assert!(stamped.get("_timestamp_receiver").is_none());
+
+        let relayed = routed(&state, r#"{"_timestamp_received": 5}"#);
+        assert_eq!(relayed[routing::RECEIVED_FIELD], 1_760_000_000_000_u64);
+        assert_eq!(
+            relayed["_timestamp_received_original"], 5,
+            "a sender's receive time is kept beside the receiver's own"
+        );
     }
 
     #[tokio::test]
-    async fn test_enrichment_disabled() {
+    async fn with_the_common_header_off_no_receive_time_is_written() {
         let mut config = test_config();
         config.server.auth.include_common_header = false;
         let state = test_state_with(config).await;
 
-        assert!(!state.enrichment_enabled());
-    }
-
-    #[tokio::test]
-    async fn test_enrichment_enabled_by_default() {
-        let state = test_state().await;
-        assert!(state.enrichment_enabled());
+        let record = routed(&state, "{}");
+        assert!(record.get(routing::RECEIVED_FIELD).is_none(), "{record}");
+        assert_eq!(record[routing::ORG_FIELD], "default");
     }
 
     #[tokio::test]
@@ -3309,21 +3481,79 @@ mod tests {
     #[tokio::test]
     async fn test_reload_config_toggles_enrichment() {
         let state = test_state().await;
-        assert!(state.enrichment_enabled());
+        assert!(routed(&state, "{}").get(routing::RECEIVED_FIELD).is_some());
 
         // Disable enrichment via reload
         let mut new_config = test_config();
         new_config.server.auth.include_common_header = false;
         state.reload_config(new_config).await.unwrap();
 
-        assert!(!state.enrichment_enabled());
+        assert!(routed(&state, "{}").get(routing::RECEIVED_FIELD).is_none());
 
         // Re-enable via another reload
         let mut re_enable = test_config();
         re_enable.server.auth.include_common_header = true;
         state.reload_config(re_enable).await.unwrap();
 
-        assert!(state.enrichment_enabled());
+        assert!(routed(&state, "{}").get(routing::RECEIVED_FIELD).is_some());
+    }
+
+    /// A reload that edits or reorders the rules routes the next record by
+    /// the new rows, with no restart.
+    #[tokio::test]
+    async fn a_reload_routes_by_the_edited_and_reordered_rules() {
+        use scalo::rules::{MatchConfig, RuleConfig, SetAction};
+
+        let row = |id: &str, field: &str, value: &str, target: &str, set: &str| {
+            RuleConfig::new(id, target, SetAction::value(set))
+                .matching(MatchConfig::equals(field, value))
+        };
+        let mut config = test_config();
+        config.rules.rules = vec![
+            row("by-app", "app", "pay", "_source", "payments"),
+            row("by-host", "host", "h1", "_source", "hosts"),
+        ];
+        let state = test_state_with(config.clone()).await;
+        let record = r#"{"app":"pay","host":"h1"}"#;
+        assert_eq!(routed(&state, record)["_source"], "payments");
+
+        config.rules.rules.reverse();
+        state.reload_config(config.clone()).await.unwrap();
+        assert_eq!(
+            routed(&state, record)["_source"],
+            "hosts",
+            "the reorder did not land"
+        );
+
+        config.rules.rules[0] = row("by-host", "host", "h1", "_source", "edited");
+        state.reload_config(config).await.unwrap();
+        assert_eq!(
+            routed(&state, record)["_source"],
+            "edited",
+            "the edit did not land"
+        );
+    }
+
+    /// Rules that do not compile never replace the running rules.
+    #[tokio::test]
+    async fn a_reload_with_rules_that_do_not_compile_keeps_the_running_rules() {
+        use scalo::rules::{RuleConfig, SetAction};
+
+        let mut config = test_config();
+        config.rules.rules = vec![RuleConfig::new("all", "_source", SetAction::value("kept"))];
+        let state = test_state_with(config.clone()).await;
+
+        config.rules.rules = vec![RuleConfig::new("bad id!", "_source", SetAction::value("x"))];
+        assert!(
+            routing::compile_rules(&config).is_err(),
+            "the reloader's validate step refuses it"
+        );
+        let version = state.shared_config().version();
+        assert!(state.reload_config(config).await.is_err());
+        assert_eq!(routed(&state, "{}")["_source"], "kept");
+        // The published config stays with the routes, never ahead of them.
+        assert_eq!(state.shared_config().version(), version);
+        assert_eq!(state.config().rules.rules[0].id, "all");
     }
 
     #[tokio::test]
@@ -3331,7 +3561,7 @@ mod tests {
         let state = Arc::new(test_state().await);
 
         // Process a message before reload
-        let result = state.process(Bytes::from(r#"{"a": 1}"#)).await;
+        let result = state.process(Bytes::from(r#"{"a": 1}"#), &http()).await;
         assert!(result.is_ok());
 
         // Reload config with different default source
@@ -3340,7 +3570,7 @@ mod tests {
         state.reload_config(new_config).await.unwrap();
 
         // Process a message after reload -- should still work
-        let result = state.process(Bytes::from(r#"{"b": 2}"#)).await;
+        let result = state.process(Bytes::from(r#"{"b": 2}"#), &http()).await;
         assert!(result.is_ok());
 
         // Verify config actually changed
@@ -3448,21 +3678,30 @@ mod tests {
                 kafka: None,
             },
         );
-        config.destinations.rules = vec![crate::config::DestinationRule {
-            match_field: "app".to_string(),
-            match_value: "broken".to_string(),
-            destination: "broken".into(),
-        }];
+        config.rules.rules = vec![
+            scalo::rules::RuleConfig::new(
+                "app-broken",
+                "_source",
+                scalo::rules::SetAction::value("broken"),
+            )
+            .matching(scalo::rules::MatchConfig::equals("app", "broken")),
+        ];
+        config
+            .destinations
+            .sources
+            .insert("broken".to_string(), "broken".into());
         state.reload_config(config).await.unwrap();
 
         assert_eq!(totals.total("receiver_destination_build_failures_total"), 1);
-        let refused = state.process(Bytes::from(r#"{"app":"broken"}"#)).await;
+        let refused = state
+            .process(Bytes::from(r#"{"app":"broken"}"#), &http())
+            .await;
         assert!(
             refused.as_ref().is_err_and(Error::is_retryable),
             "a record for the unbuilt destination was answered {refused:?}"
         );
         state
-            .process(Bytes::from(r#"{"app":"other"}"#))
+            .process(Bytes::from(r#"{"app":"other"}"#), &http())
             .await
             .expect("the default destination still takes records");
     }
@@ -3539,7 +3778,7 @@ mod tests {
             .map(|i| Bytes::from(format!(r#"{{"id":{i}}}"#)))
             .collect();
 
-        let outcome = state.process_batch(&payloads).await;
+        let outcome = state.process_batch(&payloads, &http()).await;
 
         assert_eq!(outcome.accepted, 5);
         assert_eq!(totals.total("records_received_total"), 5);
@@ -3564,7 +3803,7 @@ mod tests {
         ];
 
         let outcome = state
-            .process_batch_acked(&payloads, &holding(&state), None)
+            .process_batch_acked(&payloads, &holding(&state), None, &http())
             .await;
 
         assert_eq!(outcome.rejected, 1);
@@ -3580,8 +3819,14 @@ mod tests {
         let _recorder = metrics::set_default_local_recorder(&totals);
         let (state, _) = counting_state(test_config(), None).await;
 
-        state.process(Bytes::from(r#"{"id":1}"#)).await.unwrap();
-        let _ = state.process(Bytes::from("not json")).await.unwrap_err();
+        state
+            .process(Bytes::from(r#"{"id":1}"#), &http())
+            .await
+            .unwrap();
+        let _ = state
+            .process(Bytes::from("not json"), &http())
+            .await
+            .unwrap_err();
 
         assert_eq!(totals.total("records_received_total"), 2);
         assert_eq!(totals.total("records_delivered_total"), 1);
@@ -3606,7 +3851,10 @@ mod tests {
         state.memory_guard().add_bytes(900);
 
         let outcome = state
-            .process_batch(&[Bytes::from(r#"{"a":1}"#), Bytes::from(r#"{"a":2}"#)])
+            .process_batch(
+                &[Bytes::from(r#"{"a":1}"#), Bytes::from(r#"{"a":2}"#)],
+                &http(),
+            )
             .await;
 
         assert!(outcome.unavailable.is_some(), "{outcome:?}");
@@ -3628,7 +3876,10 @@ mod tests {
         let (state, metrics) = counting_state(config, None).await;
 
         let outcome = state
-            .process_batch(&[Bytes::from(r#"{"a":1}"#), Bytes::from(r#"{"a":2}"#)])
+            .process_batch(
+                &[Bytes::from(r#"{"a":1}"#), Bytes::from(r#"{"a":2}"#)],
+                &http(),
+            )
             .await;
         state.update_metrics(&metrics).await;
 
@@ -3646,7 +3897,7 @@ mod tests {
             Bytes::from(r#"{"id":2}"#),
             Bytes::from(r#"{"id":3}"#),
         ];
-        let outcome = state.process_batch(&payloads).await;
+        let outcome = state.process_batch(&payloads, &http()).await;
         assert_eq!(outcome.accepted, 3, "all 3 items should succeed");
         assert!(outcome.into_error().is_none(), "no errors expected");
     }
@@ -3664,7 +3915,7 @@ mod tests {
             Bytes::from(r#"{"ok":2}"#),
         ];
 
-        let outcome = state.process_batch(&payloads).await;
+        let outcome = state.process_batch(&payloads, &http()).await;
 
         assert_eq!(outcome.accepted, 2);
         assert_eq!(outcome.rejected, 1);
@@ -3690,7 +3941,7 @@ mod tests {
         ];
 
         let outcome = state
-            .process_batch_acked(&payloads, &holding(&state), None)
+            .process_batch_acked(&payloads, &holding(&state), None, &http())
             .await;
 
         assert_eq!(outcome.accepted, 2);
@@ -3715,7 +3966,7 @@ mod tests {
             Bytes::from(r#"{"ok":2}"#),
         ];
 
-        let outcome = state.process_batch(&payloads).await;
+        let outcome = state.process_batch(&payloads, &http()).await;
 
         assert_eq!(outcome.accepted, 1, "the record before the failure");
         assert_eq!(outcome.settled(), 1, "nothing after the failure is taken");
@@ -3762,13 +4013,21 @@ mod tests {
             let state = test_state().await;
 
             for depth in [20_000, 100_000] {
-                let err = state.process(nested(depth)).await.expect_err("too deep");
+                let err = state
+                    .process(nested(depth), &http())
+                    .await
+                    .expect_err("too deep");
                 assert!(
                     matches!(err, Error::Validation(ref r) if r.contains("maximum parse depth")),
                     "{err}"
                 );
                 let outcome = state
-                    .process_batch_to_topic(&[nested(depth)], "deep_land", &holding(&state))
+                    .process_batch_to_topic(
+                        &[nested(depth)],
+                        "deep_land",
+                        &holding(&state),
+                        &http(),
+                    )
                     .await;
                 assert_eq!(outcome.rejected, 1, "{outcome:?}");
                 assert!(outcome.unavailable.is_none(), "{:?}", outcome.unavailable);
@@ -3792,7 +4051,7 @@ mod tests {
                 Bytes::from(r#"{"ok":2}"#),
             ];
 
-            let outcome = state.process_batch(&payloads).await;
+            let outcome = state.process_batch(&payloads, &http()).await;
 
             assert_eq!(outcome.accepted, 2);
             assert_eq!(outcome.rejected, 1);
@@ -3814,7 +4073,9 @@ mod tests {
         let state = test_state_on_reservations(config).await;
         state.memory_guard().add_bytes(900);
 
-        let outcome = state.process_batch(&[Bytes::from(r#"{"a":1}"#)]).await;
+        let outcome = state
+            .process_batch(&[Bytes::from(r#"{"a":1}"#)], &http())
+            .await;
 
         assert_eq!(outcome.settled(), 0);
         assert!(matches!(outcome.unavailable, Some(Error::Buffer(_))));
@@ -3845,14 +4106,14 @@ mod tests {
         let mut large = String::from(r#"{"data":""#);
         large.push_str(&"x".repeat(100_000));
         large.push_str(r#""}"#);
-        let result = state.process(Bytes::from(large)).await;
+        let result = state.process(Bytes::from(large), &http()).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_pipeline_empty_object() {
         let state = test_state().await;
-        let result = state.process(Bytes::from(r"{}")).await;
+        let result = state.process(Bytes::from(r"{}"), &http()).await;
         assert!(result.is_ok(), "empty JSON object is valid");
     }
 
@@ -3861,7 +4122,7 @@ mod tests {
         let state = test_state().await;
         let nested =
             Bytes::from(r#"{"a":{"b":{"c":{"d":{"e":{"f":"deep"}}}}},"arr":[1,2,3,[4,[5]]]}"#);
-        let result = state.process(nested).await;
+        let result = state.process(nested, &http()).await;
         assert!(result.is_ok(), "deeply nested JSON should succeed");
     }
 
@@ -3869,30 +4130,123 @@ mod tests {
     async fn test_pipeline_unicode_payload() {
         let state = test_state().await;
         let unicode = Bytes::from(r#"{"msg":"日本語🎉émojí","emoji":"🔥"}"#);
-        let result = state.process(unicode).await;
+        let result = state.process(unicode, &http()).await;
         assert!(result.is_ok(), "unicode should process correctly");
     }
 
-    #[tokio::test]
-    async fn test_enrich_payload_preserves_existing_timestamp_field() {
-        // If the payload already has a _timestamp_receiver field, enrichment
-        // injects a new one (implementation currently prepends) -- verify
-        // the result is still valid JSON
-        let payload = Bytes::from(r#"{"_timestamp_receiver":"old","key":"val"}"#);
-        let enriched = PipelineState::enrich_payload(payload);
-        // Must still parse as JSON
-        let parsed = serde_json::from_slice::<serde_json::Value>(&enriched);
-        assert!(parsed.is_ok(), "enriched JSON must remain parseable");
+    /// `test_config` with credential `acme-ingest` bound to `acme` and `beta`,
+    /// and a row landing `{"app":"b"}` in `beta`.
+    fn two_org_config() -> Config {
+        let mut config = test_config();
+        config.ingest_bindings.credentials.insert(
+            "acme-ingest".to_string(),
+            crate::config::OrgBinding {
+                orgs: vec!["acme".to_string(), "beta".to_string()],
+                default_org: None,
+            },
+        );
+        config.rules.rules = vec![
+            scalo::rules::RuleConfig::new(
+                "to-beta",
+                "_org_id",
+                scalo::rules::SetAction::value("beta"),
+            )
+            .matching(scalo::rules::MatchConfig::equals("app", "b")),
+        ];
+        config
     }
 
+    fn acme_ingest() -> Ingest {
+        Ingest::sent(Principal::Credential("acme-ingest".into()))
+    }
+
+    /// Each org's accepted records add their decoded bytes to its own usage series.
     #[tokio::test]
-    async fn test_enrich_payload_array_root_not_supported() {
-        // Top-level arrays are not valid for enrichment (expects object).
-        // Verify it doesn't panic -- either passes through or returns as-is.
-        let payload = Bytes::from("[1,2,3]");
-        let enriched = PipelineState::enrich_payload(payload.clone());
-        // Should not panic; result is implementation-defined for non-object roots
-        assert!(!enriched.is_empty());
+    async fn usage_counts_the_bytes_each_org_took() {
+        let recorder = crate::buffer::rejects::CountedKeys::default();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let state = test_state_with(two_org_config()).await;
+        let to_beta = Bytes::from(r#"{"app":"b","n":1}"#);
+        let to_acme = Bytes::from(r#"{"app":"x"}"#);
+
+        let outcome = state
+            .process_batch(
+                &[to_beta.clone(), to_acme.clone(), to_acme.clone()],
+                &acme_ingest(),
+            )
+            .await;
+
+        assert_eq!(outcome.accepted, 3, "{outcome:?}");
+        assert_eq!(
+            recorder.get("usage_ingested_bytes_total{org_id=beta}"),
+            to_beta.len() as u64
+        );
+        assert_eq!(
+            recorder.get("usage_ingested_bytes_total{org_id=acme}"),
+            2 * to_acme.len() as u64
+        );
+        assert_eq!(
+            recorder.get("usage_ingested_bytes_total{org_id=default}"),
+            0
+        );
+    }
+
+    /// A dead-lettered record is not ingested, so it adds no usage.
+    #[tokio::test]
+    async fn a_dead_letter_counts_no_usage() {
+        let recorder = crate::buffer::rejects::CountedKeys::default();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_config();
+        file_dlq(&mut config, dir.path());
+        let state = test_state_with(config).await;
+
+        let outcome = state
+            .process_batch_acked(&[missing_org_id()], &holding(&state), None, &http())
+            .await;
+
+        assert_eq!(outcome.accepted, 1, "the DLQ took it: {outcome:?}");
+        assert_eq!(
+            recorder.get("usage_ingested_bytes_total{org_id=default}"),
+            0
+        );
+    }
+
+    /// A held batch answered as a resend of all of it adds no usage: the resend counts it.
+    #[tokio::test]
+    async fn a_held_batch_answered_retryable_counts_no_usage() {
+        let recorder = crate::buffer::rejects::CountedKeys::default();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_config();
+        grpc_destinations(&mut config, &["alpha"]);
+        spill_to(&mut config, dir.path());
+        let state = test_state_with(config).await;
+
+        let outcome = state
+            .process_batch_acked(
+                &[Bytes::from(r#"{"a":1}"#)],
+                &holding(&state),
+                None,
+                &http(),
+            )
+            .await;
+
+        assert!(outcome.unavailable.is_some(), "{outcome:?}");
+        assert_eq!(
+            recorder.get("usage_ingested_bytes_total{org_id=default}"),
+            0
+        );
+    }
+
+    /// A record stamped under the old name keeps it beside the new one, so
+    /// no key is written twice.
+    #[tokio::test]
+    async fn a_record_with_the_old_receive_stamp_takes_the_new_one_beside_it() {
+        let state = test_state().await;
+        let stamped = routed(&state, r#"{"_timestamp_receiver":"old","key":"val"}"#);
+        assert_eq!(stamped["_timestamp_receiver"], "old");
+        assert_eq!(stamped[routing::RECEIVED_FIELD], 1_760_000_000_000_u64);
     }
 
     #[tokio::test]
@@ -3922,7 +4276,7 @@ mod tests {
         assert!(state.is_ready());
 
         // And continue to process payloads
-        let result = state.process(Bytes::from(r#"{"ok":true}"#)).await;
+        let result = state.process(Bytes::from(r#"{"ok":true}"#), &http()).await;
         assert!(result.is_ok());
     }
 
@@ -3936,7 +4290,9 @@ mod tests {
             state.reload_config(cfg).await.unwrap();
         }
         // After many reloads, pipeline must still work
-        let result = state.process(Bytes::from(r#"{"final":true}"#)).await;
+        let result = state
+            .process(Bytes::from(r#"{"final":true}"#), &http())
+            .await;
         assert!(result.is_ok());
     }
 
@@ -3945,7 +4301,7 @@ mod tests {
         // Invalid UTF-8 bytes must not cause a panic
         let state = test_state().await;
         let bad = Bytes::from(vec![0xff, 0xfe, 0xfd, 0xfc, 0x00, 0x01]);
-        let result = state.process(bad).await;
+        let result = state.process(bad, &http()).await;
         // Must return an error, not panic
         assert!(result.is_err());
     }
@@ -3955,7 +4311,7 @@ mod tests {
         // Truncated JSON (common in network corruption) should be rejected cleanly
         let state = test_state().await;
         let truncated = Bytes::from(r#"{"key":"val"#);
-        let result = state.process(truncated).await;
+        let result = state.process(truncated, &http()).await;
         assert!(result.is_err());
     }
 }

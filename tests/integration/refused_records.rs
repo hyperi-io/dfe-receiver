@@ -118,7 +118,10 @@ async fn refusing_bus(config: &Config) -> Arc<PipelineState> {
             break;
         }
         pipeline
-            .process(Bytes::from_static(br#"{"filler":true}"#))
+            .process(
+                Bytes::from_static(br#"{"filler":true}"#),
+                &crate::common::http_ingest(),
+            )
             .await
             .expect("the queue still has room");
     }

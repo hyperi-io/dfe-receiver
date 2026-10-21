@@ -26,6 +26,7 @@ use dfe_receiver::config::{BearerConfig, TlsConfig, WebhookAuthConfig, WebhookAu
 use dfe_receiver::server::auth::BearerTokenProvider;
 use dfe_receiver::server::tls::build_tls_acceptor_async;
 use dfe_receiver::server::webhook::auth::{AuthFailure, CallerAuth};
+use dfe_receiver::tenancy::Principal;
 use tempfile::NamedTempFile;
 
 use crate::common::start_vault_container;
@@ -41,9 +42,67 @@ fn write_token_file(tokens: &[&str]) -> NamedTempFile {
     file
 }
 
+/// Whether `provider` takes `token`.
+fn accepts(provider: &BearerTokenProvider, token: &str) -> bool {
+    provider.principal(token).is_some()
+}
+
 // ---------------------------------------------------------------------------
 // File-based secret provider (always available)
 // ---------------------------------------------------------------------------
+
+/// A secret entry `<id>:<token>` authenticates the token alone, as that credential.
+#[tokio::test]
+async fn test_named_bearer_tokens_loaded_from_file_carry_their_credential() {
+    let file = write_token_file(&["acme-ingest:token-a", "token-b"]);
+    let config = BearerConfig {
+        tokens: vec![],
+        secret_source: Some(format!("file:{}", file.path().display())),
+        refresh_interval_secs: 0,
+    };
+    let provider = BearerTokenProvider::from_config(&config).await.unwrap();
+
+    assert_eq!(
+        provider.principal("token-a"),
+        Some(Principal::Credential("acme-ingest".into()))
+    );
+    assert_eq!(
+        provider.principal("token-b"),
+        Some(Principal::UnnamedCredential)
+    );
+    assert!(
+        !accepts(&provider, "acme-ingest:token-a"),
+        "the id is not part of the token"
+    );
+}
+
+/// A webhook header secret is one whole value, so a colon in it names no credential.
+#[tokio::test]
+async fn test_a_webhook_header_secret_with_a_colon_is_matched_whole() {
+    let file = write_token_file(&["vendor:shared-secret"]);
+    let config = WebhookAuthConfig {
+        mode: WebhookAuthMode::Header,
+        secret_source: format!("file:{}", file.path().display()),
+        refresh_interval_secs: 0,
+        header: "x-webhook-secret".to_string(),
+        ..WebhookAuthConfig::default()
+    };
+    let CallerAuth::Header(verifier) = CallerAuth::from_config("vendor", &config).await.unwrap()
+    else {
+        panic!("header mode builds a header verifier");
+    };
+    let with = |secret: &str| {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-webhook-secret", secret.parse().unwrap());
+        headers
+    };
+
+    assert!(verifier.verify(&with("vendor:shared-secret")).is_ok());
+    assert!(matches!(
+        verifier.verify(&with("shared-secret")),
+        Err(AuthFailure::InvalidHeader)
+    ));
+}
 
 #[tokio::test]
 async fn test_bearer_tokens_loaded_from_file() {
@@ -58,31 +117,66 @@ async fn test_bearer_tokens_loaded_from_file() {
     let provider = BearerTokenProvider::from_config(&config).await.unwrap();
 
     assert_eq!(provider.token_count(), 3);
-    assert!(provider.is_valid("secret-a"));
-    assert!(provider.is_valid("secret-b"));
-    assert!(provider.is_valid("secret-c"));
-    assert!(!provider.is_valid("secret-d"));
+    assert!(accepts(&provider, "secret-a"));
+    assert!(accepts(&provider, "secret-b"));
+    assert!(accepts(&provider, "secret-c"));
+    assert!(!accepts(&provider, "secret-d"));
 }
 
+/// A secret holds one entry per line, and a comma is part of the token on it,
+/// so half of a token never authenticates alone.
 #[tokio::test]
-async fn test_bearer_tokens_newline_and_comma_separated() {
-    // Source format supports both newline and comma separators
-    let mut file = NamedTempFile::new().unwrap();
-    writeln!(file, "token-1,token-2").unwrap();
-    writeln!(file, "token-3").unwrap();
-    file.flush().unwrap();
-
-    let source = format!("file:{}", file.path().display());
+async fn test_a_comma_in_a_bearer_secret_is_part_of_the_token() {
+    let file = write_token_file(&["abc,def", "acme-ingest:x,y", "token-3"]);
     let config = BearerConfig {
         tokens: vec![],
-        secret_source: Some(source),
+        secret_source: Some(format!("file:{}", file.path().display())),
         refresh_interval_secs: 0,
     };
     let provider = BearerTokenProvider::from_config(&config).await.unwrap();
 
     assert_eq!(provider.token_count(), 3);
-    for t in &["token-1", "token-2", "token-3"] {
-        assert!(provider.is_valid(t), "missing token: {t}");
+    assert!(accepts(&provider, "abc,def"));
+    assert!(accepts(&provider, "token-3"));
+    assert_eq!(
+        provider.principal("x,y"),
+        Some(Principal::Credential("acme-ingest".into()))
+    );
+    for half in ["abc", "def", "x", "y"] {
+        assert!(!accepts(&provider, half), "{half} authenticated alone");
+    }
+}
+
+/// A webhook header secret with a comma in it is matched whole, never by half.
+#[tokio::test]
+async fn test_a_comma_in_a_webhook_header_secret_is_part_of_it() {
+    let file = write_token_file(&["abc,def"]);
+    let config = WebhookAuthConfig {
+        mode: WebhookAuthMode::Header,
+        secret_source: format!("file:{}", file.path().display()),
+        refresh_interval_secs: 0,
+        header: "x-webhook-secret".to_string(),
+        ..WebhookAuthConfig::default()
+    };
+    let CallerAuth::Header(verifier) = CallerAuth::from_config("vendor", &config).await.unwrap()
+    else {
+        panic!("header mode builds a header verifier");
+    };
+    let with = |secret: &str| {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-webhook-secret", secret.parse().unwrap());
+        headers
+    };
+
+    assert!(verifier.verify(&with("abc,def")).is_ok());
+    for half in ["abc", "def"] {
+        assert!(
+            matches!(
+                verifier.verify(&with(half)),
+                Err(AuthFailure::InvalidHeader)
+            ),
+            "{half} authenticated alone"
+        );
     }
 }
 
@@ -147,7 +241,7 @@ async fn test_bearer_tokens_missing_file_falls_back_to_static() {
     let provider = BearerTokenProvider::from_config(&config).await.unwrap();
 
     assert_eq!(provider.token_count(), 1);
-    assert!(provider.is_valid("static-fallback"));
+    assert!(accepts(&provider, "static-fallback"));
 }
 
 /// A value with no `provider:` prefix must be refused, not used.
@@ -164,9 +258,12 @@ async fn test_bearer_tokens_source_with_no_provider_is_not_used_as_a_token() {
     };
     let provider = BearerTokenProvider::from_config(&config).await.unwrap();
 
-    assert!(provider.is_valid("static"), "the static token must survive");
     assert!(
-        !provider.is_valid("invalid_no_colon"),
+        accepts(&provider, "static"),
+        "the static token must survive"
+    );
+    assert!(
+        !accepts(&provider, "invalid_no_colon"),
         "the spec itself must not become an accepted token"
     );
     assert_eq!(provider.token_count(), 1);
@@ -181,9 +278,9 @@ async fn test_bearer_tokens_unknown_provider_rejected() {
     };
     let provider = BearerTokenProvider::from_config(&config).await.unwrap();
 
-    assert!(provider.is_valid("fallback"));
+    assert!(accepts(&provider, "fallback"));
     assert!(
-        !provider.is_valid("nonexistent_provider:some_path"),
+        !accepts(&provider, "nonexistent_provider:some_path"),
         "an unknown provider must not fall through as a literal token"
     );
 }
@@ -406,9 +503,9 @@ async fn test_bearer_tokens_loaded_from_vault_container() {
         .await;
 
     assert_eq!(provider.token_count(), 2);
-    assert!(provider.is_valid("vault-token-1"));
-    assert!(provider.is_valid("vault-token-2"));
-    assert!(!provider.is_valid("not-in-vault"));
+    assert!(accepts(&provider, "vault-token-1"));
+    assert!(accepts(&provider, "vault-token-2"));
+    assert!(!accepts(&provider, "not-in-vault"));
 }
 
 /// TLS certificate material loads from `vault:` references, the certificate and
@@ -675,8 +772,8 @@ async fn test_bearer_tokens_reload_after_file_update() {
         refresh_interval_secs: 0,
     };
     let provider1 = BearerTokenProvider::from_config(&config).await.unwrap();
-    assert!(provider1.is_valid("initial-token"));
-    assert!(!provider1.is_valid("rotated-token"));
+    assert!(accepts(&provider1, "initial-token"));
+    assert!(!accepts(&provider1, "rotated-token"));
     drop(provider1);
 
     // Simulate K8s secret rotation: rewrite the file atomically
@@ -687,11 +784,11 @@ async fn test_bearer_tokens_reload_after_file_update() {
     // file through the resolver)
     let provider2 = BearerTokenProvider::from_config(&config).await.unwrap();
     assert!(
-        !provider2.is_valid("initial-token"),
+        !accepts(&provider2, "initial-token"),
         "old token should be revoked after rotation"
     );
     assert!(
-        provider2.is_valid("rotated-token"),
+        accepts(&provider2, "rotated-token"),
         "new token should be accepted after rotation"
     );
 

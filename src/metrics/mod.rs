@@ -1137,6 +1137,24 @@ const RECEIVER_SERIES: &[SeriesSpec] = &[
         "Records whose sender-supplied _org_id was removed (routing.source_org_id: disallow)",
     ),
     (
+        "usage_ingested_bytes_total",
+        MetricType::Counter,
+        &["org_id"],
+        "Payload bytes accepted for delivery, by the org each record was stamped with",
+    ),
+    (
+        "rules_hits_total",
+        MetricType::Counter,
+        &["rule_set", "rule"],
+        "Records each rule of the routing rule set matched, by rule set and rule id",
+    ),
+    (
+        "rules_clamped_total",
+        MetricType::Counter,
+        &["rule_set", "rule"],
+        "Records whose _org_id a rule set outside the credential's orgs, replaced by its default org",
+    ),
+    (
         "receiver_events_per_second",
         MetricType::Gauge,
         &[],

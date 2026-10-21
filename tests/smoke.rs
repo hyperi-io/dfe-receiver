@@ -25,6 +25,7 @@ use tokio_util::sync::CancellationToken;
 use dfe_receiver::config::Config;
 use dfe_receiver::metrics::Metrics;
 use dfe_receiver::pipeline::Orchestrator;
+use dfe_receiver::tenancy::{Ingest, Principal};
 
 /// Full startup lifecycle: metrics init + pipeline build + process + shutdown.
 ///
@@ -61,8 +62,9 @@ async fn test_full_startup_lifecycle() {
 
     // Step 6: Process a message through the pipeline
     let payload = Bytes::from(r#"{"test": "startup_smoke"}"#);
+    let ingest = Ingest::sent(Principal::Listener("http"));
     state
-        .process(payload)
+        .process(payload, &ingest)
         .await
         .expect("should process message");
 

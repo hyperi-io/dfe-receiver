@@ -36,11 +36,12 @@ use crate::config::{OtlpConfig, RawCapture};
 use crate::error::{Error, Result, unavailable_response};
 use crate::metrics::Metrics;
 use crate::pipeline::{Acks, BatchOutcome, PipelineState};
-use crate::server::auth::{AuthMode, TokenAuth, grpc_auth_interceptor};
+use crate::server::auth::{AuthMode, TokenAuth, grpc_auth_interceptor, principal_or_listener};
 use crate::server::grpc::{count_connections, count_oversize};
 use crate::server::http::{Accept, create_auth_state};
 use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
 use crate::server::traits::{BoundAddr, Listeners, ProtocolHandler};
+use crate::tenancy::{Ingest, Principal};
 use convert::OtlpMode;
 
 /// The transport label both OTLP listeners count under.
@@ -148,6 +149,7 @@ impl OtlpService {
         &self,
         payloads: Vec<convert::ConvertedPayload>,
         deadline: Option<std::time::Duration>,
+        ingest: &Ingest,
     ) -> std::result::Result<Option<Rejected>, Status> {
         let total_bytes: u64 = payloads.iter().map(|p| p.json.len() as u64).sum();
         self.metrics.add_bytes_received("otlp", total_bytes);
@@ -155,7 +157,7 @@ impl OtlpService {
         let jsons: Vec<bytes::Bytes> = payloads.into_iter().map(|p| p.json).collect();
         let outcome = self
             .pipeline
-            .process_batch_acked(&jsons, &self.acks, deadline)
+            .process_batch_acked(&jsons, &self.acks, deadline, ingest)
             .await;
         let settled = settle(&self.metrics, jsons.len(), outcome);
         match settled {
@@ -186,6 +188,11 @@ enum Settled {
 
 /// The message on a retryable OTLP answer.
 const OVERLOADED: &str = "server is overloaded, retry later";
+
+/// Who sent an export: its token's credential, else the listener.
+fn sender(principal: Option<&Principal>) -> Ingest {
+    Ingest::sent(principal_or_listener(principal, TRANSPORT))
+}
 
 /// Settle a batch outcome into an OTLP answer, counting the request.
 ///
@@ -229,12 +236,13 @@ impl LogsService for OtlpService {
     {
         self.metrics.inc_requests_total("otlp");
         let deadline = sender_deadline(request.metadata());
+        let ingest = sender(request.extensions().get());
         let req = request.into_inner();
 
         let payloads = convert::convert_logs(&req, self.mode, self.raw_capture)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
-        let rejected = self.process_payloads(payloads, deadline).await?;
+        let rejected = self.process_payloads(payloads, deadline, &ingest).await?;
         Ok(Response::new(logs_response(rejected)))
     }
 }
@@ -248,12 +256,13 @@ impl TraceService for OtlpService {
     {
         self.metrics.inc_requests_total("otlp");
         let deadline = sender_deadline(request.metadata());
+        let ingest = sender(request.extensions().get());
         let req = request.into_inner();
 
         let payloads = convert::convert_traces(&req, self.mode, self.raw_capture)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
-        let rejected = self.process_payloads(payloads, deadline).await?;
+        let rejected = self.process_payloads(payloads, deadline, &ingest).await?;
         Ok(Response::new(traces_response(rejected)))
     }
 }
@@ -269,12 +278,13 @@ impl MetricsService for OtlpService {
     > {
         self.metrics.inc_requests_total("otlp");
         let deadline = sender_deadline(request.metadata());
+        let ingest = sender(request.extensions().get());
         let req = request.into_inner();
 
         let payloads = convert::convert_metrics(&req, self.mode, self.raw_capture)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
-        let rejected = self.process_payloads(payloads, deadline).await?;
+        let rejected = self.process_payloads(payloads, deadline, &ingest).await?;
         Ok(Response::new(metrics_response(rejected)))
     }
 }
@@ -422,11 +432,11 @@ async fn run_http_server(
     shutdown: CancellationToken,
     bound: &BoundAddr,
 ) -> Result<()> {
-    use axum::Router;
     use axum::body::Bytes;
     use axum::extract::State;
     use axum::http::HeaderMap;
     use axum::routing::post;
+    use axum::{Extension, Router};
     use tokio::net::TcpListener;
 
     #[derive(Clone)]
@@ -461,6 +471,7 @@ async fn run_http_server(
     // Handler for OTLP HTTP logs
     async fn logs_handler(
         State(state): State<OtlpHttpState>,
+        principal: Option<Extension<Principal>>,
         headers: HeaderMap,
         body: Bytes,
     ) -> std::result::Result<axum::response::Response, Error> {
@@ -477,6 +488,7 @@ async fn run_http_server(
             &state.metrics,
             &state.acks,
             payloads,
+            &sender(principal.as_ref().map(|Extension(p)| p)),
             logs_response,
         )
         .await)
@@ -485,6 +497,7 @@ async fn run_http_server(
     // Handler for OTLP HTTP traces
     async fn traces_handler(
         State(state): State<OtlpHttpState>,
+        principal: Option<Extension<Principal>>,
         headers: HeaderMap,
         body: Bytes,
     ) -> std::result::Result<axum::response::Response, Error> {
@@ -501,6 +514,7 @@ async fn run_http_server(
             &state.metrics,
             &state.acks,
             payloads,
+            &sender(principal.as_ref().map(|Extension(p)| p)),
             traces_response,
         )
         .await)
@@ -509,6 +523,7 @@ async fn run_http_server(
     // Handler for OTLP HTTP metrics
     async fn metrics_handler(
         State(state): State<OtlpHttpState>,
+        principal: Option<Extension<Principal>>,
         headers: HeaderMap,
         body: Bytes,
     ) -> std::result::Result<axum::response::Response, Error> {
@@ -525,6 +540,7 @@ async fn run_http_server(
             &state.metrics,
             &state.acks,
             payloads,
+            &sender(principal.as_ref().map(|Extension(p)| p)),
             metrics_response,
         )
         .await)
@@ -614,13 +630,16 @@ async fn export_over_http<R: prost::Message>(
     metrics: &Metrics,
     acks: &Acks,
     payloads: Vec<convert::ConvertedPayload>,
+    ingest: &Ingest,
     response: fn(Option<Rejected>) -> R,
 ) -> axum::response::Response {
     use axum::http::{HeaderValue, StatusCode, header};
     use axum::response::IntoResponse;
 
     let jsons: Vec<bytes::Bytes> = payloads.into_iter().map(|p| p.json).collect();
-    let outcome = pipeline.process_batch_acked(&jsons, acks, None).await;
+    let outcome = pipeline
+        .process_batch_acked(&jsons, acks, None, ingest)
+        .await;
     match settle(metrics, jsons.len(), outcome) {
         Settled::Unavailable => unavailable_response(OVERLOADED),
         Settled::AllRejected(message) => (StatusCode::BAD_REQUEST, message).into_response(),

@@ -45,6 +45,11 @@ pub fn load_dotenv() {
     let _ = dotenvy::from_path(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".env"));
 }
 
+/// A sender's records over an HTTP listener with no credential.
+pub fn http_ingest() -> dfe_receiver::tenancy::Ingest {
+    dfe_receiver::tenancy::Ingest::sent(dfe_receiver::tenancy::Principal::Listener("http"))
+}
+
 // ---------------------------------------------------------------------------
 // Listener addresses
 // ---------------------------------------------------------------------------

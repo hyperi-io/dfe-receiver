@@ -322,7 +322,7 @@ async fn test_full_pipeline_to_kafka() {
             r#"{{"event_category":"pipeline_test","message":"hello","seq":{i}}}"#
         ));
         pipeline
-            .process(payload)
+            .process(payload, &super::common::http_ingest())
             .await
             .expect("Pipeline process failed");
     }
@@ -476,12 +476,19 @@ async fn test_category_routing() {
         .insert("network".to_string(), network_topic.clone());
     config.routing.default_source = default_topic.clone();
     config.routing.topic_suffix = "".to_string();
-    config.routing.source_rules = vec![dfe_receiver::config::SourceRule {
-        field: "event_category".to_string(),
-        mode: "key_value_use".to_string(),
-        match_value: None,
-        source: None,
-    }];
+    config.rules.rules = ["authentication", "network"]
+        .map(|category| {
+            scalo::rules::RuleConfig::new(
+                category,
+                "_source",
+                scalo::rules::SetAction::value(category),
+            )
+            .matching(scalo::rules::MatchConfig::equals(
+                "event_category",
+                category,
+            ))
+        })
+        .to_vec();
 
     // Create pipeline
     let pipeline = PipelineState::new(
@@ -493,19 +500,24 @@ async fn test_category_routing() {
 
     // Send messages with different categories
     pipeline
-        .process(Bytes::from(
-            r#"{"event_category":"authentication","user":"alice"}"#,
-        ))
+        .process(
+            Bytes::from(r#"{"event_category":"authentication","user":"alice"}"#),
+            &super::common::http_ingest(),
+        )
         .await
         .expect("Process failed");
     pipeline
-        .process(Bytes::from(
-            r#"{"event_category":"network","ip":"10.0.0.1"}"#,
-        ))
+        .process(
+            Bytes::from(r#"{"event_category":"network","ip":"10.0.0.1"}"#),
+            &super::common::http_ingest(),
+        )
         .await
         .expect("Process failed");
     pipeline
-        .process(Bytes::from(r#"{"event_category":"unknown","data":"test"}"#))
+        .process(
+            Bytes::from(r#"{"event_category":"unknown","data":"test"}"#),
+            &super::common::http_ingest(),
+        )
         .await
         .expect("Process failed");
 
@@ -564,9 +576,10 @@ async fn test_dlq_routing() {
 
     // Send message missing required field - should go to DLQ
     let result = pipeline
-        .process(Bytes::from(
-            r#"{"event_category":"test","data":"no required field"}"#,
-        ))
+        .process(
+            Bytes::from(r#"{"event_category":"test","data":"no required field"}"#),
+            &super::common::http_ingest(),
+        )
         .await;
 
     // Should succeed (routed to DLQ)

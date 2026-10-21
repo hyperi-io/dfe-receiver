@@ -35,7 +35,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use dfe_receiver::config::{Config, SharedConfig, SourceRule};
+use dfe_receiver::config::{Config, SharedConfig};
 use dfe_receiver::pipeline::PipelineState;
 use dfe_receiver::server::flow::handler::FlowHandler;
 use dfe_receiver::server::flow::metrics::mock::flow_metrics_for_test;
@@ -83,9 +83,8 @@ fn build_netflow_v5_packet() -> Vec<u8> {
     pkt
 }
 
-/// Construct a Config wired for Kafka delivery with a `key_value_use`
-/// source rule on `_source` so the flow envelope (`_source: "netflow"`)
-/// routes to topic `netflow_land`.
+/// Construct a Config wired for Kafka delivery, with a row that routes by the
+/// flow envelope's own `_source: "netflow"`, to topic `netflow_land`.
 fn flow_kafka_config(kf: &crate::common::KafkaTestConfig, topic_suffix: &str) -> Config {
     let mut config = Config::default();
     // The HTTP server still needs a bind address, though this test never starts it.
@@ -96,15 +95,13 @@ fn flow_kafka_config(kf: &crate::common::KafkaTestConfig, topic_suffix: &str) ->
     config.kafka = kf.to_receiver_kafka_config();
     config.destinations.default = "kafka".into();
 
-    // Route by the envelope's `_source` field, suffix `_land`.
     config.routing.default_source = "main".to_string();
     config.routing.topic_suffix = topic_suffix.to_string();
-    config.routing.source_rules = vec![SourceRule {
-        field: "_source".to_string(),
-        mode: "key_value_use".to_string(),
-        match_value: None,
-        source: None,
-    }];
+    config.rules.rules = vec![scalo::rules::RuleConfig::new(
+        "own-source",
+        "_source",
+        scalo::rules::SetAction::from("_source"),
+    )];
 
     // Flow handler config -- unified mode, single port 0, NetFlow only.
     config.flow.enabled = true;

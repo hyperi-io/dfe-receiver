@@ -18,6 +18,9 @@ use crate::config::RawCapture;
 use crate::error::{Error, Result};
 use crate::server::raw_capture;
 
+/// The `_source` this listener stamps on every record it builds.
+pub const SOURCE: &str = "fluent";
+
 /// Extract a unix timestamp (seconds) from a msgpack value.
 ///
 /// Handles both integer timestamps and EventTime extension type 0
@@ -129,7 +132,7 @@ fn entry_to_json(
     // Source tag for routing
     obj.insert(
         "_source".to_string(),
-        serde_json::Value::String("fluent".to_string()),
+        serde_json::Value::String(SOURCE.to_string()),
     );
 
     if let Some(prepared) = prepared {

@@ -182,8 +182,9 @@ done
 CONFIG_DIR=$(mktemp -d -t pgo-workload-XXXXXX)
 CONFIG_FILE="$CONFIG_DIR/config.yaml"
 
-# Every key below is a field of the receiver's Config or scalo's cascade; an
-# unknown key is ignored without a warning. Only the DLQ path is expanded.
+# Every key below is a field of the receiver's Config or scalo's cascade. Most
+# sections ignore an unknown key without a warning, but routing, rules and
+# ingest_bindings refuse one. Only the DLQ path is expanded.
 cat > "$CONFIG_FILE" <<YAML
 server:
   bind_address: "127.0.0.1:8080"
@@ -276,24 +277,32 @@ loader:
 destinations:
   default: "kafka"
 
-# Source rules in the shape dfe-engine compiles from Source definitions:
-# key_value_set on the identifier the shipper already sends.
+# Rows in the shape dfe-engine compiles from Source definitions: an equals
+# test on the identifier the shipper already sends. The org rows exercise the
+# clamp both ways: http is bound to acme, every other listener is not.
+rules:
+  rules:
+    - id: cisco-ios
+      match: { field: data_stream.dataset, op: equals, value: cisco_ios.log }
+      set: { _source: { value: cisco_ios } }
+    - id: cylance
+      match: { field: data_stream.dataset, op: equals, value: cylance.protect }
+      set: { _source: { value: cylance } }
+    - id: panw
+      match: { field: event.dataset, op: equals, value: panw.panos }
+      set: { _source: { value: panw } }
+    - id: cisco-ios-org
+      match: { field: _source, op: equals, value: cisco_ios }
+      set: { _org_id: { value: acme } }
+
+ingest_bindings:
+  listeners:
+    http:
+      orgs: [acme]
+
 routing:
   default_source: "main"
   topic_suffix: "_land"
-  source_rules:
-    - field: "data_stream.dataset"
-      mode: "key_value_set"
-      match_value: "cisco_ios.log"
-      source: "cisco_ios"
-    - field: "data_stream.dataset"
-      mode: "key_value_set"
-      match_value: "cylance.protect"
-      source: "cylance"
-    - field: "event.dataset"
-      mode: "key_value_set"
-      match_value: "panw.panos"
-      source: "panw"
   dlq:
     file_path: "${CONFIG_DIR}/dlq"
 

@@ -65,38 +65,62 @@ fn field_extraction_benchmark(c: &mut Criterion) {
 
 fn router_benchmark(c: &mut Criterion) {
     use bytes::Bytes;
-    use dfe_receiver::config::{DestinationsConfig, RoutingConfig, SourceRule};
+    use dfe_receiver::config::Config;
     use dfe_receiver::routing::Router;
+    use dfe_receiver::tenancy::{Ingest, Principal};
+    use scalo::rules::{MatchConfig, RuleConfig, SetAction};
 
     let mut group = c.benchmark_group("router");
 
     let payload =
         Bytes::from(r#"{"org_id":"acme","event_category":"auth","source":"syslog","data":"test"}"#);
+    let ingest = Ingest::sent(Principal::Listener("http"));
+    let build = |config: &Config| Router::new(config, &config.destinations).ok();
+    // A record routed and its header written, one request's tally per record.
+    let route = |router: &Router| {
+        let mut tally = router.tally();
+        router
+            .route(
+                black_box(payload.clone()),
+                &ingest,
+                1_760_000_000_000,
+                &mut tally,
+            )
+            .map(|routed| routed.payload)
+            .unwrap_or_default()
+    };
 
-    // No source rules — fast default path
-    let config = RoutingConfig::default();
-    let destinations = DestinationsConfig::default();
-    let router = Router::new(&config, &destinations, true);
+    // No rules: the default path.
+    let Some(router) = build(&Config::default()) else {
+        return;
+    };
 
     group.throughput(Throughput::Elements(1));
     group.bench_function("route_default", |b| {
-        b.iter(|| router.route(black_box(&payload)));
+        b.iter(|| route(&router));
     });
 
-    // 5 source rules — worst case miss (evaluates all rules)
-    let mut config_5 = RoutingConfig::default();
-    for i in 0..5 {
-        config_5.source_rules.push(SourceRule {
-            field: format!("nonexistent_field_{i}"),
-            mode: "key_value_set".into(),
-            match_value: Some(format!("value_{i}")),
-            source: Some(format!("source_{i}")),
-        });
-    }
-    let router_5 = Router::new(&config_5, &destinations, true);
+    // 5 rows, none matching: every row is evaluated.
+    let mut config_5 = Config::default();
+    config_5.rules.rules = (0..5)
+        .map(|i| {
+            RuleConfig::new(
+                format!("miss-{i}"),
+                "_source",
+                SetAction::value(format!("source_{i}")),
+            )
+            .matching(MatchConfig::equals(
+                format!("nonexistent_field_{i}"),
+                format!("value_{i}"),
+            ))
+        })
+        .collect();
+    let Some(router_5) = build(&config_5) else {
+        return;
+    };
 
     group.bench_function("route_5_rules_miss", |b| {
-        b.iter(|| router_5.route(black_box(&payload)));
+        b.iter(|| route(&router_5));
     });
 
     group.finish();

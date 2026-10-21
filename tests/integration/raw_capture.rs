@@ -68,6 +68,7 @@ fn common_block_switches_on_every_capturing_transport() {
         config.raw_capture_for(&config.fluent.raw_capture),
         config.raw_capture_for(&config.splunk_hec.raw_capture),
         config.raw_capture_for(&config.prometheus_rw.raw_capture),
+        #[cfg(feature = "otlp")]
         config.raw_capture_for(&config.otlp.raw_capture),
         config.raw_capture_for(&config.flow.raw_capture),
     ];
@@ -108,6 +109,7 @@ fn capture_is_off_by_default_everywhere() {
             .raw_capture_for(&config.prometheus_rw.raw_capture)
             .enabled
     );
+    #[cfg(feature = "otlp")]
     assert!(!config.raw_capture_for(&config.otlp.raw_capture).enabled);
     assert!(!config.raw_capture_for(&config.flow.raw_capture).enabled);
 }

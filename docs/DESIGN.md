@@ -24,13 +24,13 @@ dfe-receiver is a high-performance HTTP/gRPC receiver for PB/s scale data ingest
 
    Fluent Forward input (fluentd) is still accepted: it is converted to JSON at the receiver.
 
-3. **Routing**
-   - Route to Kafka topics using configurable source rules (first match wins)
-   - Rule modes: `key_present`, `key_value_set`, `key_value_use`
-   - Source-to-topic remapping and default source ("main")
-   - Legacy compat mode for `tags.event.category` / `event_category`
+3. **Routing and tenancy**
+   - A scalo rule set (`rules`) sets `_source`, then `_org_id`, first match per field
+   - `_org_id` is clamped to the orgs the sender's credential or listener is bound to (`ingest_bindings`), unbound senders to `routing.default_org_id`
+   - Source-to-topic remapping, destinations by source, and default source ("main")
    - Support direct routing to dfe-loader
-   - `_timestamp_receiver` enrichment (epoch ms injection)
+   - `_timestamp_received` enrichment (epoch ms injection): the receiver is the first hop and always writes its own, keeping a sender's as `_timestamp_received_original`
+   - `usage_ingested_bytes_total{org_id}` counts the bytes each org's accepted records carried
 
 4. **Authentication**
    - Header-based authentication (static values)
@@ -153,22 +153,15 @@ async fn ingest_handler(body: Bytes) -> StatusCode {
 
 ### Router
 
-Source-rule-based routing (first match wins):
+One pass per record (`src/routing/mod.rs`):
 
-```rust
-pub fn route(&self, payload: &Bytes) -> RouteResult {
-    // Evaluate source rules (zero-copy field extraction)
-    let source = self.evaluate_source(payload)
-        .unwrap_or_else(|| self.default_source.clone());
+1. The sender's `_org_id` is removed under `routing.source_org_id: disallow`.
+2. The rule set runs over the record's fields, read lazily from the bytes: the first `_source` row that matches, then the first `_org_id` row, which can test the `_source` just chosen.
+3. The clamp holds `_org_id` to the orgs the request's principal is bound to. A value outside them is replaced by the binding's default org and counted on `rules_clamped_total`. The record is never refused for it.
+4. The `_source` a row set, else `routing.default_source`, picks the destinations (`destinations.sources`, else `destinations.default`) and the topic.
+5. `_timestamp_received`, `_source` and `_org_id` are written back in one pass: appended before the closing brace when the record lacks them, a serde rewrite when one must be replaced or its key is spelled twice or with an escape. A sender's `_timestamp_received` is kept as `_timestamp_received_original`, swapped in the bytes with no parse when its key is spelled once and nothing else needs the rewrite. The `_source` written is the row's, else the listener's own stamp (`syslog`, `fluent`, `gelf`, the flow protocol, or `prometheus` on a series with no `_source` label), else the default. Any other `_source` the record carries is the sender's, a remote-write `_source` label included, and is kept as `_source_original` when this replaces it.
 
-    // Optional source-to-topic remapping
-    let topic = self.source_to_topic
-        .get(&source)
-        .unwrap_or(&source);
-
-    RouteResult::Kafka(format!("{topic}{}", self.topic_suffix))
-}
-```
+The principal is a bearer token's credential id, an unnamed token, or the listener itself for a request with no credential the receiver can name. mTLS client identity is not read: such a request takes its listener's binding.
 
 ### Kafka Authentication
 
@@ -230,12 +223,16 @@ With acknowledgements on (the default), each answer above is given once the dest
 
 ```rust
 pub struct BearerTokenProvider {
-    token_hashes: RwLock<HashSet<TokenHash>>,  // SHA-256 of each token, swapped on reload
+    // SHA-256 of each token, with the credential id its entry names, swapped on reload
+    token_hashes: RwLock<HashMap<TokenHash, Option<Arc<str>>>>,
+    entries: Entries,
     shutdown_tx: broadcast::Sender<()>,
 }
 ```
 
 Static tokens, `accepted_headers[].values` and `header_values` are `SensitiveString`: redacted when the config is serialised, and marked `x-dfe-secret` in the config schema. A presented credential is compared by its SHA-256 hash.
+
+A bearer entry is `<credential-id>:<token>` or a bare `<token>`. The id is not secret: `ingest_bindings.credentials` binds it to orgs, so no token or hash ever sits in the binding config. An entry that does not parse refuses the config, and a secret refresh that does not parse keeps the tokens in place. A webhook caller's header secret is read whole, colons included.
 
 Supports:
 
@@ -286,13 +283,21 @@ validation:
   required_fields: ["org_id"]
   dlq_on_invalid: true
 
+rules:
+  rules:
+    - id: crates-audit
+      match: { field: _source, op: equals, value: crates_audit }
+      set: { _source: { value: crates_audit } }
+
+ingest_bindings:
+  credentials:
+    acme-ingest:
+      orgs: [acme]
+
 routing:
-  source_rules:
-    - field: "_source"
-      mode: "key_value_use"
   default_source: "main"
+  default_org_id: "default"
   topic_suffix: "_land"
-  legacy_compat: false
   # source_to_topic:
   #   auth: "logs_auth"
   dlq:
@@ -392,9 +397,9 @@ this is not checked.
 rule, a SaaS notification hook -- rather than agents that stream them. It is
 its own protocol handler (`src/server/webhook/`), not a bolt-on to `/ingest`:
 `/ingest` checks one server-wide credential in middleware before the body is
-read, a product is identified per caller and a signed request needs the body;
-a product's payload shape is its own, so `routing.source_rules` cannot pick its
-topic; and an own listener lets a deployment expose only this port to the
+read, a product is identified per caller and a signed request needs the body.
+A product's payload shape is its own, so the `rules` rows cannot pick its
+topic. And an own listener lets a deployment expose only this port to the
 product's egress.
 
 ```mermaid
@@ -407,8 +412,8 @@ flowchart LR
     AUTH --> READY["Readiness<br/>503 + retry-after"]
     READY --> SPLIT["body: single | array"]
     SPLIT --> FILTER["CEL filter<br/>compiled at load, false drops"]
-    FILTER --> STAMP["_source = caller<br/>_timestamp_receiver"]
-    STAMP --> TOPIC["process_to_topic(caller.topic)"]
+    FILTER --> STAMP["_source = caller<br/>_timestamp_received"]
+    STAMP --> TOPIC["process_batch_to_topic(caller.topic)<br/>_org_id held to the caller's binding"]
     TOPIC --> KAFKA[("Kafka")]
 ```
 
@@ -432,10 +437,12 @@ pipeline. Failures log at debug and count under
 `receiver_auth_failures_total{reason}`; a credential spray writes no warn
 line per attempt.
 
-Delivery goes through `process_to_topic`, which validates and back-pressures
-but skips the router's enrichment, so the handler stamps `_source` (the caller
-name, which wins over a sender-supplied value) and `_timestamp_receiver`
-itself. In `body: array` mode every element is checked, filtered and stamped
+Delivery goes through `process_batch_to_topic`, which validates and
+back-pressures but skips the router's enrichment, so the handler stamps
+`_source` (the caller name, which wins over a sender-supplied value) and
+`_timestamp_received` itself. The org pass still runs: the caller's name is its
+credential id, so `_org_id` is held to `ingest_bindings.credentials.<caller>`,
+or the default org when it has none. In `body: array` mode every element is checked, filtered and stamped
 before any is delivered, so one element that is not an object refuses the
 whole request as a 400 with nothing on the topic and the sender's retry
 duplicates nothing. An oversize body is a 413 plus `body_size_rejected_total`,
@@ -905,8 +912,8 @@ See `config.example.yaml` for the full `flow:` block.
 - [x] gRPC Vector sink protocol
 - [x] Sidecar transport pattern (see `docs/SIDECAR-TRANSPORTS.md`)
 - [x] Config hot-reload via SIGHUP (routing, validation, enrichment)
-- [x] Source-rule-based routing (key_present, key_value_set, key_value_use)
-- [x] `_timestamp_receiver` enrichment
+- [x] Rule-set routing with credential-bound tenancy (`rules`, `ingest_bindings`)
+- [x] `_timestamp_received` enrichment
 - [x] 9-protocol multi-protocol ingestion (HTTP, gRPC, OTLP, Lumberjack, Splunk HEC, Syslog, Fluent, GELF, Prometheus RW)
 - [x] Flow handler (NetFlow v5/v9/IPFIX + sFlow v5 + NSEL + NAT44, autosense UDP, EXPERIMENTAL)
 - [x] Webhook intake (`POST /webhook/{caller}`, per-caller HMAC or static-header auth, per-caller topic)

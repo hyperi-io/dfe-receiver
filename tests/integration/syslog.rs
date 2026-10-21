@@ -520,3 +520,48 @@ async fn a_syslog_ip_filter_refusal_is_counted() {
     assert_eq!(requests_total(&syslog.metrics), 0);
     assert_eq!(syslog.metrics.get_active_connections(), 0);
 }
+
+/// An unbound syslog listener delivers every line as before, over UDP and TCP,
+/// each stamped `_source: syslog` and the default org. TLS reads through the
+/// same connection handler as plain TCP.
+#[tokio::test]
+async fn an_unbound_syslog_listener_delivers_into_the_default_org() {
+    use scalo::transport::TransportReceiver;
+    use tokio::io::AsyncWriteExt;
+
+    let (loader_endpoint, loader) = crate::common::grpc_destination().await;
+    let mut config = test_config();
+    config.loader.transport = "grpc".to_string();
+    config.loader.grpc_endpoint = Some(loader_endpoint);
+    config.routing.dlq.enabled = false;
+    let syslog = start_syslog_handler(config).await;
+
+    let sender = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    sender
+        .send_to(b"<14>Sep 25 10:00:00 host app: over udp", syslog.udp)
+        .await
+        .unwrap();
+    let mut tcp = tokio::net::TcpStream::connect(syslog.tcp).await.unwrap();
+    tcp.write_all(b"<14>Sep 25 10:00:01 host app: over tcp\n")
+        .await
+        .unwrap();
+    tcp.flush().await.unwrap();
+
+    let mut received = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while received.len() < 2 && tokio::time::Instant::now() < deadline {
+        if let Ok(batch) = loader.recv(2).await {
+            received.extend(batch.records.into_iter().map(|r| r.payload));
+        }
+    }
+    drop(tcp);
+    syslog.shutdown.cancel();
+
+    assert_eq!(received.len(), 2, "both lines reach the loader");
+    for record in &received {
+        let record: serde_json::Value = serde_json::from_slice(record).unwrap();
+        assert_eq!(record["_source"], "syslog", "{record}");
+        assert_eq!(record["_org_id"], "default", "{record}");
+        assert!(record.get("_source_original").is_none(), "{record}");
+    }
+}

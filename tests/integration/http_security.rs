@@ -908,16 +908,17 @@ async fn test_bearer_auth_file_refresh() {
     shutdown.cancel();
 }
 
-/// Test bearer auth with comma-separated tokens in file.
+/// A token file holds one token per line, and a comma is part of the token on
+/// it: the whole line authenticates, and no part of it does alone.
 #[tokio::test]
-async fn test_bearer_auth_file_comma_separated() {
+async fn test_bearer_auth_file_comma_is_part_of_the_token() {
     use std::io::Write;
 
     let mut config = test_config(10_000, 30_000, "bearer");
 
-    // Write comma-separated tokens
     let mut token_file = tempfile::NamedTempFile::new().expect("Failed to create temp file");
-    writeln!(token_file, "token-alpha,token-beta,token-gamma").expect("Failed to write tokens");
+    writeln!(token_file, "token-alpha,token-beta").expect("Failed to write tokens");
+    writeln!(token_file, "token-gamma").expect("Failed to write tokens");
     token_file.flush().expect("Failed to flush");
 
     let token_path = token_file
@@ -935,8 +936,8 @@ async fn test_bearer_auth_file_comma_separated() {
     let (url, shutdown) = start_test_server(config).await;
     let client = reqwest::Client::new();
 
-    // All three comma-separated tokens should work
-    for token in ["token-alpha", "token-beta", "token-gamma"] {
+    // Each whole line is a token.
+    for token in ["token-alpha,token-beta", "token-gamma"] {
         let response = client
             .post(format!("{url}/ingest"))
             .header("content-type", "application/json")
@@ -956,22 +957,24 @@ async fn test_bearer_auth_file_comma_separated() {
         );
     }
 
-    // Token not in file should be rejected
-    let response = client
-        .post(format!("{url}/ingest"))
-        .header("content-type", "application/json")
-        .header("authorization", "Bearer token-delta")
-        .body(r#"{"test":"data"}"#)
-        .send()
-        .await
-        .expect("Request failed");
+    // Half of a line, or a token not in the file, is refused.
+    for token in ["token-alpha", "token-beta", "token-delta"] {
+        let response = client
+            .post(format!("{url}/ingest"))
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"))
+            .body(r#"{"test":"data"}"#)
+            .send()
+            .await
+            .expect("Request failed");
 
-    assert_eq!(
-        response.status().as_u16(),
-        401,
-        "Expected 401 for token not in file, got: {}",
-        response.status()
-    );
+        assert_eq!(
+            response.status().as_u16(),
+            401,
+            "Expected 401 for '{token}', got: {}",
+            response.status()
+        );
+    }
 
     shutdown.cancel();
 }

@@ -462,3 +462,73 @@ async fn test_hyperdx_mode_single_timeseries() {
     shutdown.cancel();
     tokio::time::sleep(Duration::from_millis(100)).await;
 }
+
+/// A series whose `__name__` is `name`, carrying the extra `labels`.
+fn series_with(name: &str, labels: &[(&str, &str)]) -> proto::TimeSeries {
+    let mut series = make_timeseries(name, 1.0, 1_709_540_000_000);
+    series
+        .labels
+        .extend(labels.iter().map(|(name, value)| proto::Label {
+            name: (*name).to_string(),
+            value: (*value).to_string(),
+        }));
+    series
+}
+
+/// A `_source` label is the sender's: it loses to a matching row and to the
+/// default, and is kept as `_source_original`. A series without one takes the
+/// listener's own `_source: prometheus`.
+#[tokio::test]
+async fn a_source_label_is_the_senders_and_is_parked() {
+    use scalo::transport::TransportReceiver;
+
+    let (loader_endpoint, loader) = crate::common::grpc_destination().await;
+    let mut config = test_config();
+    config.loader.transport = "grpc".to_string();
+    config.loader.grpc_endpoint = Some(loader_endpoint);
+    config.routing.dlq.enabled = false;
+    config.rules.rules = vec![
+        scalo::rules::RuleConfig::new("node", "_source", scalo::rules::SetAction::value("node"))
+            .matching(scalo::rules::MatchConfig::equals("job", "node")),
+    ];
+    let (shutdown, _metrics, url) = start_rw_handler(config).await;
+
+    let request = proto::WriteRequest {
+        timeseries: vec![
+            series_with("a", &[("_source", "custom")]),
+            series_with("b", &[]),
+            series_with("c", &[("_source", "custom"), ("job", "node")]),
+        ],
+        metadata: vec![],
+    };
+    let resp = reqwest::Client::new()
+        .post(format!("{url}/api/v1/write"))
+        .header("Content-Type", "application/x-protobuf")
+        .header("Content-Encoding", "snappy")
+        .body(encode_write_request(&request))
+        .send()
+        .await
+        .expect("request failed");
+    assert_eq!(resp.status(), 204);
+
+    let mut by_name = std::collections::BTreeMap::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while by_name.len() < 3 && tokio::time::Instant::now() < deadline {
+        if let Ok(batch) = loader.recv(3).await {
+            for record in batch.records {
+                let value: serde_json::Value = serde_json::from_slice(&record.payload).unwrap();
+                by_name.insert(value["__name__"].as_str().unwrap().to_string(), value);
+            }
+        }
+    }
+    shutdown.cancel();
+
+    assert_eq!(by_name.len(), 3, "{by_name:?}");
+    let (a, b, c) = (&by_name["a"], &by_name["b"], &by_name["c"]);
+    assert_eq!(a["_source"], "main", "{a}");
+    assert_eq!(a["_source_original"], "custom", "{a}");
+    assert_eq!(b["_source"], "prometheus", "{b}");
+    assert!(b.get("_source_original").is_none(), "{b}");
+    assert_eq!(c["_source"], "node", "{c}");
+    assert_eq!(c["_source_original"], "custom", "{c}");
+}

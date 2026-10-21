@@ -28,7 +28,7 @@ use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 use serde::Serialize;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -38,10 +38,11 @@ use crate::config::{RawCapture, SplunkHecConfig};
 use crate::error::{Error, RETRY_AFTER_SECS, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::{Acks, BatchOutcome, PipelineState};
-use crate::server::auth::TokenAuth;
+use crate::server::auth::{TokenAuth, principal_or_listener};
 use crate::server::http::{Accept, create_auth_state};
 use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
 use crate::server::traits::{BoundAddr, ProtocolHandler};
+use crate::tenancy::{Ingest, Principal};
 
 use self::convert::{RawMetadata, hec_event_to_json, parse_hec_events, raw_to_json};
 
@@ -371,12 +372,22 @@ async fn run_hec_server(
 // Route handlers
 // ---------------------------------------------------------------------------
 
+/// Who sent a HEC request: its token's credential, else the listener.
+fn sender(principal: Option<&Extension<Principal>>) -> Ingest {
+    Ingest::sent(principal_or_listener(
+        principal.map(|Extension(p)| p),
+        TRANSPORT,
+    ))
+}
+
 /// `POST /services/collector/event` -- JSON events with metadata.
 #[inline]
 async fn event_handler(
     State(state): State<HecState>,
+    principal: Option<Extension<Principal>>,
     body: Bytes,
 ) -> std::result::Result<Json<HecResponse>, HecError> {
+    let ingest = sender(principal.as_ref());
     let body_len = body.len();
     debug!(
         transport = "splunk_hec",
@@ -433,7 +444,7 @@ async fn event_handler(
     let start = std::time::Instant::now();
     let outcome = state
         .pipeline
-        .process_batch_acked(&payloads, &state.acks, None)
+        .process_batch_acked(&payloads, &state.acks, None, &ingest)
         .await;
     debug!(
         transport = "splunk_hec",
@@ -448,10 +459,12 @@ async fn event_handler(
 #[inline]
 async fn raw_handler(
     State(state): State<HecState>,
+    principal: Option<Extension<Principal>>,
     headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
     body: Bytes,
 ) -> std::result::Result<Json<HecResponse>, HecError> {
+    let ingest = sender(principal.as_ref());
     let body_len = body.len();
     debug!(
         transport = "splunk_hec_raw",
@@ -510,7 +523,7 @@ async fn raw_handler(
     let start = std::time::Instant::now();
     let outcome = state
         .pipeline
-        .process_batch_acked(&payloads, &state.acks, None)
+        .process_batch_acked(&payloads, &state.acks, None, &ingest)
         .await;
     debug!(
         transport = "splunk_hec_raw",

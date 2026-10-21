@@ -6,7 +6,7 @@
 // License:   BUSL-1.1
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
-//! A matched record reaches the destination its rule names, and only that one.
+//! A record reaches the destinations its source names, and only those.
 //!
 //! Three scalo Push listeners stand in for a transform, the archiver and the
 //! loader. The assertion is the artefact -- which listener received the record
@@ -23,10 +23,11 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use dfe_receiver::config::{
-    Config, DestinationRef, DestinationRule, DestinationSpec, GrpcDestination, SharedConfig,
+    Config, DestinationRef, DestinationSpec, GrpcDestination, SharedConfig,
 };
 use dfe_receiver::pipeline::PipelineState;
 use scalo::memory::{MemoryGuard, MemoryGuardConfig, UsageSource};
+use scalo::rules::{MatchConfig, RuleConfig, SetAction};
 use scalo::transport::grpc::GrpcTransport;
 use scalo::transport::{AcknowledgementsConfig, TransportReceiver};
 use tokio_util::sync::CancellationToken;
@@ -59,23 +60,28 @@ fn grpc_destination(endpoint: &str) -> DestinationSpec {
     }
 }
 
-fn app_rule(value: &str, destination: DestinationRef) -> DestinationRule {
-    DestinationRule {
-        match_field: "app".to_string(),
-        match_value: value.to_string(),
-        destination,
-    }
+/// A record whose `app` is `value` takes `_source` `value`, which goes to `destination`.
+fn app_rule(value: &str, destination: DestinationRef) -> (RuleConfig, String, DestinationRef) {
+    let rule = RuleConfig::new(format!("app-{value}"), "_source", SetAction::value(value))
+        .matching(MatchConfig::equals("app", value));
+    (rule, value.to_string(), destination)
 }
 
 /// The receiver's destination set as the engine compiles it for a deployment
 /// with no broker: a transform, an archiver, and the loader as the default.
-fn config_with(named: HashMap<String, DestinationSpec>, rules: Vec<DestinationRule>) -> Config {
+fn config_with(
+    named: HashMap<String, DestinationSpec>,
+    routes: Vec<(RuleConfig, String, DestinationRef)>,
+) -> Config {
     let mut config = Config::default();
     config.server.auth.mode = "none".to_string();
     config.routing.dlq.enabled = false;
     config.destinations.default = "loader".into();
     config.destinations.named = named;
-    config.destinations.rules = rules;
+    for (rule, source, destination) in routes {
+        config.rules.rules.push(rule);
+        config.destinations.sources.insert(source, destination);
+    }
     config
 }
 
@@ -132,15 +138,24 @@ async fn each_rule_reaches_only_its_own_destination() {
     let pipeline = pipeline_for(config).await;
 
     pipeline
-        .process(Bytes::from(r#"{"app":"orders","id":1}"#))
+        .process(
+            Bytes::from(r#"{"app":"orders","id":1}"#),
+            &crate::common::http_ingest(),
+        )
         .await
         .expect("orders record accepted");
     pipeline
-        .process(Bytes::from(r#"{"app":"audit","id":2}"#))
+        .process(
+            Bytes::from(r#"{"app":"audit","id":2}"#),
+            &crate::common::http_ingest(),
+        )
         .await
         .expect("audit record accepted");
     pipeline
-        .process(Bytes::from(r#"{"app":"anything_else","id":3}"#))
+        .process(
+            Bytes::from(r#"{"app":"anything_else","id":3}"#),
+            &crate::common::http_ingest(),
+        )
         .await
         .expect("unmatched record accepted");
 
@@ -182,7 +197,10 @@ async fn a_destination_list_fans_the_record_out() {
     let pipeline = pipeline_for(config).await;
 
     pipeline
-        .process(Bytes::from(r#"{"app":"orders","id":7}"#))
+        .process(
+            Bytes::from(r#"{"app":"orders","id":7}"#),
+            &crate::common::http_ingest(),
+        )
         .await
         .expect("record accepted");
 
@@ -217,7 +235,10 @@ async fn an_unreachable_destination_holds_then_back_pressures_the_ingest() {
     // The buffer holds the first records, so the ingest keeps accepting.
     for id in 0..10 {
         pipeline
-            .process(Bytes::from(format!(r#"{{"app":"orders","id":{id}}}"#)))
+            .process(
+                Bytes::from(format!(r#"{{"app":"orders","id":{id}}}"#)),
+                &crate::common::http_ingest(),
+            )
             .await
             .expect("a held record is accepted, not rejected");
     }
@@ -227,7 +248,10 @@ async fn an_unreachable_destination_holds_then_back_pressures_the_ingest() {
     let mut refused = false;
     for id in 10..2_000 {
         if pipeline
-            .process(Bytes::from(format!(r#"{{"app":"orders","id":{id}}}"#)))
+            .process(
+                Bytes::from(format!(r#"{{"app":"orders","id":{id}}}"#)),
+                &crate::common::http_ingest(),
+            )
             .await
             .is_err()
         {

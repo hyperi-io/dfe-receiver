@@ -18,8 +18,12 @@
 //! - Any `provider:path[:key]` spec [`crate::secrets`] reads -- a mounted
 //!   Kubernetes Secret (`file:`), an OpenBao field (`vault:`), an environment
 //!   variable (`env:`)
+//!
+//! A token entry is `<credential-id>:<token>`, or a bare `<token>`. A request
+//! a token authenticates carries that token's [`Principal`] to the pipeline,
+//! which holds its records to the orgs `ingest_bindings` binds the id to.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -42,6 +46,7 @@ use crate::config::{AuthConfig, BearerConfig};
 use crate::error::Result;
 use crate::metrics::{AuthFailureReason, Metrics};
 use crate::server::client_ip::ClientIp;
+use crate::tenancy::{Principal, is_credential_id};
 
 /// Shortest gap between two log lines for one failure reason, or one misconfiguration.
 const AUTH_LOG_INTERVAL_MS: u64 = 5_000;
@@ -141,6 +146,115 @@ fn hash_token(token: &str) -> TokenHash {
     out
 }
 
+/// One token entry: the credential id it names, if any, and the token.
+#[derive(Debug, PartialEq, Eq)]
+pub struct TokenEntry<'a> {
+    /// The id `ingest_bindings.credentials` binds, `None` for a bare token.
+    pub credential: Option<&'a str>,
+    /// The token a request presents.
+    pub token: &'a str,
+}
+
+/// Parse token entries, `<credential-id>:<token>` or a bare `<token>`, blanks skipped.
+///
+/// # Errors
+///
+/// A message naming the entry by position when its id is malformed, its token
+/// is empty, or one token is listed under two ids. It never carries a value.
+pub fn parse_token_entries<'a>(
+    entries: impl IntoIterator<Item = &'a str>,
+) -> std::result::Result<Vec<TokenEntry<'a>>, String> {
+    let mut parsed: Vec<TokenEntry<'a>> = Vec::new();
+    let mut named: HashMap<&'a str, Option<&'a str>> = HashMap::new();
+    for (index, entry) in entries
+        .into_iter()
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .enumerate()
+    {
+        let parsed_entry = match entry.split_once(':') {
+            None => TokenEntry {
+                credential: None,
+                token: entry,
+            },
+            Some((id, token)) => {
+                if !is_credential_id(id) {
+                    return Err(format!(
+                        "entry {index}: the credential id before ':' is not 1 to 128 letters, \
+                         digits, '.', '_' or '-' starting with a letter or digit"
+                    ));
+                }
+                if token.is_empty() {
+                    return Err(format!("entry {index}: the token after ':' is empty"));
+                }
+                TokenEntry {
+                    credential: Some(id),
+                    token,
+                }
+            }
+        };
+        if named
+            .insert(parsed_entry.token, parsed_entry.credential)
+            .is_some_and(|earlier| earlier != parsed_entry.credential)
+        {
+            return Err(format!(
+                "entry {index}: its token is listed under another credential id too, so it \
+                 would name two credentials"
+            ));
+        }
+        parsed.push(parsed_entry);
+    }
+    Ok(parsed)
+}
+
+/// The entries in secret content, one per line, blanks skipped.
+///
+/// A line break is the one separator a minted token cannot hold, so every
+/// other character, a comma included, stays part of the token.
+pub fn secret_entries(content: &str) -> impl Iterator<Item = &str> {
+    content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+}
+
+/// Every valid token's hash, with the credential id it names.
+type TokenTable = HashMap<TokenHash, Option<Arc<str>>>;
+
+/// How a provider reads its entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Entries {
+    /// `<credential-id>:<token>` or a bare `<token>`.
+    Named,
+    /// Each entry is one whole secret, colons included, as a webhook caller's header secret is.
+    Verbatim,
+}
+
+/// The table `entries` describe, read as `format` says.
+fn token_table<'a>(
+    entries: impl IntoIterator<Item = &'a str>,
+    format: Entries,
+) -> std::result::Result<TokenTable, String> {
+    if format == Entries::Verbatim {
+        return Ok(entries
+            .into_iter()
+            .map(str::trim)
+            .filter(|e| !e.is_empty())
+            .map(|e| (hash_token(e), None))
+            .collect());
+    }
+    let mut ids: HashMap<&str, Arc<str>> = HashMap::new();
+    Ok(parse_token_entries(entries)?
+        .into_iter()
+        .map(|entry| {
+            let credential = entry
+                .credential
+                .map(|id| Arc::clone(ids.entry(id).or_insert_with(|| Arc::from(id))));
+            (hash_token(entry.token), credential)
+        })
+        .collect())
+}
+
 /// Bearer token provider with dynamic secret loading.
 ///
 /// Supports loading tokens from:
@@ -151,20 +265,35 @@ fn hash_token(token: &str) -> TokenHash {
 /// Tokens are stored as SHA-256 hashes to prevent timing-attack side channels
 /// and avoid holding plaintext tokens in memory.
 pub struct BearerTokenProvider {
-    /// SHA-256 hashes of valid tokens (thread-safe for hot reloading).
-    token_hashes: RwLock<HashSet<TokenHash>>,
+    /// SHA-256 hashes of valid tokens and the credential each names (thread-safe for hot reloading).
+    token_hashes: RwLock<TokenTable>,
+    /// How static, loaded and rotated entries are read.
+    entries: Entries,
     /// Shutdown signal for background refresh.
     shutdown_tx: broadcast::Sender<()>,
 }
 
 impl BearerTokenProvider {
-    /// Create a new bearer token provider with static tokens.
+    /// Create a new bearer token provider with static token entries.
+    ///
+    /// Entries that do not parse accept nothing: `Config::validate` refuses
+    /// them before a provider is built.
     pub fn new(tokens: &[SensitiveString]) -> Self {
-        let hash_set: HashSet<TokenHash> = tokens.iter().map(|t| hash_token(t.expose())).collect();
+        Self::with_entries(tokens, Entries::Named)
+    }
+
+    /// A provider reading `tokens` as `entries` says.
+    fn with_entries(tokens: &[SensitiveString], entries: Entries) -> Self {
+        let table = token_table(tokens.iter().map(SensitiveString::expose), entries)
+            .unwrap_or_else(|e| {
+                error!(error = %e, "Bearer token entries do not parse; no token is accepted");
+                TokenTable::new()
+            });
         let (shutdown_tx, _) = broadcast::channel(1);
 
         Self {
-            token_hashes: RwLock::new(hash_set),
+            token_hashes: RwLock::new(table),
+            entries,
             shutdown_tx,
         }
     }
@@ -188,7 +317,23 @@ impl BearerTokenProvider {
     /// secret source that cannot load is a misconfiguration the operator has
     /// to see.
     pub async fn from_config(config: &BearerConfig) -> Result<Self> {
-        let provider = Self::new(&config.tokens);
+        Self::load(config, Entries::Named).await
+    }
+
+    /// A provider whose every entry is one whole shared secret, never a credential id and token.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::from_config`].
+    pub async fn shared_secret_from_config(config: &BearerConfig) -> Result<Self> {
+        Self::load(config, Entries::Verbatim).await
+    }
+
+    /// The provider `config` describes, its entries read as `entries` says.
+    async fn load(config: &BearerConfig, entries: Entries) -> Result<Self> {
+        token_table(config.tokens.iter().map(SensitiveString::expose), entries)
+            .map_err(|e| crate::error::Error::Config(format!("bearer.tokens: {e}")))?;
+        let provider = Self::with_entries(&config.tokens, entries);
 
         // If secret source is configured, load tokens from secret manager
         if let Some(ref source) = config.secret_source
@@ -210,17 +355,12 @@ impl BearerTokenProvider {
     /// Load tokens from a secret source.
     ///
     /// The source is a `provider:path[:key]` reference as
-    /// [`crate::secrets::read`] accepts; the content is a newline- or
-    /// comma-separated token list.
+    /// [`crate::secrets::read`] accepts. The content holds one token entry per
+    /// line. One that does not parse leaves the current tokens in place.
     async fn load_tokens(&self, source: &str) -> Result<()> {
         let content = crate::secrets::read(source).await?;
-        let new_hashes: HashSet<TokenHash> = content
-            .lines()
-            .flat_map(|line| line.split(','))
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(hash_token)
-            .collect();
+        let new_hashes = token_table(secret_entries(&content), self.entries)
+            .map_err(|e| crate::error::Error::Config(format!("bearer secret '{source}': {e}")))?;
 
         let count = new_hashes.len();
         info!(count, source = %source, "Loaded bearer tokens from secret");
@@ -234,11 +374,20 @@ impl BearerTokenProvider {
         Ok(())
     }
 
-    /// Start background token refresh task.
-    pub fn start_refresh_task(self: Arc<Self>, source: String, interval: Duration) {
+    /// Start background token refresh task, `None` for a zero `interval`,
+    /// which refreshes never: the secret was loaded once at build.
+    pub fn start_refresh_task(
+        self: Arc<Self>,
+        source: String,
+        interval: Duration,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        // A zero-period timer panics the task it runs in.
+        if interval.is_zero() {
+            return None;
+        }
         let mut shutdown_rx = self.shutdown_tx.subscribe();
 
-        tokio::spawn(async move {
+        Some(tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
             ticker.tick().await; // Skip immediate tick
 
@@ -263,22 +412,36 @@ impl BearerTokenProvider {
                     }
                 }
             }
-        });
+        }))
     }
 
-    /// Check if a token is valid (constant-time via hash lookup).
+    /// The principal `token` authenticates, `None` when it is not valid
+    /// (constant-time via hash lookup).
     #[inline]
-    pub fn is_valid(&self, token: &str) -> bool {
+    pub fn principal(&self, token: &str) -> Option<Principal> {
         let candidate = hash_token(token);
-        self.token_hashes.read().contains(&candidate)
+        self.token_hashes
+            .read()
+            .get(&candidate)
+            .map(|credential| match credential {
+                Some(id) => Principal::Credential(Arc::clone(id)),
+                None => Principal::UnnamedCredential,
+            })
     }
 
-    /// Update tokens (for rotation callbacks).
+    /// Update tokens (for rotation callbacks). Entries that do not parse
+    /// leave the current tokens in place.
     pub fn update_tokens(&self, tokens: &[SensitiveString]) {
-        let hash_set: HashSet<TokenHash> = tokens.iter().map(|t| hash_token(t.expose())).collect();
-        let count = hash_set.len();
+        let table = match token_table(tokens.iter().map(SensitiveString::expose), self.entries) {
+            Ok(table) => table,
+            Err(e) => {
+                error!(error = %e, "Bearer token entries do not parse; keeping the current tokens");
+                return;
+            }
+        };
+        let count = table.len();
         info!(count, "Bearer tokens updated");
-        *self.token_hashes.write() = hash_set;
+        *self.token_hashes.write() = table;
 
         security::token_rotated("bearer_update", &format!("{count} tokens loaded"));
     }
@@ -395,6 +558,7 @@ impl TokenAuth {
 
 /// A tonic interceptor checking the `authorization` metadata key against
 /// `auth`'s bearer tokens, recording refusals on `metrics` under `transport`.
+/// An accepted request carries its [`Principal`] in its extensions.
 ///
 /// Header auth never runs here: a gRPC request carries metadata, not the HTTP
 /// headers `accepted_headers` names.
@@ -403,7 +567,7 @@ pub fn grpc_auth_interceptor(
     metrics: Arc<Metrics>,
     transport: &'static str,
 ) -> impl Fn(tonic::Request<()>) -> std::result::Result<tonic::Request<()>, tonic::Status> + Clone {
-    move |req: tonic::Request<()>| {
+    move |mut req: tonic::Request<()>| {
         let mut headers = axum::http::HeaderMap::new();
         if let Some(auth_value) = req.metadata().get("authorization")
             && let Ok(s) = auth_value.to_str()
@@ -412,14 +576,24 @@ pub fn grpc_auth_interceptor(
             headers.insert("authorization", hv);
         }
 
-        if let Some(err) = validate_bearer_auth(&auth, &headers) {
-            let peer = req.remote_addr().map(|addr| addr.ip());
-            record_refusal(&metrics, transport, &err, peer, None);
-            return Err(tonic::Status::unauthenticated(err.message));
+        match validate_bearer_auth(&auth, &headers) {
+            Ok(principal) => {
+                req.extensions_mut().insert(principal);
+                Ok(req)
+            }
+            Err(err) => {
+                let peer = req.remote_addr().map(|addr| addr.ip());
+                record_refusal(&metrics, transport, &err, peer, None);
+                Err(tonic::Status::unauthenticated(err.message))
+            }
         }
-
-        Ok(req)
     }
+}
+
+/// The principal a request's auth left in its extensions, else the listener's.
+#[must_use]
+pub fn principal_or_listener(principal: Option<&Principal>, transport: &'static str) -> Principal {
+    principal.cloned().unwrap_or(Principal::Listener(transport))
 }
 
 /// Token-based authentication middleware.
@@ -432,10 +606,14 @@ pub fn grpc_auth_interceptor(
 /// [`PROBE_PATHS`] are exempt: they carry no data and kubelet cannot
 /// authenticate.
 ///
+/// An accepted request carries its [`Principal`] in its extensions: the
+/// token's credential, or the listener's under `none` and `mtls`, whose
+/// certificate the request path cannot read.
+///
 /// A refusal is recorded by [`record_auth_failure`].
 pub async fn token_auth_middleware(
     State(gate): State<TokenAuth>,
-    request: Request<Body>,
+    mut request: Request<Body>,
     next: Next,
 ) -> Response {
     let auth = &gate.auth;
@@ -455,33 +633,35 @@ pub async fn token_auth_middleware(
         return AuthError::misconfigured().into_response();
     };
 
-    // Skip if auth mode doesn't require token auth
-    if !mode.requires_token_auth() {
-        return next.run(request).await;
-    }
-
     // Check authentication based on mode
     let auth_result = match mode {
         AuthMode::Bearer => validate_bearer_auth(auth, request.headers()),
         AuthMode::Header | AuthMode::Both => {
             // Try bearer first if provider is configured, then fall back to
             // header auth when there are headers to fall back to.
+            let headers = || {
+                validate_header_auth(&auth.config, request.headers())
+                    .map_or(Ok(Principal::UnnamedCredential), Err)
+            };
             if auth.bearer_provider.is_some() {
                 match validate_bearer_auth(auth, request.headers()) {
-                    None => None,
-                    Some(refused) if auth.config.effective_headers().is_empty() => Some(refused),
-                    Some(_) => validate_header_auth(&auth.config, request.headers()),
+                    Ok(principal) => Ok(principal),
+                    Err(refused) if auth.config.effective_headers().is_empty() => Err(refused),
+                    Err(_) => headers(),
                 }
             } else {
-                validate_header_auth(&auth.config, request.headers())
+                headers()
             }
         }
-        AuthMode::None | AuthMode::Mtls => None,
+        AuthMode::None | AuthMode::Mtls => Ok(Principal::Listener(gate.transport)),
     };
 
     match auth_result {
-        None => next.run(request).await,
-        Some(err) => {
+        Ok(principal) => {
+            request.extensions_mut().insert(principal);
+            next.run(request).await
+        }
+        Err(err) => {
             let client = refused_client(&request);
             debug!(
                 transport = gate.transport,
@@ -506,15 +686,15 @@ pub async fn token_auth_middleware(
 /// Validate bearer token authentication.
 ///
 /// Checks the `Authorization: Bearer <token>` header against valid tokens.
-/// Returns `None` if authentication passes, `Some(AuthError)` on failure.
+/// Returns the token's [`Principal`] if authentication passes, `AuthError` on
+/// failure.
 ///
 /// A missing provider is a misconfiguration, not a pass. `create_auth_state`
 /// only builds a provider when `bearer.tokens` is non-empty or
 /// `bearer.secret_source` is set, so `mode: bearer` with neither leaves
-/// `bearer_provider` at `None`. `None` from this function means "no
-/// objection", which the middleware serves as authenticated -- so a missing
-/// provider must report an error instead. Mirrors what `validate_header_auth`
-/// does for an empty accepted-headers list.
+/// `bearer_provider` at `None`, and that must report an error rather than
+/// admit the request. Mirrors what `validate_header_auth` does for an empty
+/// accepted-headers list.
 ///
 /// The `Header`/`Both` branch of `token_auth_middleware` only calls this when
 /// `bearer_provider.is_some()`, so header auth is unaffected.
@@ -522,17 +702,17 @@ pub async fn token_auth_middleware(
 pub fn validate_bearer_auth(
     auth: &AuthState,
     headers: &axum::http::HeaderMap,
-) -> Option<AuthError> {
+) -> std::result::Result<Principal, AuthError> {
     let Some(ref provider) = auth.bearer_provider else {
         log_misconfigured("bearer auth is required but no token provider is configured");
-        return Some(AuthError::misconfigured());
+        return Err(AuthError::misconfigured());
     };
 
     // Check for Authorization header
     let auth_header = headers.get("authorization").and_then(|v| v.to_str().ok());
 
     let Some(auth_value) = auth_header else {
-        return Some(AuthError::refused(
+        return Err(AuthError::refused(
             AuthFailureReason::MissingHeader,
             "missing_authorization_header",
         ));
@@ -548,21 +728,22 @@ pub fn validate_bearer_auth(
     } else if let Some(token) = auth_value.strip_prefix("splunk ") {
         token.trim()
     } else {
-        return Some(AuthError::refused(
+        return Err(AuthError::refused(
             AuthFailureReason::InvalidToken,
             "invalid_bearer_format",
         ));
     };
 
     // Validate token
-    if provider.is_valid(token) {
-        debug!("Bearer token accepted");
-        None
-    } else {
-        Some(AuthError::refused(
+    match provider.principal(token) {
+        Some(principal) => {
+            debug!("Bearer token accepted");
+            Ok(principal)
+        }
+        None => Err(AuthError::refused(
             AuthFailureReason::InvalidToken,
             "invalid_bearer_token",
-        ))
+        )),
     }
 }
 
@@ -922,20 +1103,89 @@ mod tests {
         let provider = BearerTokenProvider::new(&tokens);
 
         assert_eq!(provider.token_count(), 2);
-        assert!(provider.is_valid("token1"));
-        assert!(provider.is_valid("token2"));
-        assert!(!provider.is_valid("invalid"));
+        assert!(provider.principal("token1").is_some());
+        assert!(provider.principal("token2").is_some());
+        assert!(provider.principal("invalid").is_none());
     }
 
     #[test]
     fn test_bearer_provider_update_tokens() {
         let provider = BearerTokenProvider::new(&["old-token".into()]);
-        assert!(provider.is_valid("old-token"));
-        assert!(!provider.is_valid("new-token"));
+        assert!(provider.principal("old-token").is_some());
+        assert!(provider.principal("new-token").is_none());
 
         provider.update_tokens(&["new-token".into()]);
-        assert!(!provider.is_valid("old-token"));
-        assert!(provider.is_valid("new-token"));
+        assert!(provider.principal("old-token").is_none());
+        assert!(provider.principal("new-token").is_some());
+    }
+
+    /// A token listed with an id authenticates as that credential, and a bare
+    /// token as one bound to nothing.
+    #[test]
+    fn a_token_entry_names_the_credential_it_authenticates() {
+        let provider = BearerTokenProvider::new(&["acme-agents:tok-a".into(), "tok-bare".into()]);
+        assert_eq!(
+            provider.principal("tok-a"),
+            Some(Principal::Credential(Arc::from("acme-agents")))
+        );
+        assert_eq!(
+            provider.principal("tok-bare"),
+            Some(Principal::UnnamedCredential)
+        );
+        // The entry is not the token: only the part after the id authenticates.
+        assert_eq!(provider.principal("acme-agents:tok-a"), None);
+    }
+
+    /// A zero refresh interval starts no task, so no zero-period timer panics one.
+    #[tokio::test]
+    async fn a_zero_refresh_interval_starts_no_refresh_task() {
+        let provider = Arc::new(BearerTokenProvider::new(&["tok".into()]));
+        let none = Arc::clone(&provider).start_refresh_task("file:/absent".into(), Duration::ZERO);
+        assert!(none.is_none());
+        let task = provider
+            .start_refresh_task("file:/absent".into(), Duration::from_secs(60))
+            .expect("a refresh task");
+        task.abort();
+    }
+
+    /// Secret content holds one entry per line, and a comma stays in its token.
+    #[test]
+    fn secret_entries_split_on_line_breaks_only() {
+        let entries: Vec<&str> = secret_entries(" abc,def \r\n\nacme:x,y\n").collect();
+        assert_eq!(entries, ["abc,def", "acme:x,y"]);
+    }
+
+    /// An entry whose id is malformed, or a token under two ids, is refused
+    /// without the token in the message.
+    #[test]
+    fn a_token_entry_that_does_not_parse_is_refused_by_position() {
+        for (entries, says) in [
+            (vec!["bad id:secret-1"], "entry 0"),
+            (vec!["ok:"], "entry 0"),
+            (vec!["a:shared", "b:shared"], "entry 1"),
+            (vec!["a:shared", "shared"], "entry 1"),
+        ] {
+            let err = parse_token_entries(entries.iter().copied()).expect_err("must not parse");
+            assert!(err.contains(says), "{entries:?}: {err}");
+            assert!(
+                !err.contains("secret-1") && !err.contains("shared"),
+                "{err}"
+            );
+        }
+        let parsed = parse_token_entries([" a:t1 ", "", "a:t2", "t3", "a:t1"]).unwrap();
+        assert_eq!(
+            parsed.len(),
+            4,
+            "blanks are skipped and a repeated entry is accepted"
+        );
+    }
+
+    /// A malformed static entry accepts nothing rather than a guessed split.
+    #[test]
+    fn an_unparsable_static_entry_accepts_no_token() {
+        let provider = BearerTokenProvider::new(&["bad id:secret".into(), "fine".into()]);
+        assert_eq!(provider.token_count(), 0);
+        assert!(provider.principal("fine").is_none());
     }
 
     #[test]
@@ -947,7 +1197,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("authorization", "Bearer secret-token-1".parse().unwrap());
 
-        assert!(validate_bearer_auth(&auth, &headers).is_none());
+        assert!(validate_bearer_auth(&auth, &headers).is_ok());
     }
 
     #[test]
@@ -959,7 +1209,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("authorization", "bearer secret-token-2".parse().unwrap());
 
-        assert!(validate_bearer_auth(&auth, &headers).is_none());
+        assert!(validate_bearer_auth(&auth, &headers).is_ok());
     }
 
     #[test]
@@ -971,9 +1221,8 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("authorization", "Bearer wrong-token".parse().unwrap());
 
-        let err = validate_bearer_auth(&auth, &headers);
-        assert!(err.is_some());
-        assert_eq!(err.unwrap().status, StatusCode::UNAUTHORIZED);
+        let err = validate_bearer_auth(&auth, &headers).expect_err("refused");
+        assert_eq!(err.status, StatusCode::UNAUTHORIZED);
     }
 
     #[test]
@@ -984,9 +1233,8 @@ mod tests {
 
         let headers = HeaderMap::new();
 
-        let err = validate_bearer_auth(&auth, &headers);
-        assert!(err.is_some());
-        assert_eq!(err.unwrap().message, "missing_authorization_header");
+        let err = validate_bearer_auth(&auth, &headers).expect_err("refused");
+        assert_eq!(err.message, "missing_authorization_header");
     }
 
     #[test]
@@ -998,9 +1246,8 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("authorization", "Basic dXNlcjpwYXNz".parse().unwrap());
 
-        let err = validate_bearer_auth(&auth, &headers);
-        assert!(err.is_some());
-        assert_eq!(err.unwrap().message, "invalid_bearer_format");
+        let err = validate_bearer_auth(&auth, &headers).expect_err("refused");
+        assert_eq!(err.message, "invalid_bearer_format");
     }
 
     #[test]
@@ -1011,10 +1258,9 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("authorization", "Bearer any-token".parse().unwrap());
 
-        // A missing provider under bearer mode must be reported, not skipped:
-        // the middleware reads "no objection" as "authenticated".
+        // A missing provider under bearer mode must be reported, not skipped.
         let err = validate_bearer_auth(&auth, &headers)
-            .expect("missing bearer provider must not be treated as a pass");
+            .expect_err("missing bearer provider must not be treated as a pass");
         assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(err.message, "server_misconfigured");
     }
@@ -1027,7 +1273,7 @@ mod tests {
         let headers = HeaderMap::new();
 
         assert!(
-            validate_bearer_auth(&auth, &headers).is_some(),
+            validate_bearer_auth(&auth, &headers).is_err(),
             "missing bearer provider must not be treated as a pass"
         );
     }
@@ -1045,6 +1291,13 @@ mod tests {
             ..AuthConfig::default()
         };
         assert_ne!(config1, config3);
+    }
+
+    impl BearerTokenProvider {
+        /// Whether `token` authenticates anyone.
+        fn is_valid(&self, token: &str) -> bool {
+            self.principal(token).is_some()
+        }
     }
 
     #[tokio::test]
@@ -1325,12 +1578,70 @@ mod tests {
         assert_eq!(metrics.get_auth_failures_total(), 50);
     }
 
+    /// The principal the handler behind the middleware sees for one request.
+    async fn principal_seen(config: AuthConfig, authorization: Option<&str>) -> String {
+        let provider = BearerTokenProvider::new(&config.bearer.tokens);
+        let app = axum::Router::new()
+            .route(
+                "/ingest",
+                axum::routing::post(|principal: Option<axum::Extension<Principal>>| async move {
+                    format!("{:?}", principal.map(|axum::Extension(p)| p))
+                }),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                TokenAuth::new(
+                    AuthState::with_bearer_provider(config, provider),
+                    Arc::new(Metrics::default()),
+                    "http",
+                ),
+                token_auth_middleware,
+            ));
+        let mut request = Request::post("/ingest");
+        if let Some(value) = authorization {
+            request = request.header("authorization", value);
+        }
+        let response = tower::ServiceExt::oneshot(app, request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        String::from_utf8(body.to_vec()).unwrap()
+    }
+
+    /// Each accepted request reaches its handler carrying who sent it: the
+    /// token's credential, a bare token's unnamed credential, or under `none`
+    /// the listener.
+    #[tokio::test]
+    async fn the_middleware_hands_the_principal_to_the_handler() {
+        let bearer = AuthConfig {
+            bearer: BearerConfig {
+                tokens: vec!["acme-agents:tok-a".into(), "tok-bare".into()],
+                ..BearerConfig::default()
+            },
+            ..bearer_config()
+        };
+        assert_eq!(
+            principal_seen(bearer.clone(), Some("Bearer tok-a")).await,
+            r#"Some(Credential("acme-agents"))"#
+        );
+        assert_eq!(
+            principal_seen(bearer, Some("Bearer tok-bare")).await,
+            "Some(UnnamedCredential)"
+        );
+        assert_eq!(
+            principal_seen(AuthConfig::default(), None).await,
+            r#"Some(Listener("http"))"#
+        );
+    }
+
     /// A configuration that cannot check credentials is the operator's fault:
     /// it answers 500 and counts no client failure.
     #[test]
     fn a_misconfiguration_is_not_a_client_auth_failure() {
         let err = validate_bearer_auth(&AuthState::new(bearer_config()), &HeaderMap::new())
-            .expect("a missing provider refuses");
+            .expect_err("a missing provider refuses");
         assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
         assert!(err.reason.is_none());
 

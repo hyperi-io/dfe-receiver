@@ -24,6 +24,7 @@ use tracing::debug;
 
 use crate::metrics::{DropReason, Metrics};
 use crate::pipeline::{Acks, Offer, PipelineState};
+use crate::tenancy::Ingest;
 
 /// Wait before the first re-offer.
 const FIRST_RETRY: Duration = Duration::from_millis(100);
@@ -31,8 +32,9 @@ const FIRST_RETRY: Duration = Duration::from_millis(100);
 /// Longest wait between re-offers, so a pipeline that recovers is found within it.
 const LAST_RETRY: Duration = Duration::from_secs(2);
 
-/// Offer `payloads` to the pipeline until every one is settled -- taken, or
-/// refused for good -- holding the caller, and the socket it reads, until then.
+/// Offer `payloads` from `ingest` to the pipeline until every one is settled
+/// -- taken, or refused for good -- holding the caller, and the socket it
+/// reads, until then.
 ///
 /// Counts the request once, and every record dropped; the pipeline counts
 /// each record as received on the first offer alone. Returns false when
@@ -45,13 +47,16 @@ pub(crate) async fn hold_until_settled(
     transport: &str,
     shutdown: &CancellationToken,
     acks: &Acks,
+    ingest: &Ingest,
 ) -> bool {
     let mut pending = payloads;
     let mut rejected = 0;
     let mut wait = FIRST_RETRY;
     let mut offer = Offer::First;
     loop {
-        let outcome = pipeline.offer_batch_acked(pending, acks, offer).await;
+        let outcome = pipeline
+            .offer_batch_acked(pending, acks, offer, ingest)
+            .await;
         offer = Offer::Again;
         rejected += outcome.rejected;
         let settled = outcome.settled();
@@ -98,6 +103,12 @@ mod tests {
 
     use super::*;
     use crate::config::{Config, SharedConfig};
+    use crate::tenancy::Principal;
+
+    /// Records a listener built, from a sender it cannot name.
+    fn test_ingest() -> Ingest {
+        Ingest::built(Principal::Listener("syslog"), "syslog")
+    }
 
     /// A pipeline on the memory transport whose guard counts only its own
     /// reservations, so a test can put it under pressure and take it off.
@@ -168,6 +179,7 @@ mod tests {
                     "test",
                     &CancellationToken::new(),
                     &Acks::at_enqueue(),
+                    &test_ingest(),
                 )
                 .await
             }
@@ -209,6 +221,7 @@ mod tests {
                     "test",
                     &CancellationToken::new(),
                     &Acks::at_enqueue(),
+                    &test_ingest(),
                 )
                 .await
             }
@@ -245,6 +258,7 @@ mod tests {
             "test",
             &shutdown,
             &Acks::at_enqueue(),
+            &test_ingest(),
         )
         .await;
 
@@ -260,7 +274,7 @@ mod tests {
         let metrics = Metrics::default();
         let mut config = pipeline.config();
         config.validation.dlq_on_invalid = false;
-        pipeline.rebuild_components(&config).await;
+        pipeline.rebuild_components(&config).await.unwrap();
 
         let kept_reading = tokio::time::timeout(
             Duration::from_secs(1),
@@ -271,6 +285,7 @@ mod tests {
                 "test",
                 &CancellationToken::new(),
                 &Acks::at_enqueue(),
+                &test_ingest(),
             ),
         )
         .await
@@ -301,6 +316,7 @@ mod tests {
                 "test",
                 &CancellationToken::new(),
                 &acks,
+                &test_ingest(),
             ),
         )
         .await

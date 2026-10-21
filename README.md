@@ -201,7 +201,8 @@ answers are in [docs/DESIGN.md](docs/DESIGN.md#what-a-sender-is-told).
 A generic authenticated intake for products that push events: one route per
 caller declared under `webhook.callers`, each with its own secret, topic and
 body shape. Every accepted record lands on the caller's topic stamped with
-`_source: <caller>` and `_timestamp_receiver`.
+`_source: <caller>`, `_timestamp_received` and the `_org_id` the caller's name
+is bound to in `ingest_bindings.credentials`.
 
 ```yaml
 webhook:
@@ -266,25 +267,39 @@ curl http://localhost:8080/readyz
 
 ## Routing
 
-Messages are routed to Kafka topics based on source rules that extract JSON fields:
+The `rules` section is an ordered rule set that sets each record's `_source`,
+then its `_org_id`. The first matching row per field wins. The source picks
+the topic, and `destinations.sources` can send it elsewhere.
 
 ```yaml
+rules:
+  rules:
+    - id: auth-events
+      match: { field: event.category, op: equals, value: auth }
+      set: { _source: { value: logs_auth } }
+    - id: acme-firewall
+      match: { field: data_stream.dataset, op: equals, value: cisco_asa.log }
+      set: { _org_id: { value: acme } }
+ingest_bindings:
+  credentials:
+    acme-ingest:                 # bearer entry "acme-ingest:<token>"
+      orgs: [acme]
 routing:
   default_source: "main"
+  default_org_id: "default"
   topic_suffix: "_land"
-  source_rules:
-    - name: "auth_events"
-      mode: "key_value_set"
-      field: "event.category"
-      values: ["auth", "authentication"]
-      topic: "logs_auth"
-  dlq:
-    enabled: true
-    topic: "dfe_receiver_dlq"
 ```
 
-Given `{"event": {"category": "auth"}}`, routes to `logs_auth_land`.
-Unmatched messages route to `main_land` (default_source + topic_suffix).
+Given `{"event": {"category": "auth"}}`, the record routes to `logs_auth_land`.
+Unmatched records route to `main_land` (default_source + topic_suffix).
+
+A record lands only in an org its sender is bound to. A row that picks
+another org is replaced by the binding's default org and counted on
+`rules_clamped_total`, never refused. A credential or listener with no binding
+lands its records in `routing.default_org_id`. A sender's own `_org_id` is
+removed unless `routing.source_org_id: allow`, and a sender's `_source` that a
+row replaces is kept as `_source_original`. Rule edits apply on the next config
+reload, with no restart.
 
 ## Metrics
 

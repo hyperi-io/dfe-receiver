@@ -37,9 +37,10 @@ use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::metrics::{ConnectionGuard, Metrics};
 use crate::pipeline::{Acks, BatchOutcome, PipelineState};
-use crate::server::auth::{AuthMode, AuthState, grpc_auth_interceptor};
+use crate::server::auth::{AuthMode, AuthState, grpc_auth_interceptor, principal_or_listener};
 use crate::server::http::create_auth_state;
 use crate::server::traits::{BoundAddr, ProtocolHandler};
+use crate::tenancy::Ingest;
 
 /// The transport label the Vector gRPC listener counts under.
 const TRANSPORT: &str = "grpc";
@@ -104,6 +105,7 @@ impl Vector for VectorService {
         }
 
         let deadline = sender_deadline(request.metadata());
+        let ingest = Ingest::sent(principal_or_listener(request.extensions().get(), TRANSPORT));
         let req = request.into_inner();
         let event_count = req.events.len();
         debug!(
@@ -137,7 +139,7 @@ impl Vector for VectorService {
         }
         let mut outcome = self
             .pipeline
-            .process_batch_acked(&jsons, &self.acks, deadline)
+            .process_batch_acked(&jsons, &self.acks, deadline, &ingest)
             .await;
         outcome.rejected += refused.rejected;
         outcome.first_rejection = outcome.first_rejection.or(refused.first_rejection);

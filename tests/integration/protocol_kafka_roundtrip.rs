@@ -285,6 +285,14 @@ async fn test_webhook_to_kafka_roundtrip() {
         body: WebhookBody::Single,
         filter: String::new(),
     }];
+    // The caller's name is its credential id, bound here to one org.
+    config.ingest_bindings.credentials.insert(
+        "runzero".to_string(),
+        dfe_receiver::config::OrgBinding {
+            orgs: vec!["acme".to_string()],
+            default_org: None,
+        },
+    );
 
     // Subscribe BEFORE sending
     let consumer = kafka_consumer(&kf, &topic).expect("consumer setup");
@@ -335,9 +343,14 @@ async fn test_webhook_to_kafka_roundtrip() {
     let record: serde_json::Value =
         serde_json::from_slice(&received).expect("the record on Kafka is JSON");
     assert_eq!(record["_source"], "runzero", "record: {record}");
+    assert_eq!(record["_org_id"], "acme", "record: {record}");
     assert!(
-        record["_timestamp_receiver"].is_u64(),
+        record["_timestamp_received"].is_u64(),
         "record must carry the receiver timestamp: {record}"
+    );
+    assert!(
+        record.get("_timestamp_receiver").is_none(),
+        "record: {record}"
     );
     assert_eq!(
         record["text"], fixture["body"]["text"],
@@ -441,6 +454,7 @@ async fn test_webhook_array_with_a_bad_element_delivers_nothing() {
         record["a"], 2,
         "an element of the refused request reached the topic: {record}"
     );
+    assert_eq!(record["_org_id"], "default", "an unbound caller: {record}");
     // Nothing follows it, so a leaked element on another partition shows too.
     let extra = kafka_consume_next(&consumer, Duration::from_secs(3)).await;
     assert!(
@@ -483,7 +497,7 @@ async fn test_http_to_kafka_roundtrip() {
 
     let payload = Bytes::from(r#"{"event":"http-to-kafka-test","id":42,"source":"integration"}"#);
     pipeline
-        .process(payload.clone())
+        .process(payload.clone(), &crate::common::http_ingest())
         .await
         .expect("pipeline processing failed");
 

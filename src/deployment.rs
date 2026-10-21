@@ -142,7 +142,8 @@ pub fn contract() -> DeploymentContract {
                 .public(),
         ],
         unbound_listen_paths: vec![],
-        hot_paths: vec![],
+        // The config reloader rebuilds the router from both, so an edit needs no pod roll.
+        hot_paths: vec!["rules".into(), "ingest_bindings".into()],
         entrypoint_args: vec!["--config".into(), "/etc/dfe-receiver/config.yaml".into()],
         secrets: secrets(),
         default_config: Some(serde_json::json!({
@@ -628,6 +629,17 @@ mod tests {
                 Some("not-a-mode")
             ]
         );
+    }
+
+    /// Every hot path names a config section the binary reads, or an edit to it reaches nothing.
+    #[test]
+    fn hot_paths_are_the_rule_set_and_the_ingest_bindings() {
+        let c = contract();
+        assert_eq!(c.hot_paths, ["rules", "ingest_bindings"]);
+        let read = serde_json::to_value(Config::default()).expect("config serialises");
+        for path in &c.hot_paths {
+            assert!(read.get(path).is_some(), "{path} is not a config section");
+        }
     }
 
     /// The startup probe, the grace period and the pod's resources.

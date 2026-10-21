@@ -34,6 +34,7 @@ use crate::server::hold::hold_until_settled;
 use crate::server::http::Accept;
 use crate::server::ip_filter::IpFilter;
 use crate::server::traits::{BoundAddr, ProtocolHandler};
+use crate::tenancy::{Ingest, Principal};
 use convert::{extract_chunk_id, fluent_to_json};
 
 /// TLS handshake timeout.
@@ -85,6 +86,8 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
 ) {
     use tokio::io::AsyncReadExt;
 
+    // A Forward frame carries no credential, and the converter writes `_source`.
+    let ingest = Ingest::built(Principal::Listener(TRANSPORT), convert::SOURCE);
     let mut buf = vec![0u8; 64 * 1024];
     let mut pending = Vec::new();
 
@@ -139,7 +142,7 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
 
                     match (fluent_to_json(&msg, raw_capture), chunk_id.as_deref()) {
                         (Ok(payloads), Some(chunk)) => {
-                            let outcome = pipeline.process_batch_acked(&payloads, &acks, None).await;
+                            let outcome = pipeline.process_batch_acked(&payloads, &acks, None, &ingest).await;
                             if let Some(e) = outcome.unavailable {
                                 // No ack is the Forward protocol's retry signal; closing makes the
                                 // sender see it now rather than at its ack timeout.
@@ -159,7 +162,7 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
                             send_ack(&mut stream, chunk, peer_addr).await;
                         }
                         (Ok(payloads), None) => {
-                            if !hold_until_settled(&pipeline, &payloads, &metrics, "fluent", &shutdown, &acks).await {
+                            if !hold_until_settled(&pipeline, &payloads, &metrics, "fluent", &shutdown, &acks, &ingest).await {
                                 debug!(peer = %peer_addr, "Fluent Forward connection closing (shutdown during a hold)");
                                 return;
                             }

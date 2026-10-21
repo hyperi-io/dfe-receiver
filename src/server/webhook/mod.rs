@@ -11,8 +11,9 @@
 //! One route per declared caller, `POST /webhook/{caller}`, each with its own
 //! secret, topic and body shape (see [`WebhookConfig`]). A record that passes
 //! the caller's authentication and optional CEL filter is stamped with
-//! `_source` (the caller name) and `_timestamp_receiver`, then delivered to
-//! the caller's topic through [`PipelineState::process_batch_to_topic`].
+//! `_source` (the caller name) and `_timestamp_received`, then delivered to
+//! the caller's topic through [`PipelineState::process_batch_to_topic`], which
+//! stamps its `_org_id` held to the orgs `ingest_bindings` binds the caller to.
 //!
 //! With `webhook.bind_address` unset the routes are merged into the main
 //! ingest listener by `server::http::run_server`, so they sit under its TLS,
@@ -45,11 +46,13 @@ use crate::config::{Config, WebhookBody, WebhookCallerConfig, WebhookConfig};
 use crate::error::{Error, Result, unavailable_response};
 use crate::metrics::Metrics;
 use crate::pipeline::{Acks, PipelineState};
+use crate::routing::{Header, RECEIVED_FIELD, Received, SOURCE_FIELD, Write};
 use crate::server::auth::record_auth_failure;
 use crate::server::http::{Accept, apply_request_limits, split_json_array};
 use crate::server::ip_filter::IpFilter;
 use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
 use crate::server::traits::{BoundAddr, ProtocolHandler};
+use crate::tenancy::{Ingest, Principal};
 use crate::validation::depth::{self, MAX_BATCH_DEPTH, MAX_PARSE_DEPTH};
 use crate::validation::{NOT_AN_OBJECT, is_json_object};
 
@@ -463,10 +466,12 @@ async fn webhook_handler(
         }
     };
 
+    // The caller is the credential: its name binds its records to their orgs.
+    let ingest = Ingest::sent(Principal::Credential(Arc::clone(&caller.name)));
     let start = std::time::Instant::now();
     let outcome = state
         .pipeline
-        .process_batch_to_topic(&records, &caller.topic, &state.acks)
+        .process_batch_to_topic(&records, &caller.topic, &state.acks, &ingest)
         .await;
     let elapsed = start.elapsed();
     state
@@ -517,30 +522,29 @@ fn now_millis() -> u128 {
         .as_millis()
 }
 
-/// Write `_source` (the caller) and `_timestamp_receiver` into the record.
+/// Write `_source` (the caller) and `_timestamp_received` into the record.
 ///
-/// The caller's identity wins: a record that already carries either key is
-/// re-serialised with the receiver's values in place of the sender's, since
-/// `_source` picks the destination table downstream and a duplicate key makes
-/// the loader's JSON column reject the record. Records without them take the
-/// byte-append path the pipeline uses.
+/// The caller's identity wins: a record that already carries `_source` is
+/// rewritten with the caller in its place, since `_source` picks the
+/// destination table downstream and a duplicate key makes the loader's JSON
+/// column reject the record. The receiver's own receive time is written too,
+/// and one the sender wrote is kept as `_timestamp_received_original`. Records
+/// with neither take the byte-append path the pipeline uses.
 fn stamp(record: Bytes, caller: &str, now_ms: u128) -> Result<Bytes> {
-    let reserved = get_from_slice(&record, ["_source"].as_slice()).is_ok()
-        || get_from_slice(&record, ["_timestamp_receiver"].as_slice()).is_ok();
-    if !reserved {
-        let stamped = crate::routing::stamp_source(record, caller);
-        return Ok(PipelineState::enrich_payload_at(stamped, now_ms));
-    }
-    let mut value: serde_json::Value = serde_json::from_slice(&record)?;
-    let Some(object) = value.as_object_mut() else {
-        return Err(Error::Validation("record is not a JSON object".into()));
+    let holds = |field: &str| get_from_slice(&record, [field].as_slice()).is_ok();
+    let header = Header {
+        received: Received::of(holds(RECEIVED_FIELD), now_ms),
+        source: if holds(SOURCE_FIELD) {
+            Write::Replace {
+                value: caller,
+                park: false,
+            }
+        } else {
+            Write::Append(caller)
+        },
+        org: Write::Keep,
     };
-    object.insert("_source".into(), serde_json::Value::String(caller.into()));
-    object.insert(
-        "_timestamp_receiver".into(),
-        serde_json::Value::Number(serde_json::Number::from(now_ms as u64)),
-    );
-    Ok(Bytes::from(serde_json::to_vec(&value)?))
+    header.write(record)
 }
 
 #[cfg(test)]
@@ -562,7 +566,7 @@ mod tests {
         let text = String::from_utf8(stamped.to_vec()).unwrap();
         assert_eq!(
             text,
-            r#"{"a":1,"_source":"runzero","_timestamp_receiver":1700}"#
+            r#"{"a":1,"_timestamp_received":1700,"_source":"runzero"}"#
         );
     }
 
@@ -570,7 +574,7 @@ mod tests {
     fn an_empty_object_is_stamped_without_a_leading_comma() {
         let stamped = stamp(Bytes::from("{}"), "runzero", 1700).unwrap();
         let text = String::from_utf8(stamped.to_vec()).unwrap();
-        assert_eq!(text, r#"{"_source":"runzero","_timestamp_receiver":1700}"#);
+        assert_eq!(text, r#"{"_timestamp_received":1700,"_source":"runzero"}"#);
     }
 
     #[test]
@@ -578,24 +582,25 @@ mod tests {
         let stamped = stamp(Bytes::from(r#"{"_source":"other","a":1}"#), "runzero", 1700).unwrap();
         let value: serde_json::Value = serde_json::from_slice(&stamped).unwrap();
         assert_eq!(value["_source"], "runzero");
-        assert_eq!(value["_timestamp_receiver"], 1700);
+        assert_eq!(value["_timestamp_received"], 1700);
         assert_eq!(value["a"], 1);
         // Exactly one of each key: a duplicate is what the slow path prevents.
         let text = String::from_utf8(stamped.to_vec()).unwrap();
         assert_eq!(text.matches("\"_source\"").count(), 1);
-        assert_eq!(text.matches("\"_timestamp_receiver\"").count(), 1);
+        assert_eq!(text.matches("\"_timestamp_received\"").count(), 1);
     }
 
     #[test]
-    fn a_sender_supplied_receiver_timestamp_is_replaced() {
+    fn a_sender_supplied_receiver_timestamp_is_replaced_and_kept_beside() {
         let stamped = stamp(
-            Bytes::from(r#"{"_timestamp_receiver":1,"a":1}"#),
+            Bytes::from(r#"{"_timestamp_received":1,"a":1}"#),
             "runzero",
             1700,
         )
         .unwrap();
         let value: serde_json::Value = serde_json::from_slice(&stamped).unwrap();
-        assert_eq!(value["_timestamp_receiver"], 1700);
+        assert_eq!(value["_timestamp_received"], 1700);
+        assert_eq!(value["_timestamp_received_original"], 1);
         assert_eq!(value["_source"], "runzero");
     }
 
@@ -639,8 +644,8 @@ mod tests {
         assert_eq!(
             texts,
             [
-                r#"{"n":1,"_source":"bulk","_timestamp_receiver":1700}"#,
-                r#"{"n":3,"_source":"bulk","_timestamp_receiver":1700}"#,
+                r#"{"n":1,"_timestamp_received":1700,"_source":"bulk"}"#,
+                r#"{"n":3,"_timestamp_received":1700,"_source":"bulk"}"#,
             ]
         );
     }

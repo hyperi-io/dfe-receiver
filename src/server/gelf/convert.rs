@@ -18,6 +18,9 @@ use crate::config::RawCapture;
 use crate::error::{Error, Result};
 use crate::server::raw_capture;
 
+/// The `_source` this listener stamps on every record it builds.
+pub const SOURCE: &str = "gelf";
+
 /// Severity level names matching syslog levels 0-7.
 const SEVERITY_NAMES: [&str; 8] = [
     "emergency",
@@ -77,7 +80,7 @@ pub fn gelf_to_json(raw: &[u8], raw_capture: RawCapture) -> Result<Bytes> {
     // Source tag for routing
     obj.insert(
         "_source".to_string(),
-        serde_json::Value::String("gelf".to_string()),
+        serde_json::Value::String(SOURCE.to_string()),
     );
 
     raw_capture::attach_to_map(&mut obj, raw, raw_capture);

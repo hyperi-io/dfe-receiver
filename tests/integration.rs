@@ -68,6 +68,10 @@ mod record_counts;
 mod refused_records;
 #[path = "integration/reload_destinations.rs"]
 mod reload_destinations;
+// A loader that never answers has to fail the test, and the poll loop cannot express that as an assert.
+#[allow(clippy::panic)]
+#[path = "integration/rules_reload.rs"]
+mod rules_reload;
 #[path = "integration/source_routing.rs"]
 mod source_routing;
 #[path = "integration/splunk_hec.rs"]
