@@ -248,11 +248,11 @@ async fn write_handler(
     principal: Option<Extension<Principal>>,
     body: Bytes,
 ) -> std::result::Result<StatusCode, RwError> {
-    // The converter writes each sample's `_source`, so it stands when no rule sets one.
-    let ingest = Ingest::built(principal_or_listener(
-        principal.as_ref().map(|Extension(p)| p),
-        TRANSPORT,
-    ));
+    // A `_source` label is the sender's: only the converter's own stamp stands when no rule sets one.
+    let ingest = Ingest::built(
+        principal_or_listener(principal.as_ref().map(|Extension(p)| p), TRANSPORT),
+        convert::SOURCE,
+    );
     state.metrics.inc_requests_total("prometheus_rw");
     state
         .metrics

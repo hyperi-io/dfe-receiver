@@ -18,8 +18,9 @@
 //! For `_org_id`, in order: the sender's own value under
 //! `routing.source_org_id: allow`, the configured rows, then the binding's
 //! default. The `_source` written: the configured rows, the listener's own
-//! stamp for a record the listener built, then `routing.default_source`. A
-//! listener's stamp alone never moves a record off the default topic.
+//! stamp on a record the listener built, then `routing.default_source`. A
+//! listener's stamp alone never moves a record off the default topic, and any
+//! other `_source` a record carries is the sender's, replaced and parked.
 
 mod header;
 
@@ -530,22 +531,21 @@ impl Router {
     }
 
     /// The `_source` a record is written with: the row's, else the listener's
-    /// own stamp, else the default.
+    /// own stamp when the record carries it, else the default. A value the
+    /// listener did not stamp is the sender's, and is parked like one.
     fn final_source<'a>(
         &'a self,
         assigned: Option<Cow<'a, str>>,
-        found: &'a Found<'a>,
+        found: &Found<'_>,
         ingest: &Ingest,
     ) -> Cow<'a, str> {
         if let Some(assigned) = assigned {
             return assigned;
         }
-        if ingest.keeps_listener_source()
-            && let Some(own) = text(&found.source)
-        {
-            return Cow::Borrowed(own);
+        match ingest.listener_stamp() {
+            Some(stamp) if text(&found.source) == Some(stamp) => Cow::Borrowed(stamp),
+            _ => Cow::Borrowed(&self.default_source),
         }
-        Cow::Borrowed(&self.default_source)
     }
 
     /// Where a record routed as `source` goes, and its topic when a destination
@@ -738,22 +738,57 @@ mod tests {
 
     // --- a listener's own _source ---
 
+    /// Records the syslog listener built, stamping `_source: syslog` itself.
+    fn syslog() -> Ingest {
+        Ingest::built(Principal::Listener("syslog"), "syslog")
+    }
+
     #[test]
     fn a_listener_source_stands_on_the_default_topic_when_no_row_sets_one() {
         let r = router(&Config::default());
-        let syslog = Ingest::built(Principal::Listener("syslog"));
-        let (route, value, org) = route(&r, &syslog, r#"{"message":"m","_source":"syslog"}"#);
+        let (route, value, org) = route(&r, &syslog(), r#"{"message":"m","_source":"syslog"}"#);
         assert_eq!(value["_source"], "syslog");
         assert!(value.get("_source_original").is_none());
         assert_eq!(route.topic(), Some("main_land"));
         assert_eq!(org, "default");
     }
 
+    /// A built record's `_source` that is not the listener's stamp came from the
+    /// sender, as a remote-write `_source` label does, and is parked like one.
+    #[test]
+    fn a_built_record_whose_source_is_not_the_stamp_is_treated_as_the_senders() {
+        let prometheus = Ingest::built(Principal::Listener("prometheus_rw"), "prometheus");
+        let r = router(&Config::default());
+        let (to, value, _) = route(&r, &prometheus, r#"{"_source":"custom","value":1}"#);
+        assert_eq!(value["_source"], "main");
+        assert_eq!(value["_source_original"], "custom");
+        assert_eq!(to.topic(), Some("main_land"));
+
+        let (_, value, _) = route(&r, &prometheus, r#"{"_source":"prometheus","value":1}"#);
+        assert_eq!(
+            value["_source"], "prometheus",
+            "the listener's own stamp stands"
+        );
+        assert!(value.get("_source_original").is_none());
+
+        let r = router(&config_with(vec![equals(
+            "job",
+            "job",
+            "node",
+            SOURCE_FIELD,
+            "node",
+        )]));
+        let (to, value, _) = route(&r, &prometheus, r#"{"_source":"custom","job":"node"}"#);
+        assert_eq!(value["_source"], "node", "a matching row wins");
+        assert_eq!(value["_source_original"], "custom");
+        assert_eq!(to.topic(), Some("node_land"));
+    }
+
     #[test]
     fn a_row_copying_the_listener_source_routes_by_it() {
         let copy = RuleConfig::new("own", SOURCE_FIELD, SetAction::from(SOURCE_FIELD));
         let r = router(&config_with(vec![copy]));
-        let syslog = Ingest::built(Principal::Listener("syslog"));
+        let syslog = syslog();
         let (route, value, _) = route(&r, &syslog, r#"{"message":"m","_source":"syslog"}"#);
         assert_eq!(value["_source"], "syslog");
         assert_eq!(route.topic(), Some("syslog_land"));
@@ -768,8 +803,7 @@ mod tests {
             SOURCE_FIELD,
             "auth",
         )]));
-        let syslog = Ingest::built(Principal::Listener("syslog"));
-        let (_, value, _) = route(&r, &syslog, r#"{"appname":"sshd","_source":"syslog"}"#);
+        let (_, value, _) = route(&r, &syslog(), r#"{"appname":"sshd","_source":"syslog"}"#);
         assert_eq!(value["_source"], "auth");
         assert_eq!(value["_source_original"], "syslog");
     }
@@ -844,8 +878,7 @@ mod tests {
     #[test]
     fn a_listener_binding_holds_records_without_a_credential() {
         let r = router(&with_bindings(Config::default()));
-        let syslog = Ingest::built(Principal::Listener("syslog"));
-        let (_, value, _) = route(&r, &syslog, r#"{"_source":"syslog"}"#);
+        let (_, value, _) = route(&r, &syslog(), r#"{"_source":"syslog"}"#);
         assert_eq!(value["_org_id"], "netops");
     }
 

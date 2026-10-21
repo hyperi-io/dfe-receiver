@@ -56,7 +56,7 @@ pub enum Principal {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ingest {
     principal: Principal,
-    listener_source: bool,
+    stamp: Option<&'static str>,
 }
 
 impl Ingest {
@@ -65,17 +65,18 @@ impl Ingest {
     pub fn sent(principal: Principal) -> Self {
         Self {
             principal,
-            listener_source: false,
+            stamp: None,
         }
     }
 
-    /// Records the listener built from its wire protocol, `_source` included,
-    /// so that `_source` stands when no rule sets one.
+    /// Records the listener built from its wire protocol, stamping `_source`
+    /// `stamp` itself. That `_source` stands when no rule sets one. Any other
+    /// value the record carries came from the sender, and is treated as one.
     #[must_use]
-    pub fn built(principal: Principal) -> Self {
+    pub fn built(principal: Principal, stamp: &'static str) -> Self {
         Self {
             principal,
-            listener_source: true,
+            stamp: Some(stamp),
         }
     }
 
@@ -85,10 +86,10 @@ impl Ingest {
         &self.principal
     }
 
-    /// Whether a record's own `_source` is the listener's, kept when no rule sets one.
+    /// The `_source` the listener stamps on the records it builds.
     #[must_use]
-    pub fn keeps_listener_source(&self) -> bool {
-        self.listener_source
+    pub fn listener_stamp(&self) -> Option<&'static str> {
+        self.stamp
     }
 }
 

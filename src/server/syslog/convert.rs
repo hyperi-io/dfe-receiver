@@ -18,6 +18,9 @@ use crate::config::RawCapture;
 use crate::error::{Error, Result};
 use crate::server::raw_capture;
 
+/// The `_source` this listener stamps on every record it builds.
+pub const SOURCE: &str = "syslog";
+
 /// Convert a raw syslog message string to pipeline-ready JSON bytes.
 ///
 /// Uses `syslog_loose::parse_message` which auto-detects RFC 5424 vs RFC 3164.
@@ -121,7 +124,7 @@ pub fn syslog_to_json(raw: &str, raw_capture: RawCapture) -> Result<Bytes> {
     // Source tag for routing
     obj.insert(
         "_source".to_string(),
-        serde_json::Value::String("syslog".to_string()),
+        serde_json::Value::String(SOURCE.to_string()),
     );
 
     raw_capture::attach_str_to_map(&mut obj, raw, raw_capture);

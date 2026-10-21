@@ -48,7 +48,7 @@ const TRANSPORT: &str = "syslog";
 
 /// A syslog line carries no credential, and the listener writes its `_source`.
 fn listener_ingest() -> Ingest {
-    Ingest::built(Principal::Listener(TRANSPORT))
+    Ingest::built(Principal::Listener(TRANSPORT), convert::SOURCE)
 }
 
 /// TLS handshake timeout.

@@ -87,7 +87,7 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
     use tokio::io::AsyncReadExt;
 
     // A Forward frame carries no credential, and the converter writes `_source`.
-    let ingest = Ingest::built(Principal::Listener(TRANSPORT));
+    let ingest = Ingest::built(Principal::Listener(TRANSPORT), convert::SOURCE);
     let mut buf = vec![0u8; 64 * 1024];
     let mut pending = Vec::new();
 

@@ -31,6 +31,9 @@ use crate::server::raw_capture;
 
 use super::proto;
 
+/// The `_source` this listener stamps on a series that carries no `_source` label.
+pub const SOURCE: &str = "prometheus";
+
 // ---------------------------------------------------------------------------
 // Output mode
 // ---------------------------------------------------------------------------
@@ -134,7 +137,7 @@ fn native_labels(ts: &proto::TimeSeries) -> serde_json::Map<String, serde_json::
     }
     labels
         .entry("_source")
-        .or_insert_with(|| serde_json::Value::String("prometheus".to_string()));
+        .or_insert_with(|| serde_json::Value::String(SOURCE.to_string()));
     labels
 }
 

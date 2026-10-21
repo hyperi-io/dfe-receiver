@@ -107,7 +107,7 @@ mod tests {
 
     /// Records a listener built, from a sender it cannot name.
     fn test_ingest() -> Ingest {
-        Ingest::built(Principal::Listener("syslog"))
+        Ingest::built(Principal::Listener("syslog"), "syslog")
     }
 
     /// A pipeline on the memory transport whose guard counts only its own

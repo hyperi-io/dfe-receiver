@@ -384,7 +384,7 @@ impl UdpFlowListener {
         let mode_label = cfg.output.mode.label();
         let is_exploded = matches!(cfg.output.mode, OutputMode::Exploded);
         // A flow packet carries no credential, and the envelope writes `_source`.
-        let ingest = Ingest::built(Principal::Listener(D::PROTOCOL));
+        let ingest = Ingest::built(Principal::Listener(D::PROTOCOL), D::PROTOCOL);
 
         if is_exploded {
             // All-or-nothing per packet: pre-clone every rendered envelope
