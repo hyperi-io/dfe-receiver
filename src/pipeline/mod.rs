@@ -3374,7 +3374,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_record_takes_the_receive_time_once() {
+    async fn a_record_takes_the_receivers_own_receive_time() {
         let state = test_state().await;
 
         let stamped = routed(&state, r#"{"key": "value"}"#);
@@ -3383,10 +3383,10 @@ mod tests {
         assert!(stamped.get("_timestamp_receiver").is_none());
 
         let relayed = routed(&state, r#"{"_timestamp_received": 5}"#);
+        assert_eq!(relayed[routing::RECEIVED_FIELD], 1_760_000_000_000_u64);
         assert_eq!(
-            relayed[routing::RECEIVED_FIELD],
-            5,
-            "a relayed record keeps its first hop's"
+            relayed["_timestamp_received_original"], 5,
+            "a sender's receive time is kept beside the receiver's own"
         );
     }
 

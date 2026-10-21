@@ -164,8 +164,15 @@ async fn test_grpc_push_forwards_source_to_the_loader() {
     assert!(parsed.get("_source_original").is_none(), "{parsed}");
     assert_eq!(parsed["_source_fetcher"], "crates_io.crates");
     assert_eq!(parsed["crate"], "dfe-fetcher");
-    // The first hop's receive time stands, so the key is written once.
-    assert_eq!(parsed["_timestamp_received"], 1_757_000_000_000_u64);
+    // The receiver writes its own receive time, once, and keeps the sender's beside it.
+    assert!(
+        parsed["_timestamp_received"].as_u64() > Some(1_757_000_000_000),
+        "{parsed}"
+    );
+    assert_eq!(
+        parsed["_timestamp_received_original"],
+        1_757_000_000_000_u64
+    );
     assert_eq!(parsed["_org_id"], "default");
     let body = std::str::from_utf8(&received[0]).expect("utf8");
     assert_eq!(body.matches("\"_timestamp_received\"").count(), 1, "{body}");

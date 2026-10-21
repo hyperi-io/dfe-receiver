@@ -35,7 +35,7 @@ use scalo::rules::{
 };
 use sonic_rs::get_from_slice;
 
-pub use self::header::{Header, Write};
+pub use self::header::{Header, Received, Write};
 use crate::config::{Config, DestinationRef, DestinationsConfig, SourceOrgId};
 use crate::error::{Error, Result};
 use crate::tenancy::{Binding, Bindings, Ingest};
@@ -409,8 +409,9 @@ impl Router {
     /// the sender's binding, write its header fields, and pick its destinations.
     ///
     /// This is a HOT PATH function. `received_ms` is written as
-    /// `_timestamp_received` when the record carries none. `tally` comes from
-    /// [`tally`](Self::tally) on this router.
+    /// `_timestamp_received`, and one the record already carries is kept as
+    /// `_timestamp_received_original`. `tally` comes from [`tally`](Self::tally)
+    /// on this router.
     ///
     /// # Errors
     ///
@@ -444,7 +445,11 @@ impl Router {
             .enrichment_enabled
             .then(|| self.final_source(assigned, &found, ingest));
         let header = Header {
-            received_ms: (self.enrichment_enabled && !found.has_received).then_some(received_ms),
+            received: if self.enrichment_enabled {
+                Received::of(found.has_received, received_ms)
+            } else {
+                Received::Skip
+            },
             source: source.as_deref().map_or(Write::Keep, |source| {
                 Write::of(&found.source, found.source_once, source, true)
             }),
@@ -483,7 +488,7 @@ impl Router {
         let outcome = tally.evaluate_clamped(&record, &clamp);
         let org = self.final_org(&outcome, &found, binding);
         let header = Header {
-            received_ms: None,
+            received: Received::Skip,
             source: Write::Keep,
             org: Write::of(&found.org, found.org_once, org, false),
         };
@@ -744,9 +749,14 @@ mod tests {
         assert_eq!(text.matches("\"_source\"").count(), 1, "{text}");
         assert!(!text.contains("_source_original"), "{text}");
         assert_eq!(text.matches("\"_timestamp_received\"").count(), 1, "{text}");
-        assert!(
-            text.contains("1757000000000"),
-            "the first hop's time stands: {text}"
+        let value: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(
+            value["_timestamp_received"], NOW as u64,
+            "the receiver's own time: {text}"
+        );
+        assert_eq!(
+            value["_timestamp_received_original"], 1_757_000_000_000_u64,
+            "the sender's is kept beside it: {text}"
         );
         assert_eq!(routed.route.topic(), Some("crates_audit_land"));
     }

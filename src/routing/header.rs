@@ -63,11 +63,37 @@ impl<'a> Write<'a> {
     }
 }
 
+/// What `_timestamp_received` needs, in epoch milliseconds.
+///
+/// The receiver is the first hop, so it writes its own receive time on every
+/// record and keeps one the sender wrote as `_timestamp_received_original`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Received {
+    /// Not this pass's field.
+    Skip,
+    /// The record carries none.
+    Append(u128),
+    /// The record carries one, which is kept beside this.
+    Replace(u128),
+}
+
+impl Received {
+    /// The write that stamps `now_ms` on a record that `holds` one or not.
+    #[must_use]
+    pub fn of(holds: bool, now_ms: u128) -> Self {
+        if holds {
+            Self::Replace(now_ms)
+        } else {
+            Self::Append(now_ms)
+        }
+    }
+}
+
 /// The header fields one record needs written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Header<'a> {
-    /// `_timestamp_received` to add, for a record that carries none.
-    pub received_ms: Option<u128>,
+    /// `_timestamp_received`.
+    pub received: Received,
     /// `_source`.
     pub source: Write<'a>,
     /// `_org_id`.
@@ -84,7 +110,10 @@ impl Header<'_> {
     /// not parse as a JSON object.
     pub fn write(&self, payload: Bytes) -> Result<Bytes> {
         let replaces = |write: Write<'_>| matches!(write, Write::Replace { .. });
-        if replaces(self.source) || replaces(self.org) {
+        if replaces(self.source)
+            || replaces(self.org)
+            || matches!(self.received, Received::Replace(_))
+        {
             return rewrite(&payload, self);
         }
         Ok(append(payload, self))
@@ -95,7 +124,11 @@ impl Header<'_> {
 fn append(payload: Bytes, header: &Header<'_>) -> Bytes {
     let source = header.source.appended();
     let org = header.org.appended();
-    if header.received_ms.is_none() && source.is_none() && org.is_none() {
+    let received = match header.received {
+        Received::Append(ms) => Some(ms),
+        Received::Skip | Received::Replace(_) => None,
+    };
+    if received.is_none() && source.is_none() && org.is_none() {
         return payload;
     }
     let raw = payload.as_ref();
@@ -112,7 +145,7 @@ fn append(payload: Bytes, header: &Header<'_>) -> Bytes {
             .is_some_and(|pos| raw[pos] != b'{'),
     };
     out.buf.extend_from_slice(&raw[..close]);
-    if let Some(ms) = header.received_ms {
+    if let Some(ms) = received {
         out.key(RECEIVED_FIELD);
         push_decimal(&mut out.buf, ms);
     }
@@ -153,9 +186,14 @@ fn rewrite(payload: &[u8], header: &Header<'_>) -> Result<Bytes> {
     let Some(map) = value.as_object_mut() else {
         return Err(Error::Validation(NOT_AN_OBJECT.into()));
     };
-    if let Some(ms) = header.received_ms {
-        let ms = u64::try_from(ms).unwrap_or(u64::MAX);
-        map.insert(RECEIVED_FIELD.to_string(), serde_json::Value::from(ms));
+    if let Received::Append(ms) | Received::Replace(ms) = header.received {
+        let own = serde_json::Value::from(u64::try_from(ms).unwrap_or(u64::MAX));
+        let held = map.insert(RECEIVED_FIELD.to_string(), own.clone());
+        if let Some(held) = held
+            && held != own
+        {
+            park_original(map, RECEIVED_FIELD, held);
+        }
     }
     apply(map, SOURCE_FIELD, header.source);
     apply(map, ORG_FIELD, header.org);
@@ -244,7 +282,7 @@ mod tests {
 
     fn header(source: Write<'static>, org: Write<'static>) -> Header<'static> {
         Header {
-            received_ms: Some(1700),
+            received: Received::Append(1700),
             source,
             org,
         }
@@ -279,7 +317,7 @@ mod tests {
     #[test]
     fn a_record_that_needs_nothing_is_not_copied() {
         let h = Header {
-            received_ms: None,
+            received: Received::Skip,
             source: Write::Keep,
             org: Write::Keep,
         };
@@ -309,6 +347,35 @@ mod tests {
         assert_eq!(value["_timestamp_received"], 1700);
         assert_eq!(out.matches("\"_source\"").count(), 1, "{out}");
         assert_eq!(out.matches("\"_org_id\"").count(), 1, "{out}");
+    }
+
+    /// A sender's receive time, of any JSON type, is kept beside the receiver's own.
+    #[test]
+    fn a_sender_receive_time_is_parked_beside_the_receivers_own() {
+        let h = Header {
+            received: Received::Replace(1700),
+            source: Write::Keep,
+            org: Write::Keep,
+        };
+        for (record, held) in [
+            (r#"{"_timestamp_received":5,"a":1}"#, serde_json::json!(5)),
+            (
+                r#"{"_timestamp_received":"soon"}"#,
+                serde_json::json!("soon"),
+            ),
+            (
+                r#"{"_timestamp_received":{"t":1}}"#,
+                serde_json::json!({"t": 1}),
+            ),
+        ] {
+            let out = written(record, &h);
+            let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(value["_timestamp_received"], 1700, "{out}");
+            assert_eq!(value["_timestamp_received_original"], held, "{out}");
+            assert_eq!(out.matches("\"_timestamp_received\"").count(), 1, "{out}");
+        }
+        assert_eq!(Received::of(true, 9), Received::Replace(9));
+        assert_eq!(Received::of(false, 9), Received::Append(9));
     }
 
     #[test]
@@ -386,7 +453,7 @@ mod tests {
     #[test]
     fn a_duplicate_key_collapses_to_one_and_an_equal_copy_is_not_parked() {
         let h = Header {
-            received_ms: None,
+            received: Received::Skip,
             source: Write::Replace {
                 value: "web",
                 park: true,

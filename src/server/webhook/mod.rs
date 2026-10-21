@@ -46,7 +46,7 @@ use crate::config::{Config, WebhookBody, WebhookCallerConfig, WebhookConfig};
 use crate::error::{Error, Result, unavailable_response};
 use crate::metrics::Metrics;
 use crate::pipeline::{Acks, PipelineState};
-use crate::routing::{Header, RECEIVED_FIELD, SOURCE_FIELD, Write};
+use crate::routing::{Header, RECEIVED_FIELD, Received, SOURCE_FIELD, Write};
 use crate::server::auth::record_auth_failure;
 use crate::server::http::{Accept, apply_request_limits, split_json_array};
 use crate::server::ip_filter::IpFilter;
@@ -524,35 +524,27 @@ fn now_millis() -> u128 {
 
 /// Write `_source` (the caller) and `_timestamp_received` into the record.
 ///
-/// The caller's identity wins: a record that already carries either key is
-/// re-serialised with the receiver's values in place of the sender's, since
-/// `_source` picks the destination table downstream and a duplicate key makes
-/// the loader's JSON column reject the record. Records without them take the
-/// byte-append path the pipeline uses.
+/// The caller's identity wins: a record that already carries `_source` is
+/// rewritten with the caller in its place, since `_source` picks the
+/// destination table downstream and a duplicate key makes the loader's JSON
+/// column reject the record. The receiver's own receive time is written too,
+/// and one the sender wrote is kept as `_timestamp_received_original`. Records
+/// with neither take the byte-append path the pipeline uses.
 fn stamp(record: Bytes, caller: &str, now_ms: u128) -> Result<Bytes> {
-    let reserved = get_from_slice(&record, [SOURCE_FIELD].as_slice()).is_ok()
-        || get_from_slice(&record, [RECEIVED_FIELD].as_slice()).is_ok();
-    if !reserved {
-        let header = Header {
-            received_ms: Some(now_ms),
-            source: Write::Append(caller),
-            org: Write::Keep,
-        };
-        return header.write(record);
-    }
-    let mut value: serde_json::Value = serde_json::from_slice(&record)?;
-    let Some(object) = value.as_object_mut() else {
-        return Err(Error::Validation("record is not a JSON object".into()));
+    let holds = |field: &str| get_from_slice(&record, [field].as_slice()).is_ok();
+    let header = Header {
+        received: Received::of(holds(RECEIVED_FIELD), now_ms),
+        source: if holds(SOURCE_FIELD) {
+            Write::Replace {
+                value: caller,
+                park: false,
+            }
+        } else {
+            Write::Append(caller)
+        },
+        org: Write::Keep,
     };
-    object.insert(
-        SOURCE_FIELD.into(),
-        serde_json::Value::String(caller.into()),
-    );
-    object.insert(
-        RECEIVED_FIELD.into(),
-        serde_json::Value::Number(serde_json::Number::from(now_ms as u64)),
-    );
-    Ok(Bytes::from(serde_json::to_vec(&value)?))
+    header.write(record)
 }
 
 #[cfg(test)]
@@ -599,7 +591,7 @@ mod tests {
     }
 
     #[test]
-    fn a_sender_supplied_receiver_timestamp_is_replaced() {
+    fn a_sender_supplied_receiver_timestamp_is_replaced_and_kept_beside() {
         let stamped = stamp(
             Bytes::from(r#"{"_timestamp_received":1,"a":1}"#),
             "runzero",
@@ -608,6 +600,7 @@ mod tests {
         .unwrap();
         let value: serde_json::Value = serde_json::from_slice(&stamped).unwrap();
         assert_eq!(value["_timestamp_received"], 1700);
+        assert_eq!(value["_timestamp_received_original"], 1);
         assert_eq!(value["_source"], "runzero");
     }
 

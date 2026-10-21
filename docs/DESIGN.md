@@ -29,7 +29,7 @@ dfe-receiver is a high-performance HTTP/gRPC receiver for PB/s scale data ingest
    - `_org_id` is clamped to the orgs the sender's credential or listener is bound to (`ingest_bindings`), unbound senders to `routing.default_org_id`
    - Source-to-topic remapping, destinations by source, and default source ("main")
    - Support direct routing to dfe-loader
-   - `_timestamp_received` enrichment (epoch ms injection), kept when a first hop already set it
+   - `_timestamp_received` enrichment (epoch ms injection): the receiver is the first hop and always writes its own, keeping a sender's as `_timestamp_received_original`
    - `usage_ingested_bytes_total{org_id}` counts the bytes each org's accepted records carried
 
 4. **Authentication**
@@ -159,7 +159,7 @@ One pass per record (`src/routing/mod.rs`):
 2. The rule set runs over the record's fields, read lazily from the bytes: the first `_source` row that matches, then the first `_org_id` row, which can test the `_source` just chosen.
 3. The clamp holds `_org_id` to the orgs the request's principal is bound to. A value outside them is replaced by the binding's default org and counted on `rules_clamped_total`. The record is never refused for it.
 4. The `_source` a row set, else `routing.default_source`, picks the destinations (`destinations.sources`, else `destinations.default`) and the topic.
-5. `_timestamp_received`, `_source` and `_org_id` are written back in one pass: appended before the closing brace when the record lacks them, a serde rewrite only when one must be replaced. The `_source` written is the row's, else the listener's own stamp (`syslog`, `fluent`, `gelf`, the flow protocol, or `prometheus` on a series with no `_source` label), else the default. Any other `_source` the record carries is the sender's, a remote-write `_source` label included, and is kept as `_source_original` when this replaces it.
+5. `_timestamp_received`, `_source` and `_org_id` are written back in one pass: appended before the closing brace when the record lacks them, a serde rewrite when one must be replaced or its key is spelled twice or with an escape. A sender's `_timestamp_received` is kept as `_timestamp_received_original`. The `_source` written is the row's, else the listener's own stamp (`syslog`, `fluent`, `gelf`, the flow protocol, or `prometheus` on a series with no `_source` label), else the default. Any other `_source` the record carries is the sender's, a remote-write `_source` label included, and is kept as `_source_original` when this replaces it.
 
 The principal is a bearer token's credential id, an unnamed token, or the listener itself for a request with no credential the receiver can name. mTLS client identity is not read: such a request takes its listener's binding.
 
