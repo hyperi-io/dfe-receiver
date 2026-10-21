@@ -274,7 +274,7 @@ mod tests {
         let metrics = Metrics::default();
         let mut config = pipeline.config();
         config.validation.dlq_on_invalid = false;
-        pipeline.rebuild_components(&config).await;
+        pipeline.rebuild_components(&config).await.unwrap();
 
         let kept_reading = tokio::time::timeout(
             Duration::from_secs(1),

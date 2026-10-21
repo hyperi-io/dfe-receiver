@@ -1493,12 +1493,13 @@ impl PipelineState {
     ///
     /// # Errors
     ///
-    /// None today: a destination whose sender fails to build is reported and
-    /// skipped, not returned.
+    /// [`Error::Config`] when the router does not build. The routes and the
+    /// published config both stay on the last good version. A destination
+    /// whose sender fails to build is reported and skipped, not returned.
     pub async fn reload_config(&self, new_config: Config) -> Result<()> {
-        self.rebuild_components(&new_config).await;
+        self.rebuild_components(&new_config).await?;
 
-        // Update shared config (bumps version, notifies subscribers)
+        // Published only once the routes it describes are live.
         self.shared_config.update(new_config);
         security::config_changed(
             "config_reload",
@@ -1513,9 +1514,9 @@ impl PipelineState {
 
     /// Rebuild mutable pipeline components from new configuration.
     ///
-    /// Called by the config change subscriber when `SharedConfig` is updated
-    /// externally (e.g., by `ConfigReloader`). Does NOT update `SharedConfig`
-    /// itself -- that's already been done by the caller.
+    /// Does NOT update `SharedConfig`: the caller publishes `new_config` once
+    /// this returns `Ok`, so a failed rebuild leaves the routes and the
+    /// published config on the same version.
     ///
     /// The routing rules and the destination senders change together, so a
     /// rule takes effect with the sender it names. A destination the config
@@ -1531,15 +1532,18 @@ impl PipelineState {
     /// its old sender, and the reload waits for that; until then its records
     /// are answered unavailable. The Kafka producer and the DLQ are built at
     /// startup only.
-    pub async fn rebuild_components(&self, new_config: &Config) {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Config`] when the router does not build. Nothing is swapped.
+    pub async fn rebuild_components(&self, new_config: &Config) -> Result<()> {
         let _one_at_a_time = self.reloading.lock().await;
         let resolved = new_config.resolved_destinations();
-        // `Config::validate` compiled these rules before the reload published them.
         let router = match Router::new(new_config, &resolved) {
             Ok(router) => Arc::new(router),
             Err(e) => {
-                error!(error = %e, "A config reload's rules did not compile; the current routes stay");
-                return;
+                error!(error = %e, "A config reload's router did not build; the current routes stay");
+                return Err(e);
             }
         };
         let (destinations, moves) = self.rebuild_destinations(new_config, &resolved).await;
@@ -1571,6 +1575,7 @@ impl PipelineState {
         for moving in moves {
             self.move_spool(moving).await;
         }
+        Ok(())
     }
 
     /// The destination set `config` asks for: the current sender where a
@@ -2202,6 +2207,10 @@ impl Orchestrator {
     /// `reload_secs` (0 for never), and rebuild the routes and destinations
     /// from each reload that validates. The rules and bindings change with no
     /// restart.
+    ///
+    /// The reloader publishes to a staging copy. The config every reader sees
+    /// moves only once the routes it describes are live, so a rebuild that
+    /// fails leaves both on the last good version.
     pub fn watch_config(&self, config_path: Option<&str>, reload_secs: u64) {
         use scalo::config::reloader::{ConfigReloader, ReloaderConfig};
 
@@ -2222,24 +2231,23 @@ impl Orchestrator {
             config_path: path,
             ..Config::default()
         };
+        let staged = SharedConfig::new(self.shared_config.get());
         let reloader = ConfigReloader::new(
             reloader_config,
-            self.shared_config.clone(),
+            staged.clone(),
             move || crate::config::reload_config(&placeholder).map_err(|e| Box::new(e) as BoxError),
             |config: &Config| config.validate().map_err(|e| Box::new(e) as BoxError),
         );
         let _reloading = reloader.start();
 
         let state = Arc::clone(&self.state);
-        let mut changes = self.shared_config.subscribe();
+        let mut changes = staged.subscribe();
         tokio::spawn(async move {
             while changes.changed().await.is_ok() {
-                let config = state.config();
-                state.rebuild_components(&config).await;
-                info!(
-                    version = *changes.borrow(),
-                    "Pipeline components rebuilt after config reload"
-                );
+                let config = staged.get();
+                if let Err(e) = state.reload_config(config).await {
+                    warn!(error = %e, "Config reload refused; the last good config stays");
+                }
             }
         });
     }
@@ -3476,8 +3484,12 @@ mod tests {
             routing::compile_rules(&config).is_err(),
             "the reloader's validate step refuses it"
         );
-        state.reload_config(config).await.unwrap();
+        let version = state.shared_config().version();
+        assert!(state.reload_config(config).await.is_err());
         assert_eq!(routed(&state, "{}")["_source"], "kept");
+        // The published config stays with the routes, never ahead of them.
+        assert_eq!(state.shared_config().version(), version);
+        assert_eq!(state.config().rules.rules[0].id, "all");
     }
 
     #[tokio::test]
