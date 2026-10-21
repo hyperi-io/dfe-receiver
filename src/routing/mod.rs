@@ -35,7 +35,7 @@ use scalo::rules::{
 };
 use sonic_rs::get_from_slice;
 
-pub use self::header::{Header, Received, Write};
+pub use self::header::{Header, RECEIVED_ORIGINAL, Received, Write};
 use crate::config::{Config, DestinationRef, DestinationsConfig, SourceOrgId};
 use crate::error::{Error, Result};
 use crate::tenancy::{Binding, Bindings, Ingest};
@@ -71,6 +71,7 @@ struct Spelled {
     source: u32,
     org: u32,
     received: u32,
+    received_original: u32,
 }
 
 impl Spelled {
@@ -80,6 +81,7 @@ impl Spelled {
             source: 0,
             org: 0,
             received: 0,
+            received_original: 0,
         };
         for (at, pair) in raw.windows(2).enumerate() {
             if pair == b"\"_" {
@@ -87,6 +89,7 @@ impl Spelled {
                 spelled.source += u32::from(quoted(key, SOURCE_FIELD));
                 spelled.org += u32::from(quoted(key, ORG_FIELD));
                 spelled.received += u32::from(quoted(key, RECEIVED_FIELD));
+                spelled.received_original += u32::from(quoted(key, RECEIVED_ORIGINAL));
             }
         }
         spelled
@@ -263,6 +266,9 @@ struct Found<'j> {
     org_once: bool,
     /// Whether the record already carries `_timestamp_received`.
     has_received: bool,
+    /// Where that value sits in the bytes, when it can be swapped there: the
+    /// key spelled once with no escape, and no `_timestamp_received_original`.
+    received_at: Option<(usize, usize)>,
 }
 
 /// A record as the rules read it: the header fields the router already read,
@@ -445,10 +451,13 @@ impl Router {
             .enrichment_enabled
             .then(|| self.final_source(assigned, &found, ingest));
         let header = Header {
-            received: if self.enrichment_enabled {
-                Received::of(found.has_received, received_ms)
-            } else {
-                Received::Skip
+            received: match (self.enrichment_enabled, found.received_at) {
+                (false, _) => Received::Skip,
+                (true, Some(at)) => Received::Swap {
+                    ms: received_ms,
+                    at,
+                },
+                (true, None) => Received::of(found.has_received, received_ms),
             },
             source: source.as_deref().map_or(Write::Keep, |source| {
                 Write::of(&found.source, found.source_once, source, true)
@@ -515,6 +524,10 @@ impl Router {
     /// `_timestamp_received` only when `check_received`.
     fn found<'j>(&self, json: &'j JsonPayload<'_>, raw: &[u8], check_received: bool) -> Found<'j> {
         let spelled = Spelled::of(raw);
+        let received_at =
+            (check_received && spelled.once(spelled.received) && spelled.received_original == 0)
+                .then(|| header::value_span(raw, RECEIVED_FIELD))
+                .flatten();
         Found {
             source: if spelled.may_hold(spelled.source) {
                 json.lookup(&self.source_path)
@@ -529,9 +542,11 @@ impl Router {
                 json.lookup(&self.org_path)
             },
             org_once: spelled.once(spelled.org),
-            has_received: check_received
-                && spelled.may_hold(spelled.received)
-                && !matches!(json.lookup(&self.received_path), Lookup::Missing),
+            has_received: received_at.is_some()
+                || (check_received
+                    && spelled.may_hold(spelled.received)
+                    && !matches!(json.lookup(&self.received_path), Lookup::Missing)),
+            received_at,
         }
     }
 
@@ -759,6 +774,54 @@ mod tests {
             "the sender's is kept beside it: {text}"
         );
         assert_eq!(routed.route.topic(), Some("crates_audit_land"));
+    }
+
+    /// However a sender spells `_timestamp_received`, the record leaves with one,
+    /// the receiver's own, and the sender's value kept beside it.
+    #[test]
+    fn every_spelling_of_a_sender_receive_time_leaves_one_receivers_own() {
+        let r = router(&Config::default());
+        for (record, parked) in [
+            (r#"{"_timestamp_received":5,"a":1}"#, ("_original", 5)),
+            (
+                r#"{"_timestamp_received":5,"_timestamp_received_original":3}"#,
+                ("_original_2", 5),
+            ),
+            (
+                r#"{"_timestamp_received":5,"_timestamp_received":6}"#,
+                ("_original", 6),
+            ),
+            ("{\"\\u005ftimestamp_received\":5}", ("_original", 5)),
+        ] {
+            let mut tally = r.tally();
+            let routed = r
+                .route(Bytes::from(record), &listener("http"), NOW, &mut tally)
+                .expect("routes");
+            let held: Vec<u64> = sonic_rs::to_object_iter(&routed.payload[..])
+                .map(|pair| pair.expect("a top-level field"))
+                .filter(|(name, _)| name.as_ref() == RECEIVED_FIELD)
+                .map(|(_, value)| value.as_raw_str().parse().expect("a number"))
+                .collect();
+            assert_eq!(held, [NOW as u64], "{record}");
+            let value: serde_json::Value = serde_json::from_slice(&routed.payload).unwrap();
+            let (suffix, sent) = parked;
+            assert_eq!(value[format!("{RECEIVED_FIELD}{suffix}")], sent, "{record}");
+        }
+
+        // The common relayed record is swapped in its bytes, not parsed.
+        let mut tally = r.tally();
+        let routed = r
+            .route(
+                Bytes::from(r#"{"_timestamp_received":5, "a":1}"#),
+                &listener("http"),
+                NOW,
+                &mut tally,
+            )
+            .expect("routes");
+        assert_eq!(
+            routed.payload,
+            r#"{"_timestamp_received":1760000000000, "a":1,"_timestamp_received_original":5,"_source":"main","_org_id":"default"}"#
+        );
     }
 
     // --- a listener's own _source ---

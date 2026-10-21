@@ -16,6 +16,7 @@
 
 use bytes::Bytes;
 use scalo::rules::Lookup;
+use sonic_rs::get_from_slice;
 
 use super::{ORG_FIELD, RECEIVED_FIELD, SOURCE_FIELD};
 use crate::error::{Error, Result};
@@ -75,6 +76,15 @@ pub enum Received {
     Append(u128),
     /// The record carries one, which is kept beside this.
     Replace(u128),
+    /// As `Replace`, for a record that spells the key once with no escape and
+    /// holds no `_timestamp_received_original`: the value at byte span `at`
+    /// is swapped in the bytes with no parse.
+    Swap {
+        /// The receive time written.
+        ms: u128,
+        /// Where the sender's value sits in the record.
+        at: (usize, usize),
+    },
 }
 
 impl Received {
@@ -87,7 +97,17 @@ impl Received {
             Self::Append(now_ms)
         }
     }
+
+    fn ms(self) -> Option<u128> {
+        match self {
+            Self::Skip => None,
+            Self::Append(ms) | Self::Replace(ms) | Self::Swap { ms, .. } => Some(ms),
+        }
+    }
 }
+
+/// Where a sender's `_timestamp_received` is kept.
+pub const RECEIVED_ORIGINAL: &str = "_timestamp_received_original";
 
 /// The header fields one record needs written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,8 +136,57 @@ impl Header<'_> {
         {
             return rewrite(&payload, self);
         }
+        if let Received::Swap { ms, at } = self.received {
+            return swap(&payload, self, ms, at);
+        }
         Ok(append(payload, self))
     }
+}
+
+/// Where the top-level `field`'s value sits in `raw`, `None` when it has none.
+#[must_use]
+pub(super) fn value_span(raw: &[u8], field: &str) -> Option<(usize, usize)> {
+    let value = get_from_slice(raw, [field].as_slice()).ok()?;
+    let part = value.as_raw_str();
+    let start = (part.as_ptr() as usize).checked_sub(raw.as_ptr() as usize)?;
+    let end = start.checked_add(part.len())?;
+    (raw.get(start..end) == Some(part.as_bytes())).then_some((start, end))
+}
+
+/// Swap the value at `at` for `ms` in the record's bytes, keep the value it
+/// held as `_timestamp_received_original`, and append the rest. Falls back to
+/// the parse when `at` is not a value inside the record's braces.
+fn swap(raw: &[u8], header: &Header<'_>, ms: u128, (start, end): (usize, usize)) -> Result<Bytes> {
+    let close = raw.iter().rposition(|&b| b == b'}');
+    let (Some(close), Some(held)) = (close, raw.get(start..end)) else {
+        return rewrite(raw, header);
+    };
+    if start == 0 || end > close {
+        return rewrite(raw, header);
+    }
+    let mut own = Vec::with_capacity(39);
+    push_decimal(&mut own, ms);
+    let mut out = Appender {
+        buf: Vec::with_capacity(raw.len() + held.len() + APPEND_RESERVE * 2),
+        comma: true,
+    };
+    out.buf.extend_from_slice(&raw[..start]);
+    out.buf.extend_from_slice(&own);
+    out.buf.extend_from_slice(&raw[end..close]);
+    if held != own.as_slice() {
+        out.key(RECEIVED_ORIGINAL);
+        out.buf.extend_from_slice(held);
+    }
+    if let Some(source) = header.source.appended() {
+        out.key(SOURCE_FIELD);
+        push_json_string(&mut out.buf, source);
+    }
+    if let Some(org) = header.org.appended() {
+        out.key(ORG_FIELD);
+        push_json_string(&mut out.buf, org);
+    }
+    out.buf.extend_from_slice(&raw[close..]);
+    Ok(Bytes::from(out.buf))
 }
 
 /// Append every field `header` adds before the record's last `}`.
@@ -126,7 +195,7 @@ fn append(payload: Bytes, header: &Header<'_>) -> Bytes {
     let org = header.org.appended();
     let received = match header.received {
         Received::Append(ms) => Some(ms),
-        Received::Skip | Received::Replace(_) => None,
+        Received::Skip | Received::Replace(_) | Received::Swap { .. } => None,
     };
     if received.is_none() && source.is_none() && org.is_none() {
         return payload;
@@ -186,7 +255,7 @@ fn rewrite(payload: &[u8], header: &Header<'_>) -> Result<Bytes> {
     let Some(map) = value.as_object_mut() else {
         return Err(Error::Validation(NOT_AN_OBJECT.into()));
     };
-    if let Received::Append(ms) | Received::Replace(ms) = header.received {
+    if let Some(ms) = header.received.ms() {
         let own = serde_json::Value::from(u64::try_from(ms).unwrap_or(u64::MAX));
         let held = map.insert(RECEIVED_FIELD.to_string(), own.clone());
         if let Some(held) = held
@@ -349,33 +418,88 @@ mod tests {
         assert_eq!(out.matches("\"_org_id\"").count(), 1, "{out}");
     }
 
-    /// A sender's receive time, of any JSON type, is kept beside the receiver's own.
+    /// A sender's receive time, of any JSON type, is kept beside the receiver's
+    /// own, by a parse or by a swap in the bytes alike.
     #[test]
     fn a_sender_receive_time_is_parked_beside_the_receivers_own() {
-        let h = Header {
-            received: Received::Replace(1700),
-            source: Write::Keep,
-            org: Write::Keep,
-        };
-        for (record, held) in [
-            (r#"{"_timestamp_received":5,"a":1}"#, serde_json::json!(5)),
-            (
-                r#"{"_timestamp_received":"soon"}"#,
-                serde_json::json!("soon"),
-            ),
-            (
-                r#"{"_timestamp_received":{"t":1}}"#,
-                serde_json::json!({"t": 1}),
-            ),
-        ] {
-            let out = written(record, &h);
-            let value: serde_json::Value = serde_json::from_str(&out).unwrap();
-            assert_eq!(value["_timestamp_received"], 1700, "{out}");
-            assert_eq!(value["_timestamp_received_original"], held, "{out}");
-            assert_eq!(out.matches("\"_timestamp_received\"").count(), 1, "{out}");
+        for swaps in [false, true] {
+            for (record, held) in [
+                (r#"{"_timestamp_received":5,"a":1}"#, serde_json::json!(5)),
+                (
+                    r#"{"a":1, "_timestamp_received" : "soon" }"#,
+                    serde_json::json!("soon"),
+                ),
+                (
+                    r#"{"_timestamp_received":{"t":[1,2]}}"#,
+                    serde_json::json!({"t": [1, 2]}),
+                ),
+            ] {
+                let received = if swaps {
+                    swap_at(record, 1700)
+                } else {
+                    Received::Replace(1700)
+                };
+                let h = Header {
+                    received,
+                    source: Write::Keep,
+                    org: Write::Append("acme"),
+                };
+                let out = written(record, &h);
+                let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+                assert_eq!(value["_timestamp_received"], 1700, "{received:?}: {out}");
+                assert_eq!(value[RECEIVED_ORIGINAL], held, "{received:?}: {out}");
+                assert_eq!(value["_org_id"], "acme", "{received:?}: {out}");
+                assert_eq!(out.matches("\"_timestamp_received\"").count(), 1, "{out}");
+            }
         }
         assert_eq!(Received::of(true, 9), Received::Replace(9));
         assert_eq!(Received::of(false, 9), Received::Append(9));
+        assert_eq!(RECEIVED_ORIGINAL, format!("{RECEIVED_FIELD}_original"));
+    }
+
+    /// A swap leaves every byte around the value it replaces as it was, and
+    /// parks nothing when the sender's value is the receiver's own.
+    #[test]
+    fn a_swap_leaves_every_other_byte_as_it_was() {
+        let swapped = |record: &'static str| {
+            let h = Header {
+                received: swap_at(record, 1700),
+                source: Write::Keep,
+                org: Write::Keep,
+            };
+            written(record, &h)
+        };
+        assert_eq!(
+            swapped(r#"{"b": 2, "_timestamp_received":5 ,"a":[1]}"#),
+            r#"{"b": 2, "_timestamp_received":1700 ,"a":[1],"_timestamp_received_original":5}"#
+        );
+        assert_eq!(
+            swapped(r#"{"_timestamp_received":1700}"#),
+            r#"{"_timestamp_received":1700}"#
+        );
+    }
+
+    /// A span that is not a value inside the braces falls back to the parse.
+    #[test]
+    fn a_swap_at_no_value_falls_back_to_the_parse() {
+        let record = r#"{"_timestamp_received":5}"#;
+        for at in [(0, 1), (24, 25), (23, 99), (99, 100)] {
+            let h = Header {
+                received: Received::Swap { ms: 1700, at },
+                source: Write::Keep,
+                org: Write::Keep,
+            };
+            let value: serde_json::Value = serde_json::from_str(&written(record, &h)).unwrap();
+            assert_eq!(value["_timestamp_received"], 1700, "{at:?}");
+            assert_eq!(value[RECEIVED_ORIGINAL], 5, "{at:?}");
+        }
+        assert_eq!(value_span(br#"{"a":1}"#, RECEIVED_FIELD), None);
+    }
+
+    /// The swap of `record`'s own `_timestamp_received` for `ms`.
+    fn swap_at(record: &str, ms: u128) -> Received {
+        let at = value_span(record.as_bytes(), RECEIVED_FIELD).expect("a receive time");
+        Received::Swap { ms, at }
     }
 
     #[test]
