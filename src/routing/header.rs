@@ -10,9 +10,9 @@
 //!
 //! A record that lacks every field it needs takes them by a byte append before
 //! its closing brace, with no parse. One that already carries a field holding
-//! another value is rewritten through a parse, because a second top-level key
-//! of the same name makes the loader's ClickHouse JSON column reject the whole
-//! record.
+//! another value, or spells its key twice or with an escape, is rewritten
+//! through a parse, because a second top-level key of the same name makes the
+//! loader's ClickHouse JSON column reject the whole record.
 
 use bytes::Bytes;
 use scalo::rules::Lookup;
@@ -42,11 +42,15 @@ pub enum Write<'a> {
 
 impl<'a> Write<'a> {
     /// The write that gives a field holding `found` the value `value`.
+    ///
+    /// `once` says the field's key is spelled once in the bytes and with no
+    /// escape. Without it a record that already holds `value` is rewritten
+    /// anyway, because a lookup reads only the first of two keys of one name.
     #[must_use]
-    pub fn of(found: &Lookup<'_>, value: &'a str, park: bool) -> Self {
+    pub fn of(found: &Lookup<'_>, once: bool, value: &'a str, park: bool) -> Self {
         match found {
             Lookup::Missing => Self::Append(value),
-            Lookup::Text(text) if text.as_ref() == value => Self::Keep,
+            Lookup::Text(text) if once && text.as_ref() == value => Self::Keep,
             _ => Self::Replace { value, park },
         }
     }
@@ -168,7 +172,11 @@ fn apply(map: &mut serde_json::Map<String, serde_json::Value>, field: &str, writ
         }
         Write::Replace { value, park } => {
             let held = map.insert(field.to_string(), serde_json::Value::from(value));
-            if park && let Some(held) = held {
+            // A second copy of the same value is collapsed, not parked.
+            if park
+                && let Some(held) = held
+                && held.as_str() != Some(value)
+            {
                 park_original(map, field, held);
             }
         }
@@ -349,25 +357,54 @@ mod tests {
 
     #[test]
     fn the_write_follows_what_the_record_holds() {
-        assert_eq!(Write::of(&Lookup::Missing, "a", true), Write::Append("a"));
+        let replace = Write::Replace {
+            value: "a",
+            park: true,
+        };
         assert_eq!(
-            Write::of(&Lookup::Text(Cow::Borrowed("a")), "a", true),
+            Write::of(&Lookup::Missing, true, "a", true),
+            Write::Append("a")
+        );
+        assert_eq!(
+            Write::of(&Lookup::Text(Cow::Borrowed("a")), true, "a", true),
             Write::Keep
+        );
+        assert_eq!(
+            Write::of(&Lookup::Text(Cow::Borrowed("a")), false, "a", true),
+            replace,
+            "a key spelled twice or with an escape is rewritten even when the first copy matches"
         );
         for held in [
             Lookup::Text(Cow::Borrowed("b")),
             Lookup::Null,
             Lookup::Composite,
         ] {
-            assert_eq!(
-                Write::of(&held, "a", true),
-                Write::Replace {
-                    value: "a",
-                    park: true
-                },
-                "{held:?}"
-            );
+            assert_eq!(Write::of(&held, true, "a", true), replace, "{held:?}");
         }
+    }
+
+    #[test]
+    fn a_duplicate_key_collapses_to_one_and_an_equal_copy_is_not_parked() {
+        let h = Header {
+            received_ms: None,
+            source: Write::Replace {
+                value: "web",
+                park: true,
+            },
+            org: Write::Replace {
+                value: "acme",
+                park: false,
+            },
+        };
+        let out = written(
+            r#"{"_source":"web","_source":"web","_org_id":"acme","_org_id":"beta"}"#,
+            &h,
+        );
+        assert_eq!(out.matches("\"_source\"").count(), 1, "{out}");
+        assert_eq!(out.matches("\"_org_id\"").count(), 1, "{out}");
+        let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(value["_org_id"], "acme");
+        assert!(value.get("_source_original").is_none(), "{out}");
     }
 
     #[test]

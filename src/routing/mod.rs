@@ -56,42 +56,50 @@ pub const RULE_TARGETS: [&str; 2] = [SOURCE_FIELD, ORG_FIELD];
 /// The row that keeps a sender's own `_org_id` under `routing.source_org_id: allow`.
 pub const SENDER_ORG_RULE: &str = "receiver.sender-org-id";
 
-/// The header keys a record can hold, from one pass over its bytes with no parse.
+/// How a record spells each header key, from one pass over its bytes with no parse.
 ///
 /// Spelled with no escape, a key is its quoted name in the bytes, so a record
 /// with no `\` that never quotes a name holds no such key at any depth and its
 /// lookup is skipped: a lookup that misses builds an error, the dearest step
 /// on the hot path. Any `\` sends every key to its lookup.
+///
+/// A lookup reads only the first of two keys of one name, so a value it finds
+/// is the record's only copy just when the key is spelled [`once`](Self::once).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Spelled {
-    source: bool,
-    org: bool,
-    received: bool,
+    escapes: bool,
+    source: u32,
+    org: u32,
+    received: u32,
 }
 
 impl Spelled {
     fn of(raw: &[u8]) -> Self {
-        if raw.contains(&b'\\') {
-            return Self {
-                source: true,
-                org: true,
-                received: true,
-            };
-        }
         let mut spelled = Self {
-            source: false,
-            org: false,
-            received: false,
+            escapes: raw.contains(&b'\\'),
+            source: 0,
+            org: 0,
+            received: 0,
         };
         for (at, pair) in raw.windows(2).enumerate() {
             if pair == b"\"_" {
                 let key = &raw[at + 1..];
-                spelled.source |= quoted(key, SOURCE_FIELD);
-                spelled.org |= quoted(key, ORG_FIELD);
-                spelled.received |= quoted(key, RECEIVED_FIELD);
+                spelled.source += u32::from(quoted(key, SOURCE_FIELD));
+                spelled.org += u32::from(quoted(key, ORG_FIELD));
+                spelled.received += u32::from(quoted(key, RECEIVED_FIELD));
             }
         }
         spelled
+    }
+
+    /// Whether a key spelled `count` times may be in the record at all.
+    fn may_hold(self, count: u32) -> bool {
+        self.escapes || count > 0
+    }
+
+    /// Whether a key spelled `count` times is spelled once, and with no escape.
+    fn once(self, count: u32) -> bool {
+        !self.escapes && count == 1
     }
 }
 
@@ -111,7 +119,8 @@ fn quoted(rest: &[u8], name: &str) -> bool {
 /// [`Error::Validation`] when the record carries one and does not parse
 /// whole, so it would reach the rules with a tenant the sender picked.
 pub fn strip_org_id(payload: Bytes) -> Result<Bytes> {
-    if !Spelled::of(&payload).org
+    let spelled = Spelled::of(&payload);
+    if !spelled.may_hold(spelled.org)
         || get_from_slice(payload.as_ref(), [ORG_FIELD].as_slice()).is_err()
     {
         return Ok(payload);
@@ -247,7 +256,11 @@ impl ResolvedDestinations {
 /// The header fields the router reads from a record before the rules run.
 struct Found<'j> {
     source: Lookup<'j>,
+    /// Whether `source` is the record's only `_source`.
+    source_once: bool,
     org: Lookup<'j>,
+    /// Whether `org` is the record's only `_org_id`.
+    org_once: bool,
     /// Whether the record already carries `_timestamp_received`.
     has_received: bool,
 }
@@ -432,10 +445,10 @@ impl Router {
             .then(|| self.final_source(assigned, &found, ingest));
         let header = Header {
             received_ms: (self.enrichment_enabled && !found.has_received).then_some(received_ms),
-            source: source
-                .as_deref()
-                .map_or(Write::Keep, |source| Write::of(&found.source, source, true)),
-            org: Write::of(&found.org, org, false),
+            source: source.as_deref().map_or(Write::Keep, |source| {
+                Write::of(&found.source, found.source_once, source, true)
+            }),
+            org: Write::of(&found.org, found.org_once, org, false),
         };
         Ok(Routed {
             route,
@@ -472,7 +485,7 @@ impl Router {
         let header = Header {
             received_ms: None,
             source: Write::Keep,
-            org: Write::of(&found.org, org, false),
+            org: Write::of(&found.org, found.org_once, org, false),
         };
         Ok((header.write(payload)?, org))
     }
@@ -498,19 +511,21 @@ impl Router {
     fn found<'j>(&self, json: &'j JsonPayload<'_>, raw: &[u8], check_received: bool) -> Found<'j> {
         let spelled = Spelled::of(raw);
         Found {
-            source: if spelled.source {
+            source: if spelled.may_hold(spelled.source) {
                 json.lookup(&self.source_path)
             } else {
                 Lookup::Missing
             },
+            source_once: spelled.once(spelled.source),
             // The strip has removed the sender's, so there is nothing to read.
-            org: if self.strips_org_id || !spelled.org {
+            org: if self.strips_org_id || !spelled.may_hold(spelled.org) {
                 Lookup::Missing
             } else {
                 json.lookup(&self.org_path)
             },
+            org_once: spelled.once(spelled.org),
             has_received: check_received
-                && spelled.received
+                && spelled.may_hold(spelled.received)
                 && !matches!(json.lookup(&self.received_path), Lookup::Missing),
         }
     }
@@ -1115,33 +1130,81 @@ mod tests {
         }
     }
 
-    /// A key is skipped only when no spelling of it can be in the bytes.
+    /// A key is skipped only when no spelling of it can be in the bytes, and
+    /// counts as spelled once only when it is quoted once with no escape anywhere.
     #[test]
     fn a_key_counts_as_spelled_wherever_it_could_be_one() {
-        let none = Spelled {
-            source: false,
-            org: false,
-            received: false,
-        };
-        let all = Spelled {
-            source: true,
-            org: true,
-            received: true,
-        };
-        assert_eq!(
-            Spelled::of(br#"{"org_id":"a","source":"b","_sourcey":1}"#),
-            none
+        let none = Spelled::of(br#"{"org_id":"a","source":"b","_sourcey":1}"#);
+        assert!(!none.may_hold(none.source) && !none.may_hold(none.org));
+        assert!(!none.may_hold(none.received));
+
+        let escaped = Spelled::of(b"{\"a\":\"\\u0041\",\"_org_id\":\"o\"}");
+        assert!(escaped.may_hold(escaped.source), "an escape anywhere");
+        assert!(
+            !escaped.once(escaped.org),
+            "an escape could spell a second key"
         );
-        assert_eq!(
-            Spelled::of(b"{\"a\":\"\\u0041\"}"),
-            all,
-            "an escape anywhere"
-        );
+
         let nested = Spelled::of(br#"{"a":{"_org_id":"x"},"b":"x _source y"}"#);
-        assert!(nested.org, "a nested key is left to the lookup");
-        assert!(!nested.source, "a name inside a longer string is no key");
+        assert!(
+            nested.may_hold(nested.org),
+            "a nested key is left to the lookup"
+        );
+        assert!(
+            !nested.may_hold(nested.source),
+            "a name inside a longer string is no key"
+        );
+
         let header = Spelled::of(br#"{"_source":"s","_timestamp_received":1,"_org_id":"o"}"#);
-        assert_eq!(header, all);
+        assert!(header.once(header.source) && header.once(header.org));
+        assert!(header.once(header.received));
+
+        let twice = Spelled::of(br#"{"_org_id":"acme","_org_id":"beta"}"#);
+        assert_eq!(twice.org, 2);
+        assert!(!twice.once(twice.org));
+    }
+
+    /// Under `allow`, a record that spells `_org_id` twice, or with an escape,
+    /// leaves with one `_org_id`, inside the binding, whichever copy came first.
+    #[test]
+    fn under_allow_a_duplicate_org_key_leaves_as_one_key_inside_the_binding() {
+        let mut config = with_bindings(Config::default());
+        config.routing.source_org_id = SourceOrgId::Allow;
+        let r = router(&config);
+        let acme = credential("acme-agents");
+        for record in [
+            r#"{"_org_id":"acme","_org_id":"beta","a":1}"#,
+            r#"{"_org_id":"beta","_org_id":"acme","a":1}"#,
+            "{\"_org_id\":\"acme\",\"\\u005forg_id\":\"beta\",\"a\":1}",
+            "{\"\\u005forg_id\":\"beta\",\"_org_id\":\"acme\",\"a\":1}",
+            "{\"_org_id\":\"ac\\u006de\",\"_org_id\":\"beta\"}",
+            r#"{"_org_id":"acme","a":{"_org_id":"beta"}}"#,
+        ] {
+            let mut tally = r.tally();
+            let routed = r
+                .route(Bytes::from(record), &acme, NOW, &mut tally)
+                .expect("routes");
+            let orgs = top_level(&routed.payload, ORG_FIELD);
+            assert_eq!(orgs.len(), 1, "{record} left as {orgs:?}");
+            assert!(
+                ["acme", "acme-dev"].contains(&orgs[0].as_str()),
+                "{record} -> {orgs:?}"
+            );
+            let (out, org) = r
+                .assign_org(Bytes::from(record), &acme, &mut tally)
+                .expect("assigns");
+            let orgs = top_level(&out, ORG_FIELD);
+            assert_eq!(orgs, [org], "{record} on the org pass");
+        }
+    }
+
+    /// Every top-level value of `key` in `record`, decoded, in the order written.
+    fn top_level(record: &[u8], key: &str) -> Vec<String> {
+        sonic_rs::to_object_iter(record)
+            .map(|pair| pair.expect("a top-level field"))
+            .filter(|(name, _)| name.as_ref() == key)
+            .map(|(_, value)| sonic_rs::from_str::<String>(value.as_raw_str()).expect("a string"))
+            .collect()
     }
 
     #[test]
