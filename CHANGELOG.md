@@ -3,6 +3,13 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.15.54](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.53...v1.15.54) (2026-10-21)
+
+### Bug Fixes
+
+* **deps:** update redpandadata/redpanda Docker tag to v26.2.4 ([#197](https://github.com/hyperi-io/dfe-receiver/issues/197)) ([366a447](https://github.com/hyperi-io/dfe-receiver/commit/366a44746d3cb40e5e0072c2280544bb89758639))
+* **routing:** bind _org_id to the sender's orgs ([#202](https://github.com/hyperi-io/dfe-receiver/issues/202)) ([9af6cd6](https://github.com/hyperi-io/dfe-receiver/commit/9af6cd6681249777c207da7ff450245e845cdff2))
+
 ## [1.15.53](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.52...v1.15.53) (2026-10-21)
 
 ### Bug Fixes
