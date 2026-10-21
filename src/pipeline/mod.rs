@@ -1383,6 +1383,10 @@ impl PipelineState {
         dispatch: &mut Dispatch<'_>,
     ) -> Result<()> {
         if let Some(ref dlq) = self.dlq {
+            // A dead letter skips the clamp, so it keeps no `_org_id` the sender
+            // wrote. One that does not parse names no org, and is kept as sent.
+            let payload =
+                routing::strip_org_id(payload.clone()).unwrap_or_else(|_| payload.clone());
             let entry = DlqEntry::new("receiver", reason, payload.to_vec());
             let Some(ticket) = dispatch.ticket else {
                 return dlq
@@ -2668,6 +2672,66 @@ mod tests {
         let entry: DlqEntry = serde_json::from_str(written.lines().next().unwrap()).unwrap();
         let record: serde_json::Value = serde_json::from_slice(&entry.payload).unwrap();
         assert_eq!(record, serde_json::json!({"a": 1}));
+    }
+
+    /// Under `allow`, a dead letter skips the clamp, so it leaves with no
+    /// `_org_id` the sender wrote, however the key is spelled.
+    #[tokio::test]
+    async fn under_allow_a_dead_letter_drops_a_sender_org_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_config();
+        file_dlq(&mut config, dir.path());
+        config.routing.source_org_id = crate::config::SourceOrgId::Allow;
+        let state = test_state_with(config).await;
+        let spoofed = [
+            Bytes::from(r#"{"a":1,"_org_id":"another-org"}"#),
+            Bytes::from("{\"a\":1,\"\\u005forg_id\":\"another-org\"}"),
+        ];
+
+        let outcome = state
+            .process_batch_acked(&spoofed, &holding(&state), None, &http())
+            .await;
+
+        assert_eq!(outcome.accepted, 2);
+        state.dlq.as_ref().unwrap().flush().await.unwrap();
+        let written =
+            std::fs::read_to_string(dir.path().join("receiver").join("dlq.ndjson")).unwrap();
+        let records: Vec<serde_json::Value> = written
+            .lines()
+            .map(|line| {
+                let entry: DlqEntry = serde_json::from_str(line).unwrap();
+                serde_json::from_slice(&entry.payload).unwrap()
+            })
+            .collect();
+        assert_eq!(records, vec![serde_json::json!({"a": 1}); 2], "{written}");
+    }
+
+    /// A dead letter whose `_org_id` cannot be removed still reaches the DLQ,
+    /// as sent: it does not parse, so no org it names can be read from it.
+    #[tokio::test]
+    async fn under_allow_a_dead_letter_that_cannot_be_stripped_is_kept_as_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_config();
+        file_dlq(&mut config, dir.path());
+        config.routing.source_org_id = crate::config::SourceOrgId::Allow;
+        let state = test_state_with(config).await;
+        let unparsable = Bytes::from(r#"{"_org_id":"another-org","s":"\ud800"}"#);
+
+        let outcome = state
+            .process_batch_acked(
+                std::slice::from_ref(&unparsable),
+                &holding(&state),
+                None,
+                &http(),
+            )
+            .await;
+
+        assert_eq!(outcome.accepted, 1, "{:?}", outcome.unavailable);
+        state.dlq.as_ref().unwrap().flush().await.unwrap();
+        let written =
+            std::fs::read_to_string(dir.path().join("receiver").join("dlq.ndjson")).unwrap();
+        let entry: DlqEntry = serde_json::from_str(written.lines().next().unwrap()).unwrap();
+        assert_eq!(entry.payload, unparsable.to_vec());
     }
 
     /// Held, a dead letter the DLQ refuses answers retryable: the record is in
