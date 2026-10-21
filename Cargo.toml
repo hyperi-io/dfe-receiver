@@ -211,7 +211,8 @@ jemalloc = ["dep:tikv-jemallocator"]
 # NOTE: the `[[bin]] pgo-driver` target has `required-features =
 # ["pgo-driver"]` so hyperi-ci's binary-detection skips it on default
 # builds (hyperi-ci >= v1.9.2 respects required-features).
-pgo-driver = ["dep:reqwest"]
+# The driver sends OTLP logs, built from the otlp feature's protobuf types.
+pgo-driver = ["dep:reqwest", "otlp"]
 
 [profile.release]
 lto = "thin"
