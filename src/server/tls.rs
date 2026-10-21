@@ -393,12 +393,17 @@ impl TlsCertProvider {
     ///
     /// Periodically reloads certificates from secret managers and swaps
     /// the TLS acceptor behind the `RwLock`. Existing connections are unaffected;
-    /// new connections use the updated certificates.
+    /// new connections use the updated certificates. A zero
+    /// `refresh_interval_secs` refreshes never.
     pub fn start_refresh_task(&self) {
         let acceptor = self.acceptor.clone();
         let config = self.config.clone();
         let shutdown = self.shutdown.clone();
         let interval = std::time::Duration::from_secs(config.refresh_interval_secs);
+        // A zero-period timer panics the task it runs in.
+        if interval.is_zero() {
+            return;
+        }
 
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval);

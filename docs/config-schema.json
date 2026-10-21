@@ -862,7 +862,7 @@
           "default": null
         },
         "refresh_interval_secs": {
-          "description": "Token refresh interval in seconds (for secret-sourced tokens).\nDefault: 300 (5 minutes)",
+          "description": "Token refresh interval in seconds (for secret-sourced tokens). 0 loads\nthe secret once at startup.\nDefault: 300 (5 minutes)",
           "type": "integer",
           "format": "uint64",
           "minimum": 0,

@@ -791,7 +791,8 @@ $defs:
         default: null
       refresh_interval_secs:
         description: |-
-          Token refresh interval in seconds (for secret-sourced tokens).
+          Token refresh interval in seconds (for secret-sourced tokens). 0 loads
+          the secret once at startup.
           Default: 300 (5 minutes)
         type: integer
         format: uint64

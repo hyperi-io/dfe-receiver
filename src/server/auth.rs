@@ -374,11 +374,20 @@ impl BearerTokenProvider {
         Ok(())
     }
 
-    /// Start background token refresh task.
-    pub fn start_refresh_task(self: Arc<Self>, source: String, interval: Duration) {
+    /// Start background token refresh task, `None` for a zero `interval`,
+    /// which refreshes never: the secret was loaded once at build.
+    pub fn start_refresh_task(
+        self: Arc<Self>,
+        source: String,
+        interval: Duration,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        // A zero-period timer panics the task it runs in.
+        if interval.is_zero() {
+            return None;
+        }
         let mut shutdown_rx = self.shutdown_tx.subscribe();
 
-        tokio::spawn(async move {
+        Some(tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
             ticker.tick().await; // Skip immediate tick
 
@@ -403,7 +412,7 @@ impl BearerTokenProvider {
                     }
                 }
             }
-        });
+        }))
     }
 
     /// The principal `token` authenticates, `None` when it is not valid
@@ -1125,6 +1134,25 @@ mod tests {
         );
         // The entry is not the token: only the part after the id authenticates.
         assert_eq!(provider.principal("acme-agents:tok-a"), None);
+    }
+
+    /// A zero refresh interval starts no task, so no zero-period timer panics one.
+    #[tokio::test]
+    async fn a_zero_refresh_interval_starts_no_refresh_task() {
+        let provider = Arc::new(BearerTokenProvider::new(&["tok".into()]));
+        let none = Arc::clone(&provider).start_refresh_task("file:/absent".into(), Duration::ZERO);
+        assert!(none.is_none());
+        let task = provider
+            .start_refresh_task("file:/absent".into(), Duration::from_secs(60))
+            .expect("a refresh task");
+        task.abort();
+    }
+
+    /// Secret content holds one entry per line, and a comma stays in its token.
+    #[test]
+    fn secret_entries_split_on_line_breaks_only() {
+        let entries: Vec<&str> = secret_entries(" abc,def \r\n\nacme:x,y\n").collect();
+        assert_eq!(entries, ["abc,def", "acme:x,y"]);
     }
 
     /// An entry whose id is malformed, or a token under two ids, is refused

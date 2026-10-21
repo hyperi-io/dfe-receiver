@@ -1235,7 +1235,8 @@ pub struct BearerConfig {
     /// is part of a token, never a separator.
     pub secret_source: Option<String>,
 
-    /// Token refresh interval in seconds (for secret-sourced tokens).
+    /// Token refresh interval in seconds (for secret-sourced tokens). 0 loads
+    /// the secret once at startup.
     /// Default: 300 (5 minutes)
     pub refresh_interval_secs: u64,
 }
