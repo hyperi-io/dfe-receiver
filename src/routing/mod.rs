@@ -65,6 +65,8 @@ pub const SENDER_ORG_RULE: &str = "receiver.sender-org-id";
 ///
 /// A lookup reads only the first of two keys of one name, so a value it finds
 /// is the record's only copy just when the key is spelled [`once`](Self::once).
+/// It reads a number or boolean as its JSON text, so that copy is a string
+/// only when the key's value also opens with a quote.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Spelled {
     escapes: bool,
@@ -72,6 +74,10 @@ struct Spelled {
     org: u32,
     received: u32,
     received_original: u32,
+    /// Whether the last `_source` spelled opens a string value.
+    source_string: bool,
+    /// Whether the last `_org_id` spelled opens a string value.
+    org_string: bool,
 }
 
 impl Spelled {
@@ -82,14 +88,23 @@ impl Spelled {
             org: 0,
             received: 0,
             received_original: 0,
+            source_string: false,
+            org_string: false,
         };
         for (at, pair) in raw.windows(2).enumerate() {
             if pair == b"\"_" {
                 let key = &raw[at + 1..];
-                spelled.source += u32::from(quoted(key, SOURCE_FIELD));
-                spelled.org += u32::from(quoted(key, ORG_FIELD));
-                spelled.received += u32::from(quoted(key, RECEIVED_FIELD));
-                spelled.received_original += u32::from(quoted(key, RECEIVED_ORIGINAL));
+                if let Some(after) = after_quoted(key, SOURCE_FIELD) {
+                    spelled.source += 1;
+                    spelled.source_string = opens_string(after);
+                }
+                if let Some(after) = after_quoted(key, ORG_FIELD) {
+                    spelled.org += 1;
+                    spelled.org_string = opens_string(after);
+                }
+                spelled.received += u32::from(after_quoted(key, RECEIVED_FIELD).is_some());
+                spelled.received_original +=
+                    u32::from(after_quoted(key, RECEIVED_ORIGINAL).is_some());
             }
         }
         spelled
@@ -106,10 +121,17 @@ impl Spelled {
     }
 }
 
-/// Whether `rest` opens with `name` and its closing quote.
-fn quoted(rest: &[u8], name: &str) -> bool {
-    rest.strip_prefix(name.as_bytes())
-        .is_some_and(|after| after.first() == Some(&b'"'))
+/// What follows `name` and its closing quote, when `rest` opens with them.
+fn after_quoted<'a>(rest: &'a [u8], name: &str) -> Option<&'a [u8]> {
+    rest.strip_prefix(name.as_bytes())?.strip_prefix(b"\"")
+}
+
+/// Whether `after_key`, the bytes after a key's closing quote, opens a string value.
+fn opens_string(after_key: &[u8]) -> bool {
+    after_key
+        .trim_ascii_start()
+        .strip_prefix(b":")
+        .is_some_and(|value| value.trim_ascii_start().first() == Some(&b'"'))
 }
 
 /// Remove a top-level `_org_id` the sender wrote, so only DFE's org rules pick the tenant.
@@ -259,10 +281,10 @@ impl ResolvedDestinations {
 /// The header fields the router reads from a record before the rules run.
 struct Found<'j> {
     source: Lookup<'j>,
-    /// Whether `source` is the record's only `_source`.
+    /// Whether `source` is the record's only `_source`, and a JSON string.
     source_once: bool,
     org: Lookup<'j>,
-    /// Whether `org` is the record's only `_org_id`.
+    /// Whether `org` is the record's only `_org_id`, and a JSON string.
     org_once: bool,
     /// Whether the record already carries `_timestamp_received`.
     has_received: bool,
@@ -534,14 +556,14 @@ impl Router {
             } else {
                 Lookup::Missing
             },
-            source_once: spelled.once(spelled.source),
+            source_once: spelled.once(spelled.source) && spelled.source_string,
             // The strip has removed the sender's, so there is nothing to read.
             org: if self.strips_org_id || !spelled.may_hold(spelled.org) {
                 Lookup::Missing
             } else {
                 json.lookup(&self.org_path)
             },
-            org_once: spelled.once(spelled.org),
+            org_once: spelled.once(spelled.org) && spelled.org_string,
             has_received: received_at.is_some()
                 || (check_received
                     && spelled.may_hold(spelled.received)
@@ -882,6 +904,28 @@ mod tests {
         assert_eq!(route.topic(), Some("syslog_land"));
     }
 
+    /// A row that copies a sender's number into `_source` routes by its text,
+    /// and the record carries that text as a JSON string, with the sender's
+    /// number parked like any other value it wrote there.
+    #[test]
+    fn a_row_copying_a_numeric_source_writes_it_as_a_string() {
+        let copy = RuleConfig::new("own", SOURCE_FIELD, SetAction::from(SOURCE_FIELD));
+        let r = router(&config_with(vec![copy]));
+        let mut tally = r.tally();
+        let routed = r
+            .route(
+                Bytes::from(r#"{"_source":42,"a":1}"#),
+                &listener("http"),
+                NOW,
+                &mut tally,
+            )
+            .expect("routes");
+        assert_eq!(routed.route.topic(), Some("42_land"));
+        assert_eq!(raw_top_level(&routed.payload, SOURCE_FIELD), ["\"42\""]);
+        let value: serde_json::Value = serde_json::from_slice(&routed.payload).unwrap();
+        assert_eq!(value["_source_original"], 42);
+    }
+
     #[test]
     fn a_row_that_matches_a_listener_record_overrides_its_source() {
         let r = router(&config_with(vec![equals(
@@ -1041,6 +1085,94 @@ mod tests {
         config.routing.source_org_id = SourceOrgId::Allow;
         let err = compile_rules(&config).expect_err("refused").to_string();
         assert!(err.contains("rules[0]"), "{err}");
+    }
+
+    /// Under `allow`, with credentials bound to orgs named `42` and `true`, so a
+    /// sender's number or boolean reads as the text of an org it may land in.
+    fn allow_with_literal_orgs() -> Router {
+        let mut config = with_bindings(Config::default());
+        let credentials = &mut config.ingest_bindings.credentials;
+        credentials.insert("numbered-agents".to_string(), bound(&["42"]));
+        credentials.insert("flagged-agents".to_string(), bound(&["true"]));
+        config.routing.source_org_id = SourceOrgId::Allow;
+        router(&config)
+    }
+
+    /// `record` from credential `id` leaves the route and the org pass in `org`,
+    /// with one top-level `_org_id` holding `org` as a JSON string.
+    fn assert_org_written_as_string(r: &Router, id: &str, record: &str, org: &str) {
+        let ingest = credential(id);
+        let quoted = [format!("\"{org}\"")];
+        let mut tally = r.tally();
+        let routed = r
+            .route(Bytes::from(record.to_string()), &ingest, NOW, &mut tally)
+            .expect("routes");
+        assert_eq!(routed.org, org, "{record}");
+        assert_eq!(
+            raw_top_level(&routed.payload, ORG_FIELD),
+            quoted,
+            "{record}"
+        );
+        let (out, assigned) = r
+            .assign_org(Bytes::from(record.to_string()), &ingest, &mut tally)
+            .expect("assigns");
+        assert_eq!(assigned, org, "{record} on the org pass");
+        assert_eq!(
+            raw_top_level(&out, ORG_FIELD),
+            quoted,
+            "{record} on the org pass"
+        );
+    }
+
+    #[test]
+    fn under_allow_a_numeric_org_is_written_as_the_org_string() {
+        let r = allow_with_literal_orgs();
+        assert_org_written_as_string(&r, "acme-agents", r#"{"_org_id":42,"a":1}"#, "acme");
+        // The number's JSON text is the org it lands in.
+        assert_org_written_as_string(&r, "numbered-agents", r#"{"_org_id":42,"a":1}"#, "42");
+    }
+
+    #[test]
+    fn under_allow_a_boolean_org_is_written_as_the_org_string() {
+        let r = allow_with_literal_orgs();
+        assert_org_written_as_string(&r, "acme-agents", r#"{"_org_id":true,"a":1}"#, "acme");
+        // The boolean's JSON text is the org it lands in.
+        assert_org_written_as_string(&r, "flagged-agents", r#"{"_org_id":true,"a":1}"#, "true");
+    }
+
+    #[test]
+    fn under_allow_a_null_org_is_written_as_the_org_string() {
+        let r = allow_with_literal_orgs();
+        assert_org_written_as_string(&r, "acme-agents", r#"{"_org_id":null,"a":1}"#, "acme");
+    }
+
+    #[test]
+    fn under_allow_an_object_or_array_org_is_written_as_the_org_string() {
+        let r = allow_with_literal_orgs();
+        for record in [
+            r#"{"_org_id":{"id":"acme"},"a":1}"#,
+            r#"{"_org_id":["acme"],"a":1}"#,
+        ] {
+            assert_org_written_as_string(&r, "acme-agents", record, "acme");
+        }
+    }
+
+    /// A string `_org_id` that already names the org chosen needs no write,
+    /// however the space around its colon falls.
+    #[test]
+    fn under_allow_a_string_org_already_chosen_is_left_uncopied() {
+        let r = allow_with_literal_orgs();
+        for (id, record) in [
+            ("acme-agents", r#"{"_org_id":"acme","a":1}"#),
+            ("numbered-agents", "{\"_org_id\" :\n \"42\",\"a\":1}"),
+        ] {
+            let payload = Bytes::from(record);
+            let mut tally = r.tally();
+            let (out, _) = r
+                .assign_org(payload.clone(), &credential(id), &mut tally)
+                .expect("assigns");
+            assert_eq!(out.as_ptr(), payload.as_ptr(), "{record} was rewritten");
+        }
     }
 
     // --- compile ---
@@ -1235,6 +1367,15 @@ mod tests {
         let twice = Spelled::of(br#"{"_org_id":"acme","_org_id":"beta"}"#);
         assert_eq!(twice.org, 2);
         assert!(!twice.once(twice.org));
+
+        let typed = Spelled::of(b"{\"_source\" :\n \"s\",\"_org_id\":42}");
+        assert!(
+            typed.source_string,
+            "a quoted value, however the colon is spaced"
+        );
+        assert!(!typed.org_string, "a number is no string");
+        let named = Spelled::of(br#"{"a":"_org_id"}"#);
+        assert!(!named.org_string, "a value that spells the name is no key");
     }
 
     /// Under `allow`, a record that spells `_org_id` twice, or with an escape,
@@ -1273,10 +1414,18 @@ mod tests {
 
     /// Every top-level value of `key` in `record`, decoded, in the order written.
     fn top_level(record: &[u8], key: &str) -> Vec<String> {
+        raw_top_level(record, key)
+            .iter()
+            .map(|raw| sonic_rs::from_str::<String>(raw).expect("a string"))
+            .collect()
+    }
+
+    /// Every top-level value of `key` in `record`, as its JSON text, in the order written.
+    fn raw_top_level(record: &[u8], key: &str) -> Vec<String> {
         sonic_rs::to_object_iter(record)
             .map(|pair| pair.expect("a top-level field"))
             .filter(|(name, _)| name.as_ref() == key)
-            .map(|(_, value)| sonic_rs::from_str::<String>(value.as_raw_str()).expect("a string"))
+            .map(|(_, value)| value.as_raw_str().to_owned())
             .collect()
     }
 

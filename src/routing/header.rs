@@ -44,9 +44,11 @@ pub enum Write<'a> {
 impl<'a> Write<'a> {
     /// The write that gives a field holding `found` the value `value`.
     ///
-    /// `once` says the field's key is spelled once in the bytes and with no
-    /// escape. Without it a record that already holds `value` is rewritten
-    /// anyway, because a lookup reads only the first of two keys of one name.
+    /// `once` says the bytes hold the field once, as a JSON string: its key
+    /// spelled once with no escape, and its value quoted. Without it a record
+    /// that already holds `value` is rewritten anyway, because a lookup reads
+    /// only the first of two keys of one name, and reads a number or boolean as
+    /// its JSON text.
     #[must_use]
     pub fn of(found: &Lookup<'_>, once: bool, value: &'a str, park: bool) -> Self {
         match found {
@@ -563,7 +565,7 @@ mod tests {
         assert_eq!(
             Write::of(&Lookup::Text(Cow::Borrowed("a")), false, "a", true),
             replace,
-            "a key spelled twice or with an escape is rewritten even when the first copy matches"
+            "a key spelled twice or with an escape, or a number or boolean, is rewritten even when its text matches"
         );
         for held in [
             Lookup::Text(Cow::Borrowed("b")),
