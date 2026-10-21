@@ -88,6 +88,15 @@ pub struct Config {
     /// Routing configuration.
     pub routing: RoutingConfig,
 
+    /// The ordered rule set that sets each record's `_source` and then its
+    /// `_org_id`, first match per field in declared order. Reloads with no
+    /// restart.
+    pub rules: scalo::rules::RuleSetConfig,
+
+    /// The orgs each credential's and each listener's records may land in.
+    /// Reloads with no restart.
+    pub ingest_bindings: IngestBindingsConfig,
+
     /// Destination configuration.
     pub destinations: DestinationsConfig,
 
@@ -136,6 +145,8 @@ impl Default for Config {
             raw_capture: RawCaptureConfig::default(),
             validation: ValidationConfig::default(),
             routing: RoutingConfig::default(),
+            rules: scalo::rules::RuleSetConfig::default(),
+            ingest_bindings: IngestBindingsConfig::default(),
             destinations: DestinationsConfig::default(),
             kafka: KafkaConfig::default(),
             loader: LoaderConfig::default(),
@@ -365,6 +376,18 @@ impl Config {
             self.kafka.to_scalo_kafka_config_for_producer()?;
         }
 
+        // An empty default would stamp every unbound record into no org at all.
+        if self.routing.default_org_id.is_empty() {
+            return Err(Error::Config(
+                "routing.default_org_id is empty; it is the org an unbound sender's records \
+                 land in"
+                    .into(),
+            ));
+        }
+        crate::tenancy::validate(&self.ingest_bindings).map_err(Error::Config)?;
+        // A reload whose rules do not compile is refused here, so the running set stays.
+        crate::routing::compile_rules(self)?;
+
         self.validate_auth()?;
         self.validate_ip_filters()?;
         crate::server::client_ip::TrustedProxies::parse(&self.server.trusted_proxies)
@@ -444,6 +467,12 @@ impl Config {
         known_mode("splunk_hec", &self.splunk_hec.auth)?;
         known_mode("syslog", &self.syslog.auth)?;
         known_mode("prometheus_rw", &self.prometheus_rw.auth)?;
+        bearer_entries_parse("server", &self.server.auth)?;
+        bearer_entries_parse("grpc", &self.grpc.auth)?;
+        #[cfg(feature = "otlp")]
+        bearer_entries_parse("otlp", &self.otlp.auth)?;
+        bearer_entries_parse("splunk_hec", &self.splunk_hec.auth)?;
+        bearer_entries_parse("prometheus_rw", &self.prometheus_rw.auth)?;
 
         // Always-on HTTP listener.
         cert_half_is_enforced("server", &self.server.auth, &self.server.tls)?;
@@ -560,6 +589,15 @@ fn known_mode(scope: &str, auth: &AuthConfig) -> Result<()> {
         auth.mode,
         AUTH_MODES.join(", ")
     )))
+}
+
+/// Refuse a static bearer token entry whose credential id is malformed.
+///
+/// The message names the listener and never the entry, which holds the token.
+fn bearer_entries_parse(scope: &str, auth: &AuthConfig) -> Result<()> {
+    crate::server::auth::parse_token_entries(auth.bearer.tokens.iter().map(SensitiveString::expose))
+        .map(drop)
+        .map_err(|e| Error::Config(format!("{scope}.auth.bearer.tokens: {e}")))
 }
 
 /// Refuse `header` / `both` with no credential to compare a request against.
@@ -1164,8 +1202,8 @@ pub struct AuthConfig {
     pub bearer: BearerConfig,
 
     /// Enrichment switch, read from `server.auth` alone: stamps
-    /// `_timestamp_receiver` and evaluates `routing.source_rules` on routed
-    /// records. It adds no accepted header. Default: true
+    /// `_timestamp_received` and `_source` on routed records. `_org_id` is
+    /// stamped either way. It adds no accepted header. Default: true
     #[serde(default = "default_true")]
     pub include_common_header: bool,
 
@@ -1190,11 +1228,16 @@ fn default_true() -> bool {
 pub struct BearerConfig {
     /// Static tokens (for dev/simple deployments).
     /// In production, use `secret_source` instead.
+    ///
+    /// Each entry is `<credential-id>:<token>`, or a bare `<token>` bound to
+    /// no org. The id names the credential in `ingest_bindings.credentials`.
     #[serde(default)]
     pub tokens: Vec<SensitiveString>,
 
     /// Secret source for dynamic token loading.
     /// Format: `provider:path[:key]` (e.g. "vault:secret/auth:bearer_tokens").
+    /// The secret holds entries as `tokens` takes them, one per line or comma
+    /// separated.
     pub secret_source: Option<String>,
 
     /// Token refresh interval in seconds (for secret-sourced tokens).
@@ -2007,40 +2050,20 @@ impl Default for ValidationConfig {
     }
 }
 
-/// Rule for determining `_source` value from JSON payload.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct SourceRule {
-    /// JSON field path (dot notation for nested, e.g., "tags.event.category").
-    pub field: String,
-
-    /// Match mode: "key_present", "key_value_set", "key_value_use".
-    ///
-    /// - `key_present`: if field exists -> `_source = source`
-    /// - `key_value_set`: if field value == `match_value` -> `_source = source`
-    /// - `key_value_use`: if field exists -> `_source = <field value>`
-    pub mode: String,
-
-    /// Value to match against (for `key_value_set` mode only).
-    #[serde(default)]
-    pub match_value: Option<String>,
-
-    /// Source value to set (for `key_present` and `key_value_set` modes).
-    /// Ignored for `key_value_use` (uses the field value directly).
-    #[serde(default)]
-    pub source: Option<String>,
-}
-
 /// Routing configuration.
+///
+/// An unknown key is refused: a routing key nothing reads would change where
+/// records land without a word.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct RoutingConfig {
-    /// Rules for determining `_source` value (first match wins).
-    /// Only evaluated when `include_common_header` is true.
-    #[serde(default)]
-    pub source_rules: Vec<SourceRule>,
-
-    /// Default source when no rule matches.
+    /// The `_source` a record takes when no rule sets one, unless its listener
+    /// wrote one itself.
     pub default_source: String,
+
+    /// The `_org_id` a record whose sender is bound to no org takes, and the
+    /// only org such a sender's records may land in.
+    pub default_org_id: String,
 
     /// Suffix appended to source to form topic name.
     pub topic_suffix: String,
@@ -2049,17 +2072,50 @@ pub struct RoutingConfig {
     #[serde(default)]
     pub source_to_topic: HashMap<String, String>,
 
-    /// Enable pre-2.2 compatibility.
-    /// Appends `key_value_use` rules for `tags.event.category` and `event_category`.
-    #[serde(default)]
-    pub legacy_compat: bool,
-
     /// Whether a sender may set `_org_id`, the field that picks the tenant downstream.
     #[serde(default)]
     pub source_org_id: SourceOrgId,
 
     /// DLQ configuration.
     pub dlq: DlqConfig,
+}
+
+/// The orgs each ingest principal's records may land in.
+///
+/// A record's `_org_id` is held to its sender's binding: one the rules set
+/// outside it is replaced by the binding's default. A credential or listener
+/// with no entry may assign `routing.default_org_id` alone.
+///
+/// ```yaml
+/// ingest_bindings:
+///   credentials:
+///     acme-agents: { orgs: [acme, acme-dev], default_org: acme }
+///   listeners:
+///     syslog: { orgs: [netops] }
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct IngestBindingsConfig {
+    /// By credential id: the id a bearer token carries in its entry, or a
+    /// webhook caller's name.
+    pub credentials: std::collections::BTreeMap<String, OrgBinding>,
+
+    /// By listener, for a request that carries no credential the receiver can
+    /// name: `http`, `grpc`, `otlp`, `splunk_hec`, `prometheus_rw`, `syslog`,
+    /// `fluent`, `lumberjack`, `gelf`, `netflow`, `sflow`.
+    pub listeners: std::collections::BTreeMap<String, OrgBinding>,
+}
+
+/// The orgs one principal's records may land in.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct OrgBinding {
+    /// The orgs a record may land in.
+    pub orgs: Vec<String>,
+
+    /// The org a record takes when no rule picks one of `orgs`. Unset is the
+    /// first of `orgs`.
+    pub default_org: Option<String>,
 }
 
 /// What the receiver does with an `_org_id` the sender put in the record.
@@ -2075,37 +2131,19 @@ pub enum SourceOrgId {
     Allow,
 }
 
+/// The org a record lands in when nothing binds its sender.
+pub const DEFAULT_ORG_ID: &str = "default";
+
 impl Default for RoutingConfig {
     fn default() -> Self {
         Self {
-            source_rules: vec![],
             default_source: "main".to_string(),
+            default_org_id: DEFAULT_ORG_ID.to_string(),
             topic_suffix: "_land".to_string(),
             source_to_topic: HashMap::new(),
-            legacy_compat: false,
             source_org_id: SourceOrgId::default(),
             dlq: DlqConfig::default(),
         }
-    }
-}
-
-impl RoutingConfig {
-    /// Get effective source rules, appending legacy compat rules if enabled.
-    pub fn effective_source_rules(&self) -> Vec<SourceRule> {
-        let mut rules = self.source_rules.clone();
-        if self.legacy_compat {
-            for field in &["tags.event.category", "event_category"] {
-                if !rules.iter().any(|r| r.field == *field) {
-                    rules.push(SourceRule {
-                        field: field.to_string(),
-                        mode: "key_value_use".to_string(),
-                        match_value: None,
-                        source: None,
-                    });
-                }
-            }
-        }
-        rules
     }
 }
 
@@ -2293,20 +2331,19 @@ pub fn checked_client_config(
     Ok(config)
 }
 
-/// The named destination set: where a matched record goes.
+/// The named destination set: where a record goes, by the `_source` the rules
+/// gave it.
 ///
 /// `kafka` and `loader` are always available without being declared -- the bus
 /// (the record's own topic) and the app named by the `loader` block. Any other
-/// name is declared here as a sibling key, so a match rule can send a record to
-/// a transform's Push listener, or fan it out to several destinations at once:
+/// name is declared here as a sibling key, so a source can send its records to
+/// a transform's Push listener, or fan them out to several destinations at once:
 ///
 /// ```yaml
 /// destinations:
 ///   default: loader
-///   rules:
-///     - match_field: app
-///       match_value: orders
-///       destination: [transform-orders, archiver]
+///   sources:
+///     orders: [transform-orders, archiver]
 ///   transform-orders:
 ///     grpc:
 ///       endpoint: "http://dfe-transform-orders:6000"
@@ -2317,11 +2354,12 @@ pub fn checked_client_config(
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct DestinationsConfig {
-    /// Destination for records no rule matches.
+    /// Destination for a record whose source names none in `sources`.
     pub default: DestinationRef,
 
-    /// Routing rules for destination selection (first match wins).
-    pub rules: Vec<DestinationRule>,
+    /// Destinations by the `_source` a rule row set, so a record is labelled
+    /// and routed by the one rule evaluation.
+    pub sources: std::collections::BTreeMap<String, DestinationRef>,
 
     /// Declared destinations, keyed by name.
     #[serde(flatten)]
@@ -2349,19 +2387,19 @@ impl Default for DestinationsConfig {
     fn default() -> Self {
         Self {
             default: DestinationRef::from(BUS_DESTINATION),
-            rules: vec![],
+            sources: std::collections::BTreeMap::new(),
             named: std::collections::HashMap::new(),
         }
     }
 }
 
 impl DestinationsConfig {
-    /// Every destination name the config refers to, default and rules.
+    /// Every destination name the config refers to, default and per source.
     pub fn referenced_names(&self) -> impl Iterator<Item = &str> {
         self.default
             .names()
             .iter()
-            .chain(self.rules.iter().flat_map(|r| r.destination.names()))
+            .chain(self.sources.values().flat_map(DestinationRef::names))
             .map(String::as_str)
     }
 
@@ -2469,19 +2507,6 @@ pub struct KafkaDestination {
     /// Fixed topic for this destination. Unset means the topic the record's
     /// source resolves to, which is what the built-in `kafka` destination does.
     pub topic: Option<String>,
-}
-
-/// Destination routing rule.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct DestinationRule {
-    /// Field to match.
-    pub match_field: String,
-
-    /// Value to match.
-    pub match_value: String,
-
-    /// Destination for matched messages: one name, or a list to fan out.
-    pub destination: DestinationRef,
 }
 
 /// Kafka producer configuration.
@@ -4834,6 +4859,76 @@ scaling:
                 );
             },
         );
+    }
+
+    /// Every key the example sets under `routing:` is one the receiver reads.
+    #[test]
+    fn every_routing_key_in_the_example_is_read() {
+        let example: serde_json::Value = scalo::yaml::from_str(
+            include_str!("../../config.example.yaml"),
+            "config.example.yaml",
+            scalo::yaml::Profile::Config,
+        )
+        .unwrap();
+        let read = serde_json::to_value(RoutingConfig::default()).unwrap();
+        let unread: Vec<&String> = example["routing"]
+            .as_object()
+            .expect("the example has a routing section")
+            .keys()
+            .filter(|key| read.get(key.as_str()).is_none())
+            .collect();
+        assert!(
+            unread.is_empty(),
+            "example routing keys nothing reads: {unread:?}"
+        );
+    }
+
+    /// A routing key nothing reads refuses the config rather than routing by the defaults.
+    #[test]
+    fn a_routing_key_nothing_reads_is_refused() {
+        for key in [
+            "source_rules: []",
+            "legacy_compat: false",
+            "sorce_to_topic: {}",
+        ] {
+            let yaml = format!("routing:\n  {key}\n");
+            let read: std::result::Result<Config, _> =
+                scalo::yaml::from_str(&yaml, "config.yaml", scalo::yaml::Profile::Config);
+            assert!(read.is_err(), "{key} was read");
+        }
+    }
+
+    /// The rows and bindings the example documents in its comments read and check.
+    #[test]
+    fn the_documented_rules_and_bindings_read() {
+        let yaml = r"
+rules:
+  rules:
+    - id: crates-audit
+      match: { field: _source, op: equals, value: crates_audit }
+      set: { _source: { value: crates_audit } }
+    - id: acme-firewall
+      match: { field: data_stream.dataset, op: equals, value: cisco_asa.log }
+      set: { _org_id: { value: acme } }
+ingest_bindings:
+  credentials:
+    acme-ingest:
+      orgs: [acme, acme-lab]
+      default_org: acme
+  listeners:
+    syslog:
+      orgs: [acme]
+";
+        let config: Config =
+            scalo::yaml::from_str(yaml, "config.yaml", scalo::yaml::Profile::Config).unwrap();
+        assert_eq!(config.rules.rules.len(), 2);
+        assert_eq!(
+            config.ingest_bindings.credentials["acme-ingest"].orgs,
+            ["acme", "acme-lab"]
+        );
+        assert_eq!(config.ingest_bindings.listeners["syslog"].orgs, ["acme"]);
+        crate::routing::compile_rules(&config).unwrap();
+        crate::tenancy::validate(&config.ingest_bindings).unwrap();
     }
 
     /// The example config parses and validates as the receiver loads it.

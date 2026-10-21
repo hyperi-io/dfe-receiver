@@ -70,8 +70,18 @@ webhook:
 ```
 
 Records land on `asset_context_land` stamped with `_source: asset_context` and
-`_timestamp_receiver`. The `_source` stamp is the caller name and wins over any
+`_timestamp_received`. The `_source` stamp is the caller name and wins over any
 value the sender supplies, so the join key cannot be spoofed by the payload.
+
+The caller's name is also its credential id for tenancy. Bind it to the orgs
+its records may land in, or they land in `routing.default_org_id`:
+
+```yaml
+ingest_bindings:
+  credentials:
+    asset_context:
+      orgs: [acme]
+```
 
 Pair it with `server.ip_filter` restricted to the product's published egress
 range, because `header` mode carries no body integrity.

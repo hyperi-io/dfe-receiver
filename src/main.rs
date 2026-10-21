@@ -29,14 +29,12 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use clap::Parser;
 use scalo::cli::{CliError, CommonArgs, ServiceApp, StandardCommand, VersionInfo, run_app};
-use scalo::config::reloader::{ConfigReloader, ReloaderConfig};
 use tracing::{debug, error, info};
 
-use dfe_receiver::config::{Config, reload_config};
+use dfe_receiver::config::Config;
 use dfe_receiver::deployment;
 use dfe_receiver::metrics::Metrics;
 use dfe_receiver::pipeline::Orchestrator;
@@ -159,46 +157,7 @@ impl ServiceApp for App {
 
         // Start config hot-reload (SIGHUP + periodic + file polling via scalo ConfigReloader)
         {
-            let config_path_str = config.config_path.clone();
-            let shared_config = orchestrator.shared_config();
-            let reload_state = orchestrator.state();
-
-            let reloader_config = ReloaderConfig {
-                config_path: config.config_path.as_ref().map(PathBuf::from),
-                poll_interval: Duration::from_secs(config.config_reload_secs.max(5)),
-                periodic_interval: if config.config_reload_secs > 0 {
-                    Duration::from_secs(config.config_reload_secs)
-                } else {
-                    Duration::ZERO
-                },
-                debounce: Duration::from_millis(500),
-                enable_sighup: true,
-            };
-
-            let reloader = ConfigReloader::new(
-                reloader_config,
-                shared_config.clone(),
-                move || reload_config_from_path(config_path_str.as_deref()),
-                |cfg| {
-                    cfg.validate()
-                        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
-                },
-            );
-
-            let _handle = reloader.start();
-
-            // Subscribe to config changes and rebuild pipeline components
-            let mut config_rx = shared_config.subscribe();
-            tokio::spawn(async move {
-                while config_rx.changed().await.is_ok() {
-                    let new_config = reload_state.config();
-                    reload_state.rebuild_components(&new_config).await;
-                    info!(
-                        version = *config_rx.borrow(),
-                        "Pipeline components rebuilt after config reload"
-                    );
-                }
-            });
+            orchestrator.watch_config(config.config_path.as_deref(), config.config_reload_secs);
 
             if config.config_reload_secs > 0 {
                 info!(
@@ -306,17 +265,6 @@ async fn main() {
         eprintln!("fatal: {e}");
         std::process::exit(1);
     }
-}
-
-/// Reload configuration from the original config path.
-fn reload_config_from_path(
-    config_path: Option<&str>,
-) -> std::result::Result<Config, Box<dyn std::error::Error + Send + Sync>> {
-    let placeholder = Config {
-        config_path: config_path.map(String::from),
-        ..Config::default()
-    };
-    reload_config(&placeholder).map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
 }
 
 #[cfg(test)]
@@ -444,6 +392,9 @@ mod tests {
             ),
             ("receiver_dlq_start_failures_total", Counter, &["backend"]),
             ("receiver_source_org_id_stripped_total", Counter, &[]),
+            ("usage_ingested_bytes_total", Counter, &["org_id"]),
+            ("rules_hits_total", Counter, &["rule_set", "rule"]),
+            ("rules_clamped_total", Counter, &["rule_set", "rule"]),
             ("receiver_events_per_second", Gauge, &[]),
             (
                 "receiver_destination_send_failures_total",

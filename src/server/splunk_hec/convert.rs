@@ -110,8 +110,9 @@ pub fn hec_event_to_json(event: HecEvent, raw_capture: RawCapture) -> Result<Byt
     };
 
     // Inject HEC metadata
-    if let Some(time) = event.time {
-        obj.entry("_time").or_insert(serde_json::json!(time));
+    if let Some(timestamp) = event.time.and_then(rfc3339) {
+        obj.entry("timestamp")
+            .or_insert(serde_json::Value::String(timestamp));
     }
     if let Some(host) = event.host {
         obj.entry("host").or_insert(serde_json::Value::String(host));
@@ -144,6 +145,15 @@ pub fn hec_event_to_json(event: HecEvent, raw_capture: RawCapture) -> Result<Byt
         serde_json::to_vec(&obj).map_err(|e| Error::Server(format!("JSON serialize: {e}")))?;
 
     Ok(Bytes::from(json))
+}
+
+/// HEC `time`, epoch seconds, as RFC 3339 UTC to the microsecond, `None` past chrono's range.
+fn rfc3339(time: f64) -> Option<String> {
+    let micros = (time * 1_000_000.0).round();
+    if !micros.is_finite() || micros.abs() >= i64::MAX as f64 {
+        return None;
+    }
+    chrono::DateTime::from_timestamp_micros(micros as i64).map(|ts| ts.to_rfc3339())
 }
 
 /// Metadata extracted from query parameters or headers for raw events.
@@ -255,11 +265,35 @@ mod tests {
         let json = hec_event_to_json(events.into_iter().next().unwrap(), RawCapture::OFF).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
         assert_eq!(parsed["msg"], "test");
-        assert_eq!(parsed["_time"], 1_447_828_325.5);
+        assert_eq!(parsed["timestamp"], "2015-11-18T06:32:05.500+00:00");
+        assert!(parsed.get("_time").is_none());
         assert_eq!(parsed["host"], "web01");
         assert_eq!(parsed["source"], "app");
         assert_eq!(parsed["sourcetype"], "json");
         assert_eq!(parsed["index"], "main");
+    }
+
+    #[test]
+    fn hec_time_keeps_its_microseconds_and_never_overwrites_the_event() {
+        let body = br#"{"event":{"msg":"a"},"time":1447828325.123456}
+{"event":{"timestamp":"from-event"},"time":1447828325}"#;
+        let mut events = parse_hec_events(body).unwrap().into_iter();
+        let first = hec_event_to_json(events.next().unwrap(), RawCapture::OFF).unwrap();
+        let first: serde_json::Value = serde_json::from_slice(&first).unwrap();
+        assert_eq!(first["timestamp"], "2015-11-18T06:32:05.123456+00:00");
+        let second = hec_event_to_json(events.next().unwrap(), RawCapture::OFF).unwrap();
+        let second: serde_json::Value = serde_json::from_slice(&second).unwrap();
+        assert_eq!(second["timestamp"], "from-event");
+    }
+
+    #[test]
+    fn hec_time_past_the_representable_range_writes_no_timestamp() {
+        let body = br#"{"event":{"msg":"a"},"time":1e300}"#;
+        let events = parse_hec_events(body).unwrap();
+        let json = hec_event_to_json(events.into_iter().next().unwrap(), RawCapture::OFF).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        assert!(parsed.get("timestamp").is_none());
+        assert_eq!(parsed["msg"], "a");
     }
 
     #[test]

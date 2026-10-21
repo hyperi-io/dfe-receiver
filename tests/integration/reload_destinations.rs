@@ -27,13 +27,13 @@ use std::time::Duration;
 use base64::Engine;
 use bytes::Bytes;
 use dfe_receiver::config::{
-    Config, DestinationRule, DestinationSpec, DlqConfig, GrpcDestination, SharedConfig,
-    SpilloverConfig,
+    Config, DestinationSpec, DlqConfig, GrpcDestination, SharedConfig, SpilloverConfig,
 };
 use dfe_receiver::metrics::Metrics;
 use dfe_receiver::pipeline::PipelineState;
 use dfe_receiver::server::http::HttpHandler;
 use dfe_receiver::server::traits::ProtocolHandler;
+use scalo::rules::{MatchConfig, RuleConfig, SetAction};
 use scalo::transport::grpc::GrpcTransport;
 use scalo::transport::{AcknowledgementsConfig, TransportReceiver};
 use tokio_util::sync::CancellationToken;
@@ -48,13 +48,10 @@ fn grpc_destination(endpoint: &str) -> DestinationSpec {
     }
 }
 
-/// Records whose `app` is `value` go to destination `name`.
-fn app_rule(value: &str, name: &str) -> DestinationRule {
-    DestinationRule {
-        match_field: "app".to_string(),
-        match_value: value.to_string(),
-        destination: name.into(),
-    }
+/// Records whose `app` is `value` take `_source` `value`.
+fn app_rule(value: &str) -> RuleConfig {
+    RuleConfig::new(format!("app-{value}"), "_source", SetAction::value(value))
+        .matching(MatchConfig::equals("app", value))
 }
 
 /// A brokerless receiver sending everything to the loader at `loader`.
@@ -77,7 +74,10 @@ fn routing_app(mut base: Config, value: &str, name: &str, endpoint: &str) -> Con
     base.destinations
         .named
         .insert(name.to_string(), grpc_destination(endpoint));
-    base.destinations.rules.push(app_rule(value, name));
+    base.rules.rules.push(app_rule(value));
+    base.destinations
+        .sources
+        .insert(value.to_string(), name.into());
     base
 }
 

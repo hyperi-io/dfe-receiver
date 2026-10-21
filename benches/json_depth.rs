@@ -25,10 +25,12 @@ use std::path::{Path, PathBuf};
 
 use bytes::Bytes;
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
-use dfe_receiver::config::{DestinationsConfig, RoutingConfig, SourceRule, ValidationConfig};
+use dfe_receiver::config::{Config, ValidationConfig};
 use dfe_receiver::routing::Router;
+use dfe_receiver::tenancy::{Ingest, Principal};
 use dfe_receiver::validation::depth::{MAX_BATCH_DEPTH, MAX_PARSE_DEPTH, json_depth_within};
 use dfe_receiver::validation::{ValidationResult, Validator};
+use scalo::rules::{RuleConfig, SetAction};
 use sonic_rs::{JsonContainerTrait, JsonValueTrait};
 
 /// Objects taken from each `expected` array.
@@ -156,16 +158,13 @@ fn ingress() -> (Validator, Router) {
         required_fields: Vec::new(),
         dlq_on_invalid: true,
     });
-    let routing = RoutingConfig {
-        source_rules: vec![SourceRule {
-            field: "data_stream.dataset".to_string(),
-            mode: "key_value_use".to_string(),
-            match_value: None,
-            source: None,
-        }],
-        ..RoutingConfig::default()
-    };
-    let router = Router::new(&routing, &DestinationsConfig::default(), true);
+    let mut config = Config::default();
+    config.rules.rules = vec![RuleConfig::new(
+        "by-dataset",
+        "_source",
+        SetAction::from("data_stream.dataset"),
+    )];
+    let router = Router::new(&config, &config.destinations).expect("the rule compiles");
     (validator, router)
 }
 
@@ -179,8 +178,15 @@ fn ingest(guard: Guard, validator: &Validator, router: &Router, record: &Bytes) 
     if validator.validate(record) != ValidationResult::Valid {
         return false;
     }
-    let (_, source) = router.route_with_source(record);
-    source.is_some()
+    let mut tally = router.tally();
+    router
+        .route(
+            record.clone(),
+            &Ingest::sent(Principal::Listener("http")),
+            0,
+            &mut tally,
+        )
+        .is_ok()
 }
 
 fn bench_guard(c: &mut Criterion, name: &str, records: &[Bytes]) {

@@ -23,13 +23,13 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
-use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
 use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
+use axum::{Extension, Router};
 use tokio::net::TcpListener;
 use tokio::time::{MissedTickBehavior, timeout};
 use tokio_rustls::TlsAcceptor;
@@ -47,11 +47,14 @@ use crate::config::{AuthConfig, SharedConfig};
 use crate::error::{Error, Result, unavailable_response};
 use crate::metrics::{ConnectionGuard, Metrics};
 use crate::pipeline::{Acks, PipelineState};
-use crate::server::auth::{AuthState, BearerTokenProvider, TokenAuth, token_auth_middleware};
+use crate::server::auth::{
+    AuthState, BearerTokenProvider, TokenAuth, principal_or_listener, token_auth_middleware,
+};
 use crate::server::client_ip::{ClientIpKey, TrustedProxies, attribute_client};
 use crate::server::ip_filter::IpFilter;
 use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
 use crate::server::traits::{BoundAddr, ProtocolHandler};
+use crate::tenancy::{Ingest, Principal};
 use crate::validation::depth::{MAX_BATCH_DEPTH, MAX_PARSE_DEPTH, json_depth_within};
 
 /// The transport label the `/ingest` listener counts under.
@@ -799,8 +802,13 @@ pub(crate) async fn run_tls_server(
 #[inline]
 async fn ingest_handler(
     State(state): State<HttpState>,
+    principal: Option<Extension<Principal>>,
     body: Bytes,
 ) -> std::result::Result<impl axum::response::IntoResponse, Error> {
+    let ingest = Ingest::sent(principal_or_listener(
+        principal.as_ref().map(|Extension(p)| p),
+        TRANSPORT,
+    ));
     // Shed load when pipeline is not ready (memory pressure, sink down, draining)
     if !state.pipeline.is_ready() {
         debug!(
@@ -839,8 +847,8 @@ async fn ingest_handler(
     // earlier refusal, so the sender resends rather than dropping the batch.
     let (accepted, result) = match batch {
         Some(Err(oversize)) => (0, Err(oversize)),
-        Some(Ok(payloads)) => ingest(&state, &payloads).await,
-        None => ingest(&state, std::slice::from_ref(&body)).await,
+        Some(Ok(payloads)) => ingest_records(&state, &payloads, &ingest).await,
+        None => ingest_records(&state, std::slice::from_ref(&body), &ingest).await,
     };
     let elapsed = start.elapsed();
     state
@@ -875,12 +883,16 @@ async fn ingest_handler(
     }
 }
 
-/// Run one request's events through the pipeline: how many it took, and the
-/// one error the answer reports.
-async fn ingest(state: &HttpState, payloads: &[Bytes]) -> (usize, Result<()>) {
+/// Run one request's events from `ingest` through the pipeline: how many it
+/// took, and the one error the answer reports.
+async fn ingest_records(
+    state: &HttpState,
+    payloads: &[Bytes],
+    ingest: &Ingest,
+) -> (usize, Result<()>) {
     let outcome = state
         .pipeline
-        .process_batch_acked(payloads, &state.acks, None)
+        .process_batch_acked(payloads, &state.acks, None, ingest)
         .await;
     (outcome.accepted, outcome.into_error().map_or(Ok(()), Err))
 }

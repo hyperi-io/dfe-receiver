@@ -361,11 +361,10 @@ properties:
     description: Routing configuration.
     $ref: "#/$defs/RoutingConfig"
     default:
-      source_rules: []
       default_source: main
+      default_org_id: default
       topic_suffix: _land
       source_to_topic: {}
-      legacy_compat: false
       source_org_id: disallow
       dlq:
         enabled: true
@@ -376,12 +375,30 @@ properties:
         file_path: /var/spool/dfe/dlq
         kafka_enabled: true
         kafka_send_timeout_ms: null
+  rules:
+    description: |-
+      The ordered rule set that sets each record's `_source` and then its
+      `_org_id`, first match per field in declared order. Reloads with no
+      restart.
+    $ref: "#/$defs/RuleSetConfig"
+    default:
+      name: rules
+      targets: []
+      rules: []
+  ingest_bindings:
+    description: |-
+      The orgs each credential's and each listener's records may land in.
+      Reloads with no restart.
+    $ref: "#/$defs/IngestBindingsConfig"
+    default:
+      credentials: {}
+      listeners: {}
   destinations:
     description: Destination configuration.
     $ref: "#/$defs/DestinationsConfig"
     default:
       default: kafka
-      rules: []
+      sources: {}
   kafka:
     description: Kafka producer configuration.
     $ref: "#/$defs/KafkaConfig"
@@ -706,8 +723,8 @@ $defs:
       include_common_header:
         description: |-
           Enrichment switch, read from `server.auth` alone: stamps
-          `_timestamp_receiver` and evaluates `routing.source_rules` on routed
-          records. It adds no accepted header. Default: true
+          `_timestamp_received` and `_source` on routed records. `_org_id` is
+          stamped either way. It adds no accepted header. Default: true
         type: boolean
         default: true
       header_name:
@@ -753,6 +770,9 @@ $defs:
         description: |-
           Static tokens (for dev/simple deployments).
           In production, use `secret_source` instead.
+
+          Each entry is `<credential-id>:<token>`, or a bare `<token>` bound to
+          no org. The id names the credential in `ingest_bindings.credentials`.
         type: array
         items:
           type: string
@@ -763,6 +783,8 @@ $defs:
         description: |-
           Secret source for dynamic token loading.
           Format: `provider:path[:key]` (e.g. "vault:secret/auth:bearer_tokens").
+          The secret holds entries as `tokens` takes them, one per line or comma
+          separated.
         type:
         - string
         - "null"
@@ -1804,21 +1826,25 @@ $defs:
         type: boolean
         default: true
   RoutingConfig:
-    description: Routing configuration.
+    description: |-
+      Routing configuration.
+
+      An unknown key is refused: a routing key nothing reads would change where
+      records land without a word.
     type: object
     properties:
-      source_rules:
-        description: |-
-          Rules for determining `_source` value (first match wins).
-          Only evaluated when `include_common_header` is true.
-        type: array
-        items:
-          $ref: "#/$defs/SourceRule"
-        default: []
       default_source:
-        description: Default source when no rule matches.
+        description: |-
+          The `_source` a record takes when no rule sets one, unless its listener
+          wrote one itself.
         type: string
         default: main
+      default_org_id:
+        description: |-
+          The `_org_id` a record whose sender is bound to no org takes, and the
+          only org such a sender's records may land in.
+        type: string
+        default: default
       topic_suffix:
         description: Suffix appended to source to form topic name.
         type: string
@@ -1829,12 +1855,6 @@ $defs:
         additionalProperties:
           type: string
         default: {}
-      legacy_compat:
-        description: |-
-          Enable pre-2.2 compatibility.
-          Appends `key_value_use` rules for `tags.event.category` and `event_category`.
-        type: boolean
-        default: false
       source_org_id:
         description: Whether a sender may set `_org_id`, the field that picks the tenant downstream.
         $ref: "#/$defs/SourceOrgId"
@@ -1851,38 +1871,7 @@ $defs:
           file_path: /var/spool/dfe/dlq
           kafka_enabled: true
           kafka_send_timeout_ms: null
-  SourceRule:
-    description: Rule for determining `_source` value from JSON payload.
-    type: object
-    properties:
-      field:
-        description: JSON field path (dot notation for nested, e.g., "tags.event.category").
-        type: string
-      mode:
-        description: |-
-          Match mode: "key_present", "key_value_set", "key_value_use".
-
-          - `key_present`: if field exists -> `_source = source`
-          - `key_value_set`: if field value == `match_value` -> `_source = source`
-          - `key_value_use`: if field exists -> `_source = <field value>`
-        type: string
-      match_value:
-        description: Value to match against (for `key_value_set` mode only).
-        type:
-        - string
-        - "null"
-        default: null
-      source:
-        description: |-
-          Source value to set (for `key_present` and `key_value_set` modes).
-          Ignored for `key_value_use` (uses the field value directly).
-        type:
-        - string
-        - "null"
-        default: null
-    required:
-    - field
-    - mode
+    additionalProperties: false
   SourceOrgId:
     description: What the receiver does with an `_org_id` the sender put in the record.
     oneOf:
@@ -1937,22 +1926,237 @@ $defs:
         format: uint64
         minimum: 0
         default: null
+  RuleSetConfig:
+    description: "An ordered rule set: per target field, the first row that matches sets it."
+    type: object
+    properties:
+      name:
+        description: The `rule_set` metric label. Defaults to `rules`.
+        type: string
+        default: rules
+      targets:
+        description: |-
+          The fields the set assigns, in evaluation order. A row for a later
+          target reads an earlier target's new value.
+        type: array
+        items:
+          type: string
+        default: []
+      lookups:
+        description: Bounded tables a `lookup` action maps a value through, by name.
+        type: object
+        additionalProperties:
+          type: object
+          additionalProperties:
+            type: string
+      rules:
+        description: The rows, in declared order.
+        type: array
+        items:
+          $ref: "#/$defs/RuleConfig"
+        default: []
+    additionalProperties: false
+  RuleConfig:
+    description: "One row: when it matches, it sets one target field."
+    type: object
+    properties:
+      id:
+        description: "Stable id: the `rule` metric label, and how an editor names the row."
+        type: string
+      match:
+        description: A native test. With neither `match` nor `when` the row always matches.
+        anyOf:
+        - $ref: "#/$defs/MatchConfig"
+        - type: "null"
+      when:
+        description: A CEL Fast condition, in place of `match`.
+        type:
+        - string
+        - "null"
+      set:
+        description: "Exactly one entry: the target field and how its value is found."
+        type: object
+        additionalProperties:
+          $ref: "#/$defs/SetAction"
+    additionalProperties: false
+    required:
+    - id
+    - set
+  MatchConfig:
+    description: A native test against one field, or `all` of several.
+    type: object
+    properties:
+      field:
+        description: Dotted path of the field tested.
+        type:
+        - string
+        - "null"
+      op:
+        description: The test.
+        anyOf:
+        - $ref: "#/$defs/MatchOp"
+        - type: "null"
+      value:
+        description: Operand of `equals`, `starts_with`, `ends_with`, `contains` and `regex`.
+        type:
+        - string
+        - "null"
+      prefix:
+        description: Leading text of `prefix_and_suffix`.
+        type:
+        - string
+        - "null"
+      suffix:
+        description: Trailing text of `prefix_and_suffix`.
+        type:
+        - string
+        - "null"
+      min:
+        description: Fewest characters `length` accepts.
+        type:
+        - integer
+        - "null"
+        format: uint
+        minimum: 0
+      max:
+        description: Most characters `length` accepts.
+        type:
+        - integer
+        - "null"
+        format: uint
+        minimum: 0
+      negate:
+        description: Invert the result. A negated test matches a record without the field.
+        type: boolean
+      all:
+        description: Every one of these, in place of `field` and `op`.
+        type: array
+        items:
+          $ref: "#/$defs/MatchConfig"
+    additionalProperties: false
+  MatchOp:
+    description: |-
+      A native test. Every test but `exists` reads the field's text: a string as
+      written, a number or boolean as its JSON text. Null, an object or an array
+      fails every test but a negated one.
+    oneOf:
+    - description: Text equals `value`.
+      type: string
+      const: equals
+    - description: Text starts with `value`.
+      type: string
+      const: starts_with
+    - description: Text ends with `value`.
+      type: string
+      const: ends_with
+    - description: Text contains `value`.
+      type: string
+      const: contains
+    - description: Text starts with `prefix` and ends with `suffix`.
+      type: string
+      const: prefix_and_suffix
+    - description: Text is `min` to `max` characters long.
+      type: string
+      const: length
+    - description: Present, not null, and not empty text.
+      type: string
+      const: exists
+    - description: >-
+        Text matches the regex `value`. Refused unless the CEL Fast profile allows
+        regex.
+      type: string
+      const: regex
+  SetAction:
+    description: How a matching row finds the value it sets.
+    type: object
+    properties:
+      value:
+        description: This literal text.
+        type:
+        - string
+        - "null"
+      from:
+        description: The text of this field. A record without it does not match the row.
+        type:
+        - string
+        - "null"
+      lookup:
+        description: |-
+          The `from` text mapped through this lookup table. A value the table
+          does not hold does not match the row.
+        type:
+        - string
+        - "null"
+    additionalProperties: false
+  IngestBindingsConfig:
+    description: |-
+      The orgs each ingest principal's records may land in.
+
+      A record's `_org_id` is held to its sender's binding: one the rules set
+      outside it is replaced by the binding's default. A credential or listener
+      with no entry may assign `routing.default_org_id` alone.
+
+      ```yaml
+      ingest_bindings:
+        credentials:
+          acme-agents: { orgs: [acme, acme-dev], default_org: acme }
+        listeners:
+          syslog: { orgs: [netops] }
+      ```
+    type: object
+    properties:
+      credentials:
+        description: |-
+          By credential id: the id a bearer token carries in its entry, or a
+          webhook caller's name.
+        type: object
+        additionalProperties:
+          $ref: "#/$defs/OrgBinding"
+        default: {}
+      listeners:
+        description: |-
+          By listener, for a request that carries no credential the receiver can
+          name: `http`, `grpc`, `otlp`, `splunk_hec`, `prometheus_rw`, `syslog`,
+          `fluent`, `lumberjack`, `gelf`, `netflow`, `sflow`.
+        type: object
+        additionalProperties:
+          $ref: "#/$defs/OrgBinding"
+        default: {}
+    additionalProperties: false
+  OrgBinding:
+    description: The orgs one principal's records may land in.
+    type: object
+    properties:
+      orgs:
+        description: The orgs a record may land in.
+        type: array
+        items:
+          type: string
+        default: []
+      default_org:
+        description: |-
+          The org a record takes when no rule picks one of `orgs`. Unset is the
+          first of `orgs`.
+        type:
+        - string
+        - "null"
+        default: null
+    additionalProperties: false
   DestinationsConfig:
     description: |-
-      The named destination set: where a matched record goes.
+      The named destination set: where a record goes, by the `_source` the rules
+      gave it.
 
       `kafka` and `loader` are always available without being declared -- the bus
       (the record's own topic) and the app named by the `loader` block. Any other
-      name is declared here as a sibling key, so a match rule can send a record to
-      a transform's Push listener, or fan it out to several destinations at once:
+      name is declared here as a sibling key, so a source can send its records to
+      a transform's Push listener, or fan them out to several destinations at once:
 
       ```yaml
       destinations:
         default: loader
-        rules:
-          - match_field: app
-            match_value: orders
-            destination: [transform-orders, archiver]
+        sources:
+          orders: [transform-orders, archiver]
         transform-orders:
           grpc:
             endpoint: "http://dfe-transform-orders:6000"
@@ -1963,15 +2167,17 @@ $defs:
     type: object
     properties:
       default:
-        description: Destination for records no rule matches.
+        description: Destination for a record whose source names none in `sources`.
         $ref: "#/$defs/DestinationRef"
         default: kafka
-      rules:
-        description: Routing rules for destination selection (first match wins).
-        type: array
-        items:
-          $ref: "#/$defs/DestinationRule"
-        default: []
+      sources:
+        description: |-
+          Destinations by the `_source` a rule row set, so a record is labelled
+          and routed by the one rule evaluation.
+        type: object
+        additionalProperties:
+          $ref: "#/$defs/DestinationRef"
+        default: {}
     additionalProperties:
       $ref: "#/$defs/DestinationSpec"
   DestinationRef:
@@ -1986,23 +2192,6 @@ $defs:
       type: array
       items:
         type: string
-  DestinationRule:
-    description: Destination routing rule.
-    type: object
-    properties:
-      match_field:
-        description: Field to match.
-        type: string
-      match_value:
-        description: Value to match.
-        type: string
-      destination:
-        description: "Destination for matched messages: one name, or a list to fan out."
-        $ref: "#/$defs/DestinationRef"
-    required:
-    - match_field
-    - match_value
-    - destination
   DestinationSpec:
     description: "A declared destination: exactly one transport block."
     type: object

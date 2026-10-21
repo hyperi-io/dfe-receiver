@@ -24,12 +24,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::Router;
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
+use axum::{Extension, Router};
 use prost::Message;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -39,10 +39,11 @@ use crate::config::{PrometheusRwConfig, RawCapture};
 use crate::error::{Error, RETRY_AFTER_SECS, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::{Acks, PipelineState};
-use crate::server::auth::TokenAuth;
+use crate::server::auth::{TokenAuth, principal_or_listener};
 use crate::server::http::{Accept, create_auth_state};
 use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
 use crate::server::traits::{BoundAddr, ProtocolHandler};
+use crate::tenancy::{Ingest, Principal};
 
 use self::convert::{PrometheusRwMode, write_request_to_json};
 
@@ -244,8 +245,14 @@ async fn run_prometheus_rw_server(
 /// Returns 204 No Content on success.
 async fn write_handler(
     State(state): State<RwState>,
+    principal: Option<Extension<Principal>>,
     body: Bytes,
 ) -> std::result::Result<StatusCode, RwError> {
+    // The converter writes each sample's `_source`, so it stands when no rule sets one.
+    let ingest = Ingest::built(principal_or_listener(
+        principal.as_ref().map(|Extension(p)| p),
+        TRANSPORT,
+    ));
     state.metrics.inc_requests_total("prometheus_rw");
     state
         .metrics
@@ -299,7 +306,7 @@ async fn write_handler(
     // refused for good answers 400.
     let outcome = state
         .pipeline
-        .process_batch_acked(&events, &state.acks, None)
+        .process_batch_acked(&events, &state.acks, None, &ingest)
         .await;
     if let Some(e) = outcome.unavailable {
         debug!(samples = events.len(), accepted = outcome.accepted, error = %e, "Remote Write request not fully taken");

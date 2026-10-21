@@ -36,6 +36,7 @@ use crate::pipeline::{Acks, PipelineState};
 use crate::server::http::Accept;
 use crate::server::ip_filter::IpFilter;
 use crate::server::traits::{BoundAddr, ProtocolHandler};
+use crate::tenancy::{Ingest, Principal};
 use codec::{Frame, decompress_and_parse, encode_ack, read_frame};
 
 /// TLS handshake timeout (matches HTTP handler).
@@ -94,9 +95,15 @@ impl Intake<'_> {
                 .add_bytes_received("lumberjack", payload.len() as u64);
         }
 
+        // A Beats frame carries no credential, and its events are the sender's own JSON.
         let outcome = self
             .pipeline
-            .process_batch_acked(&window.payloads, self.acks, None)
+            .process_batch_acked(
+                &window.payloads,
+                self.acks,
+                None,
+                &Ingest::sent(Principal::Listener(TRANSPORT)),
+            )
             .await;
         for _ in 0..outcome.accepted {
             self.metrics.inc_requests_success("lumberjack");

@@ -32,7 +32,7 @@ single-homed airlock: traffic from outside, produce to local Kafka, and Kafka
 never faces the network.
 
 It is not a transform stage. The receiver decides a payload is JSON, stamps
-`_source` and `_timestamp_receiver`, picks a topic and hands over. Parsing,
+`_source`, `_org_id` and `_timestamp_received`, picks a topic and hands over. Parsing,
 enrichment and schema work are dfe-loader's. The one deliberate exception is
 `_raw`: the receiver can retain the original wire bytes because for syslog and
 friends that fidelity is gone by the time the loader sees the record.
@@ -53,7 +53,7 @@ flowchart TB
     subgraph CORE["Shared core path"]
         direction TB
         VAL["Validate<br/>sonic-rs, no full parse"]
-        RT["Route<br/>source rules -> topic"]
+        RT["Route<br/>rule set -> _source, _org_id<br/>clamp to the sender's orgs -> topic"]
         BUF["Buffer<br/>in-memory + circuit breaker"]
         VAL --> RT --> BUF
     end
@@ -79,7 +79,7 @@ The webhook intake is its own handler rather than a route on `/ingest`, for
 reasons worth keeping. `/ingest` checks one server-wide credential in middleware
 before the body is read, where a product is identified per caller and a signed
 request needs the body to verify. A product's payload shape is its own, so
-`routing.source_rules` cannot pick its topic. And an own listener lets a
+the `rules` rows cannot pick its topic. And an own listener lets a
 deployment expose only that port to the product's egress.
 
 ## The hot path, and what it costs

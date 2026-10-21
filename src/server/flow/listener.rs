@@ -42,6 +42,7 @@ use crate::server::ip_filter::IpFilter;
 use crate::server::netflow::decoder::NetflowDecoder;
 use crate::server::sflow::decoder::SflowDecoder;
 use crate::server::traits::BoundAddr;
+use crate::tenancy::{Ingest, Principal};
 
 /// Generic UDP flow listener. Owns optional NetFlow and sFlow decoders; each
 /// incoming packet is autosensed and routed to the right one.
@@ -382,6 +383,8 @@ impl UdpFlowListener {
 
         let mode_label = cfg.output.mode.label();
         let is_exploded = matches!(cfg.output.mode, OutputMode::Exploded);
+        // A flow packet carries no credential, and the envelope writes `_source`.
+        let ingest = Ingest::built(Principal::Listener(D::PROTOCOL));
 
         if is_exploded {
             // All-or-nothing per packet: pre-clone every rendered envelope
@@ -409,7 +412,7 @@ impl UdpFlowListener {
             let first = iter.next().unwrap_or_else(|| {
                 unreachable!("events is non-empty (proven by len check at line 366)")
             });
-            match pipeline.process(first).await {
+            match pipeline.process(first, &ingest).await {
                 Ok(()) => {
                     metrics
                         .records_emitted_total
@@ -430,7 +433,7 @@ impl UdpFlowListener {
             let mut emitted = 1usize;
             for ev in iter {
                 emitted += 1;
-                match pipeline.process(ev).await {
+                match pipeline.process(ev, &ingest).await {
                     Ok(()) => {
                         metrics
                             .records_emitted_total
@@ -454,7 +457,7 @@ impl UdpFlowListener {
         // no partial-emit hazard.
         for range in ranges {
             let bytes = Bytes::copy_from_slice(&json_buf[range]);
-            match pipeline.process(bytes).await {
+            match pipeline.process(bytes, &ingest).await {
                 Ok(()) => {
                     metrics
                         .records_emitted_total

@@ -39,11 +39,17 @@ use crate::server::hold::hold_until_settled;
 use crate::server::http::Accept;
 use crate::server::ip_filter::IpFilter;
 use crate::server::traits::{BoundAddr, Listeners, ProtocolHandler};
+use crate::tenancy::{Ingest, Principal};
 use convert::syslog_to_json;
 use framing::SyslogFrameDecoder;
 
 /// The transport label every syslog listener counts under.
 const TRANSPORT: &str = "syslog";
+
+/// A syslog line carries no credential, and the listener writes its `_source`.
+fn listener_ingest() -> Ingest {
+    Ingest::built(Principal::Listener(TRANSPORT))
+}
 
 /// TLS handshake timeout.
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -112,7 +118,7 @@ async fn run_udp(
 
                 match syslog_to_json(raw, raw_capture) {
                     Ok(payload) => {
-                        if let Err(e) = pipeline.process(payload).await {
+                        if let Err(e) = pipeline.process(payload, &listener_ingest()).await {
                             debug!(peer = %peer_addr, error = %e, "Failed to process syslog UDP event");
                             metrics.inc_requests_error("syslog");
                             // A datagram has no answer to carry a retry, so the record is gone.
@@ -175,7 +181,7 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
                         match syslog_to_json(&raw, raw_capture) {
                             Ok(payload) => {
                                 let held = [payload];
-                                if !hold_until_settled(&pipeline, &held, &metrics, "syslog", &shutdown, &Acks::at_enqueue()).await {
+                                if !hold_until_settled(&pipeline, &held, &metrics, "syslog", &shutdown, &Acks::at_enqueue(), &listener_ingest()).await {
                                     debug!(peer = %peer_addr, "Syslog TCP connection closing (shutdown during a hold)");
                                     break;
                                 }

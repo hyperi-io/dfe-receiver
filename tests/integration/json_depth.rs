@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dfe_receiver::config::{
-    Config, SourceRule, WebhookAuthConfig, WebhookAuthMode, WebhookBody, WebhookCallerConfig,
+    Config, WebhookAuthConfig, WebhookAuthMode, WebhookBody, WebhookCallerConfig,
 };
 use dfe_receiver::metrics::Metrics;
 use dfe_receiver::pipeline::Orchestrator;
@@ -177,12 +177,11 @@ fn a_deeply_nested_body_is_refused_and_the_listener_keeps_serving() {
 fn a_deep_sibling_ahead_of_the_routing_field_is_refused() {
     on_worker_stack(|| async {
         let mut config = ingest_config();
-        config.routing.source_rules = vec![SourceRule {
-            field: "event_type".to_string(),
-            mode: "key_value_use".to_string(),
-            match_value: None,
-            source: None,
-        }];
+        config.rules.rules = vec![scalo::rules::RuleConfig::new(
+            "by-event-type",
+            "_source",
+            scalo::rules::SetAction::from("event_type"),
+        )];
         let started = start_ingest(config).await;
 
         let shallow = format!(r#"{{"sibling":{},"event_type":"auth"}}"#, nested_array(3));

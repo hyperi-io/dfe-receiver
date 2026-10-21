@@ -1,0 +1,381 @@
+// Project:   dfe-receiver
+// File:      src/routing/header.rs
+// Purpose:   Write a record's header fields back into its JSON bytes
+// Language:  Rust
+//
+// License:   BUSL-1.1
+// Copyright: (c) 2026 HYPERI PTY LIMITED
+
+//! The header fields routing decided, written into the record in one pass.
+//!
+//! A record that lacks every field it needs takes them by a byte append before
+//! its closing brace, with no parse. One that already carries a field holding
+//! another value is rewritten through a parse, because a second top-level key
+//! of the same name makes the loader's ClickHouse JSON column reject the whole
+//! record.
+
+use bytes::Bytes;
+use scalo::rules::Lookup;
+
+use super::{ORG_FIELD, RECEIVED_FIELD, SOURCE_FIELD};
+use crate::error::{Error, Result};
+use crate::validation::NOT_AN_OBJECT;
+
+/// Room for the keys and punctuation an append adds, beside the values.
+const APPEND_RESERVE: usize = 80;
+
+/// What one header field needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Write<'a> {
+    /// The record holds this value already, or the field is not this pass's.
+    Keep,
+    /// The record lacks the field.
+    Append(&'a str),
+    /// The record holds another value, kept as `<field>_original` when `park`.
+    Replace {
+        /// The value the field takes.
+        value: &'a str,
+        /// Whether the value it held is kept beside it.
+        park: bool,
+    },
+}
+
+impl<'a> Write<'a> {
+    /// The write that gives a field holding `found` the value `value`.
+    #[must_use]
+    pub fn of(found: &Lookup<'_>, value: &'a str, park: bool) -> Self {
+        match found {
+            Lookup::Missing => Self::Append(value),
+            Lookup::Text(text) if text.as_ref() == value => Self::Keep,
+            _ => Self::Replace { value, park },
+        }
+    }
+
+    fn appended(self) -> Option<&'a str> {
+        match self {
+            Self::Append(value) => Some(value),
+            Self::Keep | Self::Replace { .. } => None,
+        }
+    }
+}
+
+/// The header fields one record needs written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Header<'a> {
+    /// `_timestamp_received` to add, for a record that carries none.
+    pub received_ms: Option<u128>,
+    /// `_source`.
+    pub source: Write<'a>,
+    /// `_org_id`.
+    pub org: Write<'a>,
+}
+
+impl Header<'_> {
+    /// `payload` with these fields written. A record that needs nothing comes
+    /// back as it was, uncopied.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when a field must be replaced and the record does
+    /// not parse as a JSON object.
+    pub fn write(&self, payload: Bytes) -> Result<Bytes> {
+        let replaces = |write: Write<'_>| matches!(write, Write::Replace { .. });
+        if replaces(self.source) || replaces(self.org) {
+            return rewrite(&payload, self);
+        }
+        Ok(append(payload, self))
+    }
+}
+
+/// Append every field `header` adds before the record's last `}`.
+fn append(payload: Bytes, header: &Header<'_>) -> Bytes {
+    let source = header.source.appended();
+    let org = header.org.appended();
+    if header.received_ms.is_none() && source.is_none() && org.is_none() {
+        return payload;
+    }
+    let raw = payload.as_ref();
+    let Some(close) = raw.iter().rposition(|&b| b == b'}') else {
+        return payload;
+    };
+    let values = source.map_or(0, str::len) + org.map_or(0, str::len);
+    let mut out = Appender {
+        buf: Vec::with_capacity(raw.len() + values + APPEND_RESERVE),
+        // No comma after `{`, and trailing whitespace before the brace is not content.
+        comma: raw[..close]
+            .iter()
+            .rposition(|b| !b.is_ascii_whitespace())
+            .is_some_and(|pos| raw[pos] != b'{'),
+    };
+    out.buf.extend_from_slice(&raw[..close]);
+    if let Some(ms) = header.received_ms {
+        out.key(RECEIVED_FIELD);
+        push_decimal(&mut out.buf, ms);
+    }
+    if let Some(source) = source {
+        out.key(SOURCE_FIELD);
+        push_json_string(&mut out.buf, source);
+    }
+    if let Some(org) = org {
+        out.key(ORG_FIELD);
+        push_json_string(&mut out.buf, org);
+    }
+    out.buf.extend_from_slice(&raw[close..]);
+    Bytes::from(out.buf)
+}
+
+/// A record being appended to, and whether the next key needs a comma.
+struct Appender {
+    buf: Vec<u8>,
+    comma: bool,
+}
+
+impl Appender {
+    fn key(&mut self, name: &str) {
+        if self.comma {
+            self.buf.push(b',');
+        }
+        self.comma = true;
+        self.buf.push(b'"');
+        self.buf.extend_from_slice(name.as_bytes());
+        self.buf.extend_from_slice(b"\":");
+    }
+}
+
+/// Rewrite the record through a parse, for a field it holds with another value.
+fn rewrite(payload: &[u8], header: &Header<'_>) -> Result<Bytes> {
+    let mut value: serde_json::Value = serde_json::from_slice(payload)
+        .map_err(|e| Error::Validation(format!("record header cannot be rewritten: {e}")))?;
+    let Some(map) = value.as_object_mut() else {
+        return Err(Error::Validation(NOT_AN_OBJECT.into()));
+    };
+    if let Some(ms) = header.received_ms {
+        let ms = u64::try_from(ms).unwrap_or(u64::MAX);
+        map.insert(RECEIVED_FIELD.to_string(), serde_json::Value::from(ms));
+    }
+    apply(map, SOURCE_FIELD, header.source);
+    apply(map, ORG_FIELD, header.org);
+    serde_json::to_vec(&value)
+        .map(Bytes::from)
+        .map_err(|e| Error::Validation(format!("record header cannot be rewritten: {e}")))
+}
+
+fn apply(map: &mut serde_json::Map<String, serde_json::Value>, field: &str, write: Write<'_>) {
+    match write {
+        Write::Keep => {}
+        Write::Append(value) => {
+            map.insert(field.to_string(), serde_json::Value::from(value));
+        }
+        Write::Replace { value, park } => {
+            let held = map.insert(field.to_string(), serde_json::Value::from(value));
+            if park && let Some(held) = held {
+                park_original(map, field, held);
+            }
+        }
+    }
+}
+
+/// Keep a replaced value as `<field>_original`, or the first free
+/// `<field>_original_<n>` from 2 when the record already carries that name.
+fn park_original(
+    map: &mut serde_json::Map<String, serde_json::Value>,
+    field: &str,
+    held: serde_json::Value,
+) {
+    let preferred = format!("{field}_original");
+    if !map.contains_key(&preferred) {
+        map.insert(preferred, held);
+        return;
+    }
+    let mut n = 2u32;
+    loop {
+        let numbered = format!("{preferred}_{n}");
+        if !map.contains_key(&numbered) {
+            map.insert(numbered, held);
+            return;
+        }
+        n += 1;
+    }
+}
+
+/// Append `n` in decimal, with no allocation.
+fn push_decimal(buf: &mut Vec<u8>, mut n: u128) {
+    let mut digits = [0u8; 39];
+    let mut at = digits.len();
+    loop {
+        at -= 1;
+        digits[at] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    buf.extend_from_slice(&digits[at..]);
+}
+
+/// Append `s` as a quoted JSON string literal.
+///
+/// The common value needs no escape and is written straight through. A quote,
+/// backslash or control byte would break the record, so those go through serde.
+fn push_json_string(buf: &mut Vec<u8>, s: &str) {
+    if s.bytes().any(|b| b == b'"' || b == b'\\' || b < 0x20) {
+        let escaped = serde_json::Value::String(s.to_owned()).to_string();
+        buf.extend_from_slice(escaped.as_bytes());
+        return;
+    }
+    buf.push(b'"');
+    buf.extend_from_slice(s.as_bytes());
+    buf.push(b'"');
+}
+
+#[cfg(test)]
+mod tests {
+    use std::borrow::Cow;
+
+    use super::*;
+
+    fn header(source: Write<'static>, org: Write<'static>) -> Header<'static> {
+        Header {
+            received_ms: Some(1700),
+            source,
+            org,
+        }
+    }
+
+    fn written(record: &'static str, header: &Header<'_>) -> String {
+        String::from_utf8(header.write(Bytes::from(record)).unwrap().to_vec()).unwrap()
+    }
+
+    #[test]
+    fn a_record_lacking_every_field_takes_them_by_append() {
+        let h = header(Write::Append("web"), Write::Append("acme"));
+        assert_eq!(
+            written(r#"{"a":1}"#, &h),
+            r#"{"a":1,"_timestamp_received":1700,"_source":"web","_org_id":"acme"}"#
+        );
+        assert_eq!(
+            written("{ }", &h),
+            r#"{ "_timestamp_received":1700,"_source":"web","_org_id":"acme"}"#
+        );
+    }
+
+    #[test]
+    fn an_empty_object_takes_no_leading_comma() {
+        let h = header(Write::Keep, Write::Append("default"));
+        assert_eq!(
+            written("{}", &h),
+            r#"{"_timestamp_received":1700,"_org_id":"default"}"#
+        );
+    }
+
+    #[test]
+    fn a_record_that_needs_nothing_is_not_copied() {
+        let h = Header {
+            received_ms: None,
+            source: Write::Keep,
+            org: Write::Keep,
+        };
+        let payload = Bytes::from(r#"{"a":1}"#);
+        let out = h.write(payload.clone()).unwrap();
+        assert_eq!(out.as_ptr(), payload.as_ptr(), "the record was copied");
+    }
+
+    #[test]
+    fn a_replaced_source_is_parked_and_a_replaced_org_is_not() {
+        let h = header(
+            Write::Replace {
+                value: "web",
+                park: true,
+            },
+            Write::Replace {
+                value: "acme",
+                park: false,
+            },
+        );
+        let out = written(r#"{"_source":"spoof","_org_id":"victim","a":1}"#, &h);
+        let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(value["_source"], "web");
+        assert_eq!(value["_source_original"], "spoof");
+        assert_eq!(value["_org_id"], "acme");
+        assert!(value.get("_org_id_original").is_none());
+        assert_eq!(value["_timestamp_received"], 1700);
+        assert_eq!(out.matches("\"_source\"").count(), 1, "{out}");
+        assert_eq!(out.matches("\"_org_id\"").count(), 1, "{out}");
+    }
+
+    #[test]
+    fn a_park_never_overwrites_an_earlier_original() {
+        let h = header(
+            Write::Replace {
+                value: "web",
+                park: true,
+            },
+            Write::Keep,
+        );
+        let out = written(
+            r#"{"_source":"spoof","_source_original":"first","_source_original_2":"second"}"#,
+            &h,
+        );
+        let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(value["_source_original"], "first");
+        assert_eq!(value["_source_original_2"], "second");
+        assert_eq!(value["_source_original_3"], "spoof");
+    }
+
+    #[test]
+    fn a_value_with_quotes_is_escaped() {
+        let h = header(Write::Append(r#"we"ird\name"#), Write::Keep);
+        let value: serde_json::Value = serde_json::from_str(&written(r#"{"a":1}"#, &h)).unwrap();
+        assert_eq!(value["_source"], r#"we"ird\name"#);
+    }
+
+    #[test]
+    fn a_payload_with_no_closing_brace_is_left_alone() {
+        let h = header(Write::Append("web"), Write::Append("acme"));
+        assert_eq!(written("not json", &h), "not json");
+    }
+
+    #[test]
+    fn a_rewrite_of_a_record_that_is_not_an_object_is_refused() {
+        let h = header(
+            Write::Replace {
+                value: "web",
+                park: true,
+            },
+            Write::Keep,
+        );
+        assert!(h.write(Bytes::from("[1}")).is_err());
+    }
+
+    #[test]
+    fn the_write_follows_what_the_record_holds() {
+        assert_eq!(Write::of(&Lookup::Missing, "a", true), Write::Append("a"));
+        assert_eq!(
+            Write::of(&Lookup::Text(Cow::Borrowed("a")), "a", true),
+            Write::Keep
+        );
+        for held in [
+            Lookup::Text(Cow::Borrowed("b")),
+            Lookup::Null,
+            Lookup::Composite,
+        ] {
+            assert_eq!(
+                Write::of(&held, "a", true),
+                Write::Replace {
+                    value: "a",
+                    park: true
+                },
+                "{held:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_received_time_is_written_in_decimal() {
+        let mut buf = Vec::new();
+        push_decimal(&mut buf, 0);
+        buf.push(b' ');
+        push_decimal(&mut buf, 1_760_000_000_123);
+        assert_eq!(buf, b"0 1760000000123");
+    }
+}

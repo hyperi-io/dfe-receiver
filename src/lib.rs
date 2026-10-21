@@ -70,6 +70,7 @@ pub mod routing;
 pub mod secrets;
 pub mod server;
 pub mod sink;
+pub mod tenancy;
 pub mod validation;
 
 pub use error::{Error, Result};

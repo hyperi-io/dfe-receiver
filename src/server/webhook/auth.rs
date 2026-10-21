@@ -130,7 +130,8 @@ impl CallerAuth {
                     secret_source: Some(config.secret_source.clone()),
                     refresh_interval_secs: config.refresh_interval_secs,
                 };
-                let provider = Arc::new(BearerTokenProvider::from_config(&bearer).await?);
+                let provider =
+                    Arc::new(BearerTokenProvider::shared_secret_from_config(&bearer).await?);
                 if provider.token_count() == 0 {
                     return Err(Error::Config(format!(
                         "webhook caller '{caller}': secret source '{}' holds no secret",
@@ -346,7 +347,7 @@ impl HeaderVerifier {
         } else {
             value
         };
-        if secret.is_empty() || !self.provider.is_valid(secret) {
+        if secret.is_empty() || self.provider.principal(secret).is_none() {
             return Err(AuthFailure::InvalidHeader);
         }
         Ok(())

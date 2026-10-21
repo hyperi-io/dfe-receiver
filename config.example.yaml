@@ -104,13 +104,15 @@ server:
     # none, header, bearer, mtls, both. Anything else refuses to start. header
     # and both accept only what accepted_headers lists; nothing is implied.
     mode: "none"
-    # Enrichment switch: stamps _timestamp_receiver and evaluates
-    # routing.source_rules. It is not a credential and adds no accepted header.
+    # Enrichment switch: stamps _timestamp_received and _source. _org_id is
+    # stamped either way. It is not a credential and adds no accepted header.
     include_common_header: true
     accepted_headers:
       - name: "x-api-key"
         values: ["my-api-key"]
     bearer:
+      # Each entry is "<credential-id>:<token>", or a bare "<token>" that names
+      # no credential. ingest_bindings.credentials binds the id to orgs.
       tokens: []
       # secret_source: "vault:secret/data/auth:bearer_tokens"
       refresh_interval_secs: 300
@@ -295,8 +297,9 @@ prometheus_rw:
 # (an alert rule, a SaaS notification hook) and carries its own secret, its
 # own topic and its own body shape, so callers never share a credential and a
 # wrong secret is only tried against the caller the path names. Every record
-# lands on the caller's topic stamped with `_source: <caller>` and
-# `_timestamp_receiver`.
+# lands on the caller's topic stamped with `_source: <caller>`,
+# `_timestamp_received` and the `_org_id` ingest_bindings.credentials binds the
+# caller's name to.
 #
 # bind_address unset: the routes ride the main ingest listener (server.tls,
 # server.ip_filter, server.rate_limit apply; server.auth does NOT -- the
@@ -465,18 +468,40 @@ validation:
   required_fields: []
   dlq_on_invalid: true
 
+# The ordered rule set that sets each record's _source, then its _org_id: the
+# first matching row per field wins. A row's _org_id outside the orgs its
+# sender is bound to is replaced by the binding's default org and counted on
+# rules_clamped_total. Edits and reorders apply on the next config reload.
+rules:
+  rules: []
+  # rules:
+  #   - id: crates-audit                 # a fetcher's own _source, kept
+  #     match: { field: _source, op: equals, value: crates_audit }
+  #     set: { _source: { value: crates_audit } }
+  #   - id: acme-firewall
+  #     match: { field: data_stream.dataset, op: equals, value: cisco_asa.log }
+  #     set: { _org_id: { value: acme } }
+
+# The orgs each sender's records may land in. A credential or listener listed
+# nowhere lands its records in routing.default_org_id only.
+ingest_bindings:
+  credentials: {}
+  listeners: {}
+  # credentials:
+  #   acme-ingest:                       # the id in a "acme-ingest:<token>" bearer entry
+  #     orgs: [acme, acme-lab]
+  #     default_org: acme                # unset = the first of orgs
+  # listeners:
+  #   syslog:
+  #     orgs: [acme]
+
 routing:
-  # Source rules (first match wins). Only evaluated when include_common_header is true.
-  # Modes:
-  #   key_present:   if field exists -> _source = <source>
-  #   key_value_set: if field == match_value -> _source = <source>
-  #   key_value_use: if field exists -> _source = <field value>
-  source_rules:
-    - field: "_source"
-      mode: "key_value_use"       # use the value of _source as the source
   default_source: "main"
+  default_org_id: "default"
   topic_suffix: "_land"
-  legacy_compat: false  # also check tags.event.category / event_category
+  # disallow removes a sender's own _org_id. allow keeps it as the first
+  # _org_id row, still held to the sender's binding.
+  source_org_id: disallow
   # source_to_topic:
   #   auth: "logs_auth"
   dlq:
@@ -488,23 +513,18 @@ routing:
 
 # The named destination set. `kafka` (the bus, under the topic the record's
 # source resolves to) and `loader` (per the loader block below) are always
-# available; any other name is declared here as a sibling key. A rule's
-# destination may be a LIST, and the record then goes to every one of them --
-# that is how a record reaches the loader AND the archiver with no broker in
-# the path. A destination that stops accepting back-pressures the ingest (HTTP
-# 503); there is no DLQ fallback for a full destination, and the routing.dlq
-# topic below is for INVALID records only, so a deployment with no broker
-# should leave it disabled.
+# available. Any other name is declared here as a sibling key. `sources` picks
+# the destinations by the _source a rule row set, and an entry may be a LIST,
+# so the record goes to every one of them. That is how a record reaches the
+# loader AND the archiver with no broker in the path. A destination that stops
+# accepting back-pressures the ingest (HTTP 503). There is no DLQ fallback for
+# a full destination, and the routing.dlq topic below is for INVALID records
+# only, so a deployment with no broker should leave it disabled.
 destinations:
   default: "kafka"
-  rules: []
-  # rules:
-  #   - match_field: "tags.destination"
-  #     match_value: "direct"
-  #     destination: "loader"
-  #   - match_field: "app"
-  #     match_value: "orders"
-  #     destination: ["transform_orders", "archiver"]
+  sources: {}
+  # sources:
+  #   orders: ["transform_orders", "archiver"]
   # transform_orders:
   #   grpc:
   #     endpoint: "http://dfe-transform-orders:6000"
