@@ -246,11 +246,10 @@ Secret source format: `provider:path[:key]`, resolved by
 
 - `file:/etc/secrets/tokens`
 - `vault:secret/data/auth:bearer_tokens`
+- `aws:dfe/ingest/bearer-tokens/http`
 - `env:DFE_RECEIVER_BEARER_TOKENS`
 
-AWS Secrets Manager is not compiled in: serving `aws:` means pulling the AWS SDK
-for a path nothing uses, so the spec is refused at startup naming the scalo
-feature instead.
+AWS Secrets Manager is served by scalo's `secrets-aws` provider, which the receiver builds. An `aws:` spec names the secret, never its ARN, and `aws:name:key` picks one key out of a JSON secret.
 
 ## Configuration
 

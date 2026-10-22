@@ -142,11 +142,10 @@ Supported secret sources, read through scalo's credential resolver:
 
 - `file:/path/to/tokens` - Local file (K8s secrets)
 - `vault:secret/path:key` - OpenBao/Vault, also spelled `bao:` or `openbao:`
+- `aws:secret-name[:key]` - AWS Secrets Manager, with one key picked out of a JSON secret when `:key` is given
 - `env:VAR_NAME` - Environment variable
 
-A `vault:` reference names the field to read, so the `:key` is not optional
-there. AWS Secrets Manager is not built in: an `aws:` reference is refused at
-startup naming the scalo feature it would need.
+A `vault:` reference names the field to read, so the `:key` is not optional there. An `aws:` reference takes the secret's name, never its ARN (an ARN carries colons of its own), and reads its region and credentials from the standard AWS credential chain.
 
 #### mTLS Authentication
 

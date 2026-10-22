@@ -13,15 +13,22 @@
 //! directly, for bearer tokens and for TLS certificate material. The `vault:`
 //! provider runs against an OpenBao container in dev mode (skipped locally
 //! without Docker, required in CI), for both the bearer-token path and the
-//! webhook caller secrets that share the resolver with it.
+//! webhook caller secrets that share the resolver with it. The `aws:` provider
+//! runs against a loopback stand-in for Secrets Manager.
 
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
 
 use std::io::Write;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use axum::http::HeaderMap;
+use axum::Router;
+use axum::body::Bytes;
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use axum::routing::post;
 use dfe_receiver::config::{BearerConfig, TlsConfig, WebhookAuthConfig, WebhookAuthMode};
 use dfe_receiver::server::auth::BearerTokenProvider;
 use dfe_receiver::server::tls::build_tls_acceptor_async;
@@ -285,29 +292,147 @@ async fn test_bearer_tokens_unknown_provider_rejected() {
     );
 }
 
-/// The receiver does not build scalo's `secrets-aws`, so an `aws:` spec is
-/// refused when the provider is built -- at startup, with the feature named --
-/// rather than at the first request that needs a token.
+// ---------------------------------------------------------------------------
+// AWS Secrets Manager (loopback stand-in, no network)
+// ---------------------------------------------------------------------------
+
+/// The secret the stand-in holds, named the way the engine names a listener's
+/// bearer tokens.
+const AWS_TOKENS_SECRET: &str = "dfe/ingest/bearer-tokens/http";
+
+/// A loopback stand-in for Secrets Manager's `GetSecretValue`, recording the
+/// `SecretId` of every call it answers.
+struct FakeSecretsManager {
+    url: String,
+    asked: Arc<Mutex<Vec<String>>>,
+}
+
+/// Answer `GetSecretValue` for [`AWS_TOKENS_SECRET`] and refuse any other id the
+/// way Secrets Manager refuses a secret it does not hold.
+async fn get_secret_value(
+    State(asked): State<Arc<Mutex<Vec<String>>>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    const JSON: (axum::http::HeaderName, &str) =
+        (header::CONTENT_TYPE, "application/x-amz-json-1.1");
+
+    let target = headers
+        .get("x-amz-target")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    let request: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+    let secret_id = request["SecretId"].as_str().unwrap_or_default().to_string();
+    if target != "secretsmanager.GetSecretValue" {
+        let refusal = serde_json::json!({ "__type": "UnknownOperationException" });
+        return (StatusCode::BAD_REQUEST, [JSON], refusal.to_string()).into_response();
+    }
+    asked.lock().unwrap().push(secret_id.clone());
+
+    if secret_id == AWS_TOKENS_SECRET {
+        let secret = serde_json::json!({
+            "ARN": format!("arn:aws:secretsmanager:ap-southeast-2:000000000000:secret:{secret_id}-AbCdEf"),
+            "Name": secret_id,
+            "VersionId": "v1",
+            "SecretString": "acme-ingest:token-a\ntoken-b\n",
+        });
+        return (StatusCode::OK, [JSON], secret.to_string()).into_response();
+    }
+    let refusal = serde_json::json!({
+        "__type": "ResourceNotFoundException",
+        "Message": "Secrets Manager can't find the specified secret.",
+    });
+    (StatusCode::BAD_REQUEST, [JSON], refusal.to_string()).into_response()
+}
+
+impl FakeSecretsManager {
+    async fn start() -> Self {
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route("/", post(get_secret_value))
+            .with_state(Arc::clone(&asked));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        Self { url, asked }
+    }
+
+    /// Run `f` with the AWS SDK pointed at the stand-in and given static
+    /// credentials, so nothing in the SDK's credential chain leaves the host.
+    async fn with_env<F, T>(&self, f: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        temp_env::async_with_vars(
+            [
+                ("AWS_ENDPOINT_URL", Some(self.url.as_str())),
+                ("AWS_DEFAULT_REGION", Some("ap-southeast-2")),
+                ("AWS_ACCESS_KEY_ID", Some("AKIDEXAMPLE")),
+                ("AWS_SECRET_ACCESS_KEY", Some("not-a-real-secret-key")),
+                ("AWS_SESSION_TOKEN", None),
+                ("AWS_EC2_METADATA_DISABLED", Some("true")),
+            ],
+            f,
+        )
+        .await
+    }
+}
+
+/// An `aws:` source loads bearer tokens through scalo's AWS provider.
+///
+/// The spec has the shape the engine compiles for a listener: the secret's name
+/// and no key, so the whole secret is the token list.
 #[tokio::test]
-async fn test_aws_source_is_refused_at_startup_naming_the_feature() {
+async fn test_bearer_tokens_loaded_from_aws_secrets_manager() {
+    let aws = FakeSecretsManager::start().await;
     let config = BearerConfig {
         tokens: vec![],
-        secret_source: Some("aws:prod/auth/tokens:bearer".to_string()),
+        secret_source: Some(format!("aws:{AWS_TOKENS_SECRET}")),
         refresh_interval_secs: 0,
     };
 
-    let err = BearerTokenProvider::from_config(&config)
+    let provider = aws
+        .with_env(async { BearerTokenProvider::from_config(&config).await.unwrap() })
+        .await;
+
+    assert_eq!(provider.token_count(), 2);
+    assert_eq!(
+        provider.principal("token-a"),
+        Some(Principal::Credential("acme-ingest".into()))
+    );
+    assert!(accepts(&provider, "token-b"));
+    assert!(!accepts(&provider, "not-in-the-secret"));
+    assert_eq!(
+        *aws.asked.lock().unwrap(),
+        [AWS_TOKENS_SECRET],
+        "the lookup must reach Secrets Manager under the spec's secret name"
+    );
+}
+
+/// A secret Secrets Manager does not hold refuses startup as a failed AWS
+/// lookup, not as a missing build feature.
+#[tokio::test]
+async fn test_aws_source_that_cannot_load_is_refused_at_startup() {
+    let aws = FakeSecretsManager::start().await;
+    let config = BearerConfig {
+        tokens: vec![],
+        secret_source: Some("aws:dfe/ingest/bearer-tokens/missing".to_string()),
+        refresh_interval_secs: 0,
+    };
+
+    let err = aws
+        .with_env(async { BearerTokenProvider::from_config(&config).await.err() })
         .await
-        .err()
-        .expect("an aws: spec cannot be served")
+        .expect("a secret Secrets Manager does not hold cannot start a provider")
         .to_string();
+
     assert!(
-        err.contains("secrets-aws"),
-        "the refusal must name the scalo feature: {err}"
+        err.contains("aws resolution failed"),
+        "the refusal must come from the AWS lookup: {err}"
     );
     assert!(
-        !err.contains("provider not configured"),
-        "the spec must be refused by name, not as an unconfigured provider: {err}"
+        !err.contains("secrets-aws"),
+        "the build serves aws: specs, so the refusal must not blame the feature: {err}"
     );
 }
 
