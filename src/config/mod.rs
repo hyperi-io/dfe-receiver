@@ -776,16 +776,6 @@ impl ApplyFlatEnv for Config {
         if let Some(v) = flat_env::flat_env_bool(prefix, "COMMON_HEADER") {
             self.server.auth.include_common_header = v;
         }
-        // Bearer tokens arrive as a mounted Secret in the pod environment, so
-        // this is the route the chart takes -- the `auth` secret group in
-        // deployment.rs declares exactly this name. One entry per line, as
-        // BearerTokenProvider reads a secret source, and read through the
-        // sensitive helper so no token reaches a log line.
-        if let Some(v) = flat_env::flat_env_string_sensitive(prefix, "BEARER_TOKENS") {
-            self.server.auth.bearer.tokens = crate::server::auth::secret_entries(&v)
-                .map(SensitiveString::new)
-                .collect();
-        }
 
         // Kafka
         if let Some(v) = flat_env::flat_env_list(prefix, "KAFKA_BROKERS") {
@@ -4031,65 +4021,17 @@ webhook:
         });
     }
 
+    /// Bearer tokens come from each listener's `auth.bearer.secret_source`
+    /// alone, so a variable under the old name changes nothing.
     #[test]
-    fn bearer_tokens_arrive_from_the_environment() {
-        // The only route the chart has: a mounted Secret in the pod
-        // environment. Without this reader the auth Secret was mounted and read
-        // by nothing, and `auth.mode: bearer` came up with an empty token set.
+    fn a_bearer_tokens_variable_sets_no_token() {
         with_env(&[("DFE_RECEIVER_BEARER_TOKENS", "alpha\nbeta")], || {
             let mut config = Config::default();
             config.apply_flat_env(ENV_PREFIX);
             assert_eq!(
-                exposed(&config.server.auth.bearer.tokens),
-                ["alpha", "beta"]
+                config.server.auth.bearer.tokens,
+                Vec::<SensitiveString>::new()
             );
-        });
-    }
-
-    /// A comma is part of a token, so half of one never authenticates alone.
-    #[test]
-    fn a_comma_in_a_bearer_token_from_the_environment_is_part_of_it() {
-        with_env(
-            &[("DFE_RECEIVER_BEARER_TOKENS", "abc,def\nacme:x,y")],
-            || {
-                let mut config = Config::default();
-                config.apply_flat_env(ENV_PREFIX);
-                assert_eq!(
-                    exposed(&config.server.auth.bearer.tokens),
-                    ["abc,def", "acme:x,y"]
-                );
-            },
-        );
-    }
-
-    /// The values behind a list of secrets.
-    fn exposed(secrets: &[SensitiveString]) -> Vec<&str> {
-        secrets.iter().map(SensitiveString::expose).collect()
-    }
-
-    #[test]
-    fn bearer_tokens_from_the_environment_skip_blank_lines() {
-        with_env(
-            &[("DFE_RECEIVER_BEARER_TOKENS", "alpha\n beta \n\ngamma")],
-            || {
-                let mut config = Config::default();
-                config.apply_flat_env(ENV_PREFIX);
-                assert_eq!(
-                    exposed(&config.server.auth.bearer.tokens),
-                    ["alpha", "beta", "gamma"],
-                    "blank entries must not become empty tokens"
-                );
-            },
-        );
-    }
-
-    #[test]
-    fn bearer_tokens_from_config_survive_an_unset_environment() {
-        with_env(&[], || {
-            let mut config = Config::default();
-            config.server.auth.bearer.tokens = vec!["from-yaml".into()];
-            config.apply_flat_env(ENV_PREFIX);
-            assert_eq!(exposed(&config.server.auth.bearer.tokens), ["from-yaml"]);
         });
     }
 
@@ -4207,21 +4149,6 @@ webhook:
                 assert_eq!(sasl.mechanism, "SCRAM-SHA-512");
                 assert_eq!(sasl.username, "admin");
                 assert_eq!(sasl.password.expose(), "secret");
-            },
-        );
-    }
-
-    #[test]
-    fn test_env_override_bearer_tokens() {
-        with_env(
-            &[("DFE_RECEIVER_BEARER_TOKENS", " tok-a \ntok-b\r\n\ntok-c")],
-            || {
-                let mut config = Config::default();
-                config.apply_flat_env(ENV_PREFIX);
-                assert_eq!(
-                    exposed(&config.server.auth.bearer.tokens),
-                    ["tok-a", "tok-b", "tok-c"]
-                );
             },
         );
     }
@@ -4690,21 +4617,6 @@ kafka:
         assert!(
             debug_output.contains("file:/etc/secrets/tokens"),
             "secret_source should stay visible: {debug_output}"
-        );
-    }
-
-    #[test]
-    fn bearer_tokens_env_accepts_newline_separated_secrets() {
-        with_env(
-            &[("DFE_RECEIVER_BEARER_TOKENS", "tok-a\ntok-b\n\ntok-c")],
-            || {
-                let mut config = Config::default();
-                config.apply_flat_env(ENV_PREFIX);
-                assert_eq!(
-                    exposed(&config.server.auth.bearer.tokens),
-                    ["tok-a", "tok-b", "tok-c"]
-                );
-            },
         );
     }
 

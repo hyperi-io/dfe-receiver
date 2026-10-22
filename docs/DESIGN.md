@@ -244,10 +244,9 @@ Supports:
 Secret source format: `provider:path[:key]`, resolved by
 `scalo::secrets::resolve` -- the receiver has no resolver of its own.
 
-- `file:/etc/secrets/tokens`
+- `file:/var/run/secrets/dfe/ingest-bearer-tokens/http`
 - `vault:secret/data/auth:bearer_tokens`
 - `aws:dfe/ingest/bearer-tokens/http`
-- `env:DFE_RECEIVER_BEARER_TOKENS`
 
 AWS Secrets Manager is served by scalo's `secrets-aws` provider, which the receiver builds. An `aws:` spec names the secret, never its ARN, and `aws:name:key` picks one key out of a JSON secret.
 
