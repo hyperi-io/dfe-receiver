@@ -131,11 +131,7 @@ A buffered record a destination refuses for good leaves once the DLQ confirms th
 
 A cascade, scalo's: compiled defaults, then `/etc/dfe-receiver/config.yaml`, then `./config.yaml`, then `~/.config/dfe-receiver/config.yaml`, then `DFE_RECEIVER_*` environment variables, then CLI arguments, then runtime overrides. Routing, validation and enrichment reload on SIGHUP, and so do the gRPC destinations: a reload builds the sender of a destination it adds and retires one it removes, whose buffered records go to it or else the DLQ. With disk spillover on, a destination whose address changes moves to the new address on the same spool once no request uses its old sender, and replays what that sender spooled. The Kafka producer and the DLQ change only with a restart.
 
-Secrets are never literals in the config file. Every credential is a
-`provider:path[:key]` reference -- `file:`, `vault:`, `env:` -- resolved through
-`scalo::secrets::resolve`. The receiver has no resolver of its own, and that is
-deliberate: an `aws:` reference is refused at startup naming the scalo feature it
-would need, rather than pulling the AWS SDK in for a path nothing uses.
+Secrets are never literals in the config file. Every credential is a `provider:path[:key]` reference -- `file:`, `vault:`, `aws:`, `env:` -- resolved through `scalo::secrets::resolve`. The receiver has no resolver of its own, and builds scalo's `secrets-vault` and `secrets-aws` features so the OpenBao and AWS Secrets Manager providers are in the binary.
 
 ## Invariants
 

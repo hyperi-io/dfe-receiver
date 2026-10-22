@@ -1860,7 +1860,7 @@ pub struct WebhookAuthConfig {
     pub mode: WebhookAuthMode,
 
     /// Where the secret lives: `provider:path[:key]` as for bearer tokens
-    /// (`file:`, `vault:` / `bao:` / `openbao:`, `env:`). Required. There is no
+    /// (`file:`, `vault:` / `bao:` / `openbao:`, `aws:`, `env:`). Required. There is no
     /// static secret field on purpose: a secret in YAML surfaces in the
     /// config-schema dump and in every `config-check`.
     pub secret_source: String,
