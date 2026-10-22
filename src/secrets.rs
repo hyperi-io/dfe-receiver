@@ -16,11 +16,9 @@
 //! so a token or a PEM body pasted into a spec field would otherwise be used as
 //! the secret itself rather than refused.
 //!
-//! `aws:` is in the accepted vocabulary on purpose even though the receiver
-//! does not enable scalo's `secrets-aws` feature: letting the spec reach scalo
-//! gets the operator `aws: spec requires the secrets-aws feature to be enabled`
-//! when the receiver starts, rather than an unrecognised prefix silently
-//! becoming the token.
+//! `aws:` resolves through scalo's AWS Secrets Manager provider, which the
+//! receiver builds with scalo's `secrets-aws` feature. The engine compiles each
+//! listener's bearer source as `aws:<prefix>/ingest/bearer-tokens/<listener>`.
 
 use crate::error::{Error, Result};
 
@@ -60,10 +58,12 @@ pub fn check_spec(spec: &str) -> std::result::Result<(), String> {
 ///
 /// Returns an error when the spec names no provider, or when scalo cannot serve
 /// it -- an unreachable OpenBao, an unreadable or empty file, a `vault:` spec
-/// with no key, an `aws:` spec the build cannot serve.
+/// with no key, an `aws:` secret Secrets Manager does not hold.
 pub async fn read(spec: &str) -> Result<String> {
     check_spec(spec).map_err(|reason| Error::Config(format!("secret source: {reason}")))?;
-    scalo::secrets::resolve(spec)
+    // Boxed: the AWS provider's future nests deep enough that holding it inline
+    // overflows rustc's layout query depth in the HTTP listeners' async blocks.
+    Box::pin(scalo::secrets::resolve(spec))
         .await
         .map_err(|e| Error::Config(format!("secret source '{spec}' did not resolve: {e}")))
 }
@@ -115,22 +115,17 @@ mod tests {
         );
     }
 
-    /// The receiver does not build scalo's `secrets-aws`, so the spec has to
-    /// reach scalo and come back naming the feature -- not pass through as a
-    /// literal and become the token.
+    /// An `aws:` spec naming no secret is refused as malformed by scalo's
+    /// resolver, so it is never read as a literal and used as the token.
     #[tokio::test]
-    async fn an_aws_spec_is_refused_by_name() {
-        let err = read("aws:prod/auth/tokens:bearer")
+    async fn an_aws_spec_with_no_secret_name_is_refused() {
+        let err = read("aws:")
             .await
-            .expect_err("the receiver cannot serve an aws: spec")
+            .expect_err("an aws spec with no secret names nothing to read")
             .to_string();
         assert!(
-            err.contains("secrets-aws"),
-            "the refusal must name the feature: {err}"
-        );
-        assert!(
-            !err.contains("provider not configured"),
-            "the spec must be refused by name, not as an unconfigured provider: {err}"
+            err.contains("invalid credential spec"),
+            "aws: must be refused as malformed: {err}"
         );
     }
 

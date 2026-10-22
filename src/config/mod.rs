@@ -3129,6 +3129,18 @@ mod tests {
         assert!(config.validate().is_ok());
     }
 
+    /// The engine compiles each listener's bearer source as an `aws:` spec, so
+    /// validation must take one whole.
+    #[test]
+    fn an_aws_bearer_secret_source_is_accepted() {
+        let mut config = auth_base();
+        config.server.auth.mode = "bearer".to_string();
+        config.server.auth.bearer.secret_source =
+            Some("aws:dfe/ingest/bearer-tokens/http".to_string());
+
+        assert!(config.validate().is_ok());
+    }
+
     #[test]
     fn mtls_on_an_enabled_hec_listener_is_refused() {
         // splunk_hec runs the same token_auth_middleware, which short-circuits
@@ -3678,6 +3690,14 @@ mod tests {
     #[test]
     fn a_webhook_caller_with_a_secret_and_a_topic_is_accepted() {
         assert!(webhook_base().validate().is_ok());
+    }
+
+    #[test]
+    fn a_webhook_caller_secret_held_in_aws_is_accepted() {
+        let mut config = webhook_base();
+        config.webhook.callers[0].auth.secret_source = "aws:dfe/webhooks/runzero".to_string();
+
+        assert!(config.validate().is_ok());
     }
 
     #[test]

@@ -44,6 +44,9 @@ scalo = { version = "2.14.19", features = [
     # `vault:` secret refs (bearer tokens, webhook caller secrets) resolve
     # through scalo's OpenBao provider, which only compiles in with this on.
     "secrets-vault",
+    # `aws:` secret refs (bearer tokens, webhook caller secrets) resolve
+    # through scalo's AWS provider, which only compiles in with this on.
+    "secrets-aws",
     "scaling",
     # The webhook per-caller CEL `filter` compiles and validates through
     # scalo::expression, and no other feature listed here pulls it in.
