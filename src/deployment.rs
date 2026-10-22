@@ -300,41 +300,30 @@ pub fn contract() -> DeploymentContract {
 /// `Config::apply_flat_env` reads these names: flat env joins the prefix and
 /// the key with ONE underscore, and the user key is `USER`, not `USERNAME`.
 /// `entrypoint_args` pass `--config`, which never reads the cascade's
-/// double-underscore form. The `auth` group is optional because only bearer
-/// auth reads it.
+/// double-underscore form. No group carries bearer tokens: each listener reads
+/// its own from `auth.bearer.secret_source`.
 fn secrets() -> Vec<SecretGroupContract> {
     let env = |env_var: &str, key_name: &str, secret_key: &str| SecretEnvContract {
         env_var: env_var.into(),
         key_name: key_name.into(),
         secret_key: secret_key.into(),
     };
-    vec![
-        SecretGroupContract::new(
-            "kafka",
-            vec![
-                env("DFE_RECEIVER_KAFKA_SASL_USER", "username", "kafka-username"),
-                env(
-                    "DFE_RECEIVER_KAFKA_SASL_PASSWORD",
-                    "password",
-                    "kafka-password",
-                ),
-                env(
-                    "DFE_RECEIVER_KAFKA_SASL_MECHANISM",
-                    "mechanism",
-                    "kafka-sasl-mechanism",
-                ),
-            ],
-        ),
-        SecretGroupContract::new(
-            "auth",
-            vec![env(
-                "DFE_RECEIVER_BEARER_TOKENS",
-                "bearer-tokens",
-                "bearer-tokens",
-            )],
-        )
-        .optional(),
-    ]
+    vec![SecretGroupContract::new(
+        "kafka",
+        vec![
+            env("DFE_RECEIVER_KAFKA_SASL_USER", "username", "kafka-username"),
+            env(
+                "DFE_RECEIVER_KAFKA_SASL_PASSWORD",
+                "password",
+                "kafka-password",
+            ),
+            env(
+                "DFE_RECEIVER_KAFKA_SASL_MECHANISM",
+                "mechanism",
+                "kafka-sasl-mechanism",
+            ),
+        ],
+    )]
 }
 
 /// Capability catalog for dfe-receiver: the ingest protocols it accepts and the
@@ -737,7 +726,7 @@ mod tests {
     }
 
     /// The pod cannot produce without its broker credentials, so the Kafka
-    /// group is required. Bearer tokens matter only under bearer auth.
+    /// group is required, and it is the only one.
     #[test]
     fn test_contract_secrets() {
         let c = contract();
@@ -746,7 +735,7 @@ mod tests {
             .iter()
             .map(|g| (g.group_name.as_str(), g.optional))
             .collect();
-        assert_eq!(groups, [("kafka", false), ("auth", true)]);
+        assert_eq!(groups, [("kafka", false)]);
 
         let kafka: Vec<(&str, &str, &str)> = c.secrets[0]
             .env_vars
@@ -785,7 +774,6 @@ mod tests {
         ("DFE_RECEIVER_KAFKA_SASL_USER", "/kafka/sasl/username"),
         ("DFE_RECEIVER_KAFKA_SASL_PASSWORD", "/kafka/sasl/password"),
         ("DFE_RECEIVER_KAFKA_SASL_MECHANISM", "/kafka/sasl/mechanism"),
-        ("DFE_RECEIVER_BEARER_TOKENS", "/server/auth/bearer/tokens/0"),
     ];
 
     /// Every Secret env var the contract declares lands on the one config
