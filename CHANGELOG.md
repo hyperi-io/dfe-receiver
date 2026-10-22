@@ -3,6 +3,12 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.15.56](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.55...v1.15.56) (2026-10-22)
+
+### Bug Fixes
+
+* drop the DFE_RECEIVER_BEARER_TOKENS env and its secret group ([#204](https://github.com/hyperi-io/dfe-receiver/issues/204)) ([772833a](https://github.com/hyperi-io/dfe-receiver/commit/772833ada669f9ad5f45d3b0319ada5324553a6c))
+
 ## [1.15.55](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.54...v1.15.55) (2026-10-22)
 
 ### Bug Fixes
