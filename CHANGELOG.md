@@ -3,6 +3,12 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.15.55](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.54...v1.15.55) (2026-10-22)
+
+### Bug Fixes
+
+* **auth:** build scalo secrets-aws for aws: specs ([#203](https://github.com/hyperi-io/dfe-receiver/issues/203)) ([1a1cef9](https://github.com/hyperi-io/dfe-receiver/commit/1a1cef959522c173db814cb046b074622ad071df))
+
 ## [1.15.54](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.53...v1.15.54) (2026-10-21)
 
 ### Bug Fixes
