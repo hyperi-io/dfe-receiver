@@ -3,6 +3,12 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.15.57](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.56...v1.15.57) (2026-10-23)
+
+### Bug Fixes
+
+* **config:** pick Kafka or gRPC with one transport key ([#206](https://github.com/hyperi-io/dfe-receiver/issues/206)) ([86132e7](https://github.com/hyperi-io/dfe-receiver/commit/86132e7a7feb9bd2bcd934b66802b25c1c61cd1a))
+
 ## [1.15.56](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.55...v1.15.56) (2026-10-22)
 
 ### Bug Fixes
