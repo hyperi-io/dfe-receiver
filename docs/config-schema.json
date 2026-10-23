@@ -4,6 +4,11 @@
   "description": "Main configuration struct.",
   "type": "object",
   "properties": {
+    "transport": {
+      "description": "Which transport carries records out: `kafka` (a broker holds them between stages) or `grpc` (the loader's Push listener, point to point). Same two spellings as dfe-loader's and dfe-archiver's `transport`.\n\n`grpc` sets `destinations.default` to `loader` and `loader.transport` to `grpc` where the config leaves them unset. A config that sets either against it fails to load.",
+      "type": "string",
+      "default": "kafka"
+    },
     "server": {
       "description": "HTTP server configuration.",
       "$ref": "#/$defs/ServerConfig",
@@ -2368,7 +2373,7 @@
       "type": "object",
       "properties": {
         "default": {
-          "description": "Destination for a record whose source names none in `sources`.",
+          "description": "Destination for a record whose source names none in `sources`. Unset, it is `loader` under the top-level `transport: grpc` and `kafka` otherwise.",
           "$ref": "#/$defs/DestinationRef",
           "default": "kafka"
         },
@@ -2589,7 +2594,7 @@
           "default": "dfe-loader:6000"
         },
         "transport": {
-          "description": "Transport type (kafka, grpc; `memory` discards and is refused at startup).",
+          "description": "Transport type, kafka or grpc. `memory` discards and is refused at startup. Unset, it is `grpc` under the top-level `transport: grpc` and `kafka` otherwise.",
           "type": "string",
           "default": "kafka"
         },

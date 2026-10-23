@@ -300,6 +300,8 @@ removed unless `routing.source_org_id: allow`, and a sender's `_source` that a
 row replaces is kept as `_source_original`. Rule edits apply on the next config
 reload, with no restart.
 
+Records land on Kafka by default. `transport: grpc` (or `DFE_RECEIVER_TRANSPORT=grpc`), the key dfe-loader and dfe-archiver also read, sends them to dfe-loader's Push listener with no broker in the path. Under it an unset `destinations.default` becomes `loader` and an unset `loader.transport` becomes `grpc`. A config that sets either against it fails to start.
+
 ## Metrics
 
 Prometheus metrics available at the configured metrics endpoint:
