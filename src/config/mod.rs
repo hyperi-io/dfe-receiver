@@ -43,6 +43,11 @@ pub const ENV_PREFIX: &str = "DFE_RECEIVER";
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct Config {
+    /// Which transport carries records out: `kafka` (a broker holds them between stages) or `grpc` (the loader's Push listener, point to point). Same two spellings as dfe-loader's and dfe-archiver's `transport`.
+    ///
+    /// `grpc` sets `destinations.default` to `loader` and `loader.transport` to `grpc` where the config leaves them unset. A config that sets either against it fails to load.
+    pub transport: String,
+
     /// HTTP server configuration.
     pub server: ServerConfig,
 
@@ -130,6 +135,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            transport: default_transport(),
             server: ServerConfig::default(),
             grpc: GrpcConfig::default(),
             #[cfg(feature = "otlp")]
@@ -157,6 +163,51 @@ impl Default for Config {
             config_path: None,
             file_sink: FileSinkConfig::default(),
         }
+    }
+}
+
+/// `transport` value selecting the bus: a broker holds records between stages.
+pub const TRANSPORT_KAFKA: &str = "kafka";
+
+/// `transport` value selecting the direct form: the scalo Push listener.
+pub const TRANSPORT_GRPC: &str = "grpc";
+
+fn default_transport() -> String {
+    TRANSPORT_KAFKA.to_string()
+}
+
+/// The keys `transport: grpc` fills, read from the config source only for whether it sets them.
+#[derive(Debug, Default, Deserialize)]
+struct TransportKeys {
+    destinations: Option<DestinationsKeys>,
+    loader: Option<LoaderKeys>,
+}
+
+/// `destinations.default`, present or absent.
+#[derive(Debug, Default, Deserialize)]
+struct DestinationsKeys {
+    default: Option<serde::de::IgnoredAny>,
+}
+
+/// `loader.transport`, present or absent.
+#[derive(Debug, Default, Deserialize)]
+struct LoaderKeys {
+    transport: Option<serde::de::IgnoredAny>,
+}
+
+impl TransportKeys {
+    /// Whether the source sets `destinations.default`.
+    fn sets_default_destination(&self) -> bool {
+        self.destinations
+            .as_ref()
+            .is_some_and(|keys| keys.default.is_some())
+    }
+
+    /// Whether the source sets `loader.transport`.
+    fn sets_loader_transport(&self) -> bool {
+        self.loader
+            .as_ref()
+            .is_some_and(|keys| keys.transport.is_some())
     }
 }
 
@@ -194,6 +245,9 @@ impl Config {
         let mut config: Config = cfg
             .unmarshal()
             .map_err(|e| Error::Config(format!("invalid config: {e}")))?;
+        let keys: TransportKeys = cfg
+            .unmarshal()
+            .map_err(|e| Error::Config(format!("invalid config: {e}")))?;
 
         // Store config path for reload support
         config.config_path = config_path.map(String::from);
@@ -201,17 +255,42 @@ impl Config {
         // Apply flat env var overrides (DFE_RECEIVER_*)
         config.apply_flat_env(ENV_PREFIX);
         config.normalize();
+        config.apply_transport(&keys);
 
         Ok(config)
     }
 
     /// Load configuration from a YAML file directly (for backwards compatibility).
     pub fn load_from_file(path: &str) -> Result<Self> {
-        let mut config: Config = scalo::yaml::from_path(path, scalo::yaml::Profile::Config)?;
+        // One read for both parses, so a file replaced mid-reload cannot pair one version's keys with another's values.
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| Error::Config(format!("failed to read config file '{path}': {e}")))?;
+        let mut config: Config = scalo::yaml::from_str(&text, path, scalo::yaml::Profile::Config)?;
+        let keys: TransportKeys = scalo::yaml::from_str(&text, path, scalo::yaml::Profile::Config)?;
         config.config_path = Some(path.to_string());
         config.apply_flat_env(ENV_PREFIX);
         config.normalize();
+        config.apply_transport(&keys);
         Ok(config)
+    }
+
+    /// Whether `transport` selects the direct form, the scalo Push listener, rather than the bus.
+    #[must_use]
+    pub fn is_direct(&self) -> bool {
+        self.transport == TRANSPORT_GRPC
+    }
+
+    /// Fill the keys `transport: grpc` implies where the config source leaves them unset.
+    fn apply_transport(&mut self, keys: &TransportKeys) {
+        if !self.is_direct() {
+            return;
+        }
+        if !keys.sets_default_destination() {
+            self.destinations.default = DestinationRef::from(LOADER_DESTINATION);
+        }
+        if !keys.sets_loader_transport() {
+            self.loader.transport = TRANSPORT_GRPC.to_string();
+        }
     }
 
     /// Resolve a transport's raw-capture override against the common block.
@@ -241,11 +320,11 @@ impl Config {
         }
 
         let spec = match self.loader.transport.as_str() {
-            "kafka" => DestinationSpec {
+            TRANSPORT_KAFKA => DestinationSpec {
                 grpc: None,
                 kafka: Some(KafkaDestination::default()),
             },
-            "grpc" => DestinationSpec {
+            TRANSPORT_GRPC => DestinationSpec {
                 grpc: Some(GrpcDestination {
                     endpoint: self.loader.effective_grpc_endpoint(),
                     ..GrpcDestination::default()
@@ -313,6 +392,15 @@ impl Config {
             return Err(Error::Config("server.bind_address is required".into()));
         }
 
+        let known_transports = [TRANSPORT_KAFKA, TRANSPORT_GRPC];
+        if !known_transports.contains(&self.transport.as_str()) {
+            return Err(Error::Config(format!(
+                "transport must be one of: {} (got '{}')",
+                known_transports.join(", "),
+                self.transport
+            )));
+        }
+
         if !LOADER_TRANSPORTS.contains(&self.loader.transport.as_str()) {
             return Err(Error::Config(format!(
                 "loader.transport '{}' is not one of {}",
@@ -329,6 +417,29 @@ impl Config {
                 "loader.transport '{DISCARD_TRANSPORT}' accepts records and drops them; \
                  use one of {}",
                 DELIVERING_LOADER_TRANSPORTS.join(", ")
+            )));
+        }
+
+        // Loading fills both keys under `transport: grpc`, so a value that contradicts it came from the config.
+        if self.is_direct() && self.loader.transport != TRANSPORT_GRPC {
+            return Err(Error::Config(format!(
+                "loader.transport is '{}' but transport is 'grpc': set loader.transport to grpc \
+                 or leave it unset",
+                self.loader.transport
+            )));
+        }
+        if self.is_direct()
+            && self
+                .destinations
+                .default
+                .names()
+                .iter()
+                .any(|name| self.destinations.is_bus(name))
+        {
+            return Err(Error::Config(format!(
+                "destinations.default '{}' reaches the bus but transport is 'grpc': name a gRPC \
+                 destination such as loader or leave destinations.default unset",
+                self.destinations.default
             )));
         }
 
@@ -763,6 +874,11 @@ pub fn reload_config(current: &Config) -> Result<Config> {
 
 impl ApplyFlatEnv for Config {
     fn apply_flat_env(&mut self, prefix: &str) {
+        // Transport
+        if let Some(v) = flat_env::flat_env_string(prefix, "TRANSPORT") {
+            self.transport = v;
+        }
+
         // Server
         if let Some(v) = flat_env::flat_env_string(prefix, "BIND_ADDRESS") {
             self.server.bind_address = v;
@@ -2340,7 +2456,7 @@ pub fn checked_client_config(
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct DestinationsConfig {
-    /// Destination for a record whose source names none in `sources`.
+    /// Destination for a record whose source names none in `sources`. Unset, it is `loader` under the top-level `transport: grpc` and `kafka` otherwise.
     pub default: DestinationRef,
 
     /// Destinations by the `_source` a rule row set, so a record is labelled
@@ -2360,10 +2476,10 @@ pub const BUS_DESTINATION: &str = "kafka";
 pub const LOADER_DESTINATION: &str = "loader";
 
 /// The transports `loader.transport` accepts.
-pub const LOADER_TRANSPORTS: [&str; 3] = ["kafka", "grpc", DISCARD_TRANSPORT];
+pub const LOADER_TRANSPORTS: [&str; 3] = [TRANSPORT_KAFKA, TRANSPORT_GRPC, DISCARD_TRANSPORT];
 
 /// The transports that deliver a record somewhere.
-pub const DELIVERING_LOADER_TRANSPORTS: [&str; 2] = ["kafka", "grpc"];
+pub const DELIVERING_LOADER_TRANSPORTS: [&str; 2] = [TRANSPORT_KAFKA, TRANSPORT_GRPC];
 
 /// The transport that accepts a record and drops it. It exists so an ingest
 /// test needs no broker; `Config::validate` refuses it, so it never starts.
@@ -2597,7 +2713,7 @@ pub struct LoaderConfig {
     /// Override with grpc_endpoint to dial a different URI.
     pub address: String,
 
-    /// Transport type (kafka, grpc; `memory` discards and is refused at startup).
+    /// Transport type, kafka or grpc. `memory` discards and is refused at startup. Unset, it is `grpc` under the top-level `transport: grpc` and `kafka` otherwise.
     pub transport: String,
 
     /// Per-RPC deadline for the gRPC loader client, in milliseconds (0 = none).
@@ -2613,7 +2729,7 @@ impl Default for LoaderConfig {
     fn default() -> Self {
         Self {
             address: "dfe-loader:6000".to_string(),
-            transport: "kafka".to_string(),
+            transport: TRANSPORT_KAFKA.to_string(),
             timeout_ms: crate::pipeline::acks::NEXT_HOP_DEADLINE_MS,
             grpc_endpoint: None,
         }
@@ -3923,6 +4039,266 @@ webhook:
         assert!(err.contains("kafka, grpc"), "got: {err}");
     }
 
+    // -- the top-level transport --
+
+    /// Load `yaml` as `--config` does, with `DFE_RECEIVER_TRANSPORT` set to `env`.
+    fn load_with_transport_env(yaml: &str, env: Option<&str>) -> Result<Config> {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, yaml).expect("write config");
+        let path = path.to_str().expect("utf-8 path");
+        temp_env::with_var("DFE_RECEIVER_TRANSPORT", env, || {
+            Config::load_from_file(path)
+        })
+    }
+
+    /// Load `yaml` as `--config` does, with no transport in the environment.
+    fn load_yaml(yaml: &str) -> Config {
+        load_with_transport_env(yaml, None).expect("config loads")
+    }
+
+    #[test]
+    fn the_transport_defaults_to_kafka() {
+        assert_eq!(Config::default().transport, TRANSPORT_KAFKA);
+
+        let config = load_yaml("kafka:\n  brokers: [\"localhost:9092\"]\n");
+        assert_eq!(config.transport, TRANSPORT_KAFKA);
+        assert!(!config.is_direct());
+        assert_eq!(
+            config.destinations.default,
+            DestinationRef::from(BUS_DESTINATION)
+        );
+        assert_eq!(config.loader.transport, TRANSPORT_KAFKA);
+        config.validate().unwrap();
+    }
+
+    /// `transport: grpc` alone sends every record no source routes to the
+    /// loader's Push listener, with no broker configured.
+    #[test]
+    fn transport_grpc_sends_to_the_loader_over_grpc() {
+        let config = load_yaml("transport: grpc\n");
+        assert!(config.is_direct());
+        assert_eq!(
+            config.destinations.default,
+            DestinationRef::from(LOADER_DESTINATION)
+        );
+        assert_eq!(config.loader.transport, TRANSPORT_GRPC);
+        config.validate().unwrap();
+
+        let resolved = config.resolved_destinations();
+        let loader = resolved.named[LOADER_DESTINATION]
+            .grpc
+            .as_ref()
+            .expect("the loader is a gRPC destination");
+        assert_eq!(loader.endpoint, "http://dfe-loader:6000");
+        assert!(!resolved.uses_bus());
+    }
+
+    /// Settings that agree with `transport: grpc` are kept as written.
+    #[test]
+    fn settings_that_agree_with_transport_grpc_are_kept() {
+        let both = load_yaml(
+            "transport: grpc\ndestinations:\n  default: loader\nloader:\n  transport: grpc\n",
+        );
+        assert_eq!(
+            both.destinations.default,
+            DestinationRef::from(LOADER_DESTINATION)
+        );
+        assert_eq!(both.loader.transport, TRANSPORT_GRPC);
+        both.validate().unwrap();
+
+        let archiver = load_yaml(
+            "transport: grpc\ndestinations:\n  default: archiver\n  archiver:\n    grpc:\n      \
+             endpoint: \"http://dfe-archiver:6000\"\n",
+        );
+        assert_eq!(
+            archiver.destinations.default,
+            DestinationRef::from("archiver")
+        );
+        assert_eq!(archiver.loader.transport, TRANSPORT_GRPC);
+        archiver.validate().unwrap();
+    }
+
+    /// `loader.transport: kafka` puts the loader on the bus, which
+    /// `transport: grpc` says it is not.
+    #[test]
+    fn loader_transport_kafka_against_transport_grpc_is_refused() {
+        for yaml in [
+            "transport: grpc\nloader:\n  transport: kafka\n",
+            "transport: grpc\ndestinations:\n  default: loader\nloader:\n  transport: kafka\n",
+        ] {
+            let err = load_yaml(yaml)
+                .validate()
+                .expect_err("contradicts transport")
+                .to_string();
+            assert_eq!(
+                err,
+                "configuration error: loader.transport is 'kafka' but transport is 'grpc': set \
+                 loader.transport to grpc or leave it unset",
+                "{yaml}"
+            );
+        }
+    }
+
+    /// A default destination on the bus contradicts `transport: grpc`, alone or
+    /// as one leg of a fan-out.
+    #[test]
+    fn a_default_destination_on_the_bus_against_transport_grpc_is_refused() {
+        let err = load_yaml("transport: grpc\ndestinations:\n  default: kafka\n")
+            .validate()
+            .expect_err("the bus contradicts transport")
+            .to_string();
+        assert_eq!(
+            err,
+            "configuration error: destinations.default 'kafka' reaches the bus but transport \
+             is 'grpc': name a gRPC destination such as loader or leave destinations.default \
+             unset"
+        );
+
+        for yaml in [
+            "transport: grpc\ndestinations:\n  default: [loader, kafka]\n",
+            "transport: grpc\ndestinations:\n  default: audit_bus\n  audit_bus:\n    kafka:\n      \
+             topic: audit_land\n",
+        ] {
+            let err = load_yaml(yaml)
+                .validate()
+                .expect_err("the bus contradicts transport")
+                .to_string();
+            assert!(
+                err.contains("reaches the bus but transport is 'grpc'"),
+                "{yaml}: {err}"
+            );
+        }
+    }
+
+    /// A config with no `transport` key loads exactly as parse, flat env and
+    /// normalize leave it, so the two-key gRPC form dfe-engine renders keeps working.
+    #[test]
+    fn a_config_without_transport_loads_unchanged() {
+        for yaml in [
+            "destinations:\n  default: loader\nloader:\n  transport: grpc\n",
+            "kafka:\n  brokers: [\"localhost:9092\"]\n",
+            "kafka:\n  brokers: [\"localhost:9092\"]\ndestinations:\n  default: loader\n",
+        ] {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let path = dir.path().join("config.yaml");
+            std::fs::write(&path, yaml).expect("write config");
+            let path = path.to_str().expect("utf-8 path");
+            // The load with no transport step: parse, flat env, normalize.
+            temp_env::with_var("DFE_RECEIVER_TRANSPORT", None::<&str>, || {
+                let mut before: Config =
+                    scalo::yaml::from_str(yaml, path, scalo::yaml::Profile::Config).unwrap();
+                before.apply_flat_env(ENV_PREFIX);
+                before.normalize();
+                let now = Config::load_from_file(path).unwrap();
+                assert_eq!(
+                    serde_json::to_value(&now).unwrap(),
+                    serde_json::to_value(&before).unwrap(),
+                    "{yaml}"
+                );
+                now.validate().unwrap();
+            });
+        }
+
+        // Both forms send the default to the loader over gRPC.
+        let two_keys = load_yaml("destinations:\n  default: loader\nloader:\n  transport: grpc\n");
+        let one_key = load_yaml("transport: grpc\n");
+        assert_eq!(two_keys.transport, TRANSPORT_KAFKA);
+        assert_eq!(two_keys.loader.transport, one_key.loader.transport);
+        assert_eq!(
+            serde_json::to_value(two_keys.resolved_destinations()).unwrap(),
+            serde_json::to_value(one_key.resolved_destinations()).unwrap()
+        );
+    }
+
+    #[test]
+    fn an_unknown_transport_is_refused() {
+        for (yaml, value) in [
+            ("transport: Grpc\n", "Grpc"),
+            ("transport: memory\n", "memory"),
+            ("transport: \"\"\n", ""),
+        ] {
+            let config = load_yaml(yaml);
+            assert_eq!(
+                config.destinations.default,
+                DestinationRef::from(BUS_DESTINATION),
+                "an unknown transport fills nothing"
+            );
+            let err = config.validate().expect_err(yaml).to_string();
+            assert_eq!(
+                err,
+                format!(
+                    "configuration error: transport must be one of: kafka, grpc (got '{value}')"
+                )
+            );
+        }
+    }
+
+    /// `DFE_RECEIVER_TRANSPORT` picks the transport under `--config` as the key
+    /// does, and beats the key in the file.
+    #[test]
+    fn the_transport_env_var_selects_the_transport_under_a_config_file() {
+        let config =
+            load_with_transport_env("kafka:\n  brokers: [\"localhost:9092\"]\n", Some("grpc"))
+                .unwrap();
+        assert_eq!(config.transport, TRANSPORT_GRPC);
+        assert_eq!(
+            config.destinations.default,
+            DestinationRef::from(LOADER_DESTINATION)
+        );
+        assert_eq!(config.loader.transport, TRANSPORT_GRPC);
+        config.validate().unwrap();
+
+        let err = load_with_transport_env("loader:\n  transport: kafka\n", Some("grpc"))
+            .unwrap()
+            .validate()
+            .expect_err("the file contradicts the environment")
+            .to_string();
+        assert!(
+            err.contains("loader.transport is 'kafka' but transport is 'grpc'"),
+            "{err}"
+        );
+
+        let config = load_with_transport_env(
+            "transport: grpc\nkafka:\n  brokers: [\"localhost:9092\"]\n",
+            Some("kafka"),
+        )
+        .unwrap();
+        assert_eq!(config.transport, TRANSPORT_KAFKA);
+        assert_eq!(
+            config.destinations.default,
+            DestinationRef::from(BUS_DESTINATION)
+        );
+        assert_eq!(config.loader.transport, TRANSPORT_KAFKA);
+    }
+
+    /// The cascade with no `--config` tells a key the environment sets from one
+    /// left to its default.
+    #[test]
+    fn the_cascade_tells_a_set_loader_transport_from_a_default() {
+        temp_env::with_vars(
+            [
+                ("DFE_RECEIVER__TRANSPORT", Some("grpc")),
+                ("DFE_RECEIVER__LOADER__TRANSPORT", Some("kafka")),
+            ],
+            || {
+                let config = Config::load(None).expect("the cascade loads");
+                assert_eq!(config.transport, TRANSPORT_GRPC);
+                assert_eq!(
+                    config.destinations.default,
+                    DestinationRef::from(LOADER_DESTINATION),
+                    "unset, the default destination follows transport"
+                );
+                assert_eq!(config.loader.transport, TRANSPORT_KAFKA, "set, it is kept");
+                let err = config.validate().unwrap_err().to_string();
+                assert!(
+                    err.contains("loader.transport is 'kafka' but transport is 'grpc'"),
+                    "{err}"
+                );
+            },
+        );
+    }
+
     /// The loader's default address is the port the manifest gives its Push
     /// listener (dfe-infra apps.yaml `dfe-loader.endpoints.push`).
     #[test]
@@ -3974,6 +4350,15 @@ webhook:
         // temp_env handles unsafe set_var/remove_var internally with a mutex guard.
         let owned: Vec<(&str, Option<&str>)> = vars.iter().map(|(k, v)| (*k, Some(*v))).collect();
         temp_env::with_vars(owned, f);
+    }
+
+    #[test]
+    fn test_env_override_transport() {
+        with_env(&[("DFE_RECEIVER_TRANSPORT", "grpc")], || {
+            let mut config = Config::default();
+            config.apply_flat_env(ENV_PREFIX);
+            assert_eq!(config.transport, TRANSPORT_GRPC);
+        });
     }
 
     #[test]
@@ -4495,12 +4880,14 @@ kafka:
                 ("DFE_RECEIVER_KAFKA_BROKERS", None),
                 ("DFE_RECEIVER_DEFAULT_SOURCE", None),
                 ("DFE_RECEIVER_CONFIG_RELOAD_SECS", None),
+                ("DFE_RECEIVER_TRANSPORT", None),
             ],
             || {
                 let mut config = Config::default();
                 let original = config.clone();
                 config.apply_flat_env(ENV_PREFIX);
                 config.normalize();
+                assert_eq!(config.transport, original.transport);
                 assert_eq!(config.server.bind_address, original.server.bind_address);
                 assert_eq!(config.kafka.brokers, original.kafka.brokers);
                 assert_eq!(
@@ -4882,6 +5269,23 @@ ingest_bindings:
             scalo::yaml::Profile::Config,
         )
         .unwrap();
+        config.validate().unwrap();
+    }
+
+    /// The example's `transport` flipped to grpc starts, so the example sets
+    /// neither key that `transport: grpc` fills.
+    #[test]
+    fn the_example_config_loads_on_grpc() {
+        let example = include_str!("../../config.example.yaml");
+        let on_grpc = example.replace("\ntransport: \"kafka\"\n", "\ntransport: \"grpc\"\n");
+        assert_ne!(on_grpc, example, "the example sets a top-level transport");
+
+        let config = load_yaml(&on_grpc);
+        assert_eq!(
+            config.destinations.default,
+            DestinationRef::from(LOADER_DESTINATION)
+        );
+        assert_eq!(config.loader.transport, TRANSPORT_GRPC);
         config.validate().unwrap();
     }
 }

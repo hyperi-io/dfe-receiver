@@ -511,6 +511,12 @@ routing:
     # milliseconds. Unset keeps scalo's default.
     # kafka_send_timeout_ms: 10000
 
+# Which transport carries records out, the same two values dfe-loader and dfe-archiver read. DFE_RECEIVER_TRANSPORT overrides it.
+#   kafka   the bus, under the topic the record's source resolves to (the default)
+#   grpc    the loader's Push listener, no broker in the path
+# grpc sets destinations.default to loader and loader.transport to grpc where this file leaves them unset. Setting either against it fails the load.
+transport: "kafka"
+
 # The named destination set. `kafka` (the bus, under the topic the record's
 # source resolves to) and `loader` (per the loader block below) are always
 # available. Any other name is declared here as a sibling key. `sources` picks
@@ -521,7 +527,8 @@ routing:
 # a full destination, and the routing.dlq topic below is for INVALID records
 # only, so a deployment with no broker should leave it disabled.
 destinations:
-  default: "kafka"
+  # Unset, it is loader under transport: grpc and kafka otherwise.
+  # default: "kafka"
   sources: {}
   # sources:
   #   orders: ["transform_orders", "archiver"]
@@ -566,7 +573,8 @@ kafka:
 # is refused at startup, so a deployment cannot land on it by accident.
 loader:
   address: "dfe-loader:6000"
-  transport: "kafka"
+  # Unset, it is grpc under transport: grpc and kafka otherwise.
+  # transport: "kafka"
   # Per-RPC deadline for the gRPC client, so a loader that stops answering
   # cannot hold a sender task open. Under the 25s hold, so a held answer
   # settles before its sender gives up.
