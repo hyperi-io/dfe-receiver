@@ -52,4 +52,4 @@ release:
   helm:
     enabled: true
     contract: emit
-    library: "2.14.19"
+    library: "2.14.20"
