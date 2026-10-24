@@ -58,7 +58,11 @@ impl PerSourceRateLimiter {
         if !self.cfg.enabled {
             return true;
         }
-        let now_us = self.started_at.elapsed().as_micros() as u32;
+        self.acquire_at(src, self.started_at.elapsed().as_micros() as u32)
+    }
+
+    /// `try_acquire` at a supplied clock reading, so tests run without real time.
+    fn acquire_at(&self, src: IpAddr, now_us: u32) -> bool {
         let entry = self
             .buckets
             .entry(src)
@@ -146,12 +150,15 @@ mod tests {
             cache_size: 4096,
         };
         let rl = PerSourceRateLimiter::new(cfg);
-        // Burst of 10 should pass immediately.
+        // Burst of 10 passes at one instant.
         for _ in 0..10 {
-            assert!(rl.try_acquire(ip(1)));
+            assert!(rl.acquire_at(ip(1), 0));
         }
-        // 11th packet inside microseconds: rejected.
-        assert!(!rl.try_acquire(ip(1)));
+        // 11th packet at the same instant: rejected.
+        assert!(!rl.acquire_at(ip(1), 0));
+        // 100 pps refills one token every 10ms, and only one.
+        assert!(rl.acquire_at(ip(1), 10_000));
+        assert!(!rl.acquire_at(ip(1), 10_000));
     }
 
     #[test]
@@ -164,12 +171,12 @@ mod tests {
         };
         let rl = PerSourceRateLimiter::new(cfg);
         for _ in 0..5 {
-            assert!(rl.try_acquire(ip(1)));
+            assert!(rl.acquire_at(ip(1), 0));
         }
-        assert!(!rl.try_acquire(ip(1)));
+        assert!(!rl.acquire_at(ip(1), 0));
         // Different source: own bucket, fresh tokens.
         for _ in 0..5 {
-            assert!(rl.try_acquire(ip(2)));
+            assert!(rl.acquire_at(ip(2), 0));
         }
     }
 
