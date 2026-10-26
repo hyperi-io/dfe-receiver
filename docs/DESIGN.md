@@ -104,7 +104,7 @@ dfe-receiver is a high-performance HTTP/gRPC receiver for PB/s scale data ingest
 
 ## Where parsing happens
 
-The receiver parses the transport layer of each protocol at full efficiency and emits JSON. For syslog that is the header (PRI, timestamp, host, app name), for beats and HEC the envelope, for OTLP the framing. The payload goes in `message` and the parsed header fields sit beside it.
+We parse mechanical transport at max efficiency at the edge. The receiver parses the transport layer of each protocol at full efficiency and emits JSON. For syslog that is the header (PRI, timestamp, host, app name), for beats and HEC the envelope, for OTLP the framing. The payload goes in `message` and the parsed header fields sit beside it.
 
 Parsing a vendor's message body (grok, dissect, a pipeline) is the transforms' job. They read `message` plus the header fields.
 
