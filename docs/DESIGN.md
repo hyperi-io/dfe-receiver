@@ -102,6 +102,14 @@ dfe-receiver is a high-performance HTTP/gRPC receiver for PB/s scale data ingest
                └───────────────────┘
 ```
 
+## Where parsing happens
+
+The receiver parses the transport layer of each protocol at full efficiency and emits JSON. For syslog that is the header (PRI, timestamp, host, app name), for beats and HEC the envelope, for OTLP the framing. The payload goes in `message` and the parsed header fields sit beside it.
+
+Parsing a vendor's message body (grok, dissect, a pipeline) is the transforms' job. They read `message` plus the header fields.
+
+Raw capture (`raw_capture.enabled`, default `false`) keeps the wire bytes in `_raw`. It doubles every record, so it is an operator fallback for a single source and never the normal input to a transform. A record parsed wrongly here is fixed in the receiver, not by turning capture on downstream. See [Raw payload retention](#raw-payload-retention) and the fleet rule in [design-principles.md](https://github.com/hyperi-io/dfe-infra/blob/main/docs/design-principles.md).
+
 ## Hot Path Design
 
 The hot path is critical for PB/s throughput. Key optimizations:
