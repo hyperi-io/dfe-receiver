@@ -132,7 +132,7 @@ cel = { version = ">=0.14.5, <0.15", features = ["json"] }
 rustc-hash = "2.1.3"
 compact_str = "0.10"
 parking_lot = "0.12.5"
-arc-swap = "1.9.2"
+arc-swap = "1.9.3"
 
 # Error handling
 thiserror = "2.0.21"
