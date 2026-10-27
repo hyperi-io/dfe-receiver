@@ -29,8 +29,8 @@ memory allocators, runtime tuning, and profiling workflows.
 | `lto = "fat"` on release channel | 📋 Tier 1 | via hyperi-ci opt-in |
 | PGO | 📋 Tier 2 | via hyperi-ci opt-in |
 | BOLT | 📋 Tier 2 | via hyperi-ci opt-in (Linux only) |
-| Pre-computed topic strings (hot path) | ⏳ Tracked | `TODO.md` → *Hot Path Optimisation* |
-| Pre-split field paths (hot path) | ⏳ Tracked | `TODO.md` → *Hot Path Optimisation* |
+| Pre-computed topic strings (hot path) | ⏳ Planned | code-level tuning, see below |
+| Pre-split field paths (hot path) | ⏳ Planned | code-level tuning, see below |
 
 ## Build optimisations
 
@@ -191,7 +191,7 @@ cargo bench --bench throughput -- --baseline system-allocator
 
 ## Hot-path tuning (receiver-specific)
 
-These are tracked in `TODO.md` → *Hot Path Optimisation* for when the
+These are planned for when the
 allocator win is banked and we move to code-level tuning.
 
 ### Pre-compute topic strings in Router
