@@ -78,6 +78,8 @@ mod source_routing;
 mod splunk_hec;
 #[path = "integration/syslog.rs"]
 mod syslog;
+#[path = "integration/tls_listeners.rs"]
+mod tls_listeners;
 #[path = "integration/vault_auth.rs"]
 mod vault_auth;
 #[path = "integration/vector.rs"]

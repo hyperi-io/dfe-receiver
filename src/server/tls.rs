@@ -113,8 +113,9 @@ fn build_root_store(ca_certs: Vec<CertificateDer<'static>>, source: &str) -> Res
 ///
 /// rustls picks a provider for itself only when exactly one is compiled in. A
 /// dependency that adds ring alongside aws-lc-rs would otherwise panic the first
-/// `ServerConfig::builder()`, which is the one tonic calls too.
-fn install_crypto_provider() {
+/// `ServerConfig::builder()`, which is the one tonic calls too. `main` calls this
+/// at start, and every builder here calls it again for callers that skip `main`.
+pub fn install_crypto_provider() {
     static INSTALL: std::sync::Once = std::sync::Once::new();
     INSTALL.call_once(|| {
         // Err means a provider is installed already, and rustls uses that one.
