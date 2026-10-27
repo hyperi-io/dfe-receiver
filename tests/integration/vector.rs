@@ -43,11 +43,6 @@ use dfe_receiver::server::http::HttpHandler;
 use dfe_receiver::server::traits::ProtocolHandler;
 use tokio_util::sync::CancellationToken;
 
-/// Install the rustls CryptoProvider (needed when both ring and aws-lc-rs are available).
-fn install_crypto_provider() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-}
-
 /// Resolve the path to the Vector binary (cached via fetch-vector.sh or system PATH).
 ///
 /// Runs the fetch script once per test binary via `OnceLock`. If the script fails
@@ -303,8 +298,6 @@ sinks:
 /// runs Vector with the CA cert configured, and verifies clean delivery.
 #[tokio::test]
 async fn test_vector_https_sink() {
-    install_crypto_provider();
-
     let vector_bin = if let Some(path) = vector_binary_path() {
         path
     } else {
@@ -471,8 +464,6 @@ sinks:
 /// with TLS, and runs Vector with the `vector` sink configured for TLS.
 #[tokio::test]
 async fn test_vector_grpc_tls_sink() {
-    install_crypto_provider();
-
     let vector_bin = if let Some(path) = vector_binary_path() {
         path
     } else {

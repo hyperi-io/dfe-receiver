@@ -260,6 +260,104 @@ pub fn self_signed_cert(dir: &std::path::Path) -> (std::path::PathBuf, std::path
     (cert, key)
 }
 
+/// Open a TLS connection to a receiver listener at `addr` that presents `cert`.
+///
+/// The client names its provider, so the handshake tests the receiver's
+/// acceptor and not the process default. It trusts exactly `cert`, because
+/// [`self_signed_cert`] makes a CA certificate that webpki refuses as a leaf.
+///
+/// # Panics
+///
+/// When the certificate cannot be read or the handshake fails.
+pub async fn tls_connect(
+    addr: std::net::SocketAddr,
+    cert: &std::path::Path,
+) -> tokio_rustls::client::TlsStream<tokio::net::TcpStream> {
+    use rustls_pki_types::pem::PemObject;
+
+    let provider = std::sync::Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let pinned = PinnedCert {
+        cert: rustls_pki_types::CertificateDer::from_pem_file(cert).expect("read the certificate"),
+        provider: std::sync::Arc::clone(&provider),
+    };
+    let client = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("TLS versions")
+        .dangerous()
+        .with_custom_certificate_verifier(std::sync::Arc::new(pinned))
+        .with_no_client_auth();
+    let tcp = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("connect to the TLS listener");
+    tokio_rustls::TlsConnector::from(std::sync::Arc::new(client))
+        .connect(
+            rustls_pki_types::ServerName::IpAddress(addr.ip().into()),
+            tcp,
+        )
+        .await
+        .expect("TLS handshake with the receiver")
+}
+
+/// Accepts the one certificate it holds, and checks the handshake signatures.
+#[derive(Debug)]
+struct PinnedCert {
+    cert: rustls_pki_types::CertificateDer<'static>,
+    provider: std::sync::Arc<rustls::crypto::CryptoProvider>,
+}
+
+impl rustls::client::danger::ServerCertVerifier for PinnedCert {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls_pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls_pki_types::CertificateDer<'_>],
+        _server_name: &rustls_pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls_pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        if end_entity.as_ref() == self.cert.as_ref() {
+            Ok(rustls::client::danger::ServerCertVerified::assertion())
+        } else {
+            Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::UnknownIssuer,
+            ))
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls_pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls_pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Kafka
 // ---------------------------------------------------------------------------

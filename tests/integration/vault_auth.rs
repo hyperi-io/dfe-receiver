@@ -471,10 +471,6 @@ async fn test_keyless_vault_source_is_refused() {
 /// goes through the same resolver as every other secret.
 #[tokio::test]
 async fn test_tls_material_loads_from_file_specs() {
-    // Both ring and aws-lc-rs reach the test binary, so rustls refuses to pick
-    // a provider for itself. Same install the vector integration test does.
-    let _ = rustls::crypto::ring::default_provider().install_default();
-
     let dir = tempfile::tempdir().unwrap();
     let (cert, key) = crate::common::self_signed_cert(dir.path());
 
@@ -645,7 +641,6 @@ async fn test_bearer_tokens_loaded_from_vault_container() {
 #[tokio::test]
 async fn test_tls_material_loads_from_vault_container() {
     skip_if_no_docker!();
-    let _ = rustls::crypto::ring::default_provider().install_default();
 
     let dir = tempfile::tempdir().unwrap();
     let (cert, key) = crate::common::self_signed_cert(dir.path());
