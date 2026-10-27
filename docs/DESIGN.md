@@ -106,6 +106,8 @@ dfe-receiver is a high-performance HTTP/gRPC receiver for PB/s scale data ingest
 
 We parse mechanical transport at max efficiency at the edge. The receiver parses the transport layer of each protocol at full efficiency and emits JSON. For syslog that is the header (PRI, timestamp, host, app name), for beats and HEC the envelope, for OTLP the framing. The payload goes in `message` and the parsed header fields sit beside it.
 
+An RFC 3164 token is the app name only when it reads `name:` or `name[pid]:`, the name drawn from ASCII alphanumerics and `-_./`. Anything else stays at the front of `message`, so a tagless PAN-OS line keeps its whole CSV body and FortiGate keeps its leading `date=`. A Cisco stamp's `.407 EST:` tail goes into the timestamp's fraction, with the zone abbreviation dropped.
+
 Parsing a vendor's message body (grok, dissect, a pipeline) is the transforms' job. They read `message` plus the header fields.
 
 Raw capture (`raw_capture.enabled`, default `false`) keeps the wire bytes in `_raw`. It doubles every record, so it is an operator fallback for a single source and never the normal input to a transform. A record parsed wrongly here is fixed in the receiver, not by turning capture on downstream. See [Raw payload retention](#raw-payload-retention) and the fleet rule in [design-principles.md](https://github.com/hyperi-io/dfe-infra/blob/main/docs/design-principles.md).
