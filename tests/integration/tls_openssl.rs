@@ -177,11 +177,13 @@ async fn every_tls_listener_serves_openssl() {
     let secret = pki.file("webhook-secret");
     std::fs::write(&secret, "probe-secret").unwrap();
 
-    let (config, listeners) = all_tls_config(&pki, "none", &secret);
-    let ready: Vec<SocketAddr> = listeners.iter().map(|l| l.addr).collect();
-    let mut receiver = Receiver::start(config, &sink, &ready)
-        .await
-        .unwrap_or_else(|e| panic!("{e}"));
+    let (mut receiver, listeners) = Receiver::start(&sink, || {
+        let (config, listeners) = all_tls_config(&pki, "none", &secret);
+        let ready = listeners.iter().map(|l| l.addr).collect();
+        (config, ready, listeners)
+    })
+    .await
+    .unwrap_or_else(|e| panic!("{e}"));
 
     let mut jobs: Vec<(String, String)> = Vec::new();
     for listener in &listeners {
@@ -281,11 +283,13 @@ async fn client_certificates_are_required_on_every_mtls_listener() {
     let secret = pki.file("webhook-secret");
     std::fs::write(&secret, "probe-secret").unwrap();
 
-    let (config, listeners) = all_tls_config(&pki, "required", &secret);
-    let ready: Vec<SocketAddr> = listeners.iter().map(|l| l.addr).collect();
-    let mut receiver = Receiver::start(config, &sink, &ready)
-        .await
-        .unwrap_or_else(|e| panic!("{e}"));
+    let (mut receiver, listeners) = Receiver::start(&sink, || {
+        let (config, listeners) = all_tls_config(&pki, "required", &secret);
+        let ready = listeners.iter().map(|l| l.addr).collect();
+        (config, ready, listeners)
+    })
+    .await
+    .unwrap_or_else(|e| panic!("{e}"));
 
     let mut jobs: Vec<(String, String)> = Vec::new();
     for listener in &listeners {

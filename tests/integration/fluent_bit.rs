@@ -107,65 +107,74 @@ async fn fluent_bit_ships_to_every_listener_over_tls() {
     let sink = Sink::start().await;
 
     // Receiver with TLS: forward and syslog require a client certificate, the rest only serve one.
-    let mut tls_cfg = Config::default();
-    let http = free_addr();
-    let forward = free_addr();
-    let syslog = free_addr();
-    let hec = free_addr();
-    let prom = free_addr();
-    let gelf = free_addr();
-    let otlp_http = free_addr();
-    tls_cfg.server.bind_address = http.to_string();
-    tls_cfg.server.auth.mode = "none".to_string();
-    tls_cfg.server.tls = pki.server_tls("none");
-    tls_cfg.fluent.enabled = true;
-    tls_cfg.fluent.bind_address = forward.to_string();
-    tls_cfg.fluent.tls = pki.server_tls("required");
-    tls_cfg.syslog.enabled = true;
-    tls_cfg.syslog.udp_bind_address = free_addr().to_string();
-    tls_cfg.syslog.tcp_bind_address = free_addr().to_string();
-    tls_cfg.syslog.tls_bind_address = syslog.to_string();
-    tls_cfg.syslog.accept_unauthenticated = true;
-    tls_cfg.syslog.tls = pki.server_tls("required");
-    tls_cfg.splunk_hec.enabled = true;
-    tls_cfg.splunk_hec.bind_address = hec.to_string();
-    tls_cfg.splunk_hec.auth.mode = "none".to_string();
-    tls_cfg.splunk_hec.tls = pki.server_tls("none");
-    tls_cfg.prometheus_rw.enabled = true;
-    tls_cfg.prometheus_rw.bind_address = prom.to_string();
-    tls_cfg.prometheus_rw.auth.mode = "none".to_string();
-    tls_cfg.prometheus_rw.tls = pki.server_tls("none");
-    tls_cfg.gelf.enabled = true;
-    tls_cfg.gelf.bind_address = gelf.to_string();
-    tls_cfg.gelf.accept_unauthenticated = true;
-    tls_cfg.gelf.tls = pki.server_tls("none");
-    tls_cfg.otlp.enabled = true;
-    tls_cfg.otlp.grpc_bind_address = free_addr().to_string();
-    tls_cfg.otlp.http_bind_address = otlp_http.to_string();
-    tls_cfg.otlp.auth.mode = "none".to_string();
-    tls_cfg.otlp.tls = pki.server_tls("none");
-    let tls_ready = [http, forward, syslog, hec, prom, gelf, otlp_http];
-    let mut tls_receiver = Receiver::start(tls_cfg, &sink, &tls_ready)
+    let (mut tls_receiver, (http, forward, syslog, hec, prom, gelf, otlp_http)) =
+        Receiver::start(&sink, || {
+            let mut tls_cfg = Config::default();
+            let http = free_addr();
+            let forward = free_addr();
+            let syslog = free_addr();
+            let hec = free_addr();
+            let prom = free_addr();
+            let gelf = free_addr();
+            let otlp_http = free_addr();
+            tls_cfg.server.bind_address = http.to_string();
+            tls_cfg.server.auth.mode = "none".to_string();
+            tls_cfg.server.tls = pki.server_tls("none");
+            tls_cfg.fluent.enabled = true;
+            tls_cfg.fluent.bind_address = forward.to_string();
+            tls_cfg.fluent.tls = pki.server_tls("required");
+            tls_cfg.syslog.enabled = true;
+            tls_cfg.syslog.udp_bind_address = free_addr().to_string();
+            tls_cfg.syslog.tcp_bind_address = free_addr().to_string();
+            tls_cfg.syslog.tls_bind_address = syslog.to_string();
+            tls_cfg.syslog.accept_unauthenticated = true;
+            tls_cfg.syslog.tls = pki.server_tls("required");
+            tls_cfg.splunk_hec.enabled = true;
+            tls_cfg.splunk_hec.bind_address = hec.to_string();
+            tls_cfg.splunk_hec.auth.mode = "none".to_string();
+            tls_cfg.splunk_hec.tls = pki.server_tls("none");
+            tls_cfg.prometheus_rw.enabled = true;
+            tls_cfg.prometheus_rw.bind_address = prom.to_string();
+            tls_cfg.prometheus_rw.auth.mode = "none".to_string();
+            tls_cfg.prometheus_rw.tls = pki.server_tls("none");
+            tls_cfg.gelf.enabled = true;
+            tls_cfg.gelf.bind_address = gelf.to_string();
+            tls_cfg.gelf.accept_unauthenticated = true;
+            tls_cfg.gelf.tls = pki.server_tls("none");
+            tls_cfg.otlp.enabled = true;
+            tls_cfg.otlp.grpc_bind_address = free_addr().to_string();
+            tls_cfg.otlp.http_bind_address = otlp_http.to_string();
+            tls_cfg.otlp.auth.mode = "none".to_string();
+            tls_cfg.otlp.tls = pki.server_tls("none");
+            let ready = vec![http, forward, syslog, hec, prom, gelf, otlp_http];
+            (
+                tls_cfg,
+                ready,
+                (http, forward, syslog, hec, prom, gelf, otlp_http),
+            )
+        })
         .await
         .unwrap_or_else(|e| panic!("{e}"));
 
     // Receiver in plaintext, for the protocol cases that do not depend on TLS.
-    let mut plain_cfg = Config::default();
-    let plain_http = free_addr();
-    let plain_forward = free_addr();
-    let plain_gelf = free_addr();
-    plain_cfg.server.bind_address = plain_http.to_string();
-    plain_cfg.server.auth.mode = "none".to_string();
-    plain_cfg.fluent.enabled = true;
-    plain_cfg.fluent.bind_address = plain_forward.to_string();
-    plain_cfg.fluent.accept_unauthenticated = true;
-    plain_cfg.gelf.enabled = true;
-    plain_cfg.gelf.bind_address = plain_gelf.to_string();
-    plain_cfg.gelf.accept_unauthenticated = true;
-    let mut plain_receiver =
-        Receiver::start(plain_cfg, &sink, &[plain_http, plain_forward, plain_gelf])
-            .await
-            .unwrap_or_else(|e| panic!("{e}"));
+    let (mut plain_receiver, (plain_forward, plain_gelf)) = Receiver::start(&sink, || {
+        let mut plain_cfg = Config::default();
+        let plain_http = free_addr();
+        let plain_forward = free_addr();
+        let plain_gelf = free_addr();
+        plain_cfg.server.bind_address = plain_http.to_string();
+        plain_cfg.server.auth.mode = "none".to_string();
+        plain_cfg.fluent.enabled = true;
+        plain_cfg.fluent.bind_address = plain_forward.to_string();
+        plain_cfg.fluent.accept_unauthenticated = true;
+        plain_cfg.gelf.enabled = true;
+        plain_cfg.gelf.bind_address = plain_gelf.to_string();
+        plain_cfg.gelf.accept_unauthenticated = true;
+        let ready = vec![plain_http, plain_forward, plain_gelf];
+        (plain_cfg, ready, (plain_forward, plain_gelf))
+    })
+    .await
+    .unwrap_or_else(|e| panic!("{e}"));
 
     let mtls = Tls::On {
         ca: "ca",

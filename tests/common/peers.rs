@@ -72,6 +72,9 @@ const EXEC_DEADLINE: Duration = Duration::from_secs(90);
 /// How long the receiver binary gets to open its listeners.
 const RECEIVER_START_DEADLINE: Duration = Duration::from_secs(60);
 
+/// How many times a receiver start is tried when a reserved port was taken first.
+const START_ATTEMPTS: u32 = 3;
+
 // ---------------------------------------------------------------------------
 // Ports
 // ---------------------------------------------------------------------------
@@ -601,16 +604,38 @@ pub struct Receiver {
 }
 
 impl Receiver {
-    /// Write `config` to a file, start the binary on it, and wait until every
-    /// address in `listeners` accepts a connection.
+    /// Build a config from freshly reserved addresses, start the binary on it,
+    /// and wait until every listener address `build` returns accepts a
+    /// connection. Another process can take a reserved port before the binary
+    /// binds it, so a start that fails with `Address already in use` is retried
+    /// with new addresses, up to [`START_ATTEMPTS`] times.
     ///
-    /// The sink becomes the only destination.
+    /// `build` returns the config, the addresses to wait on, and whatever
+    /// addresses the caller needs afterwards. The last of those comes back with
+    /// the receiver. The sink becomes the only destination.
     ///
     /// # Errors
     ///
     /// The binary's log when it exits before its listeners open, or when they
     /// do not open in time.
-    pub async fn start(
+    pub async fn start<T>(
+        sink: &Sink,
+        mut build: impl FnMut() -> (Config, Vec<SocketAddr>, T),
+    ) -> Result<(Self, T), String> {
+        let mut attempt = 1;
+        loop {
+            let (config, listeners, addrs) = build();
+            match Self::spawn(config, sink, &listeners).await {
+                Ok(receiver) => return Ok((receiver, addrs)),
+                Err(e) if attempt < START_ATTEMPTS && e.contains("Address already in use") => {
+                    attempt += 1;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    async fn spawn(
         mut config: Config,
         sink: &Sink,
         listeners: &[SocketAddr],

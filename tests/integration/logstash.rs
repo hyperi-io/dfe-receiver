@@ -68,27 +68,35 @@ async fn logstash_ships_over_tls_with_http_and_lumberjack_outputs() {
     let pki = Pki::generate().await;
     let sink = Sink::start().await;
 
-    let mtls_http = free_addr();
-    let mut mtls_config = Config::default();
-    mtls_config.server.bind_address = mtls_http.to_string();
-    mtls_config.server.auth.mode = "none".to_string();
-    mtls_config.server.tls = pki.server_tls("required");
-    let mut mtls_receiver = Receiver::start(mtls_config, &sink, &[mtls_http])
-        .await
-        .unwrap_or_else(|e| panic!("{e}"));
+    let (mut mtls_receiver, mtls_http) = Receiver::start(&sink, || {
+        let mtls_http = free_addr();
+        let mut mtls_config = Config::default();
+        mtls_config.server.bind_address = mtls_http.to_string();
+        mtls_config.server.auth.mode = "none".to_string();
+        mtls_config.server.tls = pki.server_tls("required");
+        (mtls_config, vec![mtls_http], mtls_http)
+    })
+    .await
+    .unwrap_or_else(|e| panic!("{e}"));
 
-    let (tls_http, tls_lumberjack) = (free_addr(), free_addr());
-    let mut tls_config = Config::default();
-    tls_config.server.bind_address = tls_http.to_string();
-    tls_config.server.auth.mode = "none".to_string();
-    tls_config.server.tls = pki.server_tls("none");
-    tls_config.lumberjack.enabled = true;
-    tls_config.lumberjack.bind_address = tls_lumberjack.to_string();
-    tls_config.lumberjack.accept_unauthenticated = true;
-    tls_config.lumberjack.tls = pki.server_tls("none");
-    let mut tls_receiver = Receiver::start(tls_config, &sink, &[tls_http, tls_lumberjack])
-        .await
-        .unwrap_or_else(|e| panic!("{e}"));
+    let (mut tls_receiver, (tls_http, tls_lumberjack)) = Receiver::start(&sink, || {
+        let (tls_http, tls_lumberjack) = (free_addr(), free_addr());
+        let mut tls_config = Config::default();
+        tls_config.server.bind_address = tls_http.to_string();
+        tls_config.server.auth.mode = "none".to_string();
+        tls_config.server.tls = pki.server_tls("none");
+        tls_config.lumberjack.enabled = true;
+        tls_config.lumberjack.bind_address = tls_lumberjack.to_string();
+        tls_config.lumberjack.accept_unauthenticated = true;
+        tls_config.lumberjack.tls = pki.server_tls("none");
+        (
+            tls_config,
+            vec![tls_http, tls_lumberjack],
+            (tls_http, tls_lumberjack),
+        )
+    })
+    .await
+    .unwrap_or_else(|e| panic!("{e}"));
 
     let cases = vec![
         Case {
