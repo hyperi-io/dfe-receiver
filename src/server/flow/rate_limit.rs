@@ -76,11 +76,24 @@ impl PerSourceRateLimiter {
             // Refill: pps tokens per 1_000_000 us.
             let refill =
                 (u64::from(elapsed_us) * u64::from(self.cfg.packets_per_second) / 1_000_000) as u32;
-            tokens = tokens.saturating_add(refill).min(self.cfg.burst);
+            let refilled = tokens.saturating_add(refill);
+            tokens = refilled.min(self.cfg.burst);
             if tokens == 0 {
                 return false;
             }
-            let new = pack(tokens - 1, now_us);
+            // Advance by the time the whole tokens cover, so the part-token time
+            // stays in the bucket. A full bucket has nothing to bank, so it
+            // restarts from now.
+            let refilled_at = if refilled > self.cfg.burst {
+                now_us
+            } else if refill == 0 {
+                last_us
+            } else {
+                let covered_us =
+                    u64::from(refill) * 1_000_000 / u64::from(self.cfg.packets_per_second);
+                last_us.wrapping_add(covered_us as u32)
+            };
+            let new = pack(tokens - 1, refilled_at);
             if bucket
                 .state
                 .compare_exchange(cur, new, Ordering::AcqRel, Ordering::Relaxed)
@@ -159,6 +172,39 @@ mod tests {
         // 100 pps refills one token every 10ms, and only one.
         assert!(rl.acquire_at(ip(1), 10_000));
         assert!(!rl.acquire_at(ip(1), 10_000));
+    }
+
+    /// A source sending above the limit gets the limit, not less. The packet
+    /// that lets a token through must not discard the fraction of a token the
+    /// elapsed time had already earned.
+    #[test]
+    fn a_steady_over_rate_source_passes_at_the_configured_rate() {
+        // (label, limit pps, send pps, burst)
+        let cases = [
+            ("1.5x the limit", 100u32, 150u32, 10u32),
+            ("1.1x the limit", 100, 110, 10),
+            ("3x the limit", 100, 300, 10),
+            ("a high limit", 5_000, 7_500, 50),
+        ];
+        let seconds = 5u64;
+        for (label, limit, send, burst) in cases {
+            let rl = PerSourceRateLimiter::new(RateLimitConfig {
+                enabled: true,
+                packets_per_second: limit,
+                burst,
+                cache_size: 4096,
+            });
+            let total = u64::from(send) * seconds;
+            let passed = (0..total)
+                .filter(|i| rl.acquire_at(ip(1), (i * 1_000_000 / u64::from(send)) as u32))
+                .count() as u64;
+            // The burst, plus the limit for every second the stream ran.
+            let expected = u64::from(burst) + u64::from(limit) * seconds;
+            assert!(
+                passed.abs_diff(expected) <= seconds,
+                "{label}: {passed} packets passed in {seconds}s, expected {expected} +/- {seconds}"
+            );
+        }
     }
 
     #[test]
