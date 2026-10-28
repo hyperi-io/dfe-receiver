@@ -24,8 +24,17 @@ pub const SOURCE: &str = "fluent";
 /// Extract a unix timestamp (seconds) from a msgpack value.
 ///
 /// Handles both integer timestamps and EventTime extension type 0
-/// (8-byte payload: 4 bytes seconds + 4 bytes nanoseconds).
+/// (8-byte payload: 4 bytes seconds + 4 bytes nanoseconds). A Forward v1 entry
+/// that carries metadata, as Fluent Bit sends it, holds the time as the first
+/// element of `[time, metadata]`.
 fn extract_timestamp(val: &Value) -> f64 {
+    match val {
+        Value::Array(parts) if parts.len() == 2 => extract_scalar_timestamp(&parts[0]),
+        _ => extract_scalar_timestamp(val),
+    }
+}
+
+fn extract_scalar_timestamp(val: &Value) -> f64 {
     match val {
         Value::Integer(i) => i.as_f64().unwrap_or(0.0),
         Value::F32(f) => f64::from(*f),
@@ -328,6 +337,26 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&payloads[0]).unwrap();
         let ts = json["timestamp"].as_f64().unwrap();
         assert!((ts - 1_700_000_000.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_eventtime_with_metadata_entry() {
+        // Fluent Bit 5.x: each Forward entry is `[[EventTime, metadata], record]`.
+        let mut data = Vec::with_capacity(8);
+        data.extend_from_slice(&1_700_000_000_u32.to_be_bytes());
+        data.extend_from_slice(&0_u32.to_be_bytes());
+        let entry = Value::Array(vec![
+            Value::Array(vec![Value::Ext(0, data), Value::Map(vec![])]),
+            make_record("msg", "with metadata"),
+        ]);
+        let msg = Value::Array(vec![
+            Value::String("app.log".into()),
+            Value::Array(vec![entry]),
+        ]);
+        let payloads = fluent_to_json(&msg, RawCapture::OFF).unwrap();
+
+        let json: serde_json::Value = serde_json::from_slice(&payloads[0]).unwrap();
+        assert!((json["timestamp"].as_f64().unwrap() - 1_700_000_000.0).abs() < 0.001);
     }
 
     #[test]

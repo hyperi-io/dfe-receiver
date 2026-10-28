@@ -1,300 +1,271 @@
 // Project:   dfe-receiver
-// File:      tests/integration_lumberjack.rs
-// Purpose:   Integration tests using Filebeat binary (Lumberjack v2 protocol)
+// File:      tests/integration/lumberjack.rs
+// Purpose:   Filebeat in Docker shipping Lumberjack v2 to the receiver binary, with and without TLS
 // Language:  Rust
 //
 // License:   BUSL-1.1
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
-#![allow(clippy::collapsible_if)]
-#![allow(clippy::similar_names)]
+//! One Filebeat container runs one Filebeat process per case, each with its own
+//! output, against three receiver processes: mutual TLS, TLS and plaintext.
+//!
+//! Filebeat has a single output, so a case is a process. They share the
+//! container and the log file they read, and each stamps its case on its events.
 
-//! Integration tests that use the Filebeat binary.
-//!
-//! These tests start a dfe-receiver Lumberjack handler and run Filebeat as a
-//! subprocess configured to send events over the Lumberjack v2 protocol.
-//! The Filebeat binary is auto-downloaded and cached by `scripts/fetch-filebeat.sh`.
-//!
-//! Run with: `cargo test --test integration_lumberjack`
-//!
-//! Requirements:
-//! - `gh` or `jq` + `curl` (for auto-downloading Filebeat)
-
-// Allow unwrap/expect in tests - they're the idiomatic way to fail fast
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
-// Test helpers build a PipelineState inline; the config structs put the future
-// just over clippy's 16 KiB threshold. Mirrors the lib crate's allow (main.rs).
 #![allow(clippy::large_futures)]
 
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::fmt::Write;
+use std::net::SocketAddr;
+use std::time::{Duration, Instant};
 
-use dfe_receiver::config::{Config, SharedConfig};
-use dfe_receiver::metrics::Metrics;
-use dfe_receiver::pipeline::PipelineState;
-use dfe_receiver::server::lumberjack::LumberjackHandler;
-use dfe_receiver::server::traits::ProtocolHandler;
-use tokio_util::sync::CancellationToken;
+use dfe_receiver::config::Config;
 
-/// Resolve the path to the Filebeat binary (cached via fetch-filebeat.sh or system PATH).
-///
-/// Runs the fetch script once per test binary via `OnceLock`. If the script fails
-/// (offline, no `jq`, etc.), falls back to `filebeat` in PATH.
-fn filebeat_binary_path() -> Option<&'static PathBuf> {
-    static FILEBEAT_BIN: OnceLock<Option<PathBuf>> = OnceLock::new();
+use crate::common::peers::{
+    Cases, FILEBEAT_IMAGE, PEER_DIR, Peer, PeerSpec, Pki, Receiver, Sink, free_addr,
+};
+use crate::{skip_if_no_docker, test_name};
 
-    FILEBEAT_BIN
-        .get_or_init(|| {
-            let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
-            let fetch_script = repo_root.join("scripts/fetch-filebeat.sh");
+/// Events each Filebeat process sends.
+const EVENTS: usize = 20;
 
-            if fetch_script.exists() {
-                if let Ok(output) = Command::new("bash").arg(&fetch_script).output() {
-                    if output.status.success() {
-                        let path = String::from_utf8_lossy(&output.stdout)
-                            .trim()
-                            .lines()
-                            .last()
-                            .unwrap_or("")
-                            .to_string();
-                        let binary = PathBuf::from(&path);
-                        if binary.exists() {
-                            return Some(binary);
-                        }
-                    } else {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        eprintln!("fetch-filebeat.sh failed: {stderr}");
-                    }
-                }
-            }
-
-            // Fall back to system PATH
-            Command::new("filebeat")
-                .arg("version")
-                .output()
-                .ok()
-                .filter(|o| o.status.success())
-                .map(|_| PathBuf::from("filebeat"))
-        })
-        .as_ref()
+struct Case {
+    id: &'static str,
+    arrives: bool,
+    addr: SocketAddr,
+    /// `Some((ca, client))` for TLS, `None` for plaintext.
+    tls: Option<(&'static str, Option<&'static str>)>,
 }
 
-/// Create a minimal config for testing with Lumberjack enabled.
-fn test_config() -> Config {
-    let mut config = Config::default();
-    // HTTP server still needs a bind address (always enabled)
-    config.server.bind_address = "127.0.0.1:0".to_string();
-    config.server.auth.mode = "none".to_string();
-    // Enable Lumberjack
-    config.lumberjack.enabled = true;
-    config.lumberjack.bind_address = "127.0.0.1:0".to_string();
-    // The loader on its memory transport: accepted, sent nowhere, no broker.
-    config.destinations.default = "loader".into();
-    config.loader.transport = "memory".to_string();
-    config
-}
-
-/// Start the Lumberjack handler and return (shutdown_token, metrics, bound port).
-async fn start_lumberjack_handler(config: Config) -> (CancellationToken, Arc<Metrics>, u16) {
-    let metrics = Arc::new(Metrics::default());
-    let shutdown = CancellationToken::new();
-    let pipeline = Arc::new(
-        PipelineState::new(
-            SharedConfig::new(config.clone()),
-            tokio_util::sync::CancellationToken::new(),
-        )
-        .await
-        .expect("Failed to create pipeline"),
-    );
-
-    let handler = LumberjackHandler::new(config.lumberjack.clone(), pipeline, metrics.clone());
-    let bound = handler.bound_addr();
-
-    let handler_shutdown = shutdown.clone();
-    let mut task = tokio::spawn(async move { handler.start(handler_shutdown).await });
-    let addr = crate::common::bound_addr("Lumberjack", &bound, &mut task).await;
-    (shutdown, metrics, addr.port())
-}
-
-/// Write a Filebeat YAML config to a file.
-///
-/// Filebeat requires config files to be owner-writable only (chmod go-w).
-fn write_filebeat_config(path: &Path, config_yaml: &str) {
-    let mut file = std::fs::File::create(path).expect("Failed to create Filebeat config file");
-    file.write_all(config_yaml.as_bytes())
-        .expect("Failed to write Filebeat config");
-    file.flush().expect("Failed to flush Filebeat config");
-
-    // Filebeat refuses to load configs writable by group/others
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .expect("Failed to set config file permissions");
-    }
-}
-
-/// Write test log lines to a file.
-fn write_test_log_file(path: &Path, count: usize) {
-    let mut file = std::fs::File::create(path).expect("Failed to create test log file");
-    for i in 0..count {
-        writeln!(
-            file,
-            r#"{{"message":"test event {i}","sequence":{i},"source":"integration_test"}}"#
-        )
-        .expect("Failed to write test event");
-    }
-    file.flush().expect("Failed to flush test log file");
-}
-
-/// Run Filebeat as an async subprocess with timeout.
-///
-/// Filebeat doesn't cleanly exit after sending all events from a file,
-/// so we use a timeout and treat timeout-after-success as acceptable.
-/// Returns (completed_normally, stderr_output).
-async fn run_filebeat_async(
-    filebeat_bin: &Path,
-    config_path: &Path,
-    timeout_secs: u64,
-) -> (bool, String) {
-    let child = tokio::process::Command::new(filebeat_bin)
-        .arg("-c")
-        .arg(config_path)
-        .arg("-e")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("Failed to spawn filebeat binary");
-
-    let child_id = child.id();
-
-    let result =
-        tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output()).await;
-
-    match result {
-        Ok(Ok(output)) => {
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            (output.status.success(), stderr)
+fn filebeat_config(index: usize, case: &Case) -> String {
+    let ssl = case.tls.map_or_else(String::new, |(ca, client)| {
+        let mut text = format!(
+            "  ssl.enabled: true\n  ssl.verification_mode: full\n  ssl.certificate_authorities: [\"{PEER_DIR}/{ca}.crt\"]\n"
+        );
+        if let Some(client) = client {
+            text.push_str(&format!(
+                "  ssl.certificate: \"{PEER_DIR}/{client}.crt\"\n  ssl.key: \"{PEER_DIR}/{client}.key\"\n"
+            ));
         }
-        Ok(Err(e)) => {
-            panic!("Failed to wait for filebeat process: {e}");
-        }
-        Err(_) => {
-            // Timeout — Filebeat often doesn't exit after --once with file input.
-            // Kill the process and treat this as acceptable if events were sent.
-            if let Some(pid) = child_id {
-                let _ = Command::new("kill").arg(pid.to_string()).output();
-                // Give it a moment to clean up
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            }
-            // Return true since timeout after processing is expected behavior
-            (true, String::from("(timed out — expected for file input)"))
-        }
-    }
-}
-
-/// Get total events received from metrics.
-fn events_received(metrics: &Metrics) -> u64 {
-    metrics.get_requests_total()
-}
-
-// =============================================================================
-// Filebeat → Lumberjack Plaintext Test
-// =============================================================================
-
-/// Test Filebeat sending events to the receiver over plain TCP (Lumberjack v2).
-///
-/// Starts a dfe-receiver Lumberjack handler, writes test log lines to a file,
-/// runs Filebeat configured to read the file and output to our handler,
-/// and verifies events were received.
-#[tokio::test]
-async fn test_filebeat_lumberjack_plaintext() {
-    let filebeat_bin = if let Some(path) = filebeat_binary_path() {
-        path
-    } else {
-        eprintln!("Skipping test: filebeat binary not available");
-        return;
-    };
-
-    let (shutdown, metrics, port) = start_lumberjack_handler(test_config()).await;
-
-    let tmp_dir = tempfile::tempdir().expect("Failed to create temp dir");
-    let log_file = tmp_dir.path().join("test.log");
-    let config_path = tmp_dir.path().join("filebeat.yml");
-    let data_dir = tmp_dir.path().join("filebeat-data");
-    let data_dir_str = data_dir.to_str().unwrap();
-    let log_file_str = log_file.to_str().unwrap();
-
-    // Write test log lines (enough to exceed Filebeat's 1024-byte fingerprint threshold)
-    write_test_log_file(&log_file, 20);
-
-    let filebeat_config = format!(
-        r#"
-filebeat.inputs:
+        text
+    });
+    format!(
+        r#"filebeat.inputs:
   - type: filestream
-    id: test-input
-    enabled: true
-    paths:
-      - "{log_file_str}"
+    id: case-{index}
+    paths: ["{PEER_DIR}/app.log"]
     prospector:
       scanner:
         fingerprint:
           enabled: false
-    close:
-      on_state_change:
-        inactive: 2s
+    file_identity.native: ~
     parsers:
       - ndjson:
           keys_under_root: true
 
+fields:
+  case: "{id}"
+fields_under_root: true
+
 output.logstash:
-  hosts: ["127.0.0.1:{port}"]
-
-path.data: "{data_dir_str}"
-path.logs: "{data_dir_str}"
-
-# Disable unnecessary features for testing
+  hosts: ["{addr}"]
+  timeout: 5s
+  max_retries: 2
+{ssl}
+path.data: "/tmp/fb-{index}"
+path.logs: "/tmp/fb-{index}"
 setup.template.enabled: false
 setup.ilm.enabled: false
-logging.level: warning
-"#
-    );
+logging.level: info
+"#,
+        id = case.id,
+        addr = case.addr,
+    )
+}
 
-    write_filebeat_config(&config_path, &filebeat_config);
+async fn start(config: Config, sink: &Sink, addr: SocketAddr) -> Receiver {
+    Receiver::start(config, sink, &[addr])
+        .await
+        .unwrap_or_else(|e| panic!("{e}"))
+}
 
-    // Run Filebeat in the background — it won't exit on its own with filestream input.
-    // We poll metrics until events arrive, then kill Filebeat.
-    let (filebeat_success, stderr) = run_filebeat_async(filebeat_bin, &config_path, 15).await;
+#[tokio::test]
+async fn filebeat_ships_lumberjack_over_tls_and_plaintext() {
+    skip_if_no_docker!();
+    let test = test_name!();
+    let pki = Pki::generate().await;
+    let sink = Sink::start().await;
 
-    let received = events_received(&metrics);
-    eprintln!("Events received by handler: {received}");
-
-    if !filebeat_success {
-        // Check for critical errors (ignore harmless warnings)
-        let critical_errors: Vec<&str> = stderr
-            .lines()
-            .filter(|l| {
-                l.contains("ERR")
-                    && !l.contains("module")
-                    && !l.contains("connection refused")
-                    && !l.contains("ingest pipeline")
-            })
-            .collect();
-
-        if !critical_errors.is_empty() {
-            eprintln!("Filebeat critical errors:\n{}", critical_errors.join("\n"));
+    let config_for = |client_auth: Option<&str>| -> (Config, SocketAddr) {
+        let addr = free_addr();
+        let mut config = Config::default();
+        config.server.bind_address = free_addr().to_string();
+        config.server.auth.mode = "none".to_string();
+        config.lumberjack.enabled = true;
+        config.lumberjack.bind_address = addr.to_string();
+        match client_auth {
+            Some("required") => config.lumberjack.tls = pki.server_tls("required"),
+            Some(mode) => {
+                config.lumberjack.tls = pki.server_tls(mode);
+                config.lumberjack.accept_unauthenticated = true;
+            }
+            None => config.lumberjack.accept_unauthenticated = true,
         }
+        (config, addr)
+    };
+    let (mtls_config, mtls) = config_for(Some("required"));
+    let (tls_config, tls) = config_for(Some("none"));
+    let (plain_config, plain) = config_for(None);
+    let mut receivers = Vec::new();
+    receivers.push(start(mtls_config, &sink, mtls).await);
+    receivers.push(start(tls_config, &sink, tls).await);
+    receivers.push(start(plain_config, &sink, plain).await);
+
+    let cases = [
+        Case {
+            id: "fbeatcase-mtls",
+            arrives: true,
+            addr: mtls,
+            tls: Some(("ca", Some("client"))),
+        },
+        Case {
+            id: "fbeatcase-tls",
+            arrives: true,
+            addr: tls,
+            tls: Some(("ca", None)),
+        },
+        Case {
+            id: "fbeatcase-plain",
+            arrives: true,
+            addr: plain,
+            tls: None,
+        },
+        Case {
+            id: "fbeatcase-mtls-wrong-ca",
+            arrives: false,
+            addr: mtls,
+            tls: Some(("rogue-ca", Some("client"))),
+        },
+        Case {
+            id: "fbeatcase-mtls-no-client-cert",
+            arrives: false,
+            addr: mtls,
+            tls: Some(("ca", None)),
+        },
+        Case {
+            id: "fbeatcase-mtls-rogue-client-cert",
+            arrives: false,
+            addr: mtls,
+            tls: Some(("ca", Some("rogue-client"))),
+        },
+        Case {
+            id: "fbeatcase-tls-wrong-ca",
+            arrives: false,
+            addr: tls,
+            tls: Some(("rogue-ca", None)),
+        },
+        Case {
+            id: "fbeatcase-plaintext-to-tls",
+            arrives: false,
+            addr: tls,
+            tls: None,
+        },
+    ];
+
+    let files = tempfile::tempdir().unwrap();
+    for entry in std::fs::read_dir(pki.dir()).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), files.path().join(entry.file_name())).unwrap();
+    }
+    let mut lines = String::new();
+    for i in 0..EVENTS {
+        writeln!(
+            lines,
+            "{{\"message\":\"filebeat test event {i}\",\"sequence\":{i}}}"
+        )
+        .unwrap();
+    }
+    std::fs::write(files.path().join("app.log"), lines).unwrap();
+    for (index, case) in cases.iter().enumerate() {
+        std::fs::write(
+            files.path().join(format!("fb-{index}.yml")),
+            filebeat_config(index, case),
+        )
+        .unwrap();
     }
 
-    // We should have received events (Filebeat sends them as Lumberjack v2 frames)
-    assert!(
-        received > 0,
-        "Expected to receive events from Filebeat, but got 0. Stderr:\n{stderr}"
-    );
+    let peer = Peer::start(PeerSpec {
+        test,
+        service: "filebeat",
+        image: FILEBEAT_IMAGE,
+        entrypoint: Some("sleep"),
+        args: vec!["3600".to_string()],
+        files: Some(files.path()),
+        user: Some("0:0"),
+        env: vec![],
+        extra_files: vec![],
+    })
+    .await
+    .unwrap_or_else(|e| panic!("the Filebeat peer did not start: {e}"));
+    for index in 0..cases.len() {
+        let command = format!(
+            "filebeat -e --strict.perms=false -c {PEER_DIR}/fb-{index}.yml > /tmp/fb-{index}.log 2>&1"
+        );
+        peer.exec_detached(&["sh", "-c", &command]).await;
+    }
 
-    shutdown.cancel();
+    let mut results = Cases::default();
+    let deadline = Instant::now() + Duration::from_secs(90);
+    for case in cases.iter().filter(|c| c.arrives) {
+        let arrived = sink
+            .wait_for_count(
+                case.id,
+                EVENTS,
+                deadline.saturating_duration_since(Instant::now()),
+            )
+            .await;
+        results.check(
+            &format!("{}: {EVENTS} events arrive", case.id),
+            arrived,
+            || format!("only {} arrived", sink.count(case.id)),
+        );
+    }
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    for case in cases.iter().filter(|c| !c.arrives) {
+        results.check(
+            &format!("{}: nothing is delivered", case.id),
+            sink.count(case.id) == 0,
+            || sink.find(case.id).unwrap_or_default(),
+        );
+    }
+    let mut filebeat_logs = String::new();
+    for (index, case) in cases.iter().enumerate() {
+        let log = peer
+            .exec(&["cat", &format!("/tmp/fb-{index}.log")])
+            .await
+            .output;
+        if !case.arrives {
+            results.check(
+                &format!("{}: filebeat logged the failed connection", case.id),
+                log.contains("ERROR") || log.contains("error"),
+                || log.clone(),
+            );
+        }
+        filebeat_logs.push_str(&format!("--- {} ---\n{log}\n", case.id));
+    }
+    for (index, receiver) in receivers.iter_mut().enumerate() {
+        results.check(
+            &format!("receiver {index} is still running"),
+            receiver.alive(),
+            || receiver.log_text(),
+        );
+    }
+    results.finish(|| {
+        format!(
+            "filebeat logs:\n{filebeat_logs}\nreceiver 0 log:\n{}\n\n{}",
+            receivers[0].log_text(),
+            sink.dump()
+        )
+    });
 }

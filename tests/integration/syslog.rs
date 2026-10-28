@@ -62,14 +62,12 @@ fn test_config() -> Config {
     config
 }
 
-/// A running syslog handler and the addresses its listeners bound.
+/// A running syslog handler and the addresses its plaintext listeners bound.
 struct Started {
     shutdown: CancellationToken,
     metrics: Arc<Metrics>,
     udp: SocketAddr,
     tcp: SocketAddr,
-    /// Bound only when the config turns TLS on.
-    tls: Option<SocketAddr>,
 }
 
 /// Start the syslog handler and wait for its UDP and TCP listeners to bind.
@@ -93,24 +91,17 @@ async fn start_syslog_handler(config: Config) -> Started {
     );
     let udp_bound = handler.udp_bound_addr();
     let tcp_bound = handler.tcp_bound_addr();
-    let tls_bound = handler.tls_bound_addr();
 
     let handler_shutdown = shutdown.clone();
     let mut task = tokio::spawn(async move { handler.start(handler_shutdown).await });
     let udp = crate::common::bound_addr("syslog UDP", &udp_bound, &mut task).await;
     let tcp = crate::common::bound_addr("syslog TCP", &tcp_bound, &mut task).await;
-    let tls = if config.syslog.tls.enabled {
-        Some(crate::common::bound_addr("syslog TLS", &tls_bound, &mut task).await)
-    } else {
-        None
-    };
 
     Started {
         shutdown,
         metrics,
         udp,
         tcp,
-        tls,
     }
 }
 
@@ -573,46 +564,4 @@ async fn an_unbound_syslog_listener_delivers_into_the_default_org() {
         assert_eq!(record["_org_id"], "default", "{record}");
         assert!(record.get("_source_original").is_none(), "{record}");
     }
-}
-
-/// The TLS listener starts and takes a line over a real handshake, with no
-/// crypto provider installed by the test: the receiver's build has to settle
-/// which one rustls uses.
-#[tokio::test]
-async fn a_line_over_tls_reaches_the_loader() {
-    use scalo::transport::TransportReceiver;
-    use tokio::io::AsyncWriteExt;
-
-    let dir = tempfile::tempdir().unwrap();
-    let (cert, key) = crate::common::self_signed_cert(dir.path());
-    let (loader_endpoint, loader) = crate::common::grpc_destination().await;
-    let mut config = test_config();
-    config.loader.transport = "grpc".to_string();
-    config.loader.grpc_endpoint = Some(loader_endpoint);
-    config.routing.dlq.enabled = false;
-    config.syslog.tls.enabled = true;
-    config.syslog.tls.cert_file = Some(cert.to_string_lossy().into_owned());
-    config.syslog.tls.key_file = Some(key.to_string_lossy().into_owned());
-    config.syslog.tls_bind_address = "127.0.0.1:0".to_string();
-    let syslog = start_syslog_handler(config).await;
-
-    let mut tls = crate::common::tls_connect(syslog.tls.unwrap(), &cert).await;
-    tls.write_all(b"<14>Sep 25 10:00:02 host app: over tls\n")
-        .await
-        .unwrap();
-    tls.flush().await.unwrap();
-
-    let mut received = Vec::new();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while received.is_empty() && tokio::time::Instant::now() < deadline {
-        if let Ok(batch) = loader.recv(1).await {
-            received.extend(batch.records.into_iter().map(|r| r.payload));
-        }
-    }
-    drop(tls);
-    syslog.shutdown.cancel();
-
-    assert_eq!(received.len(), 1, "the TLS line reaches the loader");
-    let record: serde_json::Value = serde_json::from_slice(&received[0]).unwrap();
-    assert_eq!(record["message"], "over tls", "{record}");
 }
