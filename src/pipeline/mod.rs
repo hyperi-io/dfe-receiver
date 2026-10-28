@@ -17,6 +17,7 @@
 
 pub mod acks;
 
+use std::collections::BTreeMap;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -519,6 +520,18 @@ impl Usage {
     }
 }
 
+/// An enabled handler that is down, and the error that took it down.
+///
+/// The ingest port's `/readyz` answers with these while it is 503, so an
+/// operator sees which listener failed without reading the log.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ListenerFailure {
+    /// The handler's name, as in the `Protocol handler failed` log line.
+    pub handler: &'static str,
+    /// The handler's error, which names the listener and the bind error.
+    pub reason: String,
+}
+
 /// Shared pipeline state accessible from handlers.
 pub struct PipelineState {
     shared_config: SharedConfig,
@@ -554,6 +567,10 @@ pub struct PipelineState {
     sink_confirmation: SinkConfirmation,
     /// The listeners readiness waits on, `None` until the server declares them.
     listeners: RwLock<Option<Vec<BoundAddr>>>,
+    /// Why each handler that failed is down, by handler. A handler's listeners
+    /// are bound once and never retried, so an entry stays until the process
+    /// exits or the server declares its listeners again.
+    listener_failures: Mutex<BTreeMap<&'static str, String>>,
     /// Counts every record received and settled, and those refused before
     /// validation; `None` in tests built without it.
     metrics: Option<Arc<Metrics>>,
@@ -730,6 +747,7 @@ impl PipelineState {
             rejects,
             sink_confirmation,
             listeners: RwLock::new(None),
+            listener_failures: Mutex::new(BTreeMap::new()),
             metrics,
         })
     }
@@ -821,6 +839,25 @@ impl PipelineState {
     /// any earlier declaration.
     pub fn watch_listeners(&self, listeners: Vec<BoundAddr>) {
         *self.listeners.write() = Some(listeners);
+        self.listener_failures.lock().clear();
+    }
+
+    /// Record why an enabled handler is down. The handler's later failure
+    /// replaces its earlier one.
+    pub fn record_listener_failure(&self, handler: &'static str, reason: String) {
+        self.listener_failures.lock().insert(handler, reason);
+    }
+
+    /// The handlers that are down and why, ordered by handler name.
+    pub fn listener_failures(&self) -> Vec<ListenerFailure> {
+        self.listener_failures
+            .lock()
+            .iter()
+            .map(|(handler, reason)| ListenerFailure {
+                handler,
+                reason: reason.clone(),
+            })
+            .collect()
     }
 
     /// Get memory pressure level.
@@ -3269,6 +3306,36 @@ mod tests {
         assert!(
             !state.probe_ready(),
             "a listener that stopped must fail the probe"
+        );
+    }
+
+    #[tokio::test]
+    async fn listener_failures_are_kept_by_handler_until_listeners_are_declared_again() {
+        let state = test_state().await;
+        assert!(state.listener_failures().is_empty(), "nothing has failed");
+
+        state.record_listener_failure("syslog", "first".into());
+        state.record_listener_failure("gelf", "bind refused".into());
+        state.record_listener_failure("syslog", "second".into());
+
+        let failures: Vec<(&str, String)> = state
+            .listener_failures()
+            .into_iter()
+            .map(|failure| (failure.handler, failure.reason))
+            .collect();
+        assert_eq!(
+            failures,
+            [
+                ("gelf", "bind refused".to_string()),
+                ("syslog", "second".to_string())
+            ],
+            "one entry per handler, the latest reason, ordered by handler"
+        );
+
+        state.watch_listeners(Vec::new());
+        assert!(
+            state.listener_failures().is_empty(),
+            "a new declaration of the listeners starts clean"
         );
     }
 

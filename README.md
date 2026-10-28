@@ -258,7 +258,7 @@ curl http://localhost:8080/livez
 
 ### GET /readyz
 
-Kubernetes readiness probe. Returns 503 until every enabled listener has bound, again once any of them stops or fails (draining included), and under memory pressure. A listener that cannot bind holds it at 503 while the process stays up and logs `Protocol handler failed`. A destination outage does not fail it: every replica shares the outage, so failing the probe would empty the Service, and ingest refuses per request with 503 instead. The metrics port's `/readyz`, which the chart probes, gives the same answer.
+Kubernetes readiness probe. Returns 503 until every enabled listener has bound, again once any of them stops or fails (draining included), and under memory pressure. A listener that cannot bind holds it at 503 while the process stays up and logs `Protocol handler failed`. The ingest port's 503 body lists each failed handler and its error, for example `{"status":"not_ready","listeners":[{"handler":"syslog","reason":"..."}]}`. A destination outage does not fail it: every replica shares the outage, so failing the probe would empty the Service, and ingest refuses per request with 503 instead. The metrics port's `/readyz`, which the chart probes, gives the same answer.
 
 ```bash
 curl http://localhost:8080/readyz

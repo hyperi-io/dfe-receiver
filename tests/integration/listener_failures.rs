@@ -40,6 +40,7 @@ use scalo::transport::AcknowledgementsConfig;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+use crate::common::peers::{Cases, free_addr, free_port};
 use crate::common::{ClosedPort, HeldUdpPort};
 
 /// How long a handler gets to report that a listener could not bind.
@@ -557,24 +558,30 @@ impl Drop for ServerProcess {
     }
 }
 
-/// Take a port from the OS, then release it for the receiver's metrics server.
-///
-/// scalo's service runtime binds `--metrics-addr` itself and reports no bound
-/// address, so this listener cannot be given port 0 and read back.
-fn free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.local_addr().unwrap().port()
+/// The listeners of one binary run, each on the loopback address named.
+struct RunPorts {
+    ingest: SocketAddr,
+    fluent: SocketAddr,
+    gelf: SocketAddr,
+    syslog_tcp: SocketAddr,
 }
 
-/// Start the receiver binary with Fluent Forward on `fluent`, logging to a file
-/// in `dir`. Returns the process, the metrics base URL and the log path.
+/// Start the receiver binary with Fluent Forward, GELF and syslog on `ports`,
+/// logging to a file in `dir`. Returns the process, the metrics base URL and the
+/// log path.
 fn spawn_receiver(
     dir: &std::path::Path,
-    fluent: SocketAddr,
+    ports: &RunPorts,
 ) -> (ServerProcess, String, std::path::PathBuf) {
     let metrics_port = free_port();
     let config_path = dir.join("receiver.yaml");
     let log_path = dir.join("receiver.log");
+    let RunPorts {
+        ingest,
+        fluent,
+        gelf,
+        syslog_tcp,
+    } = ports;
 
     let mut config = std::fs::File::create(&config_path).unwrap();
     write!(
@@ -582,10 +589,19 @@ fn spawn_receiver(
         // The broker is never reached: rdkafka resolves it in the background, so
         // the process serves without one and this test needs no container.
         r#"server:
-  bind_address: "127.0.0.1:0"
+  bind_address: "{ingest}"
 fluent:
   enabled: true
   bind_address: "{fluent}"
+  accept_unauthenticated: true
+gelf:
+  enabled: true
+  bind_address: "{gelf}"
+  accept_unauthenticated: true
+syslog:
+  enabled: true
+  udp_bind_address: "127.0.0.1:0"
+  tcp_bind_address: "{syslog_tcp}"
   accept_unauthenticated: true
 kafka:
   brokers:
@@ -613,82 +629,177 @@ kafka:
     )
 }
 
+/// The status and body a probe path answers, or None while nothing is listening.
+async fn probe_body(url: &str) -> Option<(u16, String)> {
+    let response = reqwest::get(url).await.ok()?;
+    let status = response.status().as_u16();
+    Some((status, response.text().await.unwrap_or_default()))
+}
+
 /// The status a probe path answers, or None while nothing is listening.
 async fn probe(url: &str) -> Option<u16> {
-    reqwest::get(url).await.ok().map(|r| r.status().as_u16())
+    probe_body(url).await.map(|(status, _)| status)
 }
 
-/// The metrics `/readyz` a kubelet probes never passes while a listener cannot
-/// bind, and the process stays up: the same treatment the HTTP listener's own
-/// bind failure gets.
-#[tokio::test]
-async fn the_readiness_probe_fails_while_a_listener_cannot_bind() {
-    let held = ClosedPort::loopback().expect("hold a TCP port");
-    let dir = tempfile::tempdir().unwrap();
-    let (mut receiver, base, log_path) = spawn_receiver(dir.path(), held.addr());
-    let readyz = format!("{base}/readyz");
-    let livez = format!("{base}/livez");
-
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let mut failure_logged = false;
-    while Instant::now() < deadline {
-        if let Some(status) = receiver.0.try_wait().unwrap() {
-            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
-            panic!("receiver exited with {status}:\n{log}");
-        }
-        let ready = probe(&readyz).await;
-        let log = std::fs::read_to_string(&log_path).unwrap_or_default();
-        assert_ne!(
-            ready,
-            Some(200),
-            "/readyz passed with Fluent Forward unable to bind:\n{log}"
-        );
-        if log.contains("Protocol handler failed") {
-            failure_logged = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-
-    let log = std::fs::read_to_string(&log_path).unwrap_or_default();
-    assert!(
-        failure_logged,
-        "no \"Protocol handler failed\" line within 30s:\n{log}"
-    );
-    assert_eq!(
-        probe(&readyz).await,
-        Some(503),
-        "/readyz must fail once the handler has failed:\n{log}"
-    );
-    assert_eq!(
-        probe(&livez).await,
-        Some(200),
-        "the process must stay up and live:\n{log}"
-    );
+/// Which listener's port a row holds before the receiver starts.
+#[derive(Clone, Copy, PartialEq)]
+enum Held {
+    Fluent,
+    Gelf,
+    SyslogTcp,
 }
 
-/// Positive control for the test above: the same binary and config, with the
-/// port free, passes `/readyz`.
-#[tokio::test]
-async fn the_readiness_probe_passes_once_every_listener_binds() {
-    let dir = tempfile::tempdir().unwrap();
-    let any_port = SocketAddr::from(([127, 0, 0, 1], 0));
-    let (mut receiver, base, log_path) = spawn_receiver(dir.path(), any_port);
+/// Run the binary on one row and check what a kubelet and an operator see.
+///
+/// With a listener held the row waits for the failure to be logged, then expects
+/// both `/readyz` endpoints to answer 503 with the ingest port naming the
+/// listener and why, the process live, and every other handler's port still
+/// accepting. With nothing held it expects both `/readyz` endpoints to answer 200.
+async fn run_readiness_row(held: Option<(Held, &str)>) -> Result<(), String> {
+    let hold = match held {
+        Some(_) => Some(ClosedPort::loopback().map_err(|e| format!("hold a TCP port: {e}"))?),
+        None => None,
+    };
+    let pick = |which: Held| match (&hold, held) {
+        (Some(port), Some((victim, _))) if victim == which => port.addr(),
+        _ => free_addr(),
+    };
+    let ports = RunPorts {
+        ingest: free_addr(),
+        fluent: pick(Held::Fluent),
+        gelf: pick(Held::Gelf),
+        syslog_tcp: pick(Held::SyslogTcp),
+    };
+    let dir = tempfile::tempdir().map_err(|e| format!("temp dir: {e}"))?;
+    let (mut receiver, base, log_path) = spawn_receiver(dir.path(), &ports);
+    let log = || std::fs::read_to_string(&log_path).unwrap_or_default();
     let readyz = format!("{base}/readyz");
+    let ingest_readyz = format!("http://{}/readyz", ports.ingest);
+
+    let Some((_, name)) = held else {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(status) = receiver.0.try_wait().unwrap() {
+                return Err(format!("receiver exited with {status}:\n{}", log()));
+            }
+            let ready =
+                probe(&readyz).await == Some(200) && probe(&ingest_readyz).await == Some(200);
+            if ready {
+                return Ok(());
+            }
+            if Instant::now() > deadline {
+                return Err(format!(
+                    "/readyz never passed with every port free:\n{}",
+                    log()
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    };
 
     let deadline = Instant::now() + Duration::from_secs(30);
-    while Instant::now() < deadline {
+    while !log().contains("Protocol handler failed") {
         if let Some(status) = receiver.0.try_wait().unwrap() {
-            let log = std::fs::read_to_string(&log_path).unwrap_or_default();
-            panic!("receiver exited with {status}:\n{log}");
+            return Err(format!("receiver exited with {status}:\n{}", log()));
         }
         if probe(&readyz).await == Some(200) {
-            return;
+            return Err(format!(
+                "/readyz passed with {name} unable to bind:\n{}",
+                log()
+            ));
+        }
+        if Instant::now() > deadline {
+            return Err(format!(
+                "no \"Protocol handler failed\" line in 30s:\n{}",
+                log()
+            ));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let log = std::fs::read_to_string(&log_path).unwrap_or_default();
-    panic!("/readyz never passed with every port free:\n{log}");
+
+    // The handlers run side by side, so the others bind when their turn comes.
+    let bystanders = [
+        (Held::Fluent, ports.fluent),
+        (Held::Gelf, ports.gelf),
+        (Held::SyslogTcp, ports.syslog_tcp),
+    ]
+    .into_iter()
+    .filter(|(which, _)| Some(*which) != held.map(|(victim, _)| victim));
+    for (_, addr) in bystanders {
+        let deadline = Instant::now() + READY_DEADLINE;
+        while tokio::net::TcpStream::connect(addr).await.is_err() {
+            if Instant::now() > deadline {
+                return Err(format!(
+                    "{addr} stopped serving because {name} failed:\n{}",
+                    log()
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    let kubelet = probe(&readyz).await;
+    if kubelet != Some(503) {
+        return Err(format!(
+            "the metrics /readyz answered {kubelet:?}:\n{}",
+            log()
+        ));
+    }
+    let livez = probe(&format!("{base}/livez")).await;
+    if livez != Some(200) {
+        return Err(format!(
+            "the process must stay live, /livez answered {livez:?}:\n{}",
+            log()
+        ));
+    }
+
+    let (status, body) = probe_body(&ingest_readyz)
+        .await
+        .ok_or_else(|| format!("nothing answered the ingest /readyz:\n{}", log()))?;
+    if status != 503 {
+        return Err(format!(
+            "the ingest /readyz answered {status}: {body}\n{}",
+            log()
+        ));
+    }
+    let detail: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| format!("the 503 body is not JSON ({e}): {body}"))?;
+    let named = detail["listeners"].as_array().is_some_and(|failed| {
+        failed.iter().any(|failure| {
+            let reason = failure["reason"].as_str().unwrap_or_default();
+            reason.contains(name) && reason.contains("Address already in use")
+        })
+    });
+    if named {
+        Ok(())
+    } else {
+        Err(format!(
+            "the ingest /readyz 503 does not name {name} and its bind error: {body}"
+        ))
+    }
+}
+
+/// `/readyz` stays 503 while an enabled listener cannot bind, the ingest port's
+/// 503 names the listener and the bind error, and the handlers that did bind
+/// keep serving. The last row is the control: every port free, both endpoints 200.
+#[tokio::test]
+async fn readiness_names_the_listener_that_cannot_bind() {
+    let mut cases = Cases::default();
+    for (case, held) in [
+        ("fluent port taken", Some((Held::Fluent, "Fluent Forward"))),
+        ("gelf port taken", Some((Held::Gelf, "GELF"))),
+        (
+            "syslog tcp port taken",
+            Some((Held::SyslogTcp, "syslog TCP")),
+        ),
+        ("every port free", None),
+    ] {
+        let outcome = run_readiness_row(held).await;
+        cases.check(case, outcome.is_ok(), || {
+            outcome.clone().err().unwrap_or_default()
+        });
+    }
+    cases.finish(String::new);
 }
 
 // ---------------------------------------------------------------------------
