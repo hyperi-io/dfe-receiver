@@ -656,11 +656,11 @@ enum Held {
 /// listener and why, the process live, and every other handler's port still
 /// accepting. With nothing held it expects both `/readyz` endpoints to answer 200.
 async fn run_readiness_row(held: Option<(Held, &str)>) -> Result<(), String> {
-    let hold = match held {
+    let held_port = match held {
         Some(_) => Some(ClosedPort::loopback().map_err(|e| format!("hold a TCP port: {e}"))?),
         None => None,
     };
-    let pick = |which: Held| match (&hold, held) {
+    let pick = |which: Held| match (&held_port, held) {
         (Some(port), Some((victim, _))) if victim == which => port.addr(),
         _ => free_addr(),
     };
