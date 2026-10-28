@@ -17,6 +17,7 @@
 
 pub mod acks;
 
+use std::collections::BTreeSet;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -554,6 +555,10 @@ pub struct PipelineState {
     sink_confirmation: SinkConfirmation,
     /// The listeners readiness waits on, `None` until the server declares them.
     listeners: RwLock<Option<Vec<BoundAddr>>>,
+    /// The handlers that failed, by name. A handler's listeners are bound once
+    /// and never retried, so an entry stays until the process exits or the
+    /// server declares its listeners again. The error itself is only logged.
+    failed_handlers: Mutex<BTreeSet<&'static str>>,
     /// Counts every record received and settled, and those refused before
     /// validation; `None` in tests built without it.
     metrics: Option<Arc<Metrics>>,
@@ -730,6 +735,7 @@ impl PipelineState {
             rejects,
             sink_confirmation,
             listeners: RwLock::new(None),
+            failed_handlers: Mutex::new(BTreeSet::new()),
             metrics,
         })
     }
@@ -821,6 +827,17 @@ impl PipelineState {
     /// any earlier declaration.
     pub fn watch_listeners(&self, listeners: Vec<BoundAddr>) {
         *self.listeners.write() = Some(listeners);
+        self.failed_handlers.lock().clear();
+    }
+
+    /// Record that an enabled handler is down.
+    pub fn record_handler_failure(&self, handler: &'static str) {
+        self.failed_handlers.lock().insert(handler);
+    }
+
+    /// The names of the handlers that are down, in order.
+    pub fn failed_handlers(&self) -> Vec<&'static str> {
+        self.failed_handlers.lock().iter().copied().collect()
     }
 
     /// Get memory pressure level.
@@ -3269,6 +3286,27 @@ mod tests {
         assert!(
             !state.probe_ready(),
             "a listener that stopped must fail the probe"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_handlers_are_kept_by_name_until_listeners_are_declared_again() {
+        let state = test_state().await;
+        assert!(state.failed_handlers().is_empty(), "nothing has failed");
+
+        state.record_handler_failure("syslog");
+        state.record_handler_failure("gelf");
+        state.record_handler_failure("syslog");
+        assert_eq!(
+            state.failed_handlers(),
+            ["gelf", "syslog"],
+            "one entry per handler, ordered by name"
+        );
+
+        state.watch_listeners(Vec::new());
+        assert!(
+            state.failed_handlers().is_empty(),
+            "a new declaration of the listeners starts clean"
         );
     }
 
