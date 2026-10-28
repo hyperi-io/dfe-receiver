@@ -30,8 +30,8 @@ mod flow_netflow_e2e;
 mod flow_sflow_e2e;
 #[path = "integration/fluent.rs"]
 mod fluent;
-#[path = "integration/gelf.rs"]
-mod gelf;
+#[path = "integration/fluent_bit.rs"]
+mod fluent_bit;
 #[path = "integration/grpc_outage.rs"]
 mod grpc_outage;
 #[path = "integration/grpc_sink.rs"]
@@ -50,10 +50,14 @@ mod kafka_sink;
 mod listener_admission;
 #[path = "integration/listener_failures.rs"]
 mod listener_failures;
+#[path = "integration/logstash.rs"]
+mod logstash;
 #[path = "integration/lumberjack.rs"]
 mod lumberjack;
 #[path = "integration/named_destinations.rs"]
 mod named_destinations;
+#[path = "integration/otel_collector.rs"]
+mod otel_collector;
 #[path = "integration/otlp.rs"]
 mod otlp;
 #[path = "integration/prometheus_rw.rs"]
@@ -78,8 +82,8 @@ mod source_routing;
 mod splunk_hec;
 #[path = "integration/syslog.rs"]
 mod syslog;
-#[path = "integration/tls_listeners.rs"]
-mod tls_listeners;
+#[path = "integration/tls_openssl.rs"]
+mod tls_openssl;
 #[path = "integration/vault_auth.rs"]
 mod vault_auth;
 #[path = "integration/vector.rs"]

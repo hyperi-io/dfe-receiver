@@ -156,38 +156,3 @@ async fn a_posted_object_stays_a_single_event() {
 
     shutdown.cancel();
 }
-
-/// HTTPS ingest starts and answers over a real handshake, with no crypto
-/// provider installed by the test: the receiver's build has to settle which
-/// one rustls uses.
-#[tokio::test]
-async fn https_ingest_takes_an_event_over_tls() {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    let dir = tempfile::tempdir().unwrap();
-    let (cert, key) = crate::common::self_signed_cert(dir.path());
-    let (endpoint, loader) = crate::common::grpc_destination().await;
-    let mut config = receiver_config(&endpoint);
-    config.server.tls.enabled = true;
-    config.server.tls.cert_file = Some(cert.to_string_lossy().into_owned());
-    config.server.tls.key_file = Some(key.to_string_lossy().into_owned());
-    let (addr, shutdown) = start_http(config).await;
-
-    let body = r#"{"event_category":"over-tls"}"#;
-    let request = format!(
-        "POST /ingest HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    let mut tls = crate::common::tls_connect(addr, &cert).await;
-    tls.write_all(request.as_bytes()).await.unwrap();
-    let mut response = Vec::new();
-    // A peer that closes without close_notify ends the read in an error, after the response.
-    let _ = tls.read_to_end(&mut response).await;
-    let response = String::from_utf8_lossy(&response);
-    assert!(response.starts_with("HTTP/1.1 2"), "{response}");
-
-    let records = collect(&loader, 1).await;
-    assert_eq!(records.len(), 1, "the HTTPS event reaches the loader");
-
-    shutdown.cancel();
-}
