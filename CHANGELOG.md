@@ -3,6 +3,23 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.15.59](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.58...v1.15.59) (2026-10-28)
+
+### Bug Fixes
+
+* accept the block-buffer advisory, unreachable here ([#220](https://github.com/hyperi-io/dfe-receiver/issues/220)) ([6e3fb8a](https://github.com/hyperi-io/dfe-receiver/commit/6e3fb8ac13a3e3cc4efd2fe1e1cc6862f7dae3e4))
+* declare the repo classification as product ([#218](https://github.com/hyperi-io/dfe-receiver/issues/218)) ([40f29f1](https://github.com/hyperi-io/dfe-receiver/commit/40f29f15875869ecb23d5b5ac87c2076fabac9cb))
+* **deps:** update redpandadata/redpanda Docker tag to v26.2.6 ([#209](https://github.com/hyperi-io/dfe-receiver/issues/209)) ([cb3cb38](https://github.com/hyperi-io/dfe-receiver/commit/cb3cb38159df453dafc5826c1246251f85276334))
+* **deps:** update Rust crate arc-swap to 1.9.3 ([#210](https://github.com/hyperi-io/dfe-receiver/issues/210)) ([a4d4f1b](https://github.com/hyperi-io/dfe-receiver/commit/a4d4f1b4841902a29bc033b8c9b51c13eb927f22))
+* **deps:** update rust-dependencies ([#211](https://github.com/hyperi-io/dfe-receiver/issues/211)) ([489f5b7](https://github.com/hyperi-io/dfe-receiver/commit/489f5b76ac18d892ae30fbb4fe86fee2dc3cc9a4))
+* install the rustls provider for TLS ([#217](https://github.com/hyperi-io/dfe-receiver/issues/217)) ([1f4b804](https://github.com/hyperi-io/dfe-receiver/commit/1f4b80455161a65f762f356cb671590cf503a8e8)), closes [#216](https://github.com/hyperi-io/dfe-receiver/issues/216)
+* keep the part-token time in the flow rate limiter ([#222](https://github.com/hyperi-io/dfe-receiver/issues/222)) ([e3d25e7](https://github.com/hyperi-io/dfe-receiver/commit/e3d25e72c41d2c9027b55aedf317036525399652))
+* name the failed listener in the ingest readyz 503 ([#221](https://github.com/hyperi-io/dfe-receiver/issues/221)) ([acb1b18](https://github.com/hyperi-io/dfe-receiver/commit/acb1b18b45761d1533475def5bf76cd88066c366))
+* rebuild on scalo 2.14.21 ([6da81bf](https://github.com/hyperi-io/dfe-receiver/commit/6da81bf1b71c3daf321026b47c01ae370af614bf))
+* take a syslog token as the tag only when it reads name: or name[pid]: ([#215](https://github.com/hyperi-io/dfe-receiver/issues/215)) ([3e005fb](https://github.com/hyperi-io/dfe-receiver/commit/3e005fb90c075889f77e9d55b060276d8132287c)), closes [#212](https://github.com/hyperi-io/dfe-receiver/issues/212)
+* update the lockfile to the newest compatible releases ([#223](https://github.com/hyperi-io/dfe-receiver/issues/223)) ([8746441](https://github.com/hyperi-io/dfe-receiver/commit/8746441908fd3bf2ae6fb70e717982b130d589b6))
+* validate TLS listeners with real peers ([#219](https://github.com/hyperi-io/dfe-receiver/issues/219)) ([94836ef](https://github.com/hyperi-io/dfe-receiver/commit/94836efebb1f14dfd345f471ec112089ddec3ae5))
+
 ## [1.15.58](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.57...v1.15.58) (2026-10-24)
 
 ### Bug Fixes
