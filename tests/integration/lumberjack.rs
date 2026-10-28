@@ -84,12 +84,6 @@ logging.level: info
     )
 }
 
-async fn start(config: Config, sink: &Sink, addr: SocketAddr) -> Receiver {
-    Receiver::start(config, sink, &[addr])
-        .await
-        .unwrap_or_else(|e| panic!("{e}"))
-}
-
 #[tokio::test]
 async fn filebeat_ships_lumberjack_over_tls_and_plaintext() {
     skip_if_no_docker!();
@@ -97,7 +91,7 @@ async fn filebeat_ships_lumberjack_over_tls_and_plaintext() {
     let pki = Pki::generate().await;
     let sink = Sink::start().await;
 
-    let config_for = |client_auth: Option<&str>| -> (Config, SocketAddr) {
+    let config_for = |client_auth: Option<&str>| -> (Config, Vec<SocketAddr>, SocketAddr) {
         let addr = free_addr();
         let mut config = Config::default();
         config.server.bind_address = free_addr().to_string();
@@ -112,15 +106,20 @@ async fn filebeat_ships_lumberjack_over_tls_and_plaintext() {
             }
             None => config.lumberjack.accept_unauthenticated = true,
         }
-        (config, addr)
+        (config, vec![addr], addr)
     };
-    let (mtls_config, mtls) = config_for(Some("required"));
-    let (tls_config, tls) = config_for(Some("none"));
-    let (plain_config, plain) = config_for(None);
     let mut receivers = Vec::new();
-    receivers.push(start(mtls_config, &sink, mtls).await);
-    receivers.push(start(tls_config, &sink, tls).await);
-    receivers.push(start(plain_config, &sink, plain).await);
+    let mut addrs = Vec::new();
+    for mode in [Some("required"), Some("none"), None] {
+        let (receiver, addr) = Receiver::start(&sink, || config_for(mode))
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        receivers.push(receiver);
+        addrs.push(addr);
+    }
+    let [mtls, tls, plain] = addrs[..] else {
+        unreachable!("three receivers were started")
+    };
 
     let cases = [
         Case {

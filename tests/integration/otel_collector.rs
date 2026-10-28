@@ -80,28 +80,33 @@ async fn otel_collector_exports_to_every_otlp_listener() {
     let pki = Pki::generate().await;
     let sink = Sink::start().await;
 
-    let (tls_grpc, tls_http) = (free_addr(), free_addr());
-    let (mtls_grpc, mtls_http) = (free_addr(), free_addr());
-    let (plain_grpc, plain_http) = (free_addr(), free_addr());
     let mut receivers = Vec::new();
-    for (grpc_addr, http_addr, tls) in [
-        (tls_grpc, tls_http, Some("none")),
-        (mtls_grpc, mtls_http, Some("required")),
-        (plain_grpc, plain_http, None),
-    ] {
-        let config = otlp_config(|config| {
-            config.otlp.grpc_bind_address = grpc_addr.to_string();
-            config.otlp.http_bind_address = http_addr.to_string();
-            if let Some(mode) = tls {
-                config.otlp.tls = pki.server_tls(mode);
-            }
-        });
-        receivers.push(
-            Receiver::start(config, &sink, &[grpc_addr, http_addr])
-                .await
-                .unwrap_or_else(|e| panic!("{e}")),
-        );
+    let mut addrs = Vec::new();
+    for tls in [Some("none"), Some("required"), None] {
+        let (receiver, pair) = Receiver::start(&sink, || {
+            let (grpc_addr, http_addr) = (free_addr(), free_addr());
+            let config = otlp_config(|config| {
+                config.otlp.grpc_bind_address = grpc_addr.to_string();
+                config.otlp.http_bind_address = http_addr.to_string();
+                if let Some(mode) = tls {
+                    config.otlp.tls = pki.server_tls(mode);
+                }
+            });
+            (config, vec![grpc_addr, http_addr], (grpc_addr, http_addr))
+        })
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+        receivers.push(receiver);
+        addrs.push(pair);
     }
+    let [
+        (tls_grpc, tls_http),
+        (mtls_grpc, mtls_http),
+        (plain_grpc, plain_http),
+    ] = addrs[..]
+    else {
+        unreachable!("three receivers were started")
+    };
 
     let both: &'static [&'static str] = &["logs", "metrics"];
     let cases = vec![

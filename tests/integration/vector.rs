@@ -78,31 +78,40 @@ async fn vector_ships_over_http_and_grpc_with_and_without_tls() {
     let pki = Pki::generate().await;
     let sink = Sink::start().await;
 
-    let (tls_http, tls_grpc) = (free_addr(), free_addr());
-    let mut tls_config = Config::default();
-    tls_config.server.bind_address = tls_http.to_string();
-    tls_config.server.auth.mode = "none".to_string();
-    tls_config.server.tls = pki.server_tls("none");
-    tls_config.grpc.enabled = true;
-    tls_config.grpc.bind_address = tls_grpc.to_string();
-    tls_config.grpc.tls = pki.server_tls("required");
-    let mut tls_receiver = Receiver::start(tls_config, &sink, &[tls_http, tls_grpc])
-        .await
-        .unwrap_or_else(|e| panic!("{e}"));
+    let (mut tls_receiver, (tls_http, tls_grpc)) = Receiver::start(&sink, || {
+        let (tls_http, tls_grpc) = (free_addr(), free_addr());
+        let mut tls_config = Config::default();
+        tls_config.server.bind_address = tls_http.to_string();
+        tls_config.server.auth.mode = "none".to_string();
+        tls_config.server.tls = pki.server_tls("none");
+        tls_config.grpc.enabled = true;
+        tls_config.grpc.bind_address = tls_grpc.to_string();
+        tls_config.grpc.tls = pki.server_tls("required");
+        (tls_config, vec![tls_http, tls_grpc], (tls_http, tls_grpc))
+    })
+    .await
+    .unwrap_or_else(|e| panic!("{e}"));
 
     let token_dir = tempfile::tempdir().unwrap();
     let token_file = token_dir.path().join("token");
     std::fs::write(&token_file, TOKEN).unwrap();
-    let (plain_http, plain_grpc) = (free_addr(), free_addr());
-    let mut plain_config = Config::default();
-    plain_config.server.bind_address = plain_http.to_string();
-    plain_config.server.auth.mode = "bearer".to_string();
-    plain_config.server.auth.bearer.secret_source = Some(format!("file:{}", token_file.display()));
-    plain_config.grpc.enabled = true;
-    plain_config.grpc.bind_address = plain_grpc.to_string();
-    let mut plain_receiver = Receiver::start(plain_config, &sink, &[plain_http, plain_grpc])
-        .await
-        .unwrap_or_else(|e| panic!("{e}"));
+    let (mut plain_receiver, (plain_http, plain_grpc)) = Receiver::start(&sink, || {
+        let (plain_http, plain_grpc) = (free_addr(), free_addr());
+        let mut plain_config = Config::default();
+        plain_config.server.bind_address = plain_http.to_string();
+        plain_config.server.auth.mode = "bearer".to_string();
+        plain_config.server.auth.bearer.secret_source =
+            Some(format!("file:{}", token_file.display()));
+        plain_config.grpc.enabled = true;
+        plain_config.grpc.bind_address = plain_grpc.to_string();
+        (
+            plain_config,
+            vec![plain_http, plain_grpc],
+            (plain_http, plain_grpc),
+        )
+    })
+    .await
+    .unwrap_or_else(|e| panic!("{e}"));
 
     let cases = vec![
         Case {
