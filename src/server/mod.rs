@@ -267,9 +267,9 @@ impl Server {
     /// Run all enabled protocol handlers until shutdown is signalled.
     ///
     /// A handler that fails is logged and stays down, and readiness stays
-    /// false for as long as any of its listeners is not serving. The failure
-    /// is also recorded on the pipeline state, for the ingest port's `/readyz`
-    /// to report.
+    /// false for as long as any of its listeners is not serving. The handler's
+    /// name is also recorded on the pipeline state, for the ingest port's
+    /// `/readyz` to report. The error goes only to the log.
     pub async fn run(&self, shutdown: CancellationToken) -> Result<()> {
         let handlers = self.build_handlers();
 
@@ -299,11 +299,11 @@ impl Server {
             let handle = tokio::spawn(async move {
                 match handler.start(handler_shutdown.clone()).await {
                     Err(e) => {
-                        state.record_listener_failure(name, e.to_string());
+                        state.record_handler_failure(name);
                         error!(handler = name, error = %e, "Protocol handler failed");
                     }
                     Ok(()) if !handler_shutdown.is_cancelled() => {
-                        state.record_listener_failure(name, "stopped before shutdown".into());
+                        state.record_handler_failure(name);
                         error!(handler = name, "Protocol handler stopped before shutdown");
                     }
                     Ok(()) => {}

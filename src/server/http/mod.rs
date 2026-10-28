@@ -989,15 +989,20 @@ async fn liveness_handler() -> &'static str {
 }
 
 /// Readiness probe handler: the same status as the kubelet's `/readyz` on the
-/// metrics port. The 503 body lists each handler that is down and its error.
+/// metrics port. The 503 body names each handler that is down and nothing more:
+/// this port is internet-facing and the probe is unauthenticated, so the error
+/// text stays in the log.
 async fn readiness_handler(State(state): State<HttpState>) -> Response {
     if state.pipeline.probe_ready() {
         return StatusCode::OK.into_response();
     }
-    let body = serde_json::json!({
-        "status": "not_ready",
-        "listeners": state.pipeline.listener_failures(),
-    });
+    let listeners: Vec<serde_json::Value> = state
+        .pipeline
+        .failed_handlers()
+        .into_iter()
+        .map(|handler| serde_json::json!({ "handler": handler }))
+        .collect();
+    let body = serde_json::json!({ "status": "not_ready", "listeners": listeners });
     (StatusCode::SERVICE_UNAVAILABLE, axum::Json(body)).into_response()
 }
 

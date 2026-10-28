@@ -649,19 +649,39 @@ enum Held {
     SyslogTcp,
 }
 
+impl Held {
+    /// The handler name the ingest `/readyz` 503 lists.
+    fn handler(self) -> &'static str {
+        match self {
+            Self::Fluent => "fluent-forward",
+            Self::Gelf => "gelf",
+            Self::SyslogTcp => "syslog",
+        }
+    }
+
+    /// How the handler's error names the listener in the log.
+    fn listener(self) -> &'static str {
+        match self {
+            Self::Fluent => "Fluent Forward",
+            Self::Gelf => "GELF",
+            Self::SyslogTcp => "syslog TCP",
+        }
+    }
+}
+
 /// Run the binary on one row and check what a kubelet and an operator see.
 ///
 /// With a listener held the row waits for the failure to be logged, then expects
 /// both `/readyz` endpoints to answer 503 with the ingest port naming the
-/// listener and why, the process live, and every other handler's port still
-/// accepting. With nothing held it expects both `/readyz` endpoints to answer 200.
-async fn run_readiness_row(held: Option<(Held, &str)>) -> Result<(), String> {
+/// handler and nothing else, the log holding the listener and the bind error,
+/// the process live, and every other handler's port still accepting. With nothing held it expects both `/readyz` endpoints to answer 200.
+async fn run_readiness_row(held: Option<Held>) -> Result<(), String> {
     let held_port = match held {
         Some(_) => Some(ClosedPort::loopback().map_err(|e| format!("hold a TCP port: {e}"))?),
         None => None,
     };
     let pick = |which: Held| match (&held_port, held) {
-        (Some(port), Some((victim, _))) if victim == which => port.addr(),
+        (Some(port), Some(victim)) if victim == which => port.addr(),
         _ => free_addr(),
     };
     let ports = RunPorts {
@@ -676,7 +696,7 @@ async fn run_readiness_row(held: Option<(Held, &str)>) -> Result<(), String> {
     let readyz = format!("{base}/readyz");
     let ingest_readyz = format!("http://{}/readyz", ports.ingest);
 
-    let Some((_, name)) = held else {
+    let Some(victim) = held else {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             if let Some(status) = receiver.0.try_wait().unwrap() {
@@ -704,7 +724,8 @@ async fn run_readiness_row(held: Option<(Held, &str)>) -> Result<(), String> {
         }
         if probe(&readyz).await == Some(200) {
             return Err(format!(
-                "/readyz passed with {name} unable to bind:\n{}",
+                "/readyz passed with {} unable to bind:\n{}",
+                victim.listener(),
                 log()
             ));
         }
@@ -724,13 +745,14 @@ async fn run_readiness_row(held: Option<(Held, &str)>) -> Result<(), String> {
         (Held::SyslogTcp, ports.syslog_tcp),
     ]
     .into_iter()
-    .filter(|(which, _)| Some(*which) != held.map(|(victim, _)| victim));
+    .filter(|(which, _)| *which != victim);
     for (_, addr) in bystanders {
         let deadline = Instant::now() + READY_DEADLINE;
         while tokio::net::TcpStream::connect(addr).await.is_err() {
             if Instant::now() > deadline {
                 return Err(format!(
-                    "{addr} stopped serving because {name} failed:\n{}",
+                    "{addr} stopped serving because {} failed:\n{}",
+                    victim.listener(),
                     log()
                 ));
             }
@@ -764,34 +786,45 @@ async fn run_readiness_row(held: Option<(Held, &str)>) -> Result<(), String> {
     }
     let detail: serde_json::Value = serde_json::from_str(&body)
         .map_err(|e| format!("the 503 body is not JSON ({e}): {body}"))?;
-    let named = detail["listeners"].as_array().is_some_and(|failed| {
-        failed.iter().any(|failure| {
-            let reason = failure["reason"].as_str().unwrap_or_default();
-            reason.contains(name) && reason.contains("Address already in use")
-        })
-    });
-    if named {
+    let handlers: Vec<&serde_json::Value> = detail["listeners"]
+        .as_array()
+        .map(|failed| failed.iter().map(|failure| &failure["handler"]).collect())
+        .unwrap_or_default();
+    if handlers != [victim.handler()] {
+        return Err(format!(
+            "the ingest /readyz 503 must list only {}: {body}",
+            victim.handler()
+        ));
+    }
+    // The probe is unauthenticated on an internet-facing port, so the bind error stays in the log.
+    if body.contains("Address already in use") || body.contains(victim.listener()) {
+        return Err(format!("the ingest /readyz 503 leaks the error: {body}"));
+    }
+    let failed_line = log()
+        .lines()
+        .find(|line| line.contains("Protocol handler failed"))
+        .unwrap_or_default()
+        .to_string();
+    if failed_line.contains(victim.listener()) && failed_line.contains("Address already in use") {
         Ok(())
     } else {
         Err(format!(
-            "the ingest /readyz 503 does not name {name} and its bind error: {body}"
+            "the log line must name {} and its bind error: {failed_line}",
+            victim.listener()
         ))
     }
 }
 
 /// `/readyz` stays 503 while an enabled listener cannot bind, the ingest port's
-/// 503 names the listener and the bind error, and the handlers that did bind
-/// keep serving. The last row is the control: every port free, both endpoints 200.
+/// 503 names the handler, the log carries the listener and the bind error, and
+/// the handlers that did bind keep serving. The last row is the control: every port free, both endpoints 200.
 #[tokio::test]
 async fn readiness_names_the_listener_that_cannot_bind() {
     let mut cases = Cases::default();
     for (case, held) in [
-        ("fluent port taken", Some((Held::Fluent, "Fluent Forward"))),
-        ("gelf port taken", Some((Held::Gelf, "GELF"))),
-        (
-            "syslog tcp port taken",
-            Some((Held::SyslogTcp, "syslog TCP")),
-        ),
+        ("fluent port taken", Some(Held::Fluent)),
+        ("gelf port taken", Some(Held::Gelf)),
+        ("syslog tcp port taken", Some(Held::SyslogTcp)),
         ("every port free", None),
     ] {
         let outcome = run_readiness_row(held).await;
