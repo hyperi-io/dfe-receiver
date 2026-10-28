@@ -4750,9 +4750,9 @@ dependencies = [
 
 [[package]]
 name = "scalo"
-version = "2.14.20"
+version = "2.14.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1142b6ab1b3e4fa1847b2f92eb63ff78d3177d0e380a32c42d18ebcb9256f207"
+checksum = "bdd64e0f3f9d13328ba0097df81676d7a4c4b55bd96884adf1657470b7858818"
 dependencies = [
  "aes-gcm",
  "aho-corasick",
@@ -4784,7 +4784,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "owo-colors",
- "parking_lot 0.12.5",
+ "parking_lot 0.13.0",
  "prost",
  "prost-build",
  "prost-types",
