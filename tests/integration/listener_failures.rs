@@ -192,9 +192,6 @@ async fn syslog_fails_when_its_tcp_port_is_taken() {
 
 #[tokio::test]
 async fn syslog_fails_when_its_tls_port_is_taken() {
-    // Both ring and aws-lc-rs reach the test binary, so rustls refuses to pick
-    // a provider for itself.
-    let _ = rustls::crypto::ring::default_provider().install_default();
     let dir = tempfile::tempdir().expect("temp dir");
     let (cert, key) = crate::common::self_signed_cert(dir.path());
 

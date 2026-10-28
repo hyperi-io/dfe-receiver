@@ -109,6 +109,20 @@ fn build_root_store(ca_certs: Vec<CertificateDer<'static>>, source: &str) -> Res
     Ok(root_store)
 }
 
+/// Make aws-lc-rs the process's rustls provider, unless one is installed already.
+///
+/// rustls picks a provider for itself only when exactly one is compiled in. A
+/// dependency that adds ring alongside aws-lc-rs would otherwise panic the first
+/// `ServerConfig::builder()`, which is the one tonic calls too. `main` calls this
+/// at start, and every builder here calls it again for callers that skip `main`.
+pub fn install_crypto_provider() {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        // Err means a provider is installed already, and rustls uses that one.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    });
+}
+
 /// Client authentication mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientAuth {
@@ -138,6 +152,7 @@ pub fn build_tls_acceptor(config: &TlsConfig) -> Result<Option<TlsAcceptor>> {
     if !config.enabled {
         return Ok(None);
     }
+    install_crypto_provider();
 
     // If secrets are configured, fail - caller should use async version
     if config.cert_secret.is_some() || config.key_secret.is_some() || config.ca_secret.is_some() {
@@ -214,6 +229,7 @@ pub async fn build_tls_acceptor_async(config: &TlsConfig) -> Result<Option<TlsAc
     if !config.enabled {
         return Ok(None);
     }
+    install_crypto_provider();
 
     let client_auth = ClientAuth::from_str(&config.client_auth);
 
@@ -301,6 +317,7 @@ pub fn uses_secrets(config: &TlsConfig) -> bool {
 pub async fn build_grpc_tls_config(
     config: &TlsConfig,
 ) -> Result<tonic::transport::ServerTlsConfig> {
+    install_crypto_provider();
     // Load certificate (secret takes precedence over file)
     let cert_pem = if let Some(ref secret) = config.cert_secret {
         info!(source = %secret, "Loading gRPC TLS certificate from secret");

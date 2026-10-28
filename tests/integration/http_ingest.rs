@@ -31,13 +31,21 @@ use scalo::transport::grpc::GrpcTransport;
 use tokio_util::sync::CancellationToken;
 
 /// Start the HTTP server routing every event to `loader_endpoint`.
-async fn start_receiver(loader_endpoint: &str) -> (String, CancellationToken) {
+fn receiver_config(loader_endpoint: &str) -> Config {
     let mut config = Config::default();
     config.server.bind_address = "127.0.0.1:0".to_string();
     config.destinations.default = DestinationRef::One("loader".to_string());
     config.loader.transport = "grpc".to_string();
     config.loader.grpc_endpoint = Some(loader_endpoint.to_string());
+    config
+}
 
+async fn start_receiver(loader_endpoint: &str) -> (String, CancellationToken) {
+    let (addr, shutdown) = start_http(receiver_config(loader_endpoint)).await;
+    (format!("http://{addr}"), shutdown)
+}
+
+async fn start_http(config: Config) -> (std::net::SocketAddr, CancellationToken) {
     let shutdown = CancellationToken::new();
     let pipeline = Arc::new(
         PipelineState::new(SharedConfig::new(config.clone()), CancellationToken::new())
@@ -54,7 +62,7 @@ async fn start_receiver(loader_endpoint: &str) -> (String, CancellationToken) {
     let server_shutdown = shutdown.clone();
     let mut task = tokio::spawn(async move { handler.start(server_shutdown).await });
     let addr = crate::common::bound_addr("HTTP", &bound, &mut task).await;
-    (format!("http://{addr}"), shutdown)
+    (addr, shutdown)
 }
 
 /// Collect records from the mock loader until `expected` arrive or time runs out.
@@ -145,6 +153,41 @@ async fn a_posted_object_stays_a_single_event() {
 
     let records = collect(&loader, 1).await;
     assert_eq!(records.len(), 1, "expected exactly one event");
+
+    shutdown.cancel();
+}
+
+/// HTTPS ingest starts and answers over a real handshake, with no crypto
+/// provider installed by the test: the receiver's build has to settle which
+/// one rustls uses.
+#[tokio::test]
+async fn https_ingest_takes_an_event_over_tls() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let dir = tempfile::tempdir().unwrap();
+    let (cert, key) = crate::common::self_signed_cert(dir.path());
+    let (endpoint, loader) = crate::common::grpc_destination().await;
+    let mut config = receiver_config(&endpoint);
+    config.server.tls.enabled = true;
+    config.server.tls.cert_file = Some(cert.to_string_lossy().into_owned());
+    config.server.tls.key_file = Some(key.to_string_lossy().into_owned());
+    let (addr, shutdown) = start_http(config).await;
+
+    let body = r#"{"event_category":"over-tls"}"#;
+    let request = format!(
+        "POST /ingest HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let mut tls = crate::common::tls_connect(addr, &cert).await;
+    tls.write_all(request.as_bytes()).await.unwrap();
+    let mut response = Vec::new();
+    // A peer that closes without close_notify ends the read in an error, after the response.
+    let _ = tls.read_to_end(&mut response).await;
+    let response = String::from_utf8_lossy(&response);
+    assert!(response.starts_with("HTTP/1.1 2"), "{response}");
+
+    let records = collect(&loader, 1).await;
+    assert_eq!(records.len(), 1, "the HTTPS event reaches the loader");
 
     shutdown.cancel();
 }

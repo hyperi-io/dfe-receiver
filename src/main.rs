@@ -246,6 +246,7 @@ impl ServiceApp for App {
 
 #[tokio::main]
 async fn main() {
+    dfe_receiver::server::tls::install_crypto_provider();
     let app = App::parse();
 
     if let Some(output) = &app.emit_dockerfile {
