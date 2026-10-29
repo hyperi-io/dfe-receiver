@@ -890,8 +890,8 @@ impl ApplyFlatEnv for Config {
         if let Some(v) = flat_env::flat_env_parsed::<u64>(prefix, "REQUEST_TIMEOUT_MS") {
             self.server.request_timeout_ms = v;
         }
-        if let Some(v) = flat_env::flat_env_bool(prefix, "COMMON_HEADER") {
-            self.server.auth.include_common_header = v;
+        if let Some(v) = flat_env::flat_env_bool(prefix, "ENRICH") {
+            self.routing.enrich = v;
         }
 
         // Kafka
@@ -1294,12 +1294,6 @@ pub struct AuthConfig {
     /// Bearer token configuration.
     pub bearer: BearerConfig,
 
-    /// Enrichment switch, read from `server.auth` alone: stamps
-    /// `_timestamp_received` and `_source` on routed records. `_org_id` is
-    /// stamped either way. It adds no accepted header. Default: true
-    #[serde(default = "default_true")]
-    pub include_common_header: bool,
-
     /// Legacy: Single header name for header-based auth.
     /// Deprecated: Use `accepted_headers` instead.
     #[serde(default)]
@@ -1379,7 +1373,6 @@ impl Default for AuthConfig {
             mode: "none".to_string(),
             accepted_headers: vec![],
             bearer: BearerConfig::default(),
-            include_common_header: true,
             // Legacy fields for backwards compatibility
             header_name: String::new(),
             header_values: Vec::new(),
@@ -2139,6 +2132,12 @@ pub struct RoutingConfig {
     #[serde(default)]
     pub source_org_id: SourceOrgId,
 
+    /// Whether routed records get `_timestamp_received` and `_source`, and the
+    /// `_source` rules choose their destination. Off, a record is stamped with
+    /// its `_org_id` alone and takes the default destination. Independent of
+    /// authentication. Default: true.
+    pub enrich: bool,
+
     /// DLQ configuration.
     pub dlq: DlqConfig,
 }
@@ -2205,6 +2204,7 @@ impl Default for RoutingConfig {
             topic_suffix: "_land".to_string(),
             source_to_topic: HashMap::new(),
             source_org_id: SourceOrgId::default(),
+            enrich: true,
             dlq: DlqConfig::default(),
         }
     }
@@ -4350,20 +4350,19 @@ webhook:
     }
 
     #[test]
-    fn test_env_override_common_header() {
-        // Test true
-        with_env(&[("DFE_RECEIVER_COMMON_HEADER", "true")], || {
+    fn test_env_override_enrich() {
+        with_env(&[("DFE_RECEIVER_ENRICH", "false")], || {
             let mut config = Config::default();
-            config.server.auth.include_common_header = false;
+            assert!(config.routing.enrich);
             config.apply_flat_env(ENV_PREFIX);
-            assert!(config.server.auth.include_common_header);
+            assert!(!config.routing.enrich);
         });
 
-        // Test false
-        with_env(&[("DFE_RECEIVER_COMMON_HEADER", "false")], || {
+        with_env(&[("DFE_RECEIVER_ENRICH", "true")], || {
             let mut config = Config::default();
+            config.routing.enrich = false;
             config.apply_flat_env(ENV_PREFIX);
-            assert!(!config.server.auth.include_common_header);
+            assert!(config.routing.enrich);
         });
     }
 

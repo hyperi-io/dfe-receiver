@@ -409,7 +409,7 @@ impl Router {
                     )
                 })
                 .collect(),
-            enrichment_enabled: config.server.auth.include_common_header,
+            enrichment_enabled: routing.enrich,
             strips_org_id: routing.source_org_id == SourceOrgId::Disallow,
             rules,
         })
@@ -945,7 +945,7 @@ mod tests {
     #[test]
     fn with_enrichment_off_only_the_org_is_written() {
         let mut config = config_with(vec![equals("auth", "type", "auth", SOURCE_FIELD, "auth")]);
-        config.server.auth.include_common_header = false;
+        config.routing.enrich = false;
         let r = router(&config);
         let (route, value, _) = route(&r, &listener("http"), r#"{"type":"auth"}"#);
         assert_eq!(

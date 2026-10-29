@@ -46,7 +46,6 @@
             "secret_source": null,
             "refresh_interval_secs": 300
           },
-          "include_common_header": true,
           "header_name": "",
           "header_values": []
         },
@@ -80,7 +79,6 @@
             "secret_source": null,
             "refresh_interval_secs": 300
           },
-          "include_common_header": true,
           "header_name": "",
           "header_values": []
         },
@@ -117,7 +115,6 @@
             "secret_source": null,
             "refresh_interval_secs": 300
           },
-          "include_common_header": true,
           "header_name": "",
           "header_values": []
         },
@@ -153,7 +150,6 @@
             "secret_source": null,
             "refresh_interval_secs": 300
           },
-          "include_common_header": true,
           "header_name": "",
           "header_values": []
         },
@@ -190,7 +186,6 @@
             "secret_source": null,
             "refresh_interval_secs": 300
           },
-          "include_common_header": true,
           "header_name": "",
           "header_values": []
         },
@@ -232,7 +227,6 @@
             "secret_source": null,
             "refresh_interval_secs": 300
           },
-          "include_common_header": true,
           "header_name": "",
           "header_values": []
         },
@@ -272,7 +266,6 @@
             "secret_source": null,
             "refresh_interval_secs": 300
           },
-          "include_common_header": true,
           "header_name": "",
           "header_values": []
         },
@@ -422,6 +415,7 @@
         "topic_suffix": "_land",
         "source_to_topic": {},
         "source_org_id": "disallow",
+        "enrich": true,
         "dlq": {
           "enabled": true,
           "mode": "cascade",
@@ -624,7 +618,6 @@
               "secret_source": null,
               "refresh_interval_secs": 300
             },
-            "include_common_header": true,
             "header_name": "",
             "header_values": []
           }
@@ -779,11 +772,6 @@
             "refresh_interval_secs": 300
           }
         },
-        "include_common_header": {
-          "description": "Enrichment switch, read from `server.auth` alone: stamps\n`_timestamp_received` and `_source` on routed records. `_org_id` is\nstamped either way. It adds no accepted header. Default: true",
-          "type": "boolean",
-          "default": true
-        },
         "header_name": {
           "description": "Legacy: Single header name for header-based auth.\nDeprecated: Use `accepted_headers` instead.",
           "type": "string",
@@ -906,7 +894,6 @@
               "secret_source": null,
               "refresh_interval_secs": 300
             },
-            "include_common_header": true,
             "header_name": "",
             "header_values": []
           }
@@ -977,7 +964,6 @@
               "secret_source": null,
               "refresh_interval_secs": 300
             },
-            "include_common_header": true,
             "header_name": "",
             "header_values": []
           }
@@ -1045,7 +1031,6 @@
               "secret_source": null,
               "refresh_interval_secs": 300
             },
-            "include_common_header": true,
             "header_name": "",
             "header_values": []
           }
@@ -1118,7 +1103,6 @@
               "secret_source": null,
               "refresh_interval_secs": 300
             },
-            "include_common_header": true,
             "header_name": "",
             "header_values": []
           }
@@ -1249,7 +1233,6 @@
               "secret_source": null,
               "refresh_interval_secs": 300
             },
-            "include_common_header": true,
             "header_name": "",
             "header_values": []
           }
@@ -1329,7 +1312,6 @@
               "secret_source": null,
               "refresh_interval_secs": 300
             },
-            "include_common_header": true,
             "header_name": "",
             "header_values": []
           }
@@ -1957,6 +1939,11 @@
           "description": "Whether a sender may set `_org_id`, the field that picks the tenant downstream.",
           "$ref": "#/$defs/SourceOrgId",
           "default": "disallow"
+        },
+        "enrich": {
+          "description": "Whether routed records get `_timestamp_received` and `_source`, and the\n`_source` rules choose their destination. Off, a record is stamped with\nits `_org_id` alone and takes the default destination. Independent of\nauthentication. Default: true.",
+          "type": "boolean",
+          "default": true
         },
         "dlq": {
           "description": "DLQ configuration.",

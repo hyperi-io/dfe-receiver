@@ -1244,7 +1244,6 @@ mod tests {
                 values: vec!["test".into()],
             }],
             bearer: BearerConfig::default(),
-            include_common_header: false,
             header_name: String::new(),
             header_values: Vec::new(),
         }

@@ -43,7 +43,6 @@ properties:
           tokens: []
           secret_source: null
           refresh_interval_secs: 300
-        include_common_header: true
         header_name: ""
         header_values: []
       acknowledgements:
@@ -71,7 +70,6 @@ properties:
           tokens: []
           secret_source: null
           refresh_interval_secs: 300
-        include_common_header: true
         header_name: ""
         header_values: []
       max_message_size: 16777216
@@ -102,7 +100,6 @@ properties:
           tokens: []
           secret_source: null
           refresh_interval_secs: 300
-        include_common_header: true
         header_name: ""
         header_values: []
       max_message_size: 16777216
@@ -132,7 +129,6 @@ properties:
           tokens: []
           secret_source: null
           refresh_interval_secs: 300
-        include_common_header: true
         header_name: ""
         header_values: []
       accept_unauthenticated: false
@@ -163,7 +159,6 @@ properties:
           tokens: []
           secret_source: null
           refresh_interval_secs: 300
-        include_common_header: true
         header_name: ""
         header_values: []
       raw_capture:
@@ -198,7 +193,6 @@ properties:
           tokens: []
           secret_source: null
           refresh_interval_secs: 300
-        include_common_header: true
         header_name: ""
         header_values: []
       accept_unauthenticated: false
@@ -232,7 +226,6 @@ properties:
           tokens: []
           secret_source: null
           refresh_interval_secs: 300
-        include_common_header: true
         header_name: ""
         header_values: []
       acknowledgements:
@@ -358,6 +351,7 @@ properties:
       topic_suffix: _land
       source_to_topic: {}
       source_org_id: disallow
+      enrich: true
       dlq:
         enabled: true
         mode: cascade
@@ -538,7 +532,6 @@ $defs:
             tokens: []
             secret_source: null
             refresh_interval_secs: 300
-          include_common_header: true
           header_name: ""
           header_values: []
       acknowledgements:
@@ -712,13 +705,6 @@ $defs:
           tokens: []
           secret_source: null
           refresh_interval_secs: 300
-      include_common_header:
-        description: |-
-          Enrichment switch, read from `server.auth` alone: stamps
-          `_timestamp_received` and `_source` on routed records. `_org_id` is
-          stamped either way. It adds no accepted header. Default: true
-        type: boolean
-        default: true
       header_name:
         description: |-
           Legacy: Single header name for header-based auth.
@@ -849,7 +835,6 @@ $defs:
             tokens: []
             secret_source: null
             refresh_interval_secs: 300
-          include_common_header: true
           header_name: ""
           header_values: []
       max_message_size:
@@ -913,7 +898,6 @@ $defs:
             tokens: []
             secret_source: null
             refresh_interval_secs: 300
-          include_common_header: true
           header_name: ""
           header_values: []
       max_message_size:
@@ -979,7 +963,6 @@ $defs:
             tokens: []
             secret_source: null
             refresh_interval_secs: 300
-          include_common_header: true
           header_name: ""
           header_values: []
       accept_unauthenticated:
@@ -1047,7 +1030,6 @@ $defs:
             tokens: []
             secret_source: null
             refresh_interval_secs: 300
-          include_common_header: true
           header_name: ""
           header_values: []
       raw_capture:
@@ -1158,7 +1140,6 @@ $defs:
             tokens: []
             secret_source: null
             refresh_interval_secs: 300
-          include_common_header: true
           header_name: ""
           header_values: []
       accept_unauthenticated:
@@ -1234,7 +1215,6 @@ $defs:
             tokens: []
             secret_source: null
             refresh_interval_secs: 300
-          include_common_header: true
           header_name: ""
           header_values: []
       acknowledgements:
@@ -1805,6 +1785,14 @@ $defs:
         description: Whether a sender may set `_org_id`, the field that picks the tenant downstream.
         $ref: "#/$defs/SourceOrgId"
         default: disallow
+      enrich:
+        description: |-
+          Whether routed records get `_timestamp_received` and `_source`, and the
+          `_source` rules choose their destination. Off, a record is stamped with
+          its `_org_id` alone and takes the default destination. Independent of
+          authentication. Default: true.
+        type: boolean
+        default: true
       dlq:
         description: DLQ configuration.
         $ref: "#/$defs/DlqConfig"

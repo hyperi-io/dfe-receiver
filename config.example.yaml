@@ -104,9 +104,6 @@ server:
     # none, header, bearer, mtls, both. Anything else refuses to start. header
     # and both accept only what accepted_headers lists; nothing is implied.
     mode: "none"
-    # Enrichment switch: stamps _timestamp_received and _source. _org_id is
-    # stamped either way. It is not a credential and adds no accepted header.
-    include_common_header: true
     accepted_headers:
       - name: "x-api-key"
         values: ["my-api-key"]
@@ -495,6 +492,10 @@ routing:
   # disallow removes a sender's own _org_id. allow keeps it as the first
   # _org_id row, still held to the sender's binding.
   source_org_id: disallow
+  # Stamps _timestamp_received and _source, and lets the _source rules pick a
+  # destination. Off, a record gets its _org_id alone and the default
+  # destination. Independent of authentication. DFE_RECEIVER_ENRICH overrides it.
+  enrich: true
   # source_to_topic:
   #   auth: "logs_auth"
   dlq:

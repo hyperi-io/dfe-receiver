@@ -3514,7 +3514,7 @@ mod tests {
     #[tokio::test]
     async fn with_the_common_header_off_no_receive_time_is_written() {
         let mut config = test_config();
-        config.server.auth.include_common_header = false;
+        config.routing.enrich = false;
         let state = test_state_with(config).await;
 
         let record = routed(&state, "{}");
@@ -3542,14 +3542,14 @@ mod tests {
 
         // Disable enrichment via reload
         let mut new_config = test_config();
-        new_config.server.auth.include_common_header = false;
+        new_config.routing.enrich = false;
         state.reload_config(new_config).await.unwrap();
 
         assert!(routed(&state, "{}").get(routing::RECEIVED_FIELD).is_none());
 
         // Re-enable via another reload
         let mut re_enable = test_config();
-        re_enable.server.auth.include_common_header = true;
+        re_enable.routing.enrich = true;
         state.reload_config(re_enable).await.unwrap();
 
         assert!(routed(&state, "{}").get(routing::RECEIVED_FIELD).is_some());

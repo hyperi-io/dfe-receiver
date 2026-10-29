@@ -589,7 +589,7 @@ async fn test_http_ingest_refuses_an_ndjson_line_that_is_a_scalar() {
 async fn test_http_ingest_adds_no_source_when_enrichment_is_disabled() {
     let (loader_endpoint, loader) = crate::common::grpc_destination().await;
     let mut config = kvproof_config(loader_endpoint);
-    config.server.auth.include_common_header = false;
+    config.routing.enrich = false;
     let (addr, shutdown) = start_receiver_http(config).await;
 
     let response = reqwest::Client::new()

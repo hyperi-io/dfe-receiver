@@ -195,7 +195,6 @@ server:
     enabled: false
   auth:
     mode: "none"
-    include_common_header: true
 
 grpc:
   enabled: false
