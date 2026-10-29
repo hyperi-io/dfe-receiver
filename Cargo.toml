@@ -269,5 +269,7 @@ dbg_macro = "deny"
 module_name_repetitions = "allow"
 # #[must_use] goes where dropping the value is a bug, not on every pure function.
 must_use_candidate = "allow"
+# Two scalo structs are built with `..default`, so a field scalo adds does not break the build.
+needless_update = "allow"
 
 

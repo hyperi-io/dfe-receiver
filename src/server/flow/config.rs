@@ -21,17 +21,14 @@ use crate::config::IpFilterConfig;
 /// Raw record retention is no longer a mode. It is
 /// `flow.raw_capture.enabled`, which composes with either shape and writes
 /// the common-header `_raw` field like every other transport.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputMode {
+    #[default]
     Canonical,
     Exploded,
-}
-
-impl Default for OutputMode {
-    fn default() -> Self {
-        OutputMode::Canonical
-    }
 }
 
 impl OutputMode {
