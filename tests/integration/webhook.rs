@@ -21,6 +21,7 @@ use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use aws_lc_rs::hmac;
 use dfe_receiver::config::{
     Config, SharedConfig, WebhookAuthConfig, WebhookAuthMode, WebhookBody, WebhookCallerConfig,
 };
@@ -29,7 +30,6 @@ use dfe_receiver::pipeline::PipelineState;
 use dfe_receiver::server::http::HttpHandler;
 use dfe_receiver::server::traits::ProtocolHandler;
 use dfe_receiver::server::webhook::WebhookHandler;
-use ring::hmac;
 use scalo::memory::{MemoryGuard, MemoryGuardConfig, UsageSource};
 use tempfile::NamedTempFile;
 use tokio_util::sync::CancellationToken;

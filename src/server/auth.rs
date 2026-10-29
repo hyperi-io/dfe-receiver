@@ -29,13 +29,13 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
+use aws_lc_rs::digest;
 use axum::body::Body;
 use axum::extract::{ConnectInfo, State};
 use axum::http::{Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use parking_lot::RwLock;
-use ring::digest;
 use scalo::SensitiveString;
 use scalo::logger::log_debounced;
 use scalo::logger::security::{self, SecurityEvent, SecurityOutcome};

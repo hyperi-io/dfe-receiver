@@ -767,12 +767,13 @@ async fn test_webhook_hmac_secret_from_openbao() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, b"openbao-held-signing-secret");
+    let key =
+        aws_lc_rs::hmac::Key::new(aws_lc_rs::hmac::HMAC_SHA256, b"openbao-held-signing-secret");
     let mut message = ts.to_string().into_bytes();
     message.push(b'.');
     message.extend_from_slice(body);
     let signature =
-        ring::hmac::sign(&key, &message)
+        aws_lc_rs::hmac::sign(&key, &message)
             .as_ref()
             .iter()
             .fold(String::new(), |mut out, b| {
