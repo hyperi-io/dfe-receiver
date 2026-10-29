@@ -3,6 +3,15 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.15.60](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.59...v1.15.60) (2026-10-29)
+
+### Bug Fixes
+
+* 2.2.2 round on scalo 2.14.22 ([#227](https://github.com/hyperi-io/dfe-receiver/issues/227)) ([d55ffcb](https://github.com/hyperi-io/dfe-receiver/commit/d55ffcbc74cfa7a98ef0a08d9f7600faf5cafe46))
+* bring the clippy config to the baseline ([#226](https://github.com/hyperi-io/dfe-receiver/issues/226)) ([869f77d](https://github.com/hyperi-io/dfe-receiver/commit/869f77d2de6e95823bc359ef6177a620acbf3629))
+* build the PGO driver before the workload clock starts ([#228](https://github.com/hyperi-io/dfe-receiver/issues/228)) ([5a3ac81](https://github.com/hyperi-io/dfe-receiver/commit/5a3ac8114b771b4ec2dd4daf7d560f4c5b9eb618)), closes [#227](https://github.com/hyperi-io/dfe-receiver/issues/227)
+* retry a test receiver whose port was taken before it bound ([#225](https://github.com/hyperi-io/dfe-receiver/issues/225)) ([eea392d](https://github.com/hyperi-io/dfe-receiver/commit/eea392d47bedf5bf307472f3a6558cb05137620b))
+
 ## [1.15.59](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.58...v1.15.59) (2026-10-28)
 
 ### Bug Fixes
