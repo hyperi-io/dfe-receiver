@@ -44,8 +44,15 @@
 //! - 3: delivery gate failed
 
 #![allow(clippy::expect_used)] // A workload driver: a setup failure should stop the run.
+#![allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "workload counts, rates and timestamps stay inside the target ranges"
+)]
 
 use std::env;
+use std::fmt::Write as _;
 use std::io::Write as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -62,7 +69,7 @@ use tokio::time::{MissedTickBehavior, interval};
 /// Elastic-shipped events, one per line: see `tests/fixtures/pgo/README.md`.
 const BEATS_EVENTS: &str = include_str!("../../tests/fixtures/pgo/beats-events.ndjson");
 
-/// NetFlow datagrams as exporters emit them: v5, and v9 carrying its templates.
+/// `NetFlow` datagrams as exporters emit them: v5, and v9 carrying its templates.
 const NETFLOW_DATAGRAMS: [&[u8]; 3] = [
     include_bytes!("../../tests/fixtures/flow/external/telegraf-netflow-v5.bin"),
     include_bytes!("../../tests/fixtures/flow/external/telegraf-netflow-v9.bin"),
@@ -382,13 +389,14 @@ impl Stats {
     fn report(&self) {
         let mut line = format!("pgo-driver [{:>6.1}s]", self.start.elapsed().as_secs_f64());
         for c in self.all() {
-            line.push_str(&format!(
+            let _ = write!(
+                line,
                 " {}={}/{}/{}",
                 c.name,
                 c.ok.load(Ordering::Relaxed),
                 c.rejected.load(Ordering::Relaxed),
                 c.failed.load(Ordering::Relaxed),
-            ));
+            );
         }
         println!("{line} (ok/rejected/failed)");
     }

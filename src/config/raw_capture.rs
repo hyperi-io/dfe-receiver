@@ -54,19 +54,16 @@ use serde::{Deserialize, Serialize};
 pub const DEFAULT_MAX_BYTES: usize = 64 * 1024;
 
 /// What to do with a payload larger than `max_bytes`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum OversizePolicy {
     /// Keep the leading `max_bytes` and flag it with `_raw_truncated: true`.
+    #[default]
     Truncate,
     /// Emit no `_raw` at all for this event.
     Omit,
-}
-
-impl Default for OversizePolicy {
-    fn default() -> Self {
-        Self::Truncate
-    }
 }
 
 impl OversizePolicy {

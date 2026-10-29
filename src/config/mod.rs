@@ -2639,7 +2639,7 @@ impl std::fmt::Debug for SaslConfig {
 }
 
 /// Kafka TLS configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct KafkaTlsConfig {
     /// Enable TLS for Kafka.
@@ -2653,17 +2653,6 @@ pub struct KafkaTlsConfig {
 
     /// Client key file.
     pub key_file: Option<String>,
-}
-
-impl Default for KafkaTlsConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            ca_file: None,
-            cert_file: None,
-            key_file: None,
-        }
-    }
 }
 
 /// dfe-loader connection configuration.

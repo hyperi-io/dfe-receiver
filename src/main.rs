@@ -61,11 +61,11 @@ struct App {
 impl ServiceApp for App {
     type Config = Config;
 
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "dfe-receiver"
     }
 
-    fn env_prefix(&self) -> &str {
+    fn env_prefix(&self) -> &'static str {
         "DFE_RECEIVER"
     }
 
