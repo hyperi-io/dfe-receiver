@@ -126,7 +126,6 @@ async fn fluent_fails_when_its_port_is_taken() {
 
     let handler = FluentHandler::new(
         config.fluent.clone(),
-        config.raw_capture_for(&config.fluent.raw_capture),
         pipeline_for(&config).await,
         metrics(),
     );
@@ -140,12 +139,7 @@ async fn gelf_fails_when_its_port_is_taken() {
     config.gelf.enabled = true;
     config.gelf.bind_address = held.addr().to_string();
 
-    let handler = GelfHandler::new(
-        config.gelf.clone(),
-        config.raw_capture_for(&config.gelf.raw_capture),
-        pipeline_for(&config).await,
-        metrics(),
-    );
+    let handler = GelfHandler::new(config.gelf.clone(), pipeline_for(&config).await, metrics());
     assert_fails_naming(Box::new(handler), "GELF").await;
 }
 
@@ -247,12 +241,7 @@ async fn otlp_handler(grpc: &str, http: &str) -> OtlpHandler {
     config.otlp.grpc_bind_address = grpc.to_string();
     config.otlp.http_bind_address = http.to_string();
     config.otlp.auth.mode = "none".to_string();
-    OtlpHandler::new(
-        config.otlp.clone(),
-        config.raw_capture_for(&config.otlp.raw_capture),
-        pipeline_for(&config).await,
-        metrics(),
-    )
+    OtlpHandler::new(config.otlp.clone(), pipeline_for(&config).await, metrics())
 }
 
 #[cfg(feature = "otlp")]

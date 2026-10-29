@@ -434,7 +434,7 @@ async fn event_handler(
     // Amortises backpressure check and memory tracking across all events.
     let mut payloads = Vec::with_capacity(events.len());
     for event in events {
-        let json = hec_event_to_json(event, state.raw_capture).map_err(|e| {
+        let json = hec_event_to_json(event).map_err(|e| {
             state.metrics.inc_requests_error("splunk_hec");
             HecError::conversion_failed(&e)
         })?;

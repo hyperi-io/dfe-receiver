@@ -361,12 +361,7 @@ async fn remote_write_answers_503_when_part_of_a_write_is_not_taken() {
     config.prometheus_rw.auth.mode = "none".to_string();
     let pipeline = refusing_bus(&config).await;
     let metrics = Arc::new(Metrics::default());
-    let handler = PrometheusRwHandler::new(
-        config.prometheus_rw.clone(),
-        config.raw_capture_for(&config.prometheus_rw.raw_capture),
-        pipeline,
-        metrics.clone(),
-    );
+    let handler = PrometheusRwHandler::new(config.prometheus_rw.clone(), pipeline, metrics.clone());
     let (addrs, shutdown) = serve(handler).await;
 
     let series = |name: &str| rw_proto::TimeSeries {
@@ -490,12 +485,7 @@ mod otlp {
         config.otlp.auth.mode = "none".to_string();
         let pipeline = refusing_bus(&config).await;
         let metrics = Arc::new(Metrics::default());
-        let handler = OtlpHandler::new(
-            config.otlp.clone(),
-            config.raw_capture_for(&config.otlp.raw_capture),
-            pipeline,
-            metrics.clone(),
-        );
+        let handler = OtlpHandler::new(config.otlp.clone(), pipeline, metrics.clone());
         let (addrs, shutdown) = serve(handler).await;
         (addrs, shutdown, metrics)
     }
@@ -739,12 +729,7 @@ async fn fluent_withholds_the_ack_for_a_chunk_it_could_not_take() {
     fluent_config(&mut config);
     let pipeline = pressured(&config).await;
     let metrics = Arc::new(Metrics::default());
-    let handler = FluentHandler::new(
-        config.fluent.clone(),
-        config.raw_capture_for(&config.fluent.raw_capture),
-        pipeline,
-        metrics.clone(),
-    );
+    let handler = FluentHandler::new(config.fluent.clone(), pipeline, metrics.clone());
     let (addrs, shutdown) = serve(handler).await;
 
     let mut stream = TcpStream::connect(addrs[0]).await.unwrap();
@@ -859,12 +844,7 @@ async fn gelf_tcp_holds_a_message_until_the_pipeline_takes_it() {
     config.gelf.tls.enabled = false;
     let pipeline = pressured(&config).await;
     let metrics = Arc::new(Metrics::default());
-    let handler = GelfHandler::new(
-        config.gelf.clone(),
-        config.raw_capture_for(&config.gelf.raw_capture),
-        pipeline.clone(),
-        metrics.clone(),
-    );
+    let handler = GelfHandler::new(config.gelf.clone(), pipeline.clone(), metrics.clone());
     let (addrs, shutdown) = serve(handler).await;
 
     let marker = "held-gelf-message";
@@ -890,12 +870,7 @@ async fn fluent_without_chunk_holds_a_message_until_the_pipeline_takes_it() {
     fluent_config(&mut config);
     let pipeline = pressured(&config).await;
     let metrics = Arc::new(Metrics::default());
-    let handler = FluentHandler::new(
-        config.fluent.clone(),
-        config.raw_capture_for(&config.fluent.raw_capture),
-        pipeline.clone(),
-        metrics.clone(),
-    );
+    let handler = FluentHandler::new(config.fluent.clone(), pipeline.clone(), metrics.clone());
     let (addrs, shutdown) = serve(handler).await;
 
     let marker = "held-fluent-message";

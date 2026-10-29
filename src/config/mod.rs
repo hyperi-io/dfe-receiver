@@ -83,8 +83,9 @@ pub struct Config {
     pub webhook: WebhookConfig,
 
     /// Common raw-payload capture default, inherited by every transport that
-    /// supports capture. Per-transport `raw_capture:` blocks override it
-    /// field by field. See [`raw_capture`].
+    /// carries raw data: syslog, the Splunk HEC `/raw` endpoint and flow.
+    /// Per-transport `raw_capture:` blocks override it field by field. See
+    /// [`raw_capture`].
     pub raw_capture: RawCaptureConfig,
 
     /// Validation rules.
@@ -1027,26 +1028,17 @@ impl ApplyFlatEnv for Config {
             self.webhook.bind_address = Some(v);
         }
 
-        // Raw capture -- common block, then one override per capturing
-        // transport. Both levels are reachable from the environment so a
-        // container can turn capture on for a single transport without
-        // shipping a config file.
+        // Raw capture -- common block, then one override per transport that
+        // carries raw data (syslog, the Splunk HEC raw endpoint, flow). Both
+        // levels are reachable from the environment so a container can turn
+        // capture on for a single transport without shipping a config file.
         apply_raw_capture_env(&mut self.raw_capture, prefix, "RAW_CAPTURE");
-        #[cfg(feature = "otlp")]
-        apply_raw_capture_env(&mut self.otlp.raw_capture, prefix, "OTLP_RAW_CAPTURE");
         apply_raw_capture_env(
             &mut self.splunk_hec.raw_capture,
             prefix,
             "SPLUNK_HEC_RAW_CAPTURE",
         );
         apply_raw_capture_env(&mut self.syslog.raw_capture, prefix, "SYSLOG_RAW_CAPTURE");
-        apply_raw_capture_env(
-            &mut self.prometheus_rw.raw_capture,
-            prefix,
-            "PROMETHEUS_RW_RAW_CAPTURE",
-        );
-        apply_raw_capture_env(&mut self.fluent.raw_capture, prefix, "FLUENT_RAW_CAPTURE");
-        apply_raw_capture_env(&mut self.gelf.raw_capture, prefix, "GELF_RAW_CAPTURE");
         apply_raw_capture_env(&mut self.flow.raw_capture, prefix, "FLOW_RAW_CAPTURE");
     }
 }
@@ -1486,13 +1478,6 @@ pub struct OtlpConfig {
     /// Authentication configuration for OTLP endpoints.
     pub auth: AuthConfig,
 
-    /// Raw-payload capture override (inherits the common `raw_capture` block).
-    ///
-    /// OTLP arrives as protobuf, so `_raw` carries the `generic`-mode
-    /// rendering of the record -- the least-shaped decode we produce. In
-    /// `generic` mode it is therefore a copy of the event itself.
-    pub raw_capture: RawCaptureConfig,
-
     /// Largest decoded export the gRPC endpoint takes, in bytes.
     pub max_message_size: usize,
 
@@ -1520,7 +1505,6 @@ impl Default for OtlpConfig {
             grpc_bind_address: "0.0.0.0:4317".to_string(),
             http_bind_address: "0.0.0.0:4318".to_string(),
             mode: "hyperdx".to_string(),
-            raw_capture: RawCaptureConfig::default(),
             tls: TlsConfig::default(),
             auth: AuthConfig {
                 mode: "none".to_string(),
@@ -1605,9 +1589,9 @@ pub struct SplunkHecConfig {
 
     /// Raw-payload capture override (inherits the common `raw_capture` block).
     ///
-    /// On `/services/collector/event`, `_raw` carries the submitted `event`
-    /// value before HEC metadata is merged in. On `/services/collector/raw`
-    /// it carries the original line bytes.
+    /// Applies to `/services/collector/raw`, where `_raw` carries the original
+    /// line bytes. An `/event` payload is JSON, which the loader keeps whole in
+    /// `_json`, so it is never copied into `_raw`.
     pub raw_capture: RawCaptureConfig,
 
     /// Answer a request only once every destination confirmed its events
@@ -1720,13 +1704,6 @@ pub struct PrometheusRwConfig {
     /// Authentication configuration.
     pub auth: AuthConfig,
 
-    /// Raw-payload capture override (inherits the common `raw_capture` block).
-    ///
-    /// Remote Write arrives as snappy-framed protobuf, so `_raw` carries the
-    /// `native`-mode rendering of the sample -- the least-shaped decode we
-    /// produce. In `native` mode it is therefore a copy of the event itself.
-    pub raw_capture: RawCaptureConfig,
-
     /// Answer a write only once every destination confirmed its samples
     /// (default on). Off answers once they are queued.
     pub acknowledgements: AcknowledgementsConfig,
@@ -1738,7 +1715,6 @@ impl Default for PrometheusRwConfig {
             enabled: false,
             bind_address: "0.0.0.0:9091".to_string(),
             mode: "native".to_string(),
-            raw_capture: RawCaptureConfig::default(),
             max_body_size: 10 * 1024 * 1024,
             request_timeout_ms: 30_000,
             tls: TlsConfig::default(),
@@ -1780,13 +1756,6 @@ pub struct FluentConfig {
     /// `tls.client_auth` is `required`.
     pub accept_unauthenticated: bool,
 
-    /// Raw-payload capture override (inherits the common `raw_capture` block).
-    ///
-    /// Forward arrives as msgpack, so `_raw` carries the record's verbatim
-    /// msgpack-to-JSON decode, before the tag, timestamp and `_source` this
-    /// handler adds.
-    pub raw_capture: RawCaptureConfig,
-
     /// Acknowledge a chunk, or read past a message without one, only once
     /// every destination confirmed its records (default on). Off does so once
     /// they are queued.
@@ -1801,7 +1770,6 @@ impl Default for FluentConfig {
             max_message_size: 32 * 1024 * 1024,
             tls: TlsConfig::default(),
             accept_unauthenticated: false,
-            raw_capture: RawCaptureConfig::default(),
             acknowledgements: AcknowledgementsConfig::default(),
         }
     }
@@ -1835,12 +1803,6 @@ pub struct GelfConfig {
     /// reach the port. Without it, an enabled listener refuses to start unless
     /// `tls.client_auth` is `required`.
     pub accept_unauthenticated: bool,
-
-    /// Raw-payload capture override (inherits the common `raw_capture` block).
-    ///
-    /// `_raw` holds the GELF message exactly as it arrived, before the
-    /// `message`, `severity` and `_source` fields this handler derives.
-    pub raw_capture: RawCaptureConfig,
 }
 
 impl Default for GelfConfig {
@@ -1851,7 +1813,6 @@ impl Default for GelfConfig {
             max_message_size: 1024 * 1024,
             tls: TlsConfig::default(),
             accept_unauthenticated: false,
-            raw_capture: RawCaptureConfig::default(),
         }
     }
 }
@@ -4934,7 +4895,7 @@ kafka:
                 // Only the named transport is switched on; the rest still inherit
                 // the common block, which is still off.
                 assert!(config.raw_capture_for(&config.syslog.raw_capture).enabled);
-                assert!(!config.raw_capture_for(&config.gelf.raw_capture).enabled);
+                assert!(!config.raw_capture_for(&config.flow.raw_capture).enabled);
             },
         );
     }
@@ -4944,14 +4905,14 @@ kafka:
         with_env(
             &[
                 ("DFE_RECEIVER_RAW_CAPTURE_ENABLED", "true"),
-                ("DFE_RECEIVER_GELF_RAW_CAPTURE_ENABLED", "false"),
+                ("DFE_RECEIVER_FLOW_RAW_CAPTURE_ENABLED", "false"),
             ],
             || {
                 let mut config = Config::default();
                 config.apply_flat_env(ENV_PREFIX);
 
                 assert!(config.raw_capture_for(&config.syslog.raw_capture).enabled);
-                assert!(!config.raw_capture_for(&config.gelf.raw_capture).enabled);
+                assert!(!config.raw_capture_for(&config.flow.raw_capture).enabled);
             },
         );
     }

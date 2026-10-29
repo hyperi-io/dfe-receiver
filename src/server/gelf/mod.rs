@@ -26,7 +26,7 @@ use tokio_util::codec::{Decoder, FramedRead};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use crate::config::{GelfConfig, RawCapture};
+use crate::config::GelfConfig;
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::{Acks, PipelineState};
@@ -125,7 +125,6 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
     shutdown: CancellationToken,
     peer_addr: SocketAddr,
     max_message_size: usize,
-    raw_capture: RawCapture,
 ) {
     use tokio_stream::StreamExt;
 
@@ -143,7 +142,7 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
                         metrics.inc_requests_total("gelf");
                         metrics.add_bytes_received("gelf", raw.len() as u64);
 
-                        match gelf_to_json(&raw, raw_capture) {
+                        match gelf_to_json(&raw) {
                             Ok(payload) => {
                                 let held = [payload];
                                 if !hold_until_settled(&pipeline, &held, &metrics, "gelf", &shutdown, &Acks::at_enqueue(), &Ingest::built(Principal::Listener(TRANSPORT), convert::SOURCE)).await {
@@ -184,7 +183,6 @@ async fn run_tcp(
     shutdown: CancellationToken,
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
     max_message_size: usize,
-    raw_capture: RawCapture,
     ip_filter: IpFilter,
     bound: BoundAddr,
 ) -> Result<()> {
@@ -248,7 +246,7 @@ async fn run_tcp(
 
                         handle_tcp_connection(
                             tls_stream, pipeline, metrics, conn_shutdown, peer_addr,
-                            max_message_size, raw_capture,
+                            max_message_size,
                         ).await;
                     });
                 } else {
@@ -256,7 +254,7 @@ async fn run_tcp(
                         let _open = open;
                         handle_tcp_connection(
                             stream, pipeline, metrics, conn_shutdown, peer_addr,
-                            max_message_size, raw_capture,
+                            max_message_size,
                         ).await;
                     });
                 }
@@ -274,23 +272,15 @@ async fn run_tcp(
 /// GELF protocol handler.
 pub struct GelfHandler {
     config: GelfConfig,
-    /// Raw capture already resolved against the common `raw_capture` block.
-    raw_capture: RawCapture,
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
     bound: BoundAddr,
 }
 
 impl GelfHandler {
-    pub fn new(
-        config: GelfConfig,
-        raw_capture: RawCapture,
-        pipeline: Arc<PipelineState>,
-        metrics: Arc<Metrics>,
-    ) -> Self {
+    pub fn new(config: GelfConfig, pipeline: Arc<PipelineState>, metrics: Arc<Metrics>) -> Self {
         Self {
             config,
-            raw_capture,
             pipeline,
             metrics,
             bound: BoundAddr::default(),
@@ -345,7 +335,6 @@ impl ProtocolHandler for GelfHandler {
             shutdown,
             tls_acceptor,
             max_msg,
-            self.raw_capture,
             ip_filter,
             self.bound.clone(),
         )

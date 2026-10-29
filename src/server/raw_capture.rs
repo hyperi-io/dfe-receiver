@@ -11,7 +11,7 @@
 //! Two entry points, matching the two shapes the transports already build:
 //!
 //! - [`attach_to_map`] for the handlers that assemble a `serde_json::Map`
-//!   (syslog, GELF, fluent, Splunk HEC, OTLP, Prometheus RW).
+//!   (syslog, the Splunk HEC raw endpoint).
 //! - [`append_to_json_buf`] for the byte-buffer writers (flow), which append
 //!   `,"_raw":"..."` just before the closing brace.
 //!
@@ -33,8 +33,10 @@ use std::borrow::Cow;
 use crate::config::raw_capture::{OversizePolicy, RawCapture};
 
 /// JSON field holding the captured payload. Matches the dfe-schemas common
-/// header column, so dfe-loader's own `_raw` rename sees it already present
-/// and leaves it alone.
+/// header column. The loader never overwrites a `_raw` the record carries, so
+/// what the receiver writes here is stored as it is. Only raw data the source
+/// provided belongs in it (a syslog line, a HEC `/raw` line, a flow record). A
+/// JSON payload lives in `_json` alone.
 pub const RAW_FIELD: &str = "_raw";
 
 /// Set when the tail was dropped to respect `max_bytes`.
@@ -132,23 +134,6 @@ pub fn prepare_str(raw: &str, cfg: RawCapture) -> Option<PreparedRaw> {
     })
 }
 
-/// [`prepare`] for a value that must be serialised to JSON first.
-///
-/// The transports whose wire form is protobuf or msgpack cannot put the bytes
-/// themselves in a text field, so `_raw` carries their least-shaped JSON
-/// decode instead. Deferred rather than attached, because those call sites
-/// snapshot the decode before the surrounding envelope consumes it.
-pub fn prepare_serialised<T: serde::Serialize + ?Sized>(
-    source: &T,
-    cfg: RawCapture,
-) -> Result<Option<PreparedRaw>, serde_json::Error> {
-    if !cfg.enabled {
-        return Ok(None);
-    }
-    let verbatim = serde_json::to_vec(source)?;
-    Ok(prepare(&verbatim, cfg))
-}
-
 /// Write `_raw` (and its markers) into a JSON object under construction.
 ///
 /// A no-op when capture is off or the payload is omitted. An `_raw` the
@@ -176,10 +161,7 @@ pub fn attach_str_to_map(
 }
 
 /// Write an already-prepared capture into a JSON object.
-///
-/// Used directly by the transports whose "raw" is a re-serialised decode
-/// (OTLP, Prometheus RW, fluent) rather than wire bytes.
-pub fn attach_prepared_to_map(
+fn attach_prepared_to_map(
     obj: &mut serde_json::Map<String, serde_json::Value>,
     prepared: PreparedRaw,
 ) {
