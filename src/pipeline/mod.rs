@@ -567,7 +567,9 @@ pub struct PipelineState {
 impl PipelineState {
     /// Create pipeline state with no governor and no injected memory guard, so
     /// it builds its own guard from `buffer.memory_limit` and
-    /// `buffer.pressure_threshold`.
+    /// `buffer.pressure_threshold`. That guard counts only the bytes this
+    /// pipeline reserves, so how busy the host is never decides whether a test
+    /// is refused.
     ///
     /// Only tests take this path: production always injects the runtime's
     /// guard through [`with_governor`](Self::with_governor), with
@@ -639,7 +641,14 @@ impl PipelineState {
                 if (config.buffer.pressure_threshold - 0.8).abs() > f64::EPSILON {
                     mg_config.pressure_threshold = config.buffer.pressure_threshold;
                 }
-                (Arc::new(MemoryGuard::new(mg_config)), None)
+                // Usage is this pipeline's own reservations. The detected
+                // source reads the cgroup or host, so a test would trip the
+                // guard whenever the machine it ran on was busy.
+                let guard = MemoryGuard::with_usage_source(
+                    mg_config,
+                    scalo::memory::UsageSource::Reservations,
+                );
+                (Arc::new(guard), None)
             }
         };
 
@@ -2352,6 +2361,16 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    /// A pipeline built without an injected guard counts only its own
+    /// reservations. A guard on the detected cgroup or host usage would refuse
+    /// records whenever the machine running the test was busy.
+    #[tokio::test]
+    async fn a_pipeline_without_an_injected_guard_ignores_host_memory() {
+        let state = test_state().await;
+        assert_eq!(state.memory_guard.current_bytes(), 0);
+        assert!(!state.should_apply_backpressure());
     }
 
     /// The acknowledgement setting a listener with acks on gets.
