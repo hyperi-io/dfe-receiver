@@ -146,96 +146,7 @@ pub fn contract() -> DeploymentContract {
         hot_paths: vec!["rules".into(), "ingest_bindings".into()],
         entrypoint_args: vec!["--config".into(), "/etc/dfe-receiver/config.yaml".into()],
         secrets: secrets(),
-        default_config: Some(serde_json::json!({
-            "server": {
-                "bind_address": "0.0.0.0:8080",
-                "max_body_size": 10_485_760,
-                "request_timeout_ms": 30_000,
-                "auth": { "mode": "none" }
-            },
-            "grpc": {
-                "enabled": false,
-                "bind_address": "0.0.0.0:6000"
-            },
-            "otlp": {
-                "enabled": false,
-                "grpc_bind_address": "0.0.0.0:4317",
-                "http_bind_address": "0.0.0.0:4318",
-                "mode": "hyperdx"
-            },
-            "lumberjack": {
-                "enabled": false,
-                "bind_address": "0.0.0.0:5044"
-            },
-            "splunk_hec": {
-                "enabled": false,
-                "bind_address": "0.0.0.0:8088"
-            },
-            "prometheus_rw": {
-                "enabled": false,
-                "bind_address": "0.0.0.0:9091"
-            },
-            "webhook": {
-                "enabled": false,
-                "bind_address": "0.0.0.0:8090"
-            },
-            "syslog": {
-                "enabled": false,
-                "udp_bind_address": "0.0.0.0:514",
-                "tcp_bind_address": "0.0.0.0:514",
-                "tls_bind_address": "0.0.0.0:6514"
-            },
-            "fluent": {
-                "enabled": false,
-                "bind_address": "0.0.0.0:24224"
-            },
-            "gelf": {
-                "enabled": false,
-                "bind_address": "0.0.0.0:12201"
-            },
-            "flow": {
-                "enabled": false,
-                "experimental": true,
-                "bind_address": "0.0.0.0",
-                "ports": [2055, 4739, 6343],
-                "output": {
-                    "mode": "canonical",
-                    "max_records_per_packet": 200
-                },
-                "channel_capacity": 4096,
-                "recv_buffer_bytes": 8_388_608,
-                "rate_limit": {
-                    "enabled": false,
-                    "packets_per_second": 5000,
-                    "burst": 10000,
-                    "cache_size": 4096
-                },
-                "netflow": {
-                    "enabled": true,
-                    "template_cache": {
-                        "max_per_exporter": 1000,
-                        "max_exporters": 10000
-                    },
-                    "topic": "netflow_land"
-                },
-                "sflow": {
-                    "enabled": true,
-                    "topic": "sflow_land"
-                }
-            },
-            "kafka": {
-                "brokers": ["kafka:9092"],
-                "client_id": "dfe-receiver"
-            },
-            "routing": {
-                "default_source": "main",
-                "topic_suffix": "_land"
-            },
-            "metrics": {
-                "enabled": true,
-                "address": "0.0.0.0:9090"
-            }
-        })),
+        default_config: default_config(),
         depends_on: vec!["kafka".into()],
         schema_version: CONTRACT_SCHEMA_VERSION,
         oci_labels: OciLabels {
@@ -292,6 +203,103 @@ pub fn contract() -> DeploymentContract {
         security: SecurityContract::default(),
         singleton: false,
         service_account: ServiceAccount::Own,
+    }
+}
+
+/// The config keys the contract advertises as the deployment default. Each
+/// value is read from `Config::default()`, so the two cannot drift.
+const DEFAULT_CONFIG_KEYS: [&str; 48] = [
+    "/server/bind_address",
+    "/server/max_body_size",
+    "/server/request_timeout_ms",
+    "/server/auth/mode",
+    "/grpc/enabled",
+    "/grpc/bind_address",
+    "/otlp/enabled",
+    "/otlp/grpc_bind_address",
+    "/otlp/http_bind_address",
+    "/otlp/mode",
+    "/lumberjack/enabled",
+    "/lumberjack/bind_address",
+    "/splunk_hec/enabled",
+    "/splunk_hec/bind_address",
+    "/prometheus_rw/enabled",
+    "/prometheus_rw/bind_address",
+    "/webhook/enabled",
+    "/syslog/enabled",
+    "/syslog/udp_bind_address",
+    "/syslog/tcp_bind_address",
+    "/syslog/tls_bind_address",
+    "/fluent/enabled",
+    "/fluent/bind_address",
+    "/gelf/enabled",
+    "/gelf/bind_address",
+    "/flow/enabled",
+    "/flow/experimental",
+    "/flow/bind_address",
+    "/flow/ports",
+    "/flow/output/mode",
+    "/flow/output/max_records_per_packet",
+    "/flow/channel_capacity",
+    "/flow/recv_buffer_bytes",
+    "/flow/rate_limit/enabled",
+    "/flow/rate_limit/packets_per_second",
+    "/flow/rate_limit/burst",
+    "/flow/rate_limit/cache_size",
+    "/flow/netflow/enabled",
+    "/flow/netflow/template_cache/max_per_exporter",
+    "/flow/netflow/template_cache/max_exporters",
+    "/flow/netflow/topic",
+    "/flow/sflow/enabled",
+    "/flow/sflow/topic",
+    "/kafka/client_id",
+    "/routing/default_source",
+    "/routing/topic_suffix",
+    "/metrics/enabled",
+    "/metrics/address",
+];
+
+/// The deployment default config: [`DEFAULT_CONFIG_KEYS`] from
+/// `Config::default()`, plus the two values a deployment decides. The app has
+/// no default broker, and it serves the webhook on the HTTP listener unless
+/// `webhook.bind_address` gives it its own, which the chart exposes on 8090.
+///
+/// `None` when `Config::default()` does not serialise or a listed key is not in
+/// it, which the contract tests refuse.
+fn default_config() -> Option<serde_json::Value> {
+    let defaults = serde_json::to_value(crate::config::Config::default()).ok()?;
+    let mut config = serde_json::Value::Object(serde_json::Map::new());
+    for pointer in DEFAULT_CONFIG_KEYS {
+        set_at(&mut config, pointer, defaults.pointer(pointer)?.clone());
+    }
+    set_at(
+        &mut config,
+        "/kafka/brokers",
+        serde_json::json!(["kafka:9092"]),
+    );
+    set_at(
+        &mut config,
+        "/webhook/bind_address",
+        serde_json::json!("0.0.0.0:8090"),
+    );
+    Some(config)
+}
+
+/// Set `value` at the JSON pointer `pointer` in `root`, creating the objects on the way.
+fn set_at(root: &mut serde_json::Value, pointer: &str, value: serde_json::Value) {
+    let mut node = root;
+    let mut keys = pointer.trim_start_matches('/').split('/').peekable();
+    while let Some(key) = keys.next() {
+        let Some(object) = node.as_object_mut() else {
+            return;
+        };
+        if keys.peek().is_none() {
+            object.insert(key.to_owned(), value);
+            return;
+        }
+        node = object
+            .entry(key.to_owned())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
     }
 }
 
@@ -398,6 +406,37 @@ mod tests {
         assert_eq!(c.config_mount_path, "/etc/dfe-receiver/config.yaml");
         assert_eq!(c.config_filename(), "config.yaml");
         assert_eq!(c.config_dir(), "/etc/dfe-receiver");
+    }
+
+    /// The advertised default is the app's own default plus the in-cluster
+    /// broker and the webhook's own listener, and it loads and validates as a config file. A key the contract
+    /// hand-wrote would differ from `Config::default()` here.
+    #[test]
+    fn the_default_config_is_the_apps_default_and_loads() {
+        let advertised = contract().default_config.expect("default_config");
+        let defaults = serde_json::to_value(crate::config::Config::default()).expect("config");
+
+        let mut differing = Vec::new();
+        let mut stack = vec![(String::new(), &advertised)];
+        while let Some((path, node)) = stack.pop() {
+            match node {
+                serde_json::Value::Object(map) => {
+                    stack.extend(map.iter().map(|(k, v)| (format!("{path}/{k}"), v)));
+                }
+                leaf if defaults.pointer(&path) != Some(leaf) => differing.push(path),
+                _ => {}
+            }
+        }
+        differing.sort();
+        assert_eq!(differing, ["/kafka/brokers", "/webhook/bind_address"]);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("config.yaml");
+        std::fs::write(&file, serde_json::to_string(&advertised).expect("json")).expect("write");
+        let config = crate::config::Config::load_from_file(file.to_str().expect("utf-8"))
+            .expect("the default config loads");
+        config.validate().expect("the default config validates");
+        assert_eq!(config.kafka.brokers, ["kafka:9092"]);
     }
 
     #[test]
