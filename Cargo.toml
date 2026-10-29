@@ -25,7 +25,7 @@ doctest = false
 # in .hyperi-ci.yaml: the library renders only the contract version its scalo
 # release writes. The contract carries no vendor defaults, so the app names its
 # own.
-scalo = { version = "2.14.20", features = [
+scalo = { version = "2.14.22", features = [
     "config",
     "config-reload",
     "config-schema",
@@ -204,7 +204,7 @@ sha2 = ">=0.11.1, <0.12"
 # transport-grpc-vector-compat is test-only: it gives VectorCompatClient, the
 # same PushEvents client dfe-fetcher and Vector use, so the gRPC ingest path can
 # be driven in-process. Dev-dep features do not reach a release build.
-scalo = { version = "2.14.20", features = [
+scalo = { version = "2.14.22", features = [
     "deployment-test-support",
     "transport-grpc-vector-compat",
 ] }

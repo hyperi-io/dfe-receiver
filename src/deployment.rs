@@ -14,10 +14,9 @@
 //! chart.
 
 use scalo::deployment::{
-    CONTRACT_SCHEMA_VERSION, DeploymentContract, HealthContract, ImageProfile, KafkaLagTrigger,
-    KedaConfig, KedaContract, NativeDepsContract, OciLabels, PortCondition, PortContract,
-    ResourceList, ResourcesContract, SecretEnvContract, SecretGroupContract, SecurityContract,
-    ServiceAccount, WritablePath, base_image_from_cascade,
+    DeploymentContract, HealthContract, ImageProfile, KafkaLagTrigger, KedaConfig, KedaContract,
+    NativeDepsContract, OciLabels, PortCondition, PortContract, ResourceList, ResourcesContract,
+    SecretEnvContract, SecretGroupContract, WritablePath, base_image_from_cascade,
 };
 
 use crate::config::{DEFAULT_DLQ_FILE_PATH, DEFAULT_SPILLOVER_PATH};
@@ -141,14 +140,12 @@ pub fn contract() -> DeploymentContract {
                 .bound_from("flow.bind_address")
                 .public(),
         ],
-        unbound_listen_paths: vec![],
         // The config reloader rebuilds the router from both, so an edit needs no pod roll.
         hot_paths: vec!["rules".into(), "ingest_bindings".into()],
         entrypoint_args: vec!["--config".into(), "/etc/dfe-receiver/config.yaml".into()],
         secrets: secrets(),
         default_config: default_config(),
         depends_on: vec!["kafka".into()],
-        schema_version: CONTRACT_SCHEMA_VERSION,
         oci_labels: OciLabels {
             title: "dfe-receiver".into(),
             description: "High-performance HTTP/gRPC receiver for PB/s scale data ingestion".into(),
@@ -200,9 +197,7 @@ pub fn contract() -> DeploymentContract {
                 memory: "512Mi".into(),
             },
         },
-        security: SecurityContract::default(),
-        singleton: false,
-        service_account: ServiceAccount::Own,
+        ..DeploymentContract::default()
     }
 }
 
@@ -383,8 +378,12 @@ fn capabilities() -> Vec<scalo::deployment::Capability> {
 /// drift guard call THIS function so there is one source of truth for the
 /// checked-in `Dockerfile`. `None` = no contract-identity labels (those are
 /// stamped by the CI-orchestrated invocation, not this one-off).
-#[must_use]
-pub fn emit_dockerfile() -> String {
+///
+/// # Errors
+///
+/// Returns the contract's validation error: scalo refuses to generate from a
+/// bad contract.
+pub fn emit_dockerfile() -> Result<String, scalo::DeploymentError> {
     scalo::deployment::generate_dockerfile(&contract(), None)
 }
 
@@ -442,7 +441,7 @@ mod tests {
     #[test]
     fn test_contract_carries_reflectable_config() {
         let c = contract();
-        assert_eq!(c.schema_version, CONTRACT_SCHEMA_VERSION);
+        assert_eq!(c.schema_version, scalo::deployment::CONTRACT_SCHEMA_VERSION);
         assert!(c.config_schema.is_some());
         let recv = c
             .capabilities
@@ -875,7 +874,7 @@ mod tests {
 
     #[test]
     fn emit_dockerfile_produces_valid_output() {
-        let dockerfile = emit_dockerfile();
+        let dockerfile = emit_dockerfile().expect("the contract is valid");
         // Base image is cascade-resolved (debian:trixie-slim by default), so
         // assert the FROM line matches the contract's resolved base_image
         // rather than pinning a distro.
@@ -902,7 +901,7 @@ mod tests {
         // licence change in the contract that never got regenerated.
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Dockerfile");
         let on_disk = std::fs::read_to_string(&path).expect("read Dockerfile");
-        let emitted = emit_dockerfile();
+        let emitted = emit_dockerfile().expect("the contract is valid");
         assert_eq!(
             on_disk.trim(),
             emitted.trim(),

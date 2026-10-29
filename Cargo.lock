@@ -3001,19 +3001,11 @@ checksum = "1db0d8f1fc9e62caebd0319e11eaec5822b0186c171568f0480b46a0137f9108"
 dependencies = [
  "base64 0.22.1",
  "evmap",
- "http-body-util",
- "hyper",
- "hyper-rustls",
- "hyper-util",
  "indexmap 2.14.2",
- "ipnet",
  "metrics",
  "metrics-util",
  "quanta",
- "rustls",
  "thiserror 2.0.21",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -4721,9 +4713,9 @@ dependencies = [
 
 [[package]]
 name = "scalo"
-version = "2.14.21"
+version = "2.14.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bdd64e0f3f9d13328ba0097df81676d7a4c4b55bd96884adf1657470b7858818"
+checksum = "dea871e3663df6c7e3501460dad6fa4db5ff87cdf58dd13f3940b4cd39d124e1"
 dependencies = [
  "aes-gcm",
  "aho-corasick",
@@ -4737,6 +4729,7 @@ dependencies = [
  "chrono",
  "clap",
  "crc32c",
+ "crossbeam-epoch",
  "dirs",
  "dotenvy",
  "figment",
