@@ -91,12 +91,7 @@ async fn test_prometheus_rw_to_kafka_roundtrip() {
         .await
         .expect("pipeline init"),
     );
-    let handler = PrometheusRwHandler::new(
-        config.prometheus_rw.clone(),
-        config.raw_capture_for(&config.prometheus_rw.raw_capture),
-        pipeline,
-        metrics.clone(),
-    );
+    let handler = PrometheusRwHandler::new(config.prometheus_rw.clone(), pipeline, metrics.clone());
     let bound = handler.bound_addr();
     let handler_shutdown = shutdown.clone();
     let mut task = tokio::spawn(async move { handler.start(handler_shutdown).await });

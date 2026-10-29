@@ -104,9 +104,6 @@ server:
     # none, header, bearer, mtls, both. Anything else refuses to start. header
     # and both accept only what accepted_headers lists; nothing is implied.
     mode: "none"
-    # Enrichment switch: stamps _timestamp_received and _source. _org_id is
-    # stamped either way. It is not a credential and adds no accepted header.
-    include_common_header: true
     accepted_headers:
       - name: "x-api-key"
         values: ["my-api-key"]
@@ -419,7 +416,7 @@ gelf:
 # only when its raw payload is acceptable to retain at that sensitivity, and
 # redact `_raw` explicitly if the parsed fields are being redacted.
 #
-# Set here for every transport that supports capture; override per transport.
+# Set here for every transport that carries raw data; override per transport.
 # An unset field inherits, so "off" and "not configured" stay distinct.
 raw_capture:
   enabled: false
@@ -438,23 +435,16 @@ raw_capture:
 #   DFE_RECEIVER_SYSLOG_RAW_CAPTURE_MAX_BYTES=4096
 #   DFE_RECEIVER_SYSLOG_RAW_CAPTURE_ON_OVERSIZE=omit
 #
-# Supported on: syslog, gelf, fluent, splunk_hec, prometheus_rw, otlp, flow.
-# NOT offered on http, grpc or lumberjack -- those pass the payload through
-# untouched, so `_raw` would be a byte-for-byte copy of the event itself.
+# Supported on: syslog, splunk_hec (the /raw endpoint), flow.
+# NOT offered on the JSON transports (gelf, fluent, otlp, prometheus_rw, the
+# HEC /event endpoint, http, grpc, lumberjack): the loader keeps their JSON
+# record whole in `_json`, so `_raw` would store and index it a second time.
 #
 # What `_raw` holds, per transport:
 #   syslog        the wire line verbatim, PRI and header included
-#   gelf          the message as it arrived, before message/severity/_source
-#   fluent        the record's msgpack-to-JSON decode, before tag/timestamp
-#   splunk_hec    /event: the submitted `event` value before metadata merge
-#                 /raw:   the original line bytes
-#   prometheus_rw the `native`-mode rendering of the sample
-#   otlp          the `generic`-mode rendering of the record
+#   splunk_hec    /raw: the original line bytes
 #   flow          the decoder's verbatim records (a JSON array in canonical
 #                 mode, the single record in exploded)
-#
-# In prometheus_rw `native` mode and otlp `generic` mode, `_raw` is a copy of
-# the event -- that IS the least-shaped rendering. Both warn at startup.
 #
 # Two markers ride along when they apply, so a mangled capture can never be
 # mistaken for a faithful one:
@@ -502,6 +492,10 @@ routing:
   # disallow removes a sender's own _org_id. allow keeps it as the first
   # _org_id row, still held to the sender's binding.
   source_org_id: disallow
+  # Stamps _timestamp_received and _source, and lets the _source rules pick a
+  # destination. Off, a record gets its _org_id alone and the default
+  # destination. Independent of authentication. DFE_RECEIVER_ENRICH overrides it.
+  enrich: true
   # source_to_topic:
   #   auth: "logs_auth"
   dlq:

@@ -26,7 +26,7 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use crate::config::{FluentConfig, RawCapture};
+use crate::config::FluentConfig;
 use crate::error::{Error, Result};
 use crate::metrics::{DropReason, Metrics};
 use crate::pipeline::{Acks, PipelineState};
@@ -82,7 +82,6 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
     shutdown: CancellationToken,
     peer_addr: SocketAddr,
     max_buffer_size: usize,
-    raw_capture: RawCapture,
 ) {
     use tokio::io::AsyncReadExt;
 
@@ -140,7 +139,7 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
                     // Check for chunk ACK before processing
                     let chunk_id = extract_chunk_id(&msg);
 
-                    match (fluent_to_json(&msg, raw_capture), chunk_id.as_deref()) {
+                    match (fluent_to_json(&msg), chunk_id.as_deref()) {
                         (Ok(payloads), Some(chunk)) => {
                             let outcome = pipeline.process_batch_acked(&payloads, &acks, None, &ingest).await;
                             if let Some(e) = outcome.unavailable {
@@ -199,7 +198,6 @@ async fn run_tcp(
     shutdown: CancellationToken,
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
     max_buffer_size: usize,
-    raw_capture: RawCapture,
     ip_filter: IpFilter,
     bound: BoundAddr,
 ) -> Result<()> {
@@ -264,7 +262,7 @@ async fn run_tcp(
 
                         handle_tcp_connection(
                             tls_stream, pipeline, metrics, acks, conn_shutdown, peer_addr,
-                            max_buffer_size, raw_capture,
+                            max_buffer_size,
                         ).await;
                     });
                 } else {
@@ -272,7 +270,7 @@ async fn run_tcp(
                         let _open = open;
                         handle_tcp_connection(
                             stream, pipeline, metrics, acks, conn_shutdown, peer_addr,
-                            max_buffer_size, raw_capture,
+                            max_buffer_size,
                         ).await;
                     });
                 }
@@ -290,23 +288,15 @@ async fn run_tcp(
 /// Fluent Forward protocol handler.
 pub struct FluentHandler {
     config: FluentConfig,
-    /// Raw capture already resolved against the common `raw_capture` block.
-    raw_capture: RawCapture,
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
     bound: BoundAddr,
 }
 
 impl FluentHandler {
-    pub fn new(
-        config: FluentConfig,
-        raw_capture: RawCapture,
-        pipeline: Arc<PipelineState>,
-        metrics: Arc<Metrics>,
-    ) -> Self {
+    pub fn new(config: FluentConfig, pipeline: Arc<PipelineState>, metrics: Arc<Metrics>) -> Self {
         Self {
             config,
-            raw_capture,
             pipeline,
             metrics,
             bound: BoundAddr::default(),
@@ -364,7 +354,6 @@ impl ProtocolHandler for FluentHandler {
             shutdown,
             tls_acceptor,
             self.config.max_message_size,
-            self.raw_capture,
             ip_filter,
             self.bound.clone(),
         )

@@ -28,9 +28,9 @@
 use std::sync::{Arc, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use aws_lc_rs::hmac;
 use axum::http::{HeaderMap, HeaderName};
 use parking_lot::RwLock;
-use ring::hmac;
 use tracing::{debug, error, info};
 
 use crate::config::{BearerConfig, WebhookAuthConfig, WebhookAuthMode};

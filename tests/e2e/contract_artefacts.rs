@@ -190,7 +190,8 @@ fn tier_a_dockerfile_builds_and_image_runs() {
 
     let contract = test_contract();
     let identity = test_identity();
-    let dockerfile = generate_dockerfile(&contract, Some(&identity));
+    let dockerfile =
+        generate_dockerfile(&contract, Some(&identity)).expect("the contract is valid");
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let ctx = tmp.path();

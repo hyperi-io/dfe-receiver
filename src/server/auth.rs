@@ -29,13 +29,13 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
+use aws_lc_rs::digest;
 use axum::body::Body;
 use axum::extract::{ConnectInfo, State};
 use axum::http::{Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use parking_lot::RwLock;
-use ring::digest;
 use scalo::SensitiveString;
 use scalo::logger::log_debounced;
 use scalo::logger::security::{self, SecurityEvent, SecurityOutcome};
@@ -861,7 +861,6 @@ mod tests {
                 values: vec!["valid-key".into(), "another-key".into()],
             }],
             bearer: BearerConfig::default(),
-            include_common_header: false,
             header_name: String::new(),
             header_values: Vec::new(),
         }
@@ -885,7 +884,6 @@ mod tests {
                 },
             ],
             bearer: BearerConfig::default(),
-            include_common_header: false,
             header_name: String::new(),
             header_values: Vec::new(),
         }
@@ -900,7 +898,6 @@ mod tests {
                 secret_source: None,
                 refresh_interval_secs: 300,
             },
-            include_common_header: false,
             header_name: String::new(),
             header_values: Vec::new(),
         }
@@ -1058,7 +1055,6 @@ mod tests {
             mode: "header".to_string(),
             accepted_headers: vec![],
             bearer: BearerConfig::default(),
-            include_common_header: false,
             header_name: "x-legacy-header".to_string(),
             header_values: vec!["legacy-value".into()],
         };
@@ -1078,7 +1074,6 @@ mod tests {
                 values: vec!["new-value".into()],
             }],
             bearer: BearerConfig::default(),
-            include_common_header: false,
             header_name: "x-legacy-header".to_string(),
             header_values: vec!["legacy-value".into()],
         };
@@ -1333,29 +1328,15 @@ mod tests {
         assert_eq!(new_config.server.auth.mode, "none");
     }
 
-    /// The enrichment switch, on by default, adds no accepted header.
-    #[test]
-    fn the_enrichment_switch_accepts_no_header() {
-        let config = AuthConfig::default();
-        assert!(config.include_common_header);
-        assert_eq!(config.effective_headers(), [] as [AcceptedHeader; 0]);
-    }
-
     /// `x-hyperi-agent: 1.0` is a published constant, so it authenticates no
-    /// one in header mode, with enrichment on or off.
+    /// one in header mode.
     #[test]
     fn the_common_header_is_not_a_credential() {
         let mut headers = HeaderMap::new();
         headers.insert("x-hyperi-agent", "1.0".parse().unwrap());
-        for include_common_header in [true, false] {
-            let config = AuthConfig {
-                include_common_header,
-                ..test_config()
-            };
-            let err = validate_header_auth(&config, &headers)
-                .expect("the common header must not authenticate");
-            assert_eq!(err.status, StatusCode::UNAUTHORIZED);
-        }
+        let err = validate_header_auth(&test_config(), &headers)
+            .expect("the common header must not authenticate");
+        assert_eq!(err.status, StatusCode::UNAUTHORIZED);
     }
 
     /// Nor does it in `both` mode, where a failed bearer check falls through to
@@ -1364,7 +1345,6 @@ mod tests {
     async fn the_common_header_does_not_pass_a_failed_bearer_check() {
         let mut config = bearer_config();
         config.mode = "both".to_string();
-        config.include_common_header = true;
         let provider = BearerTokenProvider::new(&config.bearer.tokens);
         let app = axum::Router::new()
             .route("/ingest", axum::routing::post(|| async { "ok" }))
@@ -1399,7 +1379,6 @@ mod tests {
     #[test]
     fn an_explicit_accepted_header_is_kept_as_written() {
         let config = AuthConfig {
-            include_common_header: true,
             accepted_headers: vec![AcceptedHeader {
                 name: "x-hyperi-agent".to_string(),
                 values: vec!["2.0".into()],

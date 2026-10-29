@@ -84,12 +84,9 @@ pub fn parse_hec_events(body: &[u8]) -> Result<Vec<HecEvent>> {
 /// If the event payload is a JSON object, metadata fields are injected into it.
 /// If it's a string or number, it's wrapped as `{"message": <value>, ...metadata}`.
 ///
-/// With capture enabled, `_raw` holds the submitted `event` value as the
-/// sender wrote it, before the HEC metadata below is merged in.
-pub fn hec_event_to_json(event: HecEvent, raw_capture: RawCapture) -> Result<Bytes> {
-    let prepared = raw_capture::prepare_serialised(&event.event, raw_capture)
-        .map_err(|e| Error::Server(format!("HEC raw capture failed: {e}")))?;
-
+/// The event is JSON, which the loader keeps whole in `_json`, so it is not
+/// copied into `_raw`. Only the `/raw` endpoint's line is raw data.
+pub fn hec_event_to_json(event: HecEvent) -> Result<Bytes> {
     let mut obj = match event.event {
         serde_json::Value::Object(map) => map,
         serde_json::Value::String(s) => {
@@ -135,10 +132,6 @@ pub fn hec_event_to_json(event: HecEvent, raw_capture: RawCapture) -> Result<Byt
         for (k, v) in fields {
             obj.entry(k).or_insert(v);
         }
-    }
-
-    if let Some(prepared) = prepared {
-        raw_capture::attach_prepared_to_map(&mut obj, prepared);
     }
 
     let json =
@@ -234,7 +227,7 @@ mod tests {
     fn test_event_object_payload() {
         let body = br#"{"event":{"msg":"hello","level":"info"}}"#;
         let events = parse_hec_events(body).unwrap();
-        let json = hec_event_to_json(events.into_iter().next().unwrap(), RawCapture::OFF).unwrap();
+        let json = hec_event_to_json(events.into_iter().next().unwrap()).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
         assert_eq!(parsed["msg"], "hello");
         assert_eq!(parsed["level"], "info");
@@ -244,7 +237,7 @@ mod tests {
     fn test_event_string_payload() {
         let body = br#"{"event":"just a string"}"#;
         let events = parse_hec_events(body).unwrap();
-        let json = hec_event_to_json(events.into_iter().next().unwrap(), RawCapture::OFF).unwrap();
+        let json = hec_event_to_json(events.into_iter().next().unwrap()).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
         assert_eq!(parsed["message"], "just a string");
     }
@@ -253,7 +246,7 @@ mod tests {
     fn test_event_number_payload() {
         let body = br#"{"event":42}"#;
         let events = parse_hec_events(body).unwrap();
-        let json = hec_event_to_json(events.into_iter().next().unwrap(), RawCapture::OFF).unwrap();
+        let json = hec_event_to_json(events.into_iter().next().unwrap()).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
         assert_eq!(parsed["message"], 42);
     }
@@ -262,7 +255,7 @@ mod tests {
     fn test_metadata_injection() {
         let body = br#"{"event":{"msg":"test"},"time":1447828325.5,"host":"web01","source":"app","sourcetype":"json","index":"main"}"#;
         let events = parse_hec_events(body).unwrap();
-        let json = hec_event_to_json(events.into_iter().next().unwrap(), RawCapture::OFF).unwrap();
+        let json = hec_event_to_json(events.into_iter().next().unwrap()).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
         assert_eq!(parsed["msg"], "test");
         assert_eq!(parsed["timestamp"], "2015-11-18T06:32:05.500+00:00");
@@ -278,10 +271,10 @@ mod tests {
         let body = br#"{"event":{"msg":"a"},"time":1447828325.123456}
 {"event":{"timestamp":"from-event"},"time":1447828325}"#;
         let mut events = parse_hec_events(body).unwrap().into_iter();
-        let first = hec_event_to_json(events.next().unwrap(), RawCapture::OFF).unwrap();
+        let first = hec_event_to_json(events.next().unwrap()).unwrap();
         let first: serde_json::Value = serde_json::from_slice(&first).unwrap();
         assert_eq!(first["timestamp"], "2015-11-18T06:32:05.123456+00:00");
-        let second = hec_event_to_json(events.next().unwrap(), RawCapture::OFF).unwrap();
+        let second = hec_event_to_json(events.next().unwrap()).unwrap();
         let second: serde_json::Value = serde_json::from_slice(&second).unwrap();
         assert_eq!(second["timestamp"], "from-event");
     }
@@ -290,7 +283,7 @@ mod tests {
     fn hec_time_past_the_representable_range_writes_no_timestamp() {
         let body = br#"{"event":{"msg":"a"},"time":1e300}"#;
         let events = parse_hec_events(body).unwrap();
-        let json = hec_event_to_json(events.into_iter().next().unwrap(), RawCapture::OFF).unwrap();
+        let json = hec_event_to_json(events.into_iter().next().unwrap()).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
         assert!(parsed.get("timestamp").is_none());
         assert_eq!(parsed["msg"], "a");
@@ -300,7 +293,7 @@ mod tests {
     fn test_metadata_does_not_overwrite_event_fields() {
         let body = br#"{"event":{"host":"from-event"},"host":"from-metadata"}"#;
         let events = parse_hec_events(body).unwrap();
-        let json = hec_event_to_json(events.into_iter().next().unwrap(), RawCapture::OFF).unwrap();
+        let json = hec_event_to_json(events.into_iter().next().unwrap()).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
         // Event field takes precedence
         assert_eq!(parsed["host"], "from-event");
@@ -310,7 +303,7 @@ mod tests {
     fn test_fields_merge() {
         let body = br#"{"event":{"msg":"test"},"fields":{"env":"prod","region":"us-east"}}"#;
         let events = parse_hec_events(body).unwrap();
-        let json = hec_event_to_json(events.into_iter().next().unwrap(), RawCapture::OFF).unwrap();
+        let json = hec_event_to_json(events.into_iter().next().unwrap()).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
         assert_eq!(parsed["env"], "prod");
         assert_eq!(parsed["region"], "us-east");
@@ -373,40 +366,28 @@ mod tests {
     #[test]
     fn capture_off_emits_no_raw_field() {
         let events = parse_hec_events(br#"{"event":{"msg":"hello"}}"#).unwrap();
-        let json = hec_event_to_json(events.into_iter().next().unwrap(), RawCapture::OFF).unwrap();
+        let json = hec_event_to_json(events.into_iter().next().unwrap()).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
         assert!(parsed.get("_raw").is_none());
     }
 
     #[test]
-    fn event_capture_holds_the_payload_before_metadata_merge() {
+    fn an_event_payload_is_not_copied_into_raw() {
         let body = br#"{"event":{"msg":"hello"},"host":"web01","fields":{"env":"prod"}}"#;
         let events = parse_hec_events(body).unwrap();
-        let json = hec_event_to_json(events.into_iter().next().unwrap(), RawCapture::on()).unwrap();
+        let json = hec_event_to_json(events.into_iter().next().unwrap()).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
 
-        // Metadata is merged into the event as before.
         assert_eq!(parsed["msg"], "hello");
         assert_eq!(parsed["host"], "web01");
         assert_eq!(parsed["env"], "prod");
+        assert!(parsed.get("_raw").is_none());
 
-        // _raw is what the sender put in `event`, and nothing else.
-        let captured: serde_json::Value =
-            serde_json::from_str(parsed["_raw"].as_str().unwrap()).unwrap();
-        assert_eq!(captured["msg"], "hello");
-        assert!(captured.get("host").is_none());
-        assert!(captured.get("env").is_none());
-    }
-
-    #[test]
-    fn event_capture_works_for_a_bare_string_payload() {
         let events = parse_hec_events(br#"{"event":"just a string"}"#).unwrap();
-        let json = hec_event_to_json(events.into_iter().next().unwrap(), RawCapture::on()).unwrap();
+        let json = hec_event_to_json(events.into_iter().next().unwrap()).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&json).unwrap();
-
         assert_eq!(parsed["message"], "just a string");
-        // The event value was a JSON string, so _raw holds it quoted.
-        assert_eq!(parsed["_raw"], r#""just a string""#);
+        assert!(parsed.get("_raw").is_none());
     }
 
     #[test]

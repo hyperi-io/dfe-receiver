@@ -149,7 +149,6 @@ impl Server {
         if config.otlp.enabled {
             handlers.push(Box::new(OtlpHandler::new(
                 config.otlp.clone(),
-                config.raw_capture_for(&config.otlp.raw_capture),
                 self.state.clone(),
                 self.metrics.clone(),
             )));
@@ -178,7 +177,6 @@ impl Server {
         if config.prometheus_rw.enabled {
             handlers.push(Box::new(PrometheusRwHandler::new(
                 config.prometheus_rw.clone(),
-                config.raw_capture_for(&config.prometheus_rw.raw_capture),
                 self.state.clone(),
                 self.metrics.clone(),
             )));
@@ -198,7 +196,6 @@ impl Server {
         if config.fluent.enabled {
             handlers.push(Box::new(FluentHandler::new(
                 config.fluent.clone(),
-                config.raw_capture_for(&config.fluent.raw_capture),
                 self.state.clone(),
                 self.metrics.clone(),
             )));
@@ -208,7 +205,6 @@ impl Server {
         if config.gelf.enabled {
             handlers.push(Box::new(GelfHandler::new(
                 config.gelf.clone(),
-                config.raw_capture_for(&config.gelf.raw_capture),
                 self.state.clone(),
                 self.metrics.clone(),
             )));

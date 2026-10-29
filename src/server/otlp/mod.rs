@@ -30,9 +30,9 @@ use tokio_util::sync::CancellationToken;
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
-use crate::config::{OtlpConfig, RawCapture};
+use crate::config::OtlpConfig;
 use crate::error::{Error, Result, unavailable_response};
 use crate::metrics::Metrics;
 use crate::pipeline::{Acks, BatchOutcome, PipelineState};
@@ -119,7 +119,6 @@ pub struct OtlpService {
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
     mode: OtlpMode,
-    raw_capture: RawCapture,
     acks: Acks,
 }
 
@@ -128,14 +127,12 @@ impl OtlpService {
         pipeline: Arc<PipelineState>,
         metrics: Arc<Metrics>,
         mode: OtlpMode,
-        raw_capture: RawCapture,
         acks: Acks,
     ) -> Self {
         Self {
             pipeline,
             metrics,
             mode,
-            raw_capture,
             acks,
         }
     }
@@ -239,7 +236,7 @@ impl LogsService for OtlpService {
         let ingest = sender(request.extensions().get());
         let req = request.into_inner();
 
-        let payloads = convert::convert_logs(&req, self.mode, self.raw_capture)
+        let payloads = convert::convert_logs(&req, self.mode)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
         let rejected = self.process_payloads(payloads, deadline, &ingest).await?;
@@ -259,7 +256,7 @@ impl TraceService for OtlpService {
         let ingest = sender(request.extensions().get());
         let req = request.into_inner();
 
-        let payloads = convert::convert_traces(&req, self.mode, self.raw_capture)
+        let payloads = convert::convert_traces(&req, self.mode)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
         let rejected = self.process_payloads(payloads, deadline, &ingest).await?;
@@ -281,7 +278,7 @@ impl MetricsService for OtlpService {
         let ingest = sender(request.extensions().get());
         let req = request.into_inner();
 
-        let payloads = convert::convert_metrics(&req, self.mode, self.raw_capture)
+        let payloads = convert::convert_metrics(&req, self.mode)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
 
         let rejected = self.process_payloads(payloads, deadline, &ingest).await?;
@@ -333,7 +330,6 @@ fn metrics_response(
 /// Run the OTLP gRPC server on the specified address.
 async fn run_grpc_server(
     config: &OtlpConfig,
-    raw_capture: RawCapture,
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
     acks: Acks,
@@ -346,7 +342,7 @@ async fn run_grpc_server(
         .map_err(|e| Error::Config(format!("invalid OTLP gRPC bind address: {e}")))?;
 
     let mode = OtlpMode::from_str(&config.mode);
-    let service = OtlpService::new(pipeline, metrics.clone(), mode, raw_capture, acks);
+    let service = OtlpService::new(pipeline, metrics.clone(), mode, acks);
 
     // Build TLS config if enabled
     let tls_config = if config.tls.enabled {
@@ -440,7 +436,6 @@ struct OtlpHttpState {
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
     mode: OtlpMode,
-    raw_capture: RawCapture,
     acks: Acks,
     /// Bound on a request body after `Content-Encoding` is undone.
     max_body_size: usize,
@@ -449,7 +444,6 @@ struct OtlpHttpState {
 /// Run the OTLP HTTP server for `/v1/logs`, `/v1/metrics`, `/v1/traces`.
 async fn run_http_server(
     config: &OtlpConfig,
-    raw_capture: RawCapture,
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
     acks: Acks,
@@ -479,7 +473,6 @@ async fn run_http_server(
         pipeline,
         metrics: metrics.clone(),
         mode,
-        raw_capture,
         acks,
         max_body_size: server.max_body_size,
     };
@@ -500,7 +493,7 @@ async fn run_http_server(
             state.max_body_size,
         )?;
 
-        let payloads = convert::convert_logs(&request, state.mode, state.raw_capture)?;
+        let payloads = convert::convert_logs(&request, state.mode)?;
         Ok(export_over_http(
             &state.pipeline,
             &state.metrics,
@@ -528,7 +521,7 @@ async fn run_http_server(
             state.max_body_size,
         )?;
 
-        let payloads = convert::convert_traces(&request, state.mode, state.raw_capture)?;
+        let payloads = convert::convert_traces(&request, state.mode)?;
         Ok(export_over_http(
             &state.pipeline,
             &state.metrics,
@@ -556,7 +549,7 @@ async fn run_http_server(
             state.max_body_size,
         )?;
 
-        let payloads = convert::convert_metrics(&request, state.mode, state.raw_capture)?;
+        let payloads = convert::convert_metrics(&request, state.mode)?;
         Ok(export_over_http(
             &state.pipeline,
             &state.metrics,
@@ -748,8 +741,6 @@ fn decode_otlp_request<T: prost::Message + Default>(
 /// OTLP protocol handler -- runs gRPC (4317) and HTTP (4318) servers.
 pub struct OtlpHandler {
     config: OtlpConfig,
-    /// Raw capture already resolved against the common `raw_capture` block.
-    raw_capture: RawCapture,
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
     grpc_bound: BoundAddr,
@@ -757,15 +748,9 @@ pub struct OtlpHandler {
 }
 
 impl OtlpHandler {
-    pub fn new(
-        config: OtlpConfig,
-        raw_capture: RawCapture,
-        pipeline: Arc<PipelineState>,
-        metrics: Arc<Metrics>,
-    ) -> Self {
+    pub fn new(config: OtlpConfig, pipeline: Arc<PipelineState>, metrics: Arc<Metrics>) -> Self {
         Self {
             config,
-            raw_capture,
             pipeline,
             metrics,
             grpc_bound: BoundAddr::default(),
@@ -801,13 +786,6 @@ impl ProtocolHandler for OtlpHandler {
     }
 
     async fn start(&self, shutdown: CancellationToken) -> Result<()> {
-        if self.raw_capture.enabled && OtlpMode::from_str(&self.config.mode) == OtlpMode::Generic {
-            warn!(
-                "otlp.raw_capture is on in generic mode: _raw duplicates the event, \
-                 roughly doubling produced bytes for no extra information"
-            );
-        }
-
         let mut listeners = Listeners::default();
         // One setting and one held-byte ceiling for both endpoints.
         let acks = self
@@ -815,7 +793,6 @@ impl ProtocolHandler for OtlpHandler {
             .acks("otlp", self.config.acknowledgements, None);
 
         let grpc_config = self.config.clone();
-        let grpc_raw = self.raw_capture;
         let grpc_pipeline = self.pipeline.clone();
         let grpc_metrics = self.metrics.clone();
         let grpc_acks = acks.clone();
@@ -824,7 +801,6 @@ impl ProtocolHandler for OtlpHandler {
         listeners.spawn("OTLP gRPC", async move {
             run_grpc_server(
                 &grpc_config,
-                grpc_raw,
                 grpc_pipeline,
                 grpc_metrics,
                 grpc_acks,
@@ -835,7 +811,6 @@ impl ProtocolHandler for OtlpHandler {
         });
 
         let http_config = self.config.clone();
-        let http_raw = self.raw_capture;
         let http_pipeline = self.pipeline.clone();
         let http_metrics = self.metrics.clone();
         let http_shutdown = shutdown.clone();
@@ -845,7 +820,6 @@ impl ProtocolHandler for OtlpHandler {
         listeners.spawn("OTLP HTTP", async move {
             run_http_server(
                 &http_config,
-                http_raw,
                 http_pipeline,
                 http_metrics,
                 http_acks,

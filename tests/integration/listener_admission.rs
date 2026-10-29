@@ -355,7 +355,6 @@ fn build_rw(
 ) -> (Box<dyn ProtocolHandler>, BoundAddr) {
     let handler = PrometheusRwHandler::new(
         config.prometheus_rw.clone(),
-        config.raw_capture_for(&config.prometheus_rw.raw_capture),
         pipeline,
         Arc::new(Metrics::default()),
     );
@@ -398,12 +397,7 @@ fn build_otlp(
     config: &Config,
     pipeline: Arc<PipelineState>,
 ) -> (Box<dyn ProtocolHandler>, BoundAddr) {
-    let handler = OtlpHandler::new(
-        config.otlp.clone(),
-        config.raw_capture_for(&config.otlp.raw_capture),
-        pipeline,
-        Arc::new(Metrics::default()),
-    );
+    let handler = OtlpHandler::new(config.otlp.clone(), pipeline, Arc::new(Metrics::default()));
     let bound = handler.http_bound_addr();
     (Box::new(handler), bound)
 }
@@ -435,7 +429,6 @@ fn build_fluent(
 ) -> (Box<dyn ProtocolHandler>, BoundAddr) {
     let handler = FluentHandler::new(
         config.fluent.clone(),
-        config.raw_capture_for(&config.fluent.raw_capture),
         pipeline,
         Arc::new(Metrics::default()),
     );
@@ -452,12 +445,7 @@ fn build_gelf(
     config: &Config,
     pipeline: Arc<PipelineState>,
 ) -> (Box<dyn ProtocolHandler>, BoundAddr) {
-    let handler = GelfHandler::new(
-        config.gelf.clone(),
-        config.raw_capture_for(&config.gelf.raw_capture),
-        pipeline,
-        Arc::new(Metrics::default()),
-    );
+    let handler = GelfHandler::new(config.gelf.clone(), pipeline, Arc::new(Metrics::default()));
     let bound = handler.bound_addr();
     (Box::new(handler), bound)
 }

@@ -567,7 +567,9 @@ pub struct PipelineState {
 impl PipelineState {
     /// Create pipeline state with no governor and no injected memory guard, so
     /// it builds its own guard from `buffer.memory_limit` and
-    /// `buffer.pressure_threshold`.
+    /// `buffer.pressure_threshold`. That guard counts only the bytes this
+    /// pipeline reserves, so how busy the host is never decides whether a test
+    /// is refused.
     ///
     /// Only tests take this path: production always injects the runtime's
     /// guard through [`with_governor`](Self::with_governor), with
@@ -639,7 +641,14 @@ impl PipelineState {
                 if (config.buffer.pressure_threshold - 0.8).abs() > f64::EPSILON {
                     mg_config.pressure_threshold = config.buffer.pressure_threshold;
                 }
-                (Arc::new(MemoryGuard::new(mg_config)), None)
+                // Usage is this pipeline's own reservations. The detected
+                // source reads the cgroup or host, so a test would trip the
+                // guard whenever the machine it ran on was busy.
+                let guard = MemoryGuard::with_usage_source(
+                    mg_config,
+                    scalo::memory::UsageSource::Reservations,
+                );
+                (Arc::new(guard), None)
             }
         };
 
@@ -2354,6 +2363,16 @@ mod tests {
         .unwrap()
     }
 
+    /// A pipeline built without an injected guard counts only its own
+    /// reservations. A guard on the detected cgroup or host usage would refuse
+    /// records whenever the machine running the test was busy.
+    #[tokio::test]
+    async fn a_pipeline_without_an_injected_guard_ignores_host_memory() {
+        let state = test_state().await;
+        assert_eq!(state.memory_guard.current_bytes(), 0);
+        assert!(!state.should_apply_backpressure());
+    }
+
     /// The acknowledgement setting a listener with acks on gets.
     fn holding(state: &PipelineState) -> Acks {
         state.acks("test", AcknowledgementsConfig::default(), None)
@@ -3495,7 +3514,7 @@ mod tests {
     #[tokio::test]
     async fn with_the_common_header_off_no_receive_time_is_written() {
         let mut config = test_config();
-        config.server.auth.include_common_header = false;
+        config.routing.enrich = false;
         let state = test_state_with(config).await;
 
         let record = routed(&state, "{}");
@@ -3523,14 +3542,14 @@ mod tests {
 
         // Disable enrichment via reload
         let mut new_config = test_config();
-        new_config.server.auth.include_common_header = false;
+        new_config.routing.enrich = false;
         state.reload_config(new_config).await.unwrap();
 
         assert!(routed(&state, "{}").get(routing::RECEIVED_FIELD).is_none());
 
         // Re-enable via another reload
         let mut re_enable = test_config();
-        re_enable.server.auth.include_common_header = true;
+        re_enable.routing.enrich = true;
         state.reload_config(re_enable).await.unwrap();
 
         assert!(routed(&state, "{}").get(routing::RECEIVED_FIELD).is_some());

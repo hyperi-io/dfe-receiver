@@ -89,15 +89,17 @@ impl ServiceApp for App {
         Ok(config)
     }
 
+    /// Not ready until `run_service` installs the pipeline's check.
+    fn readiness_check(&self, _config: &Self::Config) -> Option<scalo::metrics::ReadinessFn> {
+        Some(Arc::new(|| false))
+    }
+
     async fn run_service(
         &self,
         config: Self::Config,
         mut runtime: scalo::cli::ServiceRuntime,
     ) -> Result<(), CliError> {
         info!(version = env!("CARGO_PKG_VERSION"), "Starting dfe-receiver");
-
-        // scalo's /readyz passes with no check set, so it fails until the pipeline's check lands.
-        runtime.set_readiness_check(|| false);
 
         // Log resolved config at debug level (sensitive fields already redacted by SensitiveString)
         debug!(
@@ -253,7 +255,13 @@ async fn main() {
         // Single source of truth: deployment::emit_dockerfile() is what the
         // checked_in_dockerfile_matches_emit_dockerfile drift guard asserts
         // against, so the CLI emit and the test can never disagree.
-        let content = deployment::emit_dockerfile();
+        let content = match deployment::emit_dockerfile() {
+            Ok(content) => content,
+            Err(e) => {
+                eprintln!("fatal: the deployment contract is invalid: {e}");
+                std::process::exit(1);
+            }
+        };
         if let Err(e) = std::fs::write(output, &content) {
             eprintln!("fatal: could not write Dockerfile: {e}");
             std::process::exit(1);
@@ -282,8 +290,9 @@ mod tests {
         format!("kafka:\n  brokers: [\"localhost:9092\"]\n{extra}")
     }
 
-    /// The version check `ServiceRuntime::build` resolves after `load_config`
-    /// reads `yaml` as the `--config` file, with the env opt-out at `enabled`.
+    /// The version check `ServiceRuntime::build` resolves once `run_app` has
+    /// set the cascade up from `yaml` as the `--config` file, with the env
+    /// opt-out at `enabled`.
     ///
     /// The cascade is a process-global `OnceLock`, so each caller needs its own
     /// process, which nextest gives every test.
@@ -295,6 +304,8 @@ mod tests {
 
         temp_env::with_var(ENABLED_VAR, enabled, || {
             let app = App::parse_from(["dfe-receiver", "--config", path]);
+            scalo::config::setup(app.common_args().to_config_options(app.env_prefix()))
+                .expect("cascade sets up");
             app.load_config(Some(path)).expect("config loads");
             VersionCheckConfig::from_cascade_or(app.name(), "0.0.0", app.version_check_defaults())
         })

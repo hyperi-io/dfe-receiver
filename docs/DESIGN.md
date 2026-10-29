@@ -337,11 +337,14 @@ metrics:
 Opt-in retention of the original wire payload in the dfe-schemas common-header
 `_raw` field. The parsed event is unchanged -- `_raw` is an addition to it.
 
-dfe-loader already fills `_raw` by renaming
-`first(logoriginal/_raw/raw/raw_log/message)`, and is a silent no-op when
-`_raw` is already present, so a receiver-populated value wins without any
-loader change. The reason to populate it here is fidelity the loader cannot
-recover: for syslog its fallback lands `message`, the parsed body, after the
+`_raw` holds raw data the source provided: a syslog line, a HEC `/raw` line, a
+flow record. A JSON payload lives in `_json` alone, so the JSON transports
+never write `_raw`. dfe-loader never overwrites a `_raw` the record carries, so
+a receiver-populated value is stored as it is. Without one, the legacy flatten
+path renames the first of `raw_source_fields` (default `["logoriginal"]`) and
+the `json_primary` path reads a field named `_raw`, or whatever the column's
+`@renamed` / `@source` names. The reason to populate it here is fidelity the
+loader cannot recover: for syslog its fallback lands `message`, the parsed body, after the
 PRI, the header and the exact wire spacing are gone. `syslog_loose` never
 errors either, so a malformed line silently becomes `message = <whole line>`
 and is indistinguishable from a clean parse. Only `_raw` separates them.
@@ -356,7 +359,7 @@ sensitivity is acceptable, and redact `_raw` explicitly wherever the parsed
 fields are redacted.
 
 ```yaml
-raw_capture:              # common default for every capturing transport
+raw_capture:              # common default for syslog, HEC /raw and flow
   enabled: false
   max_bytes: 65536        # 0 = unlimited
   on_oversize: truncate   # truncate | omit
@@ -373,20 +376,13 @@ Every field is optional at both levels: an unset field inherits, so "off" and
 | Transport | What `_raw` holds |
 |-----------|-------------------|
 | `syslog` | the wire line verbatim, PRI and header included |
-| `gelf` | the message as it arrived, before `message`/`severity`/`_source` |
-| `fluent` | the record's msgpack-to-JSON decode, before tag/timestamp |
-| `splunk_hec` | `/event`: the submitted `event` value before metadata merge; `/raw`: the original line bytes |
-| `prometheus_rw` | the `native`-mode rendering of the sample |
-| `otlp` | the `generic`-mode rendering of the record |
+| `splunk_hec` | `/raw`: the original line bytes |
 | `flow` | the decoder's verbatim records -- a JSON array in `canonical`, the single record in `exploded` |
 
-`http`, `grpc` and `lumberjack` do not offer the knob: they pass the payload
-through untouched, so `_raw` would be a byte-for-byte copy of the event.
-
-For `prometheus_rw` in `native` mode and `otlp` in `generic` mode, `_raw` is a
-copy of the event, because that mode already IS the least-shaped rendering.
-Both log a warning at startup. The field is still emitted so downstream sees
-one schema whichever mode the receiver runs in.
+`gelf`, `fluent`, `otlp`, `prometheus_rw`, the HEC `/event` endpoint, `http`,
+`grpc` and `lumberjack` do not offer the knob: their payload is JSON (or passes
+through untouched), which the loader keeps whole in `_json`, so `_raw` would be
+a second copy of the event.
 
 Two markers travel with the value when they apply, so a mangled capture cannot
 be mistaken for a faithful one:

@@ -9,15 +9,22 @@
 //! Raw-payload capture configuration.
 //!
 //! The dfe-schemas common header (`timeseries` profile) carries a `_raw` text
-//! column, full-text indexed, holding the original event payload. dfe-loader
-//! populates it by renaming `first(logoriginal/_raw/raw/raw_log/message)` and
-//! is a silent no-op when `_raw` is already present -- so a receiver-populated
-//! `_raw` wins with no loader change.
+//! column, full-text indexed, holding raw data the source provided: a syslog
+//! line, a Splunk HEC `/raw` line, a flow record. A JSON payload lives in
+//! `_json` alone, so the JSON transports (OTLP, Prometheus Remote Write,
+//! fluent, GELF, HEC `/event`) never write `_raw`.
 //!
-//! That matters because the loader's fallback can only reach fields that
-//! survived our conversion. For syslog it lands `message`, the PARSED body:
-//! the PRI number, the header text and the exact wire spacing are gone by
-//! then, and `syslog_loose` never errors, so a malformed line silently becomes
+//! dfe-loader never overwrites a `_raw` the record carries, so what the
+//! receiver writes is stored as it is. A record without one gets the loader's
+//! own: the legacy flatten path renames the first of `raw_source_fields`
+//! (default `["logoriginal"]`), and the `json_primary` path reads a field named
+//! `_raw`, or whatever the column's `@renamed` / `@source` names. There is no
+//! other list.
+//!
+//! That matters because the loader can only reach fields that survived our
+//! conversion. For syslog it lands `message`, the PARSED body: the PRI number,
+//! the header text and the exact wire spacing are gone by then, and
+//! `syslog_loose` never errors, so a malformed line silently becomes
 //! `message = <whole line>` and reads as a clean parse. Capturing at the
 //! transport is the only place the true bytes still exist.
 //!
@@ -28,7 +35,7 @@
 //! # Cascade
 //!
 //! ```yaml
-//! raw_capture:              # common default for every transport
+//! raw_capture:              # common default for syslog, HEC /raw and flow
 //!   enabled: false
 //!   max_bytes: 65536        # 0 = unlimited
 //!   on_oversize: truncate   # truncate | omit

@@ -25,9 +25,7 @@ use std::collections::HashMap;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 
-use crate::config::RawCapture;
 use crate::error::{Error, Result};
-use crate::server::raw_capture;
 
 use super::proto;
 
@@ -109,13 +107,10 @@ fn epoch_ms_to_ch_datetime(epoch_ms: i64) -> String {
 pub fn write_request_to_json(
     request: proto::WriteRequest,
     mode: PrometheusRwMode,
-    raw_capture: RawCapture,
 ) -> Result<Vec<Bytes>> {
     match mode {
-        PrometheusRwMode::Native => convert_native(request, raw_capture),
-        PrometheusRwMode::OTel | PrometheusRwMode::HyperDx => {
-            convert_otel(&request, mode, raw_capture)
-        }
+        PrometheusRwMode::Native => convert_native(request),
+        PrometheusRwMode::OTel | PrometheusRwMode::HyperDx => convert_otel(&request, mode),
     }
 }
 
@@ -124,9 +119,6 @@ pub fn write_request_to_json(
 // ---------------------------------------------------------------------------
 
 /// Labels of a series as flat JSON fields, plus the `_source` routing tag.
-///
-/// This is the native shape's base, and also what `_raw` carries in the
-/// otel and hyperdx modes -- native is the least-shaped decode we produce.
 fn native_labels(ts: &proto::TimeSeries) -> serde_json::Map<String, serde_json::Value> {
     let mut labels = serde_json::Map::with_capacity(ts.labels.len() + 3);
     for label in &ts.labels {
@@ -157,7 +149,7 @@ fn native_sample_obj(
 }
 
 /// Native conversion: flat JSON with labels as top-level fields.
-fn convert_native(request: proto::WriteRequest, raw_capture: RawCapture) -> Result<Vec<Bytes>> {
+fn convert_native(request: proto::WriteRequest) -> Result<Vec<Bytes>> {
     let mut events = Vec::new();
 
     for ts in request.timeseries {
@@ -165,8 +157,7 @@ fn convert_native(request: proto::WriteRequest, raw_capture: RawCapture) -> Resu
 
         // Emit one event per sample
         for sample in &ts.samples {
-            let mut obj = native_sample_obj(&labels, sample.value, sample.timestamp);
-            attach_native_raw(&mut obj, raw_capture)?;
+            let obj = native_sample_obj(&labels, sample.value, sample.timestamp);
 
             let json = serde_json::to_vec(&obj)
                 .map_err(|e| Error::Validation(format!("JSON serialisation failed: {e}")))?;
@@ -199,8 +190,6 @@ fn convert_native(request: proto::WriteRequest, raw_capture: RawCapture) -> Resu
                 );
             }
 
-            attach_native_raw(&mut obj, raw_capture)?;
-
             let json = serde_json::to_vec(&obj)
                 .map_err(|e| Error::Validation(format!("JSON serialisation failed: {e}")))?;
             events.push(Bytes::from(json));
@@ -210,34 +199,12 @@ fn convert_native(request: proto::WriteRequest, raw_capture: RawCapture) -> Resu
     Ok(events)
 }
 
-/// Attach `_raw` to a native-shape event.
-///
-/// In native mode the event already IS the verbatim decode, so `_raw` is a
-/// copy of it. That is documented on `prometheus_rw.raw_capture` and warned
-/// about at startup; the field is still emitted so downstream sees the same
-/// schema whichever mode the receiver runs in.
-fn attach_native_raw(
-    obj: &mut serde_json::Map<String, serde_json::Value>,
-    raw_capture: RawCapture,
-) -> Result<()> {
-    let prepared = raw_capture::prepare_serialised(obj, raw_capture)
-        .map_err(|e| Error::Validation(format!("Prometheus raw capture failed: {e}")))?;
-    if let Some(prepared) = prepared {
-        raw_capture::attach_prepared_to_map(obj, prepared);
-    }
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // OTel mode (generic + hyperdx)
 // ---------------------------------------------------------------------------
 
 /// OTel conversion: structured JSON matching OTLP handler output.
-fn convert_otel(
-    request: &proto::WriteRequest,
-    mode: PrometheusRwMode,
-    raw_capture: RawCapture,
-) -> Result<Vec<Bytes>> {
+fn convert_otel(request: &proto::WriteRequest, mode: PrometheusRwMode) -> Result<Vec<Bytes>> {
     // Build metadata lookup for metric type determination
     // MetricType::COUNTER (1) → "sum", everything else → "gauge"
     let metadata: HashMap<&str, i32> = request
@@ -271,17 +238,9 @@ fn convert_otel(
             _ => "gauge",
         };
 
-        // The native rendering is what _raw carries here, so build the label
-        // base once per series rather than per sample.
-        let raw_labels = if raw_capture.enabled {
-            Some(native_labels(ts))
-        } else {
-            None
-        };
-
         // Emit one event per sample
         for sample in &ts.samples {
-            let mut json_value = match mode {
+            let json_value = match mode {
                 PrometheusRwMode::HyperDx => serde_json::json!({
                     "TimeUnix": epoch_ms_to_ch_datetime(sample.timestamp),
                     "MetricName": metric_name,
@@ -300,17 +259,6 @@ fn convert_otel(
                     "resource": empty_resource,
                 }),
             };
-
-            if let (Some(labels), Some(obj)) = (&raw_labels, json_value.as_object_mut()) {
-                let native = native_sample_obj(labels, sample.value, sample.timestamp);
-                let prepared =
-                    raw_capture::prepare_serialised(&native, raw_capture).map_err(|e| {
-                        Error::Validation(format!("Prometheus raw capture failed: {e}"))
-                    })?;
-                if let Some(prepared) = prepared {
-                    raw_capture::attach_prepared_to_map(obj, prepared);
-                }
-            }
 
             let json = serde_json::to_vec(&json_value)
                 .map_err(|e| Error::Validation(format!("JSON serialisation failed: {e}")))?;
@@ -427,8 +375,7 @@ mod tests {
             metadata: vec![],
         };
 
-        let events =
-            write_request_to_json(request, PrometheusRwMode::Native, RawCapture::OFF).unwrap();
+        let events = write_request_to_json(request, PrometheusRwMode::Native).unwrap();
         assert_eq!(events.len(), 1);
 
         let obj: serde_json::Value = serde_json::from_slice(&events[0]).unwrap();
@@ -455,8 +402,7 @@ mod tests {
             metadata: vec![],
         };
 
-        let events =
-            write_request_to_json(request, PrometheusRwMode::Native, RawCapture::OFF).unwrap();
+        let events = write_request_to_json(request, PrometheusRwMode::Native).unwrap();
         assert_eq!(events.len(), 3);
 
         let obj0: serde_json::Value = serde_json::from_slice(&events[0]).unwrap();
@@ -483,8 +429,7 @@ mod tests {
             metadata: vec![],
         };
 
-        let events =
-            write_request_to_json(request, PrometheusRwMode::Native, RawCapture::OFF).unwrap();
+        let events = write_request_to_json(request, PrometheusRwMode::Native).unwrap();
         assert_eq!(events.len(), 2);
 
         let obj0: serde_json::Value = serde_json::from_slice(&events[0]).unwrap();
@@ -503,8 +448,7 @@ mod tests {
             metadata: vec![],
         };
 
-        let events =
-            write_request_to_json(request, PrometheusRwMode::Native, RawCapture::OFF).unwrap();
+        let events = write_request_to_json(request, PrometheusRwMode::Native).unwrap();
         assert_eq!(events, [] as [bytes::Bytes; 0]);
     }
 
@@ -515,8 +459,7 @@ mod tests {
             metadata: vec![],
         };
 
-        let events =
-            write_request_to_json(request, PrometheusRwMode::Native, RawCapture::OFF).unwrap();
+        let events = write_request_to_json(request, PrometheusRwMode::Native).unwrap();
         assert_eq!(events, [] as [bytes::Bytes; 0]);
     }
 
@@ -530,8 +473,7 @@ mod tests {
             metadata: vec![],
         };
 
-        let events =
-            write_request_to_json(request, PrometheusRwMode::Native, RawCapture::OFF).unwrap();
+        let events = write_request_to_json(request, PrometheusRwMode::Native).unwrap();
         let obj: serde_json::Value = serde_json::from_slice(&events[0]).unwrap();
         assert_eq!(obj["_source"], "prometheus");
     }
@@ -549,8 +491,7 @@ mod tests {
             metadata: vec![],
         };
 
-        let events =
-            write_request_to_json(request, PrometheusRwMode::Native, RawCapture::OFF).unwrap();
+        let events = write_request_to_json(request, PrometheusRwMode::Native).unwrap();
         let obj: serde_json::Value = serde_json::from_slice(&events[0]).unwrap();
         assert_eq!(obj["_source"], "custom");
     }
@@ -571,8 +512,7 @@ mod tests {
             metadata: vec![],
         };
 
-        let events =
-            write_request_to_json(request, PrometheusRwMode::Native, RawCapture::OFF).unwrap();
+        let events = write_request_to_json(request, PrometheusRwMode::Native).unwrap();
         // 1 sample + 1 exemplar = 2 events
         assert_eq!(events.len(), 2);
 
@@ -600,8 +540,7 @@ mod tests {
             metadata: vec![],
         };
 
-        let events =
-            write_request_to_json(request, PrometheusRwMode::OTel, RawCapture::OFF).unwrap();
+        let events = write_request_to_json(request, PrometheusRwMode::OTel).unwrap();
         assert_eq!(events.len(), 1);
 
         let obj: serde_json::Value = serde_json::from_slice(&events[0]).unwrap();
@@ -628,8 +567,7 @@ mod tests {
             metadata: vec![],
         };
 
-        let events =
-            write_request_to_json(request, PrometheusRwMode::OTel, RawCapture::OFF).unwrap();
+        let events = write_request_to_json(request, PrometheusRwMode::OTel).unwrap();
         assert_eq!(events, [] as [bytes::Bytes; 0]);
     }
 
@@ -650,8 +588,7 @@ mod tests {
             metadata: vec![],
         };
 
-        let events =
-            write_request_to_json(request, PrometheusRwMode::HyperDx, RawCapture::OFF).unwrap();
+        let events = write_request_to_json(request, PrometheusRwMode::HyperDx).unwrap();
         assert_eq!(events.len(), 1);
 
         let obj: serde_json::Value = serde_json::from_slice(&events[0]).unwrap();
@@ -690,8 +627,7 @@ mod tests {
             }],
         };
 
-        let events =
-            write_request_to_json(request, PrometheusRwMode::OTel, RawCapture::OFF).unwrap();
+        let events = write_request_to_json(request, PrometheusRwMode::OTel).unwrap();
         let obj: serde_json::Value = serde_json::from_slice(&events[0]).unwrap();
         assert_eq!(obj["metric_type"], "sum");
     }
@@ -706,8 +642,7 @@ mod tests {
             metadata: vec![],
         };
 
-        let events =
-            write_request_to_json(request, PrometheusRwMode::OTel, RawCapture::OFF).unwrap();
+        let events = write_request_to_json(request, PrometheusRwMode::OTel).unwrap();
         let obj: serde_json::Value = serde_json::from_slice(&events[0]).unwrap();
         assert_eq!(obj["metric_type"], "gauge");
     }
@@ -727,8 +662,7 @@ mod tests {
             }],
         };
 
-        let events =
-            write_request_to_json(request, PrometheusRwMode::HyperDx, RawCapture::OFF).unwrap();
+        let events = write_request_to_json(request, PrometheusRwMode::HyperDx).unwrap();
         let obj: serde_json::Value = serde_json::from_slice(&events[0]).unwrap();
         assert_eq!(obj["_otel_metric_type"], "sum");
     }
@@ -746,8 +680,7 @@ mod tests {
             metadata: vec![],
         };
 
-        let events =
-            write_request_to_json(request, PrometheusRwMode::OTel, RawCapture::OFF).unwrap();
+        let events = write_request_to_json(request, PrometheusRwMode::OTel).unwrap();
         let obj: serde_json::Value = serde_json::from_slice(&events[0]).unwrap();
 
         // __name__ becomes metric_name, not an attribute
@@ -769,8 +702,7 @@ mod tests {
             metadata: vec![],
         };
 
-        let events =
-            write_request_to_json(request, PrometheusRwMode::OTel, RawCapture::OFF).unwrap();
+        let events = write_request_to_json(request, PrometheusRwMode::OTel).unwrap();
         assert_eq!(events.len(), 2);
 
         let obj0: serde_json::Value = serde_json::from_slice(&events[0]).unwrap();
@@ -798,75 +730,19 @@ mod tests {
         }
     }
 
+    /// The event is JSON, which the loader keeps whole in `_json`. A native or
+    /// otel rendering of the same sample in `_raw` would be stored and
+    /// text-indexed twice.
     #[test]
-    fn capture_off_emits_no_raw_field() {
-        let events = write_request_to_json(
-            one_sample_request(),
+    fn no_mode_emits_a_raw_field() {
+        for mode in [
             PrometheusRwMode::Native,
-            RawCapture::OFF,
-        )
-        .unwrap();
-        let obj: serde_json::Value = serde_json::from_slice(&events[0]).unwrap();
-        assert!(obj.get("_raw").is_none());
-    }
-
-    #[test]
-    fn hyperdx_capture_carries_the_native_rendering() {
-        let events = write_request_to_json(
-            one_sample_request(),
-            PrometheusRwMode::HyperDx,
-            RawCapture::on(),
-        )
-        .unwrap();
-        let obj: serde_json::Value = serde_json::from_slice(&events[0]).unwrap();
-
-        // The HyperDX event is shaped as before.
-        assert_eq!(obj["MetricName"], "http_requests_total");
-        assert_eq!(obj["Value"], 42.0);
-
-        // _raw is the native decode of the same sample -- flat labels.
-        let captured: serde_json::Value =
-            serde_json::from_str(obj["_raw"].as_str().unwrap()).unwrap();
-        assert_eq!(captured["__name__"], "http_requests_total");
-        assert_eq!(captured["job"], "api");
-        assert_eq!(captured["value"], 42.0);
-        assert_eq!(captured["_source"], "prometheus");
-    }
-
-    #[test]
-    fn otel_capture_carries_the_native_rendering() {
-        let events = write_request_to_json(
-            one_sample_request(),
             PrometheusRwMode::OTel,
-            RawCapture::on(),
-        )
-        .unwrap();
-        let obj: serde_json::Value = serde_json::from_slice(&events[0]).unwrap();
-
-        assert_eq!(obj["metric_name"], "http_requests_total");
-        let captured: serde_json::Value =
-            serde_json::from_str(obj["_raw"].as_str().unwrap()).unwrap();
-        assert_eq!(captured["__name__"], "http_requests_total");
-        assert_eq!(captured["value"], 42.0);
-    }
-
-    #[test]
-    fn native_capture_emits_raw_even_though_it_duplicates() {
-        // Documented behaviour, warned about at startup: the schema stays
-        // the same whichever mode the receiver runs in.
-        let events = write_request_to_json(
-            one_sample_request(),
-            PrometheusRwMode::Native,
-            RawCapture::on(),
-        )
-        .unwrap();
-        let obj: serde_json::Value = serde_json::from_slice(&events[0]).unwrap();
-
-        let captured: serde_json::Value =
-            serde_json::from_str(obj["_raw"].as_str().unwrap()).unwrap();
-        assert_eq!(captured["value"], obj["value"]);
-        assert_eq!(captured["job"], obj["job"]);
-        // The copy does not contain itself.
-        assert!(captured.get("_raw").is_none());
+            PrometheusRwMode::HyperDx,
+        ] {
+            let events = write_request_to_json(one_sample_request(), mode).unwrap();
+            let obj: serde_json::Value = serde_json::from_slice(&events[0]).unwrap();
+            assert!(obj.get("_raw").is_none(), "{mode:?}: {obj}");
+        }
     }
 }

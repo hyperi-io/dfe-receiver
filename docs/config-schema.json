@@ -46,7 +46,6 @@
             "secret_source": null,
             "refresh_interval_secs": 300
           },
-          "include_common_header": true,
           "header_name": "",
           "header_values": []
         },
@@ -80,7 +79,6 @@
             "secret_source": null,
             "refresh_interval_secs": 300
           },
-          "include_common_header": true,
           "header_name": "",
           "header_values": []
         },
@@ -117,14 +115,8 @@
             "secret_source": null,
             "refresh_interval_secs": 300
           },
-          "include_common_header": true,
           "header_name": "",
           "header_values": []
-        },
-        "raw_capture": {
-          "enabled": null,
-          "max_bytes": null,
-          "on_oversize": null
         },
         "max_message_size": 16777216,
         "acknowledgements": {
@@ -158,7 +150,6 @@
             "secret_source": null,
             "refresh_interval_secs": 300
           },
-          "include_common_header": true,
           "header_name": "",
           "header_values": []
         },
@@ -195,7 +186,6 @@
             "secret_source": null,
             "refresh_interval_secs": 300
           },
-          "include_common_header": true,
           "header_name": "",
           "header_values": []
         },
@@ -237,7 +227,6 @@
             "secret_source": null,
             "refresh_interval_secs": 300
           },
-          "include_common_header": true,
           "header_name": "",
           "header_values": []
         },
@@ -277,14 +266,8 @@
             "secret_source": null,
             "refresh_interval_secs": 300
           },
-          "include_common_header": true,
           "header_name": "",
           "header_values": []
-        },
-        "raw_capture": {
-          "enabled": null,
-          "max_bytes": null,
-          "on_oversize": null
         },
         "acknowledgements": {
           "enabled": true
@@ -310,11 +293,6 @@
           "refresh_interval_secs": 3600
         },
         "accept_unauthenticated": false,
-        "raw_capture": {
-          "enabled": null,
-          "max_bytes": null,
-          "on_oversize": null
-        },
         "acknowledgements": {
           "enabled": true
         }
@@ -338,12 +316,7 @@
           "ca_secret": null,
           "refresh_interval_secs": 3600
         },
-        "accept_unauthenticated": false,
-        "raw_capture": {
-          "enabled": null,
-          "max_bytes": null,
-          "on_oversize": null
-        }
+        "accept_unauthenticated": false
       }
     },
     "flow": {
@@ -417,7 +390,7 @@
       }
     },
     "raw_capture": {
-      "description": "Common raw-payload capture default, inherited by every transport that\nsupports capture. Per-transport `raw_capture:` blocks override it\nfield by field. See [`raw_capture`].",
+      "description": "Common raw-payload capture default, inherited by every transport that\ncarries raw data: syslog, the Splunk HEC `/raw` endpoint and flow.\nPer-transport `raw_capture:` blocks override it field by field. See\n[`raw_capture`].",
       "$ref": "#/$defs/RawCaptureConfig",
       "default": {
         "enabled": null,
@@ -442,6 +415,7 @@
         "topic_suffix": "_land",
         "source_to_topic": {},
         "source_org_id": "disallow",
+        "enrich": true,
         "dlq": {
           "enabled": true,
           "mode": "cascade",
@@ -644,7 +618,6 @@
               "secret_source": null,
               "refresh_interval_secs": 300
             },
-            "include_common_header": true,
             "header_name": "",
             "header_values": []
           }
@@ -799,11 +772,6 @@
             "refresh_interval_secs": 300
           }
         },
-        "include_common_header": {
-          "description": "Enrichment switch, read from `server.auth` alone: stamps\n`_timestamp_received` and `_source` on routed records. `_org_id` is\nstamped either way. It adds no accepted header. Default: true",
-          "type": "boolean",
-          "default": true
-        },
         "header_name": {
           "description": "Legacy: Single header name for header-based auth.\nDeprecated: Use `accepted_headers` instead.",
           "type": "string",
@@ -926,7 +894,6 @@
               "secret_source": null,
               "refresh_interval_secs": 300
             },
-            "include_common_header": true,
             "header_name": "",
             "header_values": []
           }
@@ -997,18 +964,8 @@
               "secret_source": null,
               "refresh_interval_secs": 300
             },
-            "include_common_header": true,
             "header_name": "",
             "header_values": []
-          }
-        },
-        "raw_capture": {
-          "description": "Raw-payload capture override (inherits the common `raw_capture` block).\n\nOTLP arrives as protobuf, so `_raw` carries the `generic`-mode\nrendering of the record -- the least-shaped decode we produce. In\n`generic` mode it is therefore a copy of the event itself.",
-          "$ref": "#/$defs/RawCaptureConfig",
-          "default": {
-            "enabled": null,
-            "max_bytes": null,
-            "on_oversize": null
           }
         },
         "max_message_size": {
@@ -1033,57 +990,6 @@
           "default": 9000
         }
       }
-    },
-    "RawCaptureConfig": {
-      "description": "Raw-capture settings as written in config, at either cascade level.\n\nEvery field is `Option` so an unset field means \"inherit\", not \"off\".",
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "description": "Capture the original payload into `_raw`.",
-          "type": [
-            "boolean",
-            "null"
-          ],
-          "default": null
-        },
-        "max_bytes": {
-          "description": "Maximum captured bytes; 0 means unlimited.",
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint",
-          "minimum": 0,
-          "default": null
-        },
-        "on_oversize": {
-          "description": "Behaviour when the payload exceeds `max_bytes`.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/OversizePolicy"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        }
-      }
-    },
-    "OversizePolicy": {
-      "description": "What to do with a payload larger than `max_bytes`.",
-      "oneOf": [
-        {
-          "description": "Keep the leading `max_bytes` and flag it with `_raw_truncated: true`.",
-          "type": "string",
-          "const": "truncate"
-        },
-        {
-          "description": "Emit no `_raw` at all for this event.",
-          "type": "string",
-          "const": "omit"
-        }
-      ]
     },
     "LumberjackConfig": {
       "description": "Lumberjack v2 (Beats) protocol configuration.\n\nAccepts data from Elastic Beats agents (Filebeat, Winlogbeat, etc.)\nover the Lumberjack v2 wire protocol on TCP/TLS.",
@@ -1125,7 +1031,6 @@
               "secret_source": null,
               "refresh_interval_secs": 300
             },
-            "include_common_header": true,
             "header_name": "",
             "header_values": []
           }
@@ -1198,13 +1103,12 @@
               "secret_source": null,
               "refresh_interval_secs": 300
             },
-            "include_common_header": true,
             "header_name": "",
             "header_values": []
           }
         },
         "raw_capture": {
-          "description": "Raw-payload capture override (inherits the common `raw_capture` block).\n\nOn `/services/collector/event`, `_raw` carries the submitted `event`\nvalue before HEC metadata is merged in. On `/services/collector/raw`\nit carries the original line bytes.",
+          "description": "Raw-payload capture override (inherits the common `raw_capture` block).\n\nApplies to `/services/collector/raw`, where `_raw` carries the original\nline bytes. An `/event` payload is JSON, which the loader keeps whole in\n`_json`, so it is never copied into `_raw`.",
           "$ref": "#/$defs/RawCaptureConfig",
           "default": {
             "enabled": null,
@@ -1220,6 +1124,57 @@
           }
         }
       }
+    },
+    "RawCaptureConfig": {
+      "description": "Raw-capture settings as written in config, at either cascade level.\n\nEvery field is `Option` so an unset field means \"inherit\", not \"off\".",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Capture the original payload into `_raw`.",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "max_bytes": {
+          "description": "Maximum captured bytes; 0 means unlimited.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0,
+          "default": null
+        },
+        "on_oversize": {
+          "description": "Behaviour when the payload exceeds `max_bytes`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OversizePolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      }
+    },
+    "OversizePolicy": {
+      "description": "What to do with a payload larger than `max_bytes`.",
+      "oneOf": [
+        {
+          "description": "Keep the leading `max_bytes` and flag it with `_raw_truncated: true`.",
+          "type": "string",
+          "const": "truncate"
+        },
+        {
+          "description": "Emit no `_raw` at all for this event.",
+          "type": "string",
+          "const": "omit"
+        }
+      ]
     },
     "SyslogConfig": {
       "description": "Syslog receiver configuration (RFC 5424 + RFC 3164).\n\nAccepts syslog messages over UDP, TCP, and TLS/TCP.\nAuto-detects message format (RFC 5424 vs RFC 3164) per message.",
@@ -1278,7 +1233,6 @@
               "secret_source": null,
               "refresh_interval_secs": 300
             },
-            "include_common_header": true,
             "header_name": "",
             "header_values": []
           }
@@ -1358,18 +1312,8 @@
               "secret_source": null,
               "refresh_interval_secs": 300
             },
-            "include_common_header": true,
             "header_name": "",
             "header_values": []
-          }
-        },
-        "raw_capture": {
-          "description": "Raw-payload capture override (inherits the common `raw_capture` block).\n\nRemote Write arrives as snappy-framed protobuf, so `_raw` carries the\n`native`-mode rendering of the sample -- the least-shaped decode we\nproduce. In `native` mode it is therefore a copy of the event itself.",
-          "$ref": "#/$defs/RawCaptureConfig",
-          "default": {
-            "enabled": null,
-            "max_bytes": null,
-            "on_oversize": null
           }
         },
         "acknowledgements": {
@@ -1422,15 +1366,6 @@
           "type": "boolean",
           "default": false
         },
-        "raw_capture": {
-          "description": "Raw-payload capture override (inherits the common `raw_capture` block).\n\nForward arrives as msgpack, so `_raw` carries the record's verbatim\nmsgpack-to-JSON decode, before the tag, timestamp and `_source` this\nhandler adds.",
-          "$ref": "#/$defs/RawCaptureConfig",
-          "default": {
-            "enabled": null,
-            "max_bytes": null,
-            "on_oversize": null
-          }
-        },
         "acknowledgements": {
           "description": "Acknowledge a chunk, or read past a message without one, only once\nevery destination confirmed its records (default on). Off does so once\nthey are queued.",
           "$ref": "#/$defs/AcknowledgementsConfig",
@@ -1480,15 +1415,6 @@
           "description": "Start without client certificates, accepting every client that can\nreach the port. Without it, an enabled listener refuses to start unless\n`tls.client_auth` is `required`.",
           "type": "boolean",
           "default": false
-        },
-        "raw_capture": {
-          "description": "Raw-payload capture override (inherits the common `raw_capture` block).\n\n`_raw` holds the GELF message exactly as it arrived, before the\n`message`, `severity` and `_source` fields this handler derives.",
-          "$ref": "#/$defs/RawCaptureConfig",
-          "default": {
-            "enabled": null,
-            "max_bytes": null,
-            "on_oversize": null
-          }
         }
       }
     },
@@ -2013,6 +1939,11 @@
           "description": "Whether a sender may set `_org_id`, the field that picks the tenant downstream.",
           "$ref": "#/$defs/SourceOrgId",
           "default": "disallow"
+        },
+        "enrich": {
+          "description": "Whether routed records get `_timestamp_received` and `_source`, and the\n`_source` rules choose their destination. Off, a record is stamped with\nits `_org_id` alone and takes the default destination. Independent of\nauthentication. Default: true.",
+          "type": "boolean",
+          "default": true
         },
         "dlq": {
           "description": "DLQ configuration.",

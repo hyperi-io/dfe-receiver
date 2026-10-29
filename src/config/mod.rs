@@ -27,8 +27,8 @@ pub use shared::SharedConfig;
 use std::collections::HashMap;
 
 use scalo::SensitiveString;
+use scalo::config;
 use scalo::config::flat_env::{self, ApplyFlatEnv, Normalize};
-use scalo::config::{self, ConfigOptions};
 use scalo::transport::AcknowledgementsConfig;
 use serde::{Deserialize, Serialize};
 
@@ -83,8 +83,9 @@ pub struct Config {
     pub webhook: WebhookConfig,
 
     /// Common raw-payload capture default, inherited by every transport that
-    /// supports capture. Per-transport `raw_capture:` blocks override it
-    /// field by field. See [`raw_capture`].
+    /// carries raw data: syslog, the Splunk HEC `/raw` endpoint and flow.
+    /// Per-transport `raw_capture:` blocks override it field by field. See
+    /// [`raw_capture`].
     pub raw_capture: RawCaptureConfig,
 
     /// Validation rules.
@@ -224,21 +225,13 @@ impl Config {
     pub fn load(config_path: Option<&str>) -> Result<Self> {
         // If an explicit config file is provided, load it directly
         if let Some(path) = config_path {
-            init_cascade(path)?;
             return Self::load_from_file(path);
         }
 
-        // Otherwise, use scalo's 7-layer cascade
-        config::setup(ConfigOptions {
-            env_prefix: ENV_PREFIX.to_string(),
-            config_paths: Vec::new(),
-            load_dotenv: true,
-            ..Default::default()
-        })
-        .map_err(|e| Error::Config(format!("failed to setup config: {e}")))?;
-
-        // Get the global config and unmarshal to our struct
-        let cfg = config::get();
+        // Otherwise, read scalo's 7-layer cascade, which run_app sets up.
+        let cfg = config::try_get().ok_or_else(|| {
+            Error::Config("the config cascade is not set up: scalo's run_app sets it up".into())
+        })?;
 
         // A config that does not fit fails startup: running on defaults would
         // ingest somewhere the operator never configured.
@@ -844,26 +837,6 @@ fn no_application_auth(scope: &str, auth: &AuthConfig) -> Result<()> {
     )))
 }
 
-/// Set up scalo's cascade with the `--config` file as its settings layer.
-///
-/// The receiver reads its own sections from the file directly, but the sections
-/// scalo's runtime owns (`version_check`, `metrics`, `scaling` and the rest)
-/// resolve from the cascade alone. A reload re-enters here, and the cascade is
-/// set once per process.
-fn init_cascade(path: &str) -> Result<()> {
-    let opts = ConfigOptions {
-        env_prefix: ENV_PREFIX.to_string(),
-        config_paths: vec![std::path::PathBuf::from(path)],
-        // A working-tree `.env` must not reach a deployment's `--config` load.
-        load_dotenv: false,
-        ..Default::default()
-    };
-    match config::setup(opts) {
-        Ok(()) | Err(config::ConfigError::AlreadyInitialised) => Ok(()),
-        Err(e) => Err(Error::Config(format!("failed to setup config: {e}"))),
-    }
-}
-
 /// Reload configuration from the same source.
 ///
 /// Re-runs the full cascade (file + env overrides + validate) using
@@ -889,8 +862,8 @@ impl ApplyFlatEnv for Config {
         if let Some(v) = flat_env::flat_env_parsed::<u64>(prefix, "REQUEST_TIMEOUT_MS") {
             self.server.request_timeout_ms = v;
         }
-        if let Some(v) = flat_env::flat_env_bool(prefix, "COMMON_HEADER") {
-            self.server.auth.include_common_header = v;
+        if let Some(v) = flat_env::flat_env_bool(prefix, "ENRICH") {
+            self.routing.enrich = v;
         }
 
         // Kafka
@@ -1027,26 +1000,17 @@ impl ApplyFlatEnv for Config {
             self.webhook.bind_address = Some(v);
         }
 
-        // Raw capture -- common block, then one override per capturing
-        // transport. Both levels are reachable from the environment so a
-        // container can turn capture on for a single transport without
-        // shipping a config file.
+        // Raw capture -- common block, then one override per transport that
+        // carries raw data (syslog, the Splunk HEC raw endpoint, flow). Both
+        // levels are reachable from the environment so a container can turn
+        // capture on for a single transport without shipping a config file.
         apply_raw_capture_env(&mut self.raw_capture, prefix, "RAW_CAPTURE");
-        #[cfg(feature = "otlp")]
-        apply_raw_capture_env(&mut self.otlp.raw_capture, prefix, "OTLP_RAW_CAPTURE");
         apply_raw_capture_env(
             &mut self.splunk_hec.raw_capture,
             prefix,
             "SPLUNK_HEC_RAW_CAPTURE",
         );
         apply_raw_capture_env(&mut self.syslog.raw_capture, prefix, "SYSLOG_RAW_CAPTURE");
-        apply_raw_capture_env(
-            &mut self.prometheus_rw.raw_capture,
-            prefix,
-            "PROMETHEUS_RW_RAW_CAPTURE",
-        );
-        apply_raw_capture_env(&mut self.fluent.raw_capture, prefix, "FLUENT_RAW_CAPTURE");
-        apply_raw_capture_env(&mut self.gelf.raw_capture, prefix, "GELF_RAW_CAPTURE");
         apply_raw_capture_env(&mut self.flow.raw_capture, prefix, "FLOW_RAW_CAPTURE");
     }
 }
@@ -1302,12 +1266,6 @@ pub struct AuthConfig {
     /// Bearer token configuration.
     pub bearer: BearerConfig,
 
-    /// Enrichment switch, read from `server.auth` alone: stamps
-    /// `_timestamp_received` and `_source` on routed records. `_org_id` is
-    /// stamped either way. It adds no accepted header. Default: true
-    #[serde(default = "default_true")]
-    pub include_common_header: bool,
-
     /// Legacy: Single header name for header-based auth.
     /// Deprecated: Use `accepted_headers` instead.
     #[serde(default)]
@@ -1387,7 +1345,6 @@ impl Default for AuthConfig {
             mode: "none".to_string(),
             accepted_headers: vec![],
             bearer: BearerConfig::default(),
-            include_common_header: true,
             // Legacy fields for backwards compatibility
             header_name: String::new(),
             header_values: Vec::new(),
@@ -1486,13 +1443,6 @@ pub struct OtlpConfig {
     /// Authentication configuration for OTLP endpoints.
     pub auth: AuthConfig,
 
-    /// Raw-payload capture override (inherits the common `raw_capture` block).
-    ///
-    /// OTLP arrives as protobuf, so `_raw` carries the `generic`-mode
-    /// rendering of the record -- the least-shaped decode we produce. In
-    /// `generic` mode it is therefore a copy of the event itself.
-    pub raw_capture: RawCaptureConfig,
-
     /// Largest decoded export the gRPC endpoint takes, in bytes.
     pub max_message_size: usize,
 
@@ -1520,7 +1470,6 @@ impl Default for OtlpConfig {
             grpc_bind_address: "0.0.0.0:4317".to_string(),
             http_bind_address: "0.0.0.0:4318".to_string(),
             mode: "hyperdx".to_string(),
-            raw_capture: RawCaptureConfig::default(),
             tls: TlsConfig::default(),
             auth: AuthConfig {
                 mode: "none".to_string(),
@@ -1605,9 +1554,9 @@ pub struct SplunkHecConfig {
 
     /// Raw-payload capture override (inherits the common `raw_capture` block).
     ///
-    /// On `/services/collector/event`, `_raw` carries the submitted `event`
-    /// value before HEC metadata is merged in. On `/services/collector/raw`
-    /// it carries the original line bytes.
+    /// Applies to `/services/collector/raw`, where `_raw` carries the original
+    /// line bytes. An `/event` payload is JSON, which the loader keeps whole in
+    /// `_json`, so it is never copied into `_raw`.
     pub raw_capture: RawCaptureConfig,
 
     /// Answer a request only once every destination confirmed its events
@@ -1720,13 +1669,6 @@ pub struct PrometheusRwConfig {
     /// Authentication configuration.
     pub auth: AuthConfig,
 
-    /// Raw-payload capture override (inherits the common `raw_capture` block).
-    ///
-    /// Remote Write arrives as snappy-framed protobuf, so `_raw` carries the
-    /// `native`-mode rendering of the sample -- the least-shaped decode we
-    /// produce. In `native` mode it is therefore a copy of the event itself.
-    pub raw_capture: RawCaptureConfig,
-
     /// Answer a write only once every destination confirmed its samples
     /// (default on). Off answers once they are queued.
     pub acknowledgements: AcknowledgementsConfig,
@@ -1738,7 +1680,6 @@ impl Default for PrometheusRwConfig {
             enabled: false,
             bind_address: "0.0.0.0:9091".to_string(),
             mode: "native".to_string(),
-            raw_capture: RawCaptureConfig::default(),
             max_body_size: 10 * 1024 * 1024,
             request_timeout_ms: 30_000,
             tls: TlsConfig::default(),
@@ -1780,13 +1721,6 @@ pub struct FluentConfig {
     /// `tls.client_auth` is `required`.
     pub accept_unauthenticated: bool,
 
-    /// Raw-payload capture override (inherits the common `raw_capture` block).
-    ///
-    /// Forward arrives as msgpack, so `_raw` carries the record's verbatim
-    /// msgpack-to-JSON decode, before the tag, timestamp and `_source` this
-    /// handler adds.
-    pub raw_capture: RawCaptureConfig,
-
     /// Acknowledge a chunk, or read past a message without one, only once
     /// every destination confirmed its records (default on). Off does so once
     /// they are queued.
@@ -1801,7 +1735,6 @@ impl Default for FluentConfig {
             max_message_size: 32 * 1024 * 1024,
             tls: TlsConfig::default(),
             accept_unauthenticated: false,
-            raw_capture: RawCaptureConfig::default(),
             acknowledgements: AcknowledgementsConfig::default(),
         }
     }
@@ -1835,12 +1768,6 @@ pub struct GelfConfig {
     /// reach the port. Without it, an enabled listener refuses to start unless
     /// `tls.client_auth` is `required`.
     pub accept_unauthenticated: bool,
-
-    /// Raw-payload capture override (inherits the common `raw_capture` block).
-    ///
-    /// `_raw` holds the GELF message exactly as it arrived, before the
-    /// `message`, `severity` and `_source` fields this handler derives.
-    pub raw_capture: RawCaptureConfig,
 }
 
 impl Default for GelfConfig {
@@ -1851,7 +1778,6 @@ impl Default for GelfConfig {
             max_message_size: 1024 * 1024,
             tls: TlsConfig::default(),
             accept_unauthenticated: false,
-            raw_capture: RawCaptureConfig::default(),
         }
     }
 }
@@ -2178,6 +2104,12 @@ pub struct RoutingConfig {
     #[serde(default)]
     pub source_org_id: SourceOrgId,
 
+    /// Whether routed records get `_timestamp_received` and `_source`, and the
+    /// `_source` rules choose their destination. Off, a record is stamped with
+    /// its `_org_id` alone and takes the default destination. Independent of
+    /// authentication. Default: true.
+    pub enrich: bool,
+
     /// DLQ configuration.
     pub dlq: DlqConfig,
 }
@@ -2244,6 +2176,7 @@ impl Default for RoutingConfig {
             topic_suffix: "_land".to_string(),
             source_to_topic: HashMap::new(),
             source_org_id: SourceOrgId::default(),
+            enrich: true,
             dlq: DlqConfig::default(),
         }
     }
@@ -3014,6 +2947,18 @@ impl ScalingConfig {
 mod tests {
     use super::*;
     use temp_env;
+
+    /// Set up the cascade as `run_app` does with no `--config`, from the
+    /// environment the test has set.
+    fn setup_cascade() {
+        match config::setup(config::ConfigOptions {
+            env_prefix: ENV_PREFIX.to_string(),
+            ..Default::default()
+        }) {
+            Ok(()) | Err(config::ConfigError::AlreadyInitialised) => {}
+            Err(e) => panic!("cascade setup failed: {e}"),
+        }
+    }
 
     #[test]
     fn test_default_config() {
@@ -4271,6 +4216,7 @@ webhook:
                 ("DFE_RECEIVER__LOADER__TRANSPORT", Some("kafka")),
             ],
             || {
+                setup_cascade();
                 let config = Config::load(None).expect("the cascade loads");
                 assert_eq!(config.transport, TRANSPORT_GRPC);
                 assert_eq!(
@@ -4378,20 +4324,19 @@ webhook:
     }
 
     #[test]
-    fn test_env_override_common_header() {
-        // Test true
-        with_env(&[("DFE_RECEIVER_COMMON_HEADER", "true")], || {
+    fn test_env_override_enrich() {
+        with_env(&[("DFE_RECEIVER_ENRICH", "false")], || {
             let mut config = Config::default();
-            config.server.auth.include_common_header = false;
+            assert!(config.routing.enrich);
             config.apply_flat_env(ENV_PREFIX);
-            assert!(config.server.auth.include_common_header);
+            assert!(!config.routing.enrich);
         });
 
-        // Test false
-        with_env(&[("DFE_RECEIVER_COMMON_HEADER", "false")], || {
+        with_env(&[("DFE_RECEIVER_ENRICH", "true")], || {
             let mut config = Config::default();
+            config.routing.enrich = false;
             config.apply_flat_env(ENV_PREFIX);
-            assert!(!config.server.auth.include_common_header);
+            assert!(config.routing.enrich);
         });
     }
 
@@ -4923,7 +4868,7 @@ kafka:
                 // Only the named transport is switched on; the rest still inherit
                 // the common block, which is still off.
                 assert!(config.raw_capture_for(&config.syslog.raw_capture).enabled);
-                assert!(!config.raw_capture_for(&config.gelf.raw_capture).enabled);
+                assert!(!config.raw_capture_for(&config.flow.raw_capture).enabled);
             },
         );
     }
@@ -4933,14 +4878,14 @@ kafka:
         with_env(
             &[
                 ("DFE_RECEIVER_RAW_CAPTURE_ENABLED", "true"),
-                ("DFE_RECEIVER_GELF_RAW_CAPTURE_ENABLED", "false"),
+                ("DFE_RECEIVER_FLOW_RAW_CAPTURE_ENABLED", "false"),
             ],
             || {
                 let mut config = Config::default();
                 config.apply_flat_env(ENV_PREFIX);
 
                 assert!(config.raw_capture_for(&config.syslog.raw_capture).enabled);
-                assert!(!config.raw_capture_for(&config.gelf.raw_capture).enabled);
+                assert!(!config.raw_capture_for(&config.flow.raw_capture).enabled);
             },
         );
     }
@@ -5170,6 +5115,7 @@ scaling:
             "DFE_RECEIVER__SERVER__MAX_BODY_SIZE",
             Some("not-a-number"),
             || {
+                setup_cascade();
                 let err = Config::load(None).expect_err("a value that does not fit fails the load");
                 assert!(
                     matches!(err, Error::Config(ref msg) if msg.starts_with("invalid config")),
