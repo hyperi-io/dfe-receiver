@@ -72,9 +72,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Locate pgo-driver binary (built as a feature-gated [[bin]]).
-# On-demand build if missing: hyperi-ci's release build only produces the
-# main binary, not the pgo-driver (which requires --features pgo-driver).
-# Building here is cheap (~1 min, deps already compiled via cargo cache).
+# CI builds it in .hyperi-ci.yaml's pgo.workload_setup_cmd, before the
+# workload timeout starts. The build below is the local fallback, and on an
+# uncached runner it can take many minutes.
 PGO_DRIVER_PATH="${PGO_DRIVER_PATH:-}"
 if [[ -z "$PGO_DRIVER_PATH" ]]; then
     for candidate in \

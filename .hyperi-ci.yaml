@@ -44,6 +44,10 @@ build:
   rust:
     glibc_max: "2.41"
     features: default
+    optimize:
+      pgo:
+        # Built before the workload clock starts: an uncached arm64 runner takes longer than the workload timeout to compile it.
+        workload_setup_cmd: "cargo build --release --features pgo-driver --bin pgo-driver"
     targets:
       - x86_64-unknown-linux-gnu
       - aarch64-unknown-linux-gnu
