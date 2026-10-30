@@ -8,19 +8,20 @@
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Compile Vector proto definitions (event.proto + vector.proto)
+    // The codec refuses a push over its record budget before prost decodes it.
     tonic_prost_build::configure()
         .build_server(true)
         .build_client(false)
+        .codec_path("crate::server::budget::BudgetCodec")
         .compile_protos(&["proto/vector.proto", "proto/event.proto"], &["proto"])?;
 
     // Compile OTLP proto definitions (logs, metrics, traces services)
     // Vendored from https://github.com/open-telemetry/opentelemetry-proto v1.5.0
     if std::env::var("CARGO_FEATURE_OTLP").is_ok() {
-        // The codec refuses an export over its record budget before prost decodes it.
         tonic_prost_build::configure()
             .build_server(true)
             .build_client(true)
-            .codec_path("crate::server::otlp::budget::BudgetCodec")
+            .codec_path("crate::server::budget::BudgetCodec")
             .compile_protos(
                 &[
                     "proto/opentelemetry/proto/collector/logs/v1/logs_service.proto",

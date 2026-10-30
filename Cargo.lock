@@ -1613,6 +1613,7 @@ dependencies = [
  "prost-types",
  "rdkafka",
  "reqwest 0.13.5",
+ "rmp",
  "rmpv",
  "rustc-hash",
  "rustls",

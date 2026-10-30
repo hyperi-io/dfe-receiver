@@ -210,11 +210,7 @@ async fn run_prometheus_rw_server(
         build_tls_acceptor(&config.tls)?
     };
 
-    let accept = Accept {
-        ip_filter: crate::server::ip_filter::IpFilter::from_config(&server.ip_filter),
-        metrics,
-        transport: TRANSPORT,
-    };
+    let accept = Accept::new(&server, metrics, TRANSPORT);
 
     // Published once TLS is ready, so a failed TLS setup never reads as serving.
     let _serving = bound.publish(&listener.local_addr());

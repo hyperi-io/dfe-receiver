@@ -48,7 +48,6 @@ use crate::metrics::Metrics;
 use crate::pipeline::{Acks, PipelineState};
 use crate::server::auth::record_auth_failure;
 use crate::server::http::{Accept, apply_request_limits, split_json_array};
-use crate::server::ip_filter::IpFilter;
 use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
 use crate::server::traits::{BoundAddr, ProtocolHandler};
 use crate::tenancy::{Ingest, Principal};
@@ -309,11 +308,7 @@ async fn run_webhook_server(
         .await
         .map_err(|e| Error::Server(format!("webhook failed to bind: {e}")))?;
 
-    let accept = Accept {
-        ip_filter: IpFilter::from_config(&config.server.ip_filter),
-        metrics,
-        transport: TRANSPORT,
-    };
+    let accept = Accept::new(&config.server, metrics, TRANSPORT);
 
     let tls_provider = if webhook.tls.enabled && uses_secrets(&webhook.tls) {
         let provider = TlsCertProvider::new(webhook.tls.clone()).await?;

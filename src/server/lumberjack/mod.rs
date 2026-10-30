@@ -18,7 +18,6 @@ pub mod codec;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
@@ -34,13 +33,9 @@ use crate::error::{Error, Result};
 use crate::metrics::{DropReason, Metrics};
 use crate::pipeline::{Acks, PipelineState};
 use crate::server::http::Accept;
-use crate::server::ip_filter::IpFilter;
 use crate::server::traits::{BoundAddr, ProtocolHandler};
 use crate::tenancy::{Ingest, Principal};
 use codec::{CompressedFrames, Frame, encode_ack, read_frame};
-
-/// TLS handshake timeout (matches HTTP handler).
-const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The transport label the Lumberjack listener counts under.
 const TRANSPORT: &str = "lumberjack";
@@ -354,11 +349,11 @@ impl ProtocolHandler for LumberjackHandler {
 
         // A Lumberjack frame carries no credential, so the IP filter and the
         // TLS handshake are the whole admission surface on this port.
-        let accept = Accept {
-            ip_filter: IpFilter::from_config(&self.pipeline.config().server.ip_filter),
-            metrics: self.metrics.clone(),
-            transport: TRANSPORT,
-        };
+        let accept = Accept::new(
+            &self.pipeline.config().server,
+            self.metrics.clone(),
+            TRANSPORT,
+        );
         let acks = self
             .pipeline
             .acks("lumberjack", self.config.acknowledgements, None);
@@ -401,13 +396,17 @@ impl ProtocolHandler for LumberjackHandler {
                     let metrics = self.metrics.clone();
                     let acks = acks.clone();
                     let conn_shutdown = shutdown.clone();
+                    let accept = accept.clone();
 
                     if let Some(ref acceptor) = tls_acceptor {
                         let acceptor = acceptor.clone();
                         tokio::spawn(async move {
                             let _open = open;
+                            if !accept.first_byte(&stream).await {
+                                return;
+                            }
                             // TLS handshake with timeout
-                            let tls_result = timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await;
+                            let tls_result = timeout(accept.limits.tls_handshake, acceptor.accept(stream)).await;
                             let tls_stream = match tls_result {
                                 Ok(Ok(s)) => s,
                                 Ok(Err(e)) => {
@@ -429,6 +428,9 @@ impl ProtocolHandler for LumberjackHandler {
                     } else {
                         tokio::spawn(async move {
                             let _open = open;
+                            if !accept.first_byte(&stream).await {
+                                return;
+                            }
                             let intake = Intake { pipeline: &pipeline, metrics: &metrics, acks: &acks, peer_addr };
                             handle_connection(stream, intake, conn_shutdown).await;
                         });
@@ -449,6 +451,8 @@ impl ProtocolHandler for LumberjackHandler {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     #[test]

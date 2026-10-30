@@ -9,20 +9,12 @@
 //! The decode budget of an OTLP export, as [`crate::server::budget`] walks it.
 //!
 //! A resource and an instrumentation scope are copied into every record
-//! beneath them. [`BudgetCodec`] runs the walk on the gRPC listener, [`admit`]
-//! on OTLP/HTTP.
-
-use std::marker::PhantomData;
-
-use bytes::Buf;
-use prost::Message;
-use tonic::Status;
-use tonic::codec::{BufferSettings, Codec, DecodeBuf, Decoder};
-use tonic_prost::ProstEncoder;
+//! beneath them. [`budget::BudgetCodec`] runs the walk on the gRPC listener,
+//! [`admit`] on OTLP/HTTP.
 
 use super::pb;
 use crate::error::Result;
-use crate::server::budget::{self, Shape};
+use crate::server::budget::{self, Budgeted, Shape};
 
 static EMPTY: Shape = Shape::of(&[]);
 static KEY_VALUE: Shape = Shape::of(&[(2, &ANY_VALUE)]);
@@ -67,25 +59,22 @@ static SCOPE_METRICS: Shape = Shape::of(&[(1, &SCOPE), (2, &METRIC)]);
 static RESOURCE_METRICS: Shape = Shape::of(&[(1, &RESOURCE), (2, &SCOPE_METRICS)]);
 static METRICS: Shape = Shape::of(&[(1, &RESOURCE_METRICS)]);
 
-/// An OTLP message whose decoded size the budget bounds.
-pub trait Budgeted {
-    /// Where its repeated messages sit.
-    fn shape() -> &'static Shape;
-}
-
 impl Budgeted for pb::collector::logs::v1::ExportLogsServiceRequest {
+    const WHAT: &'static str = "OTLP export";
     fn shape() -> &'static Shape {
         &LOGS
     }
 }
 
 impl Budgeted for pb::collector::trace::v1::ExportTraceServiceRequest {
+    const WHAT: &'static str = "OTLP export";
     fn shape() -> &'static Shape {
         &TRACES
     }
 }
 
 impl Budgeted for pb::collector::metrics::v1::ExportMetricsServiceRequest {
+    const WHAT: &'static str = "OTLP export";
     fn shape() -> &'static Shape {
         &METRICS
     }
@@ -93,18 +82,21 @@ impl Budgeted for pb::collector::metrics::v1::ExportMetricsServiceRequest {
 
 // The generated client decodes the responses through the same codec.
 impl Budgeted for pb::collector::logs::v1::ExportLogsServiceResponse {
+    const WHAT: &'static str = "OTLP export";
     fn shape() -> &'static Shape {
         &EMPTY
     }
 }
 
 impl Budgeted for pb::collector::trace::v1::ExportTraceServiceResponse {
+    const WHAT: &'static str = "OTLP export";
     fn shape() -> &'static Shape {
         &EMPTY
     }
 }
 
 impl Budgeted for pb::collector::metrics::v1::ExportMetricsServiceResponse {
+    const WHAT: &'static str = "OTLP export";
     fn shape() -> &'static Shape {
         &EMPTY
     }
@@ -116,62 +108,13 @@ impl Budgeted for pb::collector::metrics::v1::ExportMetricsServiceResponse {
 ///
 /// [`crate::error::Error::Validation`] naming the budget the export is over.
 pub fn admit<T: Budgeted>(body: &[u8]) -> Result<()> {
-    budget::admit(body, T::shape(), "OTLP export")
-}
-
-/// The prost codec, with [`admit`] run on every message before it decodes.
-#[derive(Debug, Clone, Copy)]
-pub struct BudgetCodec<T, U>(PhantomData<(T, U)>);
-
-impl<T, U> Default for BudgetCodec<T, U> {
-    fn default() -> Self {
-        Self(PhantomData)
-    }
-}
-
-impl<T, U> Codec for BudgetCodec<T, U>
-where
-    T: Message + Send + 'static,
-    U: Message + Default + Budgeted + Send + 'static,
-{
-    type Encode = T;
-    type Decode = U;
-    type Encoder = ProstEncoder<T>;
-    type Decoder = BudgetDecoder<U>;
-
-    fn encoder(&mut self) -> Self::Encoder {
-        ProstEncoder::default()
-    }
-
-    fn decoder(&mut self) -> Self::Decoder {
-        BudgetDecoder(PhantomData)
-    }
-}
-
-/// Decodes `U` once its budget admits it.
-#[derive(Debug, Clone, Copy)]
-pub struct BudgetDecoder<U>(PhantomData<U>);
-
-impl<U: Message + Default + Budgeted> Decoder for BudgetDecoder<U> {
-    type Item = U;
-    type Error = Status;
-
-    fn decode(&mut self, buf: &mut DecodeBuf<'_>) -> std::result::Result<Option<U>, Status> {
-        let message = buf.copy_to_bytes(buf.remaining());
-        admit::<U>(&message).map_err(|e| Status::invalid_argument(e.to_string()))?;
-        U::decode(message)
-            .map(Some)
-            .map_err(|e| Status::internal(e.to_string()))
-    }
-
-    fn buffer_settings(&self) -> BufferSettings {
-        BufferSettings::default()
-    }
+    budget::admit(body, T::shape(), T::WHAT)
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use prost::Message;
     use prost::encoding::WireType;
 
     use super::*;

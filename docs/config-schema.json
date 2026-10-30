@@ -27,6 +27,13 @@
           "mode": "disabled",
           "cidrs": []
         },
+        "connections": {
+          "max_per_listener": 10000,
+          "first_byte_timeout_ms": 30000,
+          "idle_timeout_ms": 300000,
+          "tls_handshake_timeout_ms": 10000,
+          "http2_keep_alive_interval_ms": 60000
+        },
         "tls": {
           "enabled": false,
           "cert_file": null,
@@ -592,6 +599,17 @@
             "cidrs": []
           }
         },
+        "connections": {
+          "description": "Connection limits for every TCP listener the receiver owns an accept\nloop for.",
+          "$ref": "#/$defs/ConnectionsConfig",
+          "default": {
+            "max_per_listener": 10000,
+            "first_byte_timeout_ms": 30000,
+            "idle_timeout_ms": 300000,
+            "tls_handshake_timeout_ms": 10000,
+            "http2_keep_alive_interval_ms": 60000
+          }
+        },
         "tls": {
           "description": "TLS configuration.",
           "$ref": "#/$defs/TlsConfig",
@@ -672,6 +690,47 @@
             "type": "string"
           },
           "default": []
+        }
+      }
+    },
+    "ConnectionsConfig": {
+      "description": "Connection limits for every TCP listener the receiver owns an accept loop\nfor: the HTTP listeners (ingest, webhook, Splunk HEC, remote write, OTLP\nHTTP), and syslog TCP and TLS, Lumberjack, Fluent Forward and GELF. The two\ngRPC listeners (gRPC, OTLP gRPC) take the cap and the HTTP/2 settings.",
+      "type": "object",
+      "properties": {
+        "max_per_listener": {
+          "description": "Most connections one listener holds open at once. A connection past\nit is closed as it is accepted. 0 holds no limit.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "default": 10000
+        },
+        "first_byte_timeout_ms": {
+          "description": "How long a new connection may wait before its first byte arrives, in\nmilliseconds. A connection that has sent nothing by then is closed.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 30000
+        },
+        "idle_timeout_ms": {
+          "description": "How long an HTTP connection may stay open with no request in flight,\nin milliseconds, HTTP/1 keep-alive and HTTP/2 alike.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 300000
+        },
+        "tls_handshake_timeout_ms": {
+          "description": "How long a TLS client has to finish its handshake, in milliseconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 10000
+        },
+        "http2_keep_alive_interval_ms": {
+          "description": "How often an HTTP/2 connection is pinged to find a peer that has gone,\nin milliseconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 60000
         }
       }
     },

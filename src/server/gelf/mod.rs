@@ -16,7 +16,6 @@ pub mod convert;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use bytes::BytesMut;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -31,14 +30,11 @@ use crate::error::{Error, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::{Acks, PipelineState};
 use crate::server::hold::hold_until_settled;
-use crate::server::http::Accept;
+use crate::server::http::{Accept, ConnectionLimits};
 use crate::server::ip_filter::IpFilter;
 use crate::server::traits::{BoundAddr, ProtocolHandler};
 use crate::tenancy::{Ingest, Principal};
 use convert::gelf_to_json;
-
-/// TLS handshake timeout.
-const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The transport label the GELF listener counts under.
 const TRANSPORT: &str = "gelf";
@@ -198,6 +194,7 @@ async fn run_tcp(
         ip_filter,
         metrics: metrics.clone(),
         transport: TRANSPORT,
+        limits: ConnectionLimits::new(&pipeline.config().server.connections),
     };
 
     loop {
@@ -224,12 +221,16 @@ async fn run_tcp(
                 let pipeline = pipeline.clone();
                 let metrics = metrics.clone();
                 let conn_shutdown = shutdown.clone();
+                let accept = accept.clone();
 
                 if let Some(ref acceptor) = tls_acceptor {
                     let acceptor = acceptor.clone();
                     tokio::spawn(async move {
                         let _open = open;
-                        let tls_result = timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await;
+                        if !accept.first_byte(&stream).await {
+                            return;
+                        }
+                        let tls_result = timeout(accept.limits.tls_handshake, acceptor.accept(stream)).await;
                         let tls_stream = match tls_result {
                             Ok(Ok(s)) => s,
                             Ok(Err(e)) => {
@@ -252,6 +253,9 @@ async fn run_tcp(
                 } else {
                     tokio::spawn(async move {
                         let _open = open;
+                        if !accept.first_byte(&stream).await {
+                            return;
+                        }
                         handle_tcp_connection(
                             stream, pipeline, metrics, conn_shutdown, peer_addr,
                             max_message_size,

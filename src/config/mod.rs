@@ -535,6 +535,8 @@ impl Config {
             ));
         }
 
+        connection_timeouts_are_set(&self.server.connections)?;
+
         // Validate buffer config
         if self.buffer.pressure_threshold < 0.0 || self.buffer.pressure_threshold > 1.0 {
             return Err(Error::Config(
@@ -685,6 +687,31 @@ impl Config {
         }
         Ok(())
     }
+}
+
+/// Refuse a zero connection timeout: it would close every connection, or
+/// ping without pause.
+fn connection_timeouts_are_set(connections: &ConnectionsConfig) -> Result<()> {
+    for (key, ms) in [
+        ("first_byte_timeout_ms", connections.first_byte_timeout_ms),
+        ("idle_timeout_ms", connections.idle_timeout_ms),
+        (
+            "tls_handshake_timeout_ms",
+            connections.tls_handshake_timeout_ms,
+        ),
+        (
+            "http2_keep_alive_interval_ms",
+            connections.http2_keep_alive_interval_ms,
+        ),
+    ] {
+        if ms == 0 {
+            return Err(Error::Config(format!(
+                "server.connections.{key} is 0, which would close every connection; \
+                 set a time in milliseconds"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Refuse an IP filter [`IpFilter::parse`](crate::server::ip_filter::IpFilter::parse)
@@ -1116,6 +1143,10 @@ pub struct ServerConfig {
     /// accept loop for.
     pub ip_filter: IpFilterConfig,
 
+    /// Connection limits for every TCP listener the receiver owns an accept
+    /// loop for.
+    pub connections: ConnectionsConfig,
+
     /// TLS configuration.
     pub tls: TlsConfig,
 
@@ -1137,9 +1168,49 @@ impl Default for ServerConfig {
             rate_limit: RateLimitConfig::default(),
             trusted_proxies: Vec::new(),
             ip_filter: IpFilterConfig::default(),
+            connections: ConnectionsConfig::default(),
             tls: TlsConfig::default(),
             auth: AuthConfig::default(),
             acknowledgements: AcknowledgementsConfig::default(),
+        }
+    }
+}
+
+/// Connection limits for every TCP listener the receiver owns an accept loop
+/// for: the HTTP listeners (ingest, webhook, Splunk HEC, remote write, OTLP
+/// HTTP), and syslog TCP and TLS, Lumberjack, Fluent Forward and GELF. The two
+/// gRPC listeners (gRPC, OTLP gRPC) take the cap and the HTTP/2 settings.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct ConnectionsConfig {
+    /// Most connections one listener holds open at once. A connection past
+    /// it is closed as it is accepted. 0 holds no limit.
+    pub max_per_listener: usize,
+
+    /// How long a new connection may wait before its first byte arrives, in
+    /// milliseconds. A connection that has sent nothing by then is closed.
+    pub first_byte_timeout_ms: u64,
+
+    /// How long an HTTP connection may stay open with no request in flight,
+    /// in milliseconds, HTTP/1 keep-alive and HTTP/2 alike.
+    pub idle_timeout_ms: u64,
+
+    /// How long a TLS client has to finish its handshake, in milliseconds.
+    pub tls_handshake_timeout_ms: u64,
+
+    /// How often an HTTP/2 connection is pinged to find a peer that has gone,
+    /// in milliseconds.
+    pub http2_keep_alive_interval_ms: u64,
+}
+
+impl Default for ConnectionsConfig {
+    fn default() -> Self {
+        Self {
+            max_per_listener: 10_000,
+            first_byte_timeout_ms: 30_000,
+            idle_timeout_ms: 300_000,
+            tls_handshake_timeout_ms: 10_000,
+            http2_keep_alive_interval_ms: 60_000,
         }
     }
 }
@@ -3558,6 +3629,33 @@ mod tests {
             let mut config = auth_base();
             config.server.tls.client_auth = value.to_string();
             config.validate().unwrap_or_else(|e| panic!("{value}: {e}"));
+        }
+    }
+
+    /// A zero connection timeout would close every connection, so it refuses
+    /// startup, and the defaults start.
+    #[test]
+    fn a_zero_connection_timeout_is_refused() {
+        auth_base().validate().unwrap();
+        type Field = fn(&mut ConnectionsConfig) -> &mut u64;
+        let fields: [(&str, Field); 4] = [
+            ("first_byte_timeout_ms", |c| &mut c.first_byte_timeout_ms),
+            ("idle_timeout_ms", |c| &mut c.idle_timeout_ms),
+            ("tls_handshake_timeout_ms", |c| {
+                &mut c.tls_handshake_timeout_ms
+            }),
+            ("http2_keep_alive_interval_ms", |c| {
+                &mut c.http2_keep_alive_interval_ms
+            }),
+        ];
+        for (key, field) in fields {
+            let mut config = auth_base();
+            *field(&mut config.server.connections) = 0;
+            let err = config.validate().expect_err(key).to_string();
+            assert!(
+                err.contains(&format!("server.connections.{key} is 0")),
+                "{err}"
+            );
         }
     }
 

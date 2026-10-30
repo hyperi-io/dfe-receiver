@@ -14,9 +14,16 @@
 //! bytes by the record count. So a body within the size limit can still
 //! decode into gigabytes. The walk here reads only tags and lengths, along the
 //! messages a [`Shape`] names, and a request over budget is refused before
-//! prost allocates anything.
+//! prost allocates anything. [`BudgetCodec`] runs it on a gRPC listener.
 
+use std::marker::PhantomData;
+
+use bytes::Buf;
+use prost::Message;
 use prost::encoding::{WireType, decode_key, decode_varint};
+use tonic::Status;
+use tonic::codec::{BufferSettings, Codec, DecodeBuf, Decoder};
+use tonic_prost::ProstEncoder;
 
 use crate::error::{Error, Result};
 
@@ -207,6 +214,66 @@ fn walk(
         }
     }
     Ok(())
+}
+
+/// A protobuf message whose decoded size the budget bounds.
+pub trait Budgeted {
+    /// What a refusal calls the message.
+    const WHAT: &'static str;
+
+    /// Where its repeated messages sit.
+    fn shape() -> &'static Shape;
+}
+
+/// The prost codec, with [`admit`] run on every message before it decodes.
+#[derive(Debug, Clone, Copy)]
+pub struct BudgetCodec<T, U>(PhantomData<(T, U)>);
+
+impl<T, U> Default for BudgetCodec<T, U> {
+    fn default() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<T, U> Codec for BudgetCodec<T, U>
+where
+    T: Message + Send + 'static,
+    U: Message + Default + Budgeted + Send + 'static,
+{
+    type Encode = T;
+    type Decode = U;
+    type Encoder = ProstEncoder<T>;
+    type Decoder = BudgetDecoder<U>;
+
+    fn encoder(&mut self) -> Self::Encoder {
+        ProstEncoder::default()
+    }
+
+    fn decoder(&mut self) -> Self::Decoder {
+        BudgetDecoder(PhantomData)
+    }
+}
+
+/// Decodes `U` once its budget admits it.
+#[derive(Debug, Clone, Copy)]
+pub struct BudgetDecoder<U>(PhantomData<U>);
+
+impl<U: Message + Default + Budgeted> Decoder for BudgetDecoder<U> {
+    type Item = U;
+    type Error = Status;
+
+    fn decode(&mut self, buf: &mut DecodeBuf<'_>) -> std::result::Result<Option<U>, Status> {
+        let message = buf.copy_to_bytes(buf.remaining());
+        admit(&message, U::shape(), U::WHAT)
+            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        U::decode(message)
+            .map(Some)
+            .map_err(|e| Status::internal(e.to_string()))
+    }
+
+    fn buffer_settings(&self) -> BufferSettings {
+        BufferSettings::default()
+    }
 }
 
 #[cfg(test)]

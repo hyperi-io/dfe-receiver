@@ -87,6 +87,13 @@ server:
   ip_filter:
     mode: "disabled"         # disabled, allowlist, denylist
     cidrs: []                # e.g., ["10.0.0.0/8", "172.16.0.0/12"]
+  # Every TCP listener; the gRPC listeners take the cap and the HTTP/2 keep-alive.
+  connections:
+    max_per_listener: 10000             # open connections per listener; 0 = no cap
+    first_byte_timeout_ms: 30000        # a connection that has sent nothing by then is closed
+    idle_timeout_ms: 300000             # an HTTP connection with no request in flight
+    tls_handshake_timeout_ms: 10000
+    http2_keep_alive_interval_ms: 60000 # ping, closed after 20s unanswered
 
   tls:
     enabled: false
