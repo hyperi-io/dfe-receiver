@@ -28,7 +28,9 @@
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::Parser;
 use scalo::cli::{CliError, CommonArgs, ServiceApp, StandardCommand, VersionInfo, run_app};
@@ -246,9 +248,25 @@ impl ServiceApp for App {
     }
 }
 
-#[tokio::main]
-async fn main() {
+/// How long a task still running once shutdown completes may hold the
+/// process open: a request handler stuck in a long decode is dropped, not waited on.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+
+fn main() -> ExitCode {
     dfe_receiver::server::tls::install_crypto_provider();
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            eprintln!("fatal: the async runtime could not start: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let code = runtime.block_on(run());
+    runtime.shutdown_timeout(SHUTDOWN_GRACE);
+    code
+}
+
+async fn run() -> ExitCode {
     let app = App::parse();
 
     if let Some(output) = &app.emit_dockerfile {
@@ -259,21 +277,22 @@ async fn main() {
             Ok(content) => content,
             Err(e) => {
                 eprintln!("fatal: the deployment contract is invalid: {e}");
-                std::process::exit(1);
+                return ExitCode::FAILURE;
             }
         };
         if let Err(e) = std::fs::write(output, &content) {
             eprintln!("fatal: could not write Dockerfile: {e}");
-            std::process::exit(1);
+            return ExitCode::FAILURE;
         }
         eprintln!("Dockerfile written to {}", output.display());
-        return;
+        return ExitCode::SUCCESS;
     }
 
     if let Err(e) = run_app(app).await {
         eprintln!("fatal: {e}");
-        std::process::exit(1);
+        return ExitCode::FAILURE;
     }
+    ExitCode::SUCCESS
 }
 
 #[cfg(test)]

@@ -10,10 +10,11 @@
 //!
 //! One route per declared caller, `POST /webhook/{caller}`, each with its own
 //! secret, topic and body shape (see [`WebhookConfig`]). A record that passes
-//! the caller's authentication and optional CEL filter is stamped with
-//! `_source` (the caller name) and `_timestamp_received`, then delivered to
-//! the caller's topic through [`PipelineState::process_batch_to_topic`], which
-//! stamps its `_org_id` held to the orgs `ingest_bindings` binds the caller to.
+//! the caller's authentication and optional CEL filter is delivered to the
+//! caller's topic through [`PipelineState::process_batch_to_topic`], which
+//! stamps `_source` (the caller name) and `_timestamp_received` as it does a
+//! routed record, and `_org_id` held to the orgs `ingest_bindings` binds the
+//! caller to.
 //!
 //! With `webhook.bind_address` unset the routes are merged into the main
 //! ingest listener by `server::http::run_server`, so they sit under its TLS,
@@ -37,7 +38,6 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use rustc_hash::FxHashMap;
-use sonic_rs::get_from_slice;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
@@ -46,7 +46,6 @@ use crate::config::{Config, WebhookBody, WebhookCallerConfig, WebhookConfig};
 use crate::error::{Error, Result, unavailable_response};
 use crate::metrics::Metrics;
 use crate::pipeline::{Acks, PipelineState};
-use crate::routing::{Header, RECEIVED_FIELD, Received, SOURCE_FIELD, Write};
 use crate::server::auth::record_auth_failure;
 use crate::server::http::{Accept, apply_request_limits, split_json_array};
 use crate::server::ip_filter::IpFilter;
@@ -148,15 +147,15 @@ impl Caller {
         })
     }
 
-    /// Check, filter and stamp every record before any is delivered, so one
-    /// bad element refuses the whole request with nothing on the topic and
-    /// the sender's retry duplicates nothing.
+    /// Check and filter every record before any is delivered, so one bad
+    /// element refuses the whole request with nothing on the topic and the
+    /// sender's retry duplicates nothing.
     ///
     /// # Errors
     ///
     /// Returns `record_not_an_object` for an element that is not a JSON
-    /// object, or the stamp failure, and prepares none of the records.
-    fn prepare(&self, records: Vec<Bytes>, now_ms: u128) -> Result<Prepared> {
+    /// object, and prepares none of the records.
+    fn prepare(&self, records: Vec<Bytes>) -> Result<Prepared> {
         let mut prepared = Vec::with_capacity(records.len());
         let mut dropped = 0usize;
         for record in records {
@@ -167,7 +166,7 @@ impl Caller {
                 dropped += 1;
                 continue;
             }
-            prepared.push(stamp(record, &self.name, now_ms)?);
+            prepared.push(record);
         }
         Ok(Prepared {
             records: prepared,
@@ -458,7 +457,7 @@ async fn webhook_handler(
         },
     };
 
-    let Prepared { records, dropped } = match caller.prepare(records, now_millis()) {
+    let Prepared { records, dropped } = match caller.prepare(records) {
         Ok(prepared) => prepared,
         Err(e) => {
             state.metrics.inc_requests_error(TRANSPORT);
@@ -471,7 +470,7 @@ async fn webhook_handler(
     let start = std::time::Instant::now();
     let outcome = state
         .pipeline
-        .process_batch_to_topic(&records, &caller.topic, &state.acks, &ingest)
+        .process_batch_to_topic(&records, &caller.topic, &caller.name, &state.acks, &ingest)
         .await;
     let elapsed = start.elapsed();
     state
@@ -515,38 +514,6 @@ async fn webhook_handler(
     StatusCode::ACCEPTED.into_response()
 }
 
-fn now_millis() -> u128 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-}
-
-/// Write `_source` (the caller) and `_timestamp_received` into the record.
-///
-/// The caller's identity wins: a record that already carries `_source` is
-/// rewritten with the caller in its place, since `_source` picks the
-/// destination table downstream and a duplicate key makes the loader's JSON
-/// column reject the record. The receiver's own receive time is written too,
-/// and one the sender wrote is kept as `_timestamp_received_original`. Records
-/// with neither take the byte-append path the pipeline uses.
-fn stamp(record: Bytes, caller: &str, now_ms: u128) -> Result<Bytes> {
-    let holds = |field: &str| get_from_slice(&record, [field].as_slice()).is_ok();
-    let header = Header {
-        received: Received::of(holds(RECEIVED_FIELD), now_ms),
-        source: if holds(SOURCE_FIELD) {
-            Write::Replace {
-                value: caller,
-                park: false,
-            }
-        } else {
-            Write::Append(caller)
-        },
-        org: Write::Keep,
-    };
-    header.write(record)
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -558,50 +525,6 @@ mod tests {
         assert!(!config.enabled);
         assert!(config.bind_address.is_none());
         assert_eq!(config.max_body_size, 1024 * 1024);
-    }
-
-    #[test]
-    fn a_plain_record_is_stamped_by_byte_append() {
-        let stamped = stamp(Bytes::from(r#"{"a":1}"#), "runzero", 1700).unwrap();
-        let text = String::from_utf8(stamped.to_vec()).unwrap();
-        assert_eq!(
-            text,
-            r#"{"a":1,"_timestamp_received":1700,"_source":"runzero"}"#
-        );
-    }
-
-    #[test]
-    fn an_empty_object_is_stamped_without_a_leading_comma() {
-        let stamped = stamp(Bytes::from("{}"), "runzero", 1700).unwrap();
-        let text = String::from_utf8(stamped.to_vec()).unwrap();
-        assert_eq!(text, r#"{"_timestamp_received":1700,"_source":"runzero"}"#);
-    }
-
-    #[test]
-    fn the_caller_wins_over_a_sender_supplied_source() {
-        let stamped = stamp(Bytes::from(r#"{"_source":"other","a":1}"#), "runzero", 1700).unwrap();
-        let value: serde_json::Value = serde_json::from_slice(&stamped).unwrap();
-        assert_eq!(value["_source"], "runzero");
-        assert_eq!(value["_timestamp_received"], 1700);
-        assert_eq!(value["a"], 1);
-        // Exactly one of each key: a duplicate is what the slow path prevents.
-        let text = String::from_utf8(stamped.to_vec()).unwrap();
-        assert_eq!(text.matches("\"_source\"").count(), 1);
-        assert_eq!(text.matches("\"_timestamp_received\"").count(), 1);
-    }
-
-    #[test]
-    fn a_sender_supplied_receiver_timestamp_is_replaced_and_kept_beside() {
-        let stamped = stamp(
-            Bytes::from(r#"{"_timestamp_received":1,"a":1}"#),
-            "runzero",
-            1700,
-        )
-        .unwrap();
-        let value: serde_json::Value = serde_json::from_slice(&stamped).unwrap();
-        assert_eq!(value["_timestamp_received"], 1700);
-        assert_eq!(value["_timestamp_received_original"], 1);
-        assert_eq!(value["_source"], "runzero");
     }
 
     fn array_caller(filter: Option<&str>) -> Caller {
@@ -620,7 +543,7 @@ mod tests {
     #[test]
     fn a_bad_element_refuses_the_whole_request_before_any_delivery() {
         let records = vec![Bytes::from(r#"{"a":1}"#), Bytes::from("5")];
-        let err = array_caller(None).prepare(records, 1700).unwrap_err();
+        let err = array_caller(None).prepare(records).unwrap_err();
         assert!(
             matches!(err, Error::Validation(ref reason) if reason == "record_not_an_object"),
             "{err}"
@@ -628,25 +551,19 @@ mod tests {
     }
 
     #[test]
-    fn every_kept_element_is_stamped_and_the_drops_are_counted() {
+    fn every_kept_element_is_kept_whole_and_the_drops_are_counted() {
         let records = vec![
             Bytes::from(r#"{"n":1}"#),
             Bytes::from(r#"{"n":2}"#),
             Bytes::from(r#"{"n":3}"#),
         ];
-        let prepared = array_caller(Some("n != 2")).prepare(records, 1700).unwrap();
+        let prepared = array_caller(Some("n != 2")).prepare(records).unwrap();
         assert_eq!(prepared.dropped, 1);
         let texts: Vec<String> = prepared
             .records
             .iter()
             .map(|r| String::from_utf8(r.to_vec()).unwrap())
             .collect();
-        assert_eq!(
-            texts,
-            [
-                r#"{"n":1,"_timestamp_received":1700,"_source":"bulk"}"#,
-                r#"{"n":3,"_timestamp_received":1700,"_source":"bulk"}"#,
-            ]
-        );
+        assert_eq!(texts, [r#"{"n":1}"#, r#"{"n":3}"#]);
     }
 }

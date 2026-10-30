@@ -19,6 +19,7 @@
 //!   for direct HyperDX compatibility
 //! - **`generic`**: Normalised JSON envelope for custom routing
 
+pub mod budget;
 pub mod convert;
 
 use std::net::SocketAddr;
@@ -711,7 +712,7 @@ fn decode_content_encoding<'a>(
 /// Supports `application/x-protobuf` (default) and `application/grpc`.
 /// OTLP/JSON (`application/json`) support requires serde integration with
 /// prost types and can be added when needed.
-fn decode_otlp_request<T: prost::Message + Default>(
+fn decode_otlp_request<T: prost::Message + Default + budget::Budgeted>(
     headers: &axum::http::HeaderMap,
     body: &[u8],
     limit: usize,
@@ -729,6 +730,7 @@ fn decode_otlp_request<T: prost::Message + Default>(
     } else {
         // OTLP/protobuf (default)
         let body = decode_content_encoding(headers, body, limit)?;
+        budget::admit::<T>(&body)?;
         <T as prost::Message>::decode(&*body)
             .map_err(|e| Error::Validation(format!("OTLP protobuf decode failed: {e}")))
     }

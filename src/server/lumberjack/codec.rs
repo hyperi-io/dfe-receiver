@@ -15,8 +15,6 @@
 //!
 //! Reference: <https://github.com/elastic/go-lumber/tree/master/protocol/v2>
 
-use std::io::Cursor;
-
 use bytes::Bytes;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -172,28 +170,27 @@ async fn read_compressed_frame<R: AsyncRead + Unpin>(reader: &mut R) -> Result<F
 
 /// Parse all frames from a decompressed buffer.
 ///
-/// Used after decompressing a `Compressed` frame. The buffer must contain
-/// only complete frames (no partial frames allowed per protocol spec).
-pub fn parse_frames_from_buf(buf: &[u8]) -> Result<Vec<Frame>> {
-    let mut cursor = Cursor::new(buf);
-    let mut frames = Vec::new();
-
-    while (cursor.position() as usize) < buf.len() {
-        let frame = parse_frame_sync(&mut cursor)?;
-        frames.push(frame);
-    }
-
-    Ok(frames)
+/// The buffer must contain only complete frames (no partial frames allowed
+/// per protocol spec).
+#[cfg(test)]
+fn parse_frames_from_buf(buf: &[u8]) -> Result<Vec<Frame>> {
+    let mut cursor = std::io::Cursor::new(buf);
+    std::iter::from_fn(|| parse_frame_sync(&mut cursor).transpose()).collect()
 }
 
-/// Parse a single frame synchronously from a cursor.
+/// Parse one frame synchronously, `None` at a clean end between frames.
 ///
 /// Uses `std::io::Read` explicitly to avoid ambiguity with `AsyncReadExt`.
-fn parse_frame_sync(cursor: &mut Cursor<&[u8]>) -> Result<Frame> {
+fn parse_frame_sync<R: std::io::Read>(reader: &mut R) -> Result<Option<Frame>> {
     use std::io::Read;
 
     let mut header = [0u8; 2];
-    Read::read_exact(cursor, &mut header).map_err(|e| {
+    let read = Read::read(reader, &mut header[..1])
+        .map_err(|e| Error::Validation(format!("lumberjack: compressed block unreadable: {e}")))?;
+    if read == 0 {
+        return Ok(None);
+    }
+    Read::read_exact(reader, &mut header[1..]).map_err(|e| {
         Error::Validation(format!(
             "lumberjack: truncated frame in compressed block: {e}"
         ))
@@ -211,7 +208,7 @@ fn parse_frame_sync(cursor: &mut Cursor<&[u8]>) -> Result<Frame> {
     match frame_type {
         FRAME_WINDOW => {
             let mut buf = [0u8; 4];
-            Read::read_exact(cursor, &mut buf).map_err(|e| {
+            Read::read_exact(reader, &mut buf).map_err(|e| {
                 Error::Validation(format!("lumberjack: truncated window frame: {e}"))
             })?;
             let size = u32::from_be_bytes(buf);
@@ -220,11 +217,11 @@ fn parse_frame_sync(cursor: &mut Cursor<&[u8]>) -> Result<Frame> {
                     "lumberjack: window size {size} exceeds maximum {MAX_WINDOW_SIZE}"
                 )));
             }
-            Ok(Frame::Window { size })
+            Ok(Some(Frame::Window { size }))
         }
         FRAME_JSON_DATA => {
             let mut buf = [0u8; 8];
-            Read::read_exact(cursor, &mut buf).map_err(|e| {
+            Read::read_exact(reader, &mut buf).map_err(|e| {
                 Error::Validation(format!("lumberjack: truncated JSON data frame: {e}"))
             })?;
             let sequence = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
@@ -237,14 +234,14 @@ fn parse_frame_sync(cursor: &mut Cursor<&[u8]>) -> Result<Frame> {
             }
 
             let mut payload = vec![0u8; payload_len as usize];
-            Read::read_exact(cursor, &mut payload).map_err(|e| {
+            Read::read_exact(reader, &mut payload).map_err(|e| {
                 Error::Validation(format!("lumberjack: truncated JSON payload: {e}"))
             })?;
 
-            Ok(Frame::JsonData {
+            Ok(Some(Frame::JsonData {
                 sequence,
                 payload: Bytes::from(payload),
-            })
+            }))
         }
         _ => Err(Error::Validation(format!(
             "lumberjack: unexpected frame type 0x{frame_type:02x} in compressed block"
@@ -269,17 +266,50 @@ pub fn encode_ack(sequence: u32) -> [u8; 6] {
 // Decompression
 // ---------------------------------------------------------------------------
 
-/// Decompress a zlib-compressed frame and parse the contained inner frames.
-pub fn decompress_and_parse(compressed: &[u8]) -> Result<Vec<Frame>> {
-    use flate2::read::ZlibDecoder;
-    use std::io::Read;
+/// The inner frames of a zlib-compressed frame, decompressed one at a time.
+///
+/// Nothing beyond the frame being parsed is held, so a block that expands to
+/// [`MAX_DECOMPRESSED_SIZE`] costs one inner frame of memory, not all of it.
+pub struct CompressedFrames<'a> {
+    decoder: std::io::Take<flate2::read::ZlibDecoder<&'a [u8]>>,
+    done: bool,
+}
 
-    let mut decoder = ZlibDecoder::new(compressed).take(MAX_DECOMPRESSED_SIZE);
-    let mut decompressed = Vec::new();
-    Read::read_to_end(&mut decoder, &mut decompressed)
-        .map_err(|e| Error::Validation(format!("lumberjack: zlib decompression failed: {e}")))?;
+impl<'a> CompressedFrames<'a> {
+    /// The frames `compressed` holds.
+    pub fn new(compressed: &'a [u8]) -> Self {
+        use std::io::Read;
 
-    parse_frames_from_buf(&decompressed)
+        Self {
+            decoder: flate2::read::ZlibDecoder::new(compressed).take(MAX_DECOMPRESSED_SIZE),
+            done: false,
+        }
+    }
+}
+
+impl Iterator for CompressedFrames<'_> {
+    type Item = Result<Frame>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        let parsed = match parse_frame_sync(&mut self.decoder) {
+            // A block cut at the limit would read as a clean end and drop the rest.
+            Ok(None) if self.decoder.limit() == 0 => Err(Error::Validation(format!(
+                "lumberjack: compressed block expands past {MAX_DECOMPRESSED_SIZE} bytes"
+            ))),
+            parsed => parsed.transpose()?,
+        };
+        self.done = parsed.is_err();
+        Some(parsed)
+    }
+}
+
+/// Decompress a zlib-compressed frame and parse every inner frame.
+#[cfg(test)]
+fn decompress_and_parse(compressed: &[u8]) -> Result<Vec<Frame>> {
+    CompressedFrames::new(compressed).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -289,6 +319,8 @@ pub fn decompress_and_parse(compressed: &[u8]) -> Result<Vec<Frame>> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use std::io::Cursor;
+
     use super::*;
 
     /// Build a window frame: version + 'W' + 4-byte BE size.
@@ -519,5 +551,42 @@ mod tests {
 
         let frames = decompress_and_parse(&compressed).unwrap();
         assert_eq!(frames.len(), 3);
+    }
+
+    fn zlib(data: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+        encoder.write_all(data).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    /// A small block that expands to the limit is read one inner frame at a
+    /// time, so taking its first frame decompresses about one frame, and a
+    /// block that would expand past the limit fails instead of being cut short.
+    #[test]
+    fn a_compressed_block_is_decompressed_one_frame_at_a_time() {
+        let event = |seq| build_json_data_frame(seq, &vec![b' '; 16 * 1024 * 1024 - 64]);
+        let inner: Vec<u8> = (1..=4).flat_map(event).collect();
+        let bomb = zlib(&inner);
+        assert!(bomb.len() < 100 * 1024, "{} bytes", bomb.len());
+
+        let mut frames = CompressedFrames::new(&bomb);
+        assert!(matches!(
+            frames.next(),
+            Some(Ok(Frame::JsonData { sequence: 1, .. }))
+        ));
+        let out = frames.decoder.get_ref().total_out();
+        assert!(
+            out < 17 * 1024 * 1024,
+            "decompressed {out} bytes for one frame"
+        );
+        assert_eq!(frames.count(), 3);
+
+        let past: Vec<u8> = (1..=5).flat_map(event).collect();
+        let results: Vec<Result<Frame>> = CompressedFrames::new(&zlib(&past)).collect();
+        assert_eq!(results.len(), 5, "four frames, then the refusal");
+        assert!(results[..4].iter().all(Result::is_ok));
+        assert!(results[4].is_err());
     }
 }

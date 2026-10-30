@@ -733,6 +733,36 @@ impl Receiver {
     pub fn alive(&mut self) -> bool {
         matches!(self.child.try_wait(), Ok(None))
     }
+
+    /// The most resident memory the process has held, in KiB, from `VmHWM`.
+    #[must_use]
+    pub fn peak_rss_kib(&self) -> Option<u64> {
+        let status = std::fs::read_to_string(format!("/proc/{}/status", self.child.id()?)).ok()?;
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix("VmHWM:"))?
+            .trim()
+            .trim_end_matches("kB")
+            .trim()
+            .parse()
+            .ok()
+    }
+
+    /// Send SIGTERM, as a pod's kubelet does, and wait up to `within` for the
+    /// process to exit. False when it is still running.
+    pub async fn terminate(&mut self, within: Duration) -> bool {
+        let Some(pid) = self.child.id() else {
+            return true;
+        };
+        let sent = Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status()
+            .await
+            .is_ok_and(|status| status.success());
+        sent && tokio::time::timeout(within, self.child.wait())
+            .await
+            .is_ok()
+    }
 }
 
 // ---------------------------------------------------------------------------

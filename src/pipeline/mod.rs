@@ -453,8 +453,9 @@ pub(crate) enum Offer {
 enum Target<'a> {
     /// Enriched and routed to the destinations the routing rules pick.
     Routed,
-    /// Sent to this Kafka topic, which the listener chose.
-    Topic(&'a str),
+    /// Sent to `topic`, which the listener chose, stamped with `source` and
+    /// the receive time as a routed record is, and with no routing.
+    Topic { topic: &'a str, source: &'a str },
 }
 
 /// One request's sends: the ticket its answer is held on, the routes it was
@@ -969,20 +970,22 @@ impl PipelineState {
     }
 
     /// [`process_batch_acked`](Self::process_batch_acked) to a Kafka topic
-    /// the listener chose, with no routing or enrichment: each record takes
-    /// only its `_org_id`, held to `ingest`'s binding. On the test-only memory
-    /// transport (`loader.transport: memory`, refused at startup) there is no
-    /// broker and a valid record is accepted and dropped.
+    /// the listener chose, with no routing: each record is enriched with
+    /// `source` and its receive time as a routed record is, and its `_org_id`
+    /// is held to `ingest`'s binding. On the test-only memory transport
+    /// (`loader.transport: memory`, refused at startup) there is no broker and
+    /// a valid record is accepted and dropped.
     pub async fn process_batch_to_topic(
         &self,
         payloads: &[Bytes],
         topic: &str,
+        source: &str,
         acks: &Acks,
         ingest: &Ingest,
     ) -> BatchOutcome {
         self.run(
             payloads,
-            Target::Topic(topic),
+            Target::Topic { topic, source },
             ingest,
             Some((acks, None)),
             Offer::First,
@@ -1192,16 +1195,20 @@ impl PipelineState {
         match target {
             Target::Routed => self.process_routed(payload, ingest, dispatch).await,
             // The memory transport has no broker for a topic the listener picked.
-            Target::Topic(_) if self.kafka.is_none() && dispatch.discards() => Ok(()),
-            Target::Topic(topic) => {
+            Target::Topic { .. } if self.kafka.is_none() && dispatch.discards() => Ok(()),
+            Target::Topic { topic, source } => {
                 let decoded = payload.len() as u64;
                 let routes = dispatch.routes;
-                let (payload, org) =
-                    routes
-                        .router
-                        .assign_org(payload, ingest, &mut dispatch.tally)?;
+                let (payload, org) = routes.router.stamp_for_topic(
+                    payload,
+                    ingest,
+                    source,
+                    now_millis(),
+                    &mut dispatch.tally,
+                )?;
                 self.send_to_kafka(topic, &payload, dispatch).await?;
                 dispatch.usage.add(org, decoded);
+                self.tap(payload).await;
                 Ok(())
             }
         }
@@ -1258,14 +1265,18 @@ impl PipelineState {
             }
         }
 
-        // Debug tap: fire-and-forget write to file sink (errors are logged, not propagated)
+        self.tap(payload).await;
+        Ok(())
+    }
+
+    /// Write a delivered record to the debug file sink, when there is one. A
+    /// failed write is logged, never returned.
+    async fn tap(&self, payload: Bytes) {
         if let Some(ref fsink) = self.file_sink
             && let Err(e) = fsink.send("", payload).await
         {
             warn!(error = %e, "File sink write failed");
         }
-
-        Ok(())
     }
 
     /// Record a record the validator turned away.
@@ -3125,7 +3136,7 @@ mod tests {
             assert!(matches!(err, Error::Validation(_)), "{err}");
             assert!(!err.is_retryable(), "a sender must not retry it");
             let outcome = state
-                .process_batch_to_topic(&[body], "t_land", &holding(&state), &http())
+                .process_batch_to_topic(&[body], "t_land", "t", &holding(&state), &http())
                 .await;
             assert_eq!(outcome.rejected, 1, "{outcome:?}");
             assert!(outcome.unavailable.is_none(), "{:?}", outcome.unavailable);
@@ -3171,6 +3182,7 @@ mod tests {
                 .process_batch_to_topic(
                     std::slice::from_ref(record),
                     "t_land",
+                    "t",
                     &holding(&state),
                     &http(),
                 )
@@ -4082,6 +4094,7 @@ mod tests {
                     .process_batch_to_topic(
                         &[nested(depth)],
                         "deep_land",
+                        "deep",
                         &holding(&state),
                         &http(),
                     )

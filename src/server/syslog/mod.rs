@@ -174,11 +174,17 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
             }
             result = StreamExt::next(&mut framed) => {
                 match result {
-                    Some(Ok(raw)) => {
+                    Some(Ok(frame)) => {
                         metrics.inc_requests_total("syslog");
-                        metrics.add_bytes_received("syslog", raw.len() as u64);
+                        metrics.add_bytes_received("syslog", frame.len() as u64);
 
-                        match syslog_to_json(&raw, raw_capture) {
+                        let Ok(raw) = std::str::from_utf8(&frame) else {
+                            debug!(peer = %peer_addr, "Syslog TCP: invalid UTF-8");
+                            metrics.inc_parse_failure("syslog");
+                            metrics.inc_requests_error("syslog");
+                            continue;
+                        };
+                        match syslog_to_json(raw, raw_capture) {
                             Ok(payload) => {
                                 let held = [payload];
                                 if !hold_until_settled(&pipeline, &held, &metrics, "syslog", &shutdown, &Acks::at_enqueue(), &listener_ingest()).await {

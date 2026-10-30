@@ -13,6 +13,7 @@
 //! listener they bind.
 
 pub mod auth;
+pub mod budget;
 pub mod client_ip;
 pub mod flow;
 pub mod fluent;

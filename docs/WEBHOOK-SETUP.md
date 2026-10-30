@@ -69,9 +69,7 @@ webhook:
       body: single
 ```
 
-Records land on `asset_context_land` stamped with `_source: asset_context` and
-`_timestamp_received`. The `_source` stamp is the caller name and wins over any
-value the sender supplies, so the join key cannot be spoofed by the payload.
+Records land on `asset_context_land` stamped with `_source: asset_context` and `_timestamp_received`, as a routed record is. The `_source` stamp is the caller name and wins over any value the sender supplies, which is kept as `_source_original`, so the join key cannot be spoofed by the payload. With `routing.enrich: false` neither is written, and only `_org_id` is.
 
 The caller's name is also its credential id for tenancy. Bind it to the orgs
 its records may land in, or they land in `routing.default_org_id`:

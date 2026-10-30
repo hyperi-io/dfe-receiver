@@ -35,6 +35,7 @@ use serde::{Deserialize, Serialize};
 use scalo::scaling::{ScalingComponent, ScalingPressure, ScalingPressureConfig};
 
 use crate::error::{Error, Result};
+use crate::server::tls::ClientAuth;
 
 /// Environment variable prefix for configuration.
 pub const ENV_PREFIX: &str = "DFE_RECEIVER";
@@ -561,6 +562,24 @@ impl Config {
     /// a weaker door -- it is an open one that reads as shut. Each rule below
     /// names the code that does or does not run.
     fn validate_auth(&self) -> Result<()> {
+        // A client certificate mode the TLS builders do not recognise reads
+        // as no client certificate at all, so it is refused like a mode typo.
+        for (scope, tls) in [
+            ("server", &self.server.tls),
+            ("grpc", &self.grpc.tls),
+            #[cfg(feature = "otlp")]
+            ("otlp", &self.otlp.tls),
+            ("lumberjack", &self.lumberjack.tls),
+            ("splunk_hec", &self.splunk_hec.tls),
+            ("syslog", &self.syslog.tls),
+            ("prometheus_rw", &self.prometheus_rw.tls),
+            ("fluent", &self.fluent.tls),
+            ("gelf", &self.gelf.tls),
+            ("webhook", &self.webhook.tls),
+        ] {
+            known_client_auth(scope, tls)?;
+        }
+
         // A mode the parser does not recognise is refused on every listener,
         // running or not: it is a typo whichever block it sits in.
         known_mode("server", &self.server.auth)?;
@@ -724,10 +743,21 @@ fn header_credentials_configured(scope: &str, auth: &AuthConfig) -> Result<()> {
     )))
 }
 
+/// Refuse a `tls.client_auth` the TLS builders do not recognise, an empty one included.
+fn known_client_auth(scope: &str, tls: &TlsConfig) -> Result<()> {
+    if ClientAuth::parse(&tls.client_auth).is_some() {
+        return Ok(());
+    }
+    Err(Error::Config(format!(
+        "{scope}.tls.client_auth is '{}', which is not one of none, optional, required",
+        tls.client_auth
+    )))
+}
+
 /// Whether the TLS handshake on a listener refuses a client with no certificate.
 fn handshake_requires_a_client_certificate(tls: &TlsConfig) -> bool {
     tls.enabled
-        && tls.client_auth.eq_ignore_ascii_case("required")
+        && ClientAuth::parse(&tls.client_auth) == Some(ClientAuth::Required)
         && (tls.ca_file.is_some() || tls.ca_secret.is_some())
 }
 
@@ -790,7 +820,7 @@ fn cert_half_is_enforced(scope: &str, auth: &AuthConfig, tls: &TlsConfig) -> Res
              accepts every client unauthenticated"
         )));
     }
-    if !tls.client_auth.eq_ignore_ascii_case("required") {
+    if ClientAuth::parse(&tls.client_auth) != Some(ClientAuth::Required) {
         return Err(Error::Config(format!(
             "{scope}.auth.mode is '{mode}' but {scope}.tls.client_auth is '{}' -- \
              it must be 'required', or clients presenting no certificate are \
@@ -3501,6 +3531,34 @@ mod tests {
             err.contains("none, header, bearer, mtls, both"),
             "the error must name the valid set, got: {err}"
         );
+    }
+
+    /// A client certificate mode the TLS builders do not know starts a
+    /// listener that asks for no certificate, so it is refused on every
+    /// listener's TLS block, and each spelling they do know starts.
+    #[test]
+    fn a_client_auth_the_tls_builders_do_not_know_is_refused() {
+        for value in ["requried", "mtls", "true", ""] {
+            for scope in ["server", "gelf", "webhook"] {
+                let mut config = auth_base();
+                let tls = match scope {
+                    "server" => &mut config.server.tls,
+                    "gelf" => &mut config.gelf.tls,
+                    _ => &mut config.webhook.tls,
+                };
+                tls.client_auth = value.to_string();
+                let err = config.validate().expect_err(value).to_string();
+                assert!(
+                    err.contains(&format!("{scope}.tls.client_auth is '{value}'")),
+                    "{err}"
+                );
+            }
+        }
+        for value in ["none", "optional", "required", "Require", "REQUEST"] {
+            let mut config = auth_base();
+            config.server.tls.client_auth = value.to_string();
+            config.validate().unwrap_or_else(|e| panic!("{value}: {e}"));
+        }
     }
 
     #[test]

@@ -70,7 +70,9 @@ const RATE_LIMIT_PRUNE_INTERVAL: Duration = Duration::from_secs(5);
 /// Defends against slowloris attacks where clients send headers very slowly.
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Idle connection timeout -- close connections with no active streams.
+/// How long an HTTP/2 keep-alive ping may go unanswered. hyper sends no pings
+/// while no interval is set, so this closes neither an idle HTTP/2 connection
+/// nor one that has sent nothing yet.
 const CONNECTION_IDLE_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// Nanoseconds in a second, the numerator of the rate limiter's period.
@@ -82,7 +84,7 @@ const NANOS_PER_SECOND: u64 = 1_000_000_000;
 /// yields one `Bytes` per two input bytes, so a 10 MiB body would allocate a
 /// vector tens of times its size. At this cap a full body still allows about
 /// 100 bytes per event, well under any real one.
-const MAX_BATCH_EVENTS: usize = 100_000;
+pub(crate) const MAX_BATCH_EVENTS: usize = 100_000;
 
 /// Build a hyper HTTP connection builder with hardened timeouts.
 ///
