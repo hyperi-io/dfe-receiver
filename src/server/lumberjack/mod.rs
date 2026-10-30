@@ -18,7 +18,6 @@ pub mod codec;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
@@ -34,13 +33,9 @@ use crate::error::{Error, Result};
 use crate::metrics::{DropReason, Metrics};
 use crate::pipeline::{Acks, PipelineState};
 use crate::server::http::Accept;
-use crate::server::ip_filter::IpFilter;
 use crate::server::traits::{BoundAddr, ProtocolHandler};
 use crate::tenancy::{Ingest, Principal};
-use codec::{Frame, decompress_and_parse, encode_ack, read_frame};
-
-/// TLS handshake timeout (matches HTTP handler).
-const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+use codec::{CompressedFrames, Frame, encode_ack, read_frame};
 
 /// The transport label the Lumberjack listener counts under.
 const TRANSPORT: &str = "lumberjack";
@@ -49,24 +44,54 @@ const TRANSPORT: &str = "lumberjack";
 // Per-connection handler
 // ---------------------------------------------------------------------------
 
+/// Most event bytes a connection holds unsettled. A window past it is
+/// settled, and ACKed, in parts: a client may announce 100 000 events of up to
+/// 16 MiB each, and only what is held unsettled bypasses the pipeline's
+/// memory guard.
+const MAX_HELD_BYTES: usize = 16 * 1024 * 1024;
+
 /// The events read since the last ACK, with their sequence numbers.
 #[derive(Default)]
 struct Window {
     /// Events the current `Window` frame announced; zero before one arrives.
     size: u32,
+    /// Events of the current window read so far, settled or not.
+    received: u32,
     sequences: Vec<u32>,
     payloads: Vec<bytes::Bytes>,
+    /// Bytes of the unsettled events.
+    held: usize,
 }
 
 impl Window {
+    /// Begin a window of `size` events.
+    fn open(&mut self, size: u32) {
+        self.size = size;
+        self.received = 0;
+    }
+
     fn push(&mut self, sequence: u32, payload: bytes::Bytes) {
+        self.received = self.received.saturating_add(1);
+        self.held += payload.len();
         self.sequences.push(sequence);
         self.payloads.push(payload);
     }
 
     /// Whether every event the window announced has arrived.
     fn is_complete(&self) -> bool {
-        self.sequences.len() >= self.size as usize
+        self.received >= self.size
+    }
+
+    /// Whether the events held should be settled now: the window is complete,
+    /// or holding more would pass [`MAX_HELD_BYTES`].
+    fn is_due(&self) -> bool {
+        self.is_complete() || self.held >= MAX_HELD_BYTES
+    }
+
+    fn clear(&mut self) {
+        self.sequences.clear();
+        self.payloads.clear();
+        self.held = 0;
     }
 }
 
@@ -121,8 +146,7 @@ impl Intake<'_> {
             .checked_sub(1)
             .map_or(0, |last| window.sequences[last]);
         let events = window.payloads.len();
-        window.sequences.clear();
-        window.payloads.clear();
+        window.clear();
 
         let Some(e) = outcome.unavailable else {
             return ack(writer, taken, self.peer_addr).await;
@@ -215,39 +239,44 @@ async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin>(
                 if !intake.settle(&mut window, reader.get_mut()).await {
                     return;
                 }
-                window.size = size;
+                window.open(size);
                 debug!(peer = %peer_addr, window_size = size, "Lumberjack window started");
             }
 
             Frame::JsonData { sequence, payload } => {
                 window.push(sequence, payload);
-                if window.is_complete() && !intake.settle(&mut window, reader.get_mut()).await {
+                if window.is_due() && !intake.settle(&mut window, reader.get_mut()).await {
                     return;
                 }
             }
 
             Frame::Compressed { data } => {
-                let inner_frames = match decompress_and_parse(&data) {
-                    Ok(frames) => frames,
-                    Err(e) => {
-                        warn!(peer = %peer_addr, error = %e, "Failed to decompress Lumberjack frame");
-                        break;
-                    }
-                };
-
-                for inner in inner_frames {
-                    match inner {
-                        Frame::Window { size } => {
+                for inner in CompressedFrames::new(&data) {
+                    let due = match inner {
+                        Ok(Frame::Window { size }) => {
                             if !intake.settle(&mut window, reader.get_mut()).await {
                                 return;
                             }
-                            window.size = size;
+                            window.open(size);
+                            false
                         }
-                        Frame::JsonData { sequence, payload } => window.push(sequence, payload),
-                        Frame::Compressed { .. } => {
+                        Ok(Frame::JsonData { sequence, payload }) => {
+                            window.push(sequence, payload);
+                            window.held >= MAX_HELD_BYTES
+                        }
+                        Ok(Frame::Compressed { .. }) => {
                             warn!(peer = %peer_addr, "Nested compressed frame rejected");
                             break;
                         }
+                        // The events before the bad frame were sent whole, so they are settled first.
+                        Err(e) => {
+                            warn!(peer = %peer_addr, error = %e, "Failed to decompress Lumberjack frame");
+                            let _ = intake.settle(&mut window, reader.get_mut()).await;
+                            return;
+                        }
+                    };
+                    if due && !intake.settle(&mut window, reader.get_mut()).await {
+                        return;
                     }
                 }
 
@@ -320,11 +349,11 @@ impl ProtocolHandler for LumberjackHandler {
 
         // A Lumberjack frame carries no credential, so the IP filter and the
         // TLS handshake are the whole admission surface on this port.
-        let accept = Accept {
-            ip_filter: IpFilter::from_config(&self.pipeline.config().server.ip_filter),
-            metrics: self.metrics.clone(),
-            transport: TRANSPORT,
-        };
+        let accept = Accept::new(
+            &self.pipeline.config().server,
+            self.metrics.clone(),
+            TRANSPORT,
+        );
         let acks = self
             .pipeline
             .acks("lumberjack", self.config.acknowledgements, None);
@@ -367,13 +396,17 @@ impl ProtocolHandler for LumberjackHandler {
                     let metrics = self.metrics.clone();
                     let acks = acks.clone();
                     let conn_shutdown = shutdown.clone();
+                    let accept = accept.clone();
 
                     if let Some(ref acceptor) = tls_acceptor {
                         let acceptor = acceptor.clone();
                         tokio::spawn(async move {
                             let _open = open;
+                            if !accept.first_byte(&stream).await {
+                                return;
+                            }
                             // TLS handshake with timeout
-                            let tls_result = timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await;
+                            let tls_result = timeout(accept.limits.tls_handshake, acceptor.accept(stream)).await;
                             let tls_stream = match tls_result {
                                 Ok(Ok(s)) => s,
                                 Ok(Err(e)) => {
@@ -395,6 +428,9 @@ impl ProtocolHandler for LumberjackHandler {
                     } else {
                         tokio::spawn(async move {
                             let _open = open;
+                            if !accept.first_byte(&stream).await {
+                                return;
+                            }
                             let intake = Intake { pipeline: &pipeline, metrics: &metrics, acks: &acks, peer_addr };
                             handle_connection(stream, intake, conn_shutdown).await;
                         });
@@ -415,6 +451,8 @@ impl ProtocolHandler for LumberjackHandler {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     #[test]
@@ -423,5 +461,85 @@ mod tests {
         assert!(!config.enabled);
         assert_eq!(config.bind_address, "0.0.0.0:5044");
         assert!(!config.tls.enabled);
+    }
+
+    /// A JSON data frame of `bytes` bytes.
+    fn data_frame(sequence: u32, bytes: usize) -> Vec<u8> {
+        let mut payload = vec![b' '; bytes];
+        payload[0] = b'{';
+        payload[bytes - 1] = b'}';
+        let mut frame = vec![codec::PROTOCOL_VERSION, codec::FRAME_JSON_DATA];
+        frame.extend_from_slice(&sequence.to_be_bytes());
+        frame.extend_from_slice(&u32::try_from(bytes).unwrap().to_be_bytes());
+        frame.extend_from_slice(&payload);
+        frame
+    }
+
+    /// A window bigger than [`MAX_HELD_BYTES`] is settled and ACKed in parts,
+    /// plain or inside one compressed frame, so a client cannot make a
+    /// connection hold more than that unsettled.
+    #[tokio::test]
+    async fn a_window_past_the_held_byte_limit_is_acked_in_parts() {
+        use std::io::Write as _;
+
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        use crate::config::{Config, SharedConfig};
+
+        const EVENT: usize = 6 * 1024 * 1024;
+        let mut config = Config::default();
+        config.destinations.default = "loader".into();
+        config.loader.transport = "memory".to_string();
+        let pipeline = PipelineState::new(SharedConfig::new(config), CancellationToken::new())
+            .await
+            .unwrap();
+        let metrics = Metrics::default();
+        let acks = Acks::at_enqueue();
+
+        for compressed in [false, true] {
+            let mut window = vec![codec::PROTOCOL_VERSION, codec::FRAME_WINDOW];
+            window.extend_from_slice(&4_u32.to_be_bytes());
+            let events: Vec<u8> = (1..=4).flat_map(|seq| data_frame(seq, EVENT)).collect();
+            let sent = if compressed {
+                let mut encoder =
+                    flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+                encoder.write_all(&events).unwrap();
+                let block = encoder.finish().unwrap();
+                let mut frame = vec![codec::PROTOCOL_VERSION, codec::FRAME_COMPRESSED];
+                frame.extend_from_slice(&u32::try_from(block.len()).unwrap().to_be_bytes());
+                frame.extend_from_slice(&block);
+                [window, frame].concat()
+            } else {
+                [window, events].concat()
+            };
+
+            let (mut client, server) = tokio::io::duplex(1 << 20);
+            let intake = Intake {
+                pipeline: &pipeline,
+                metrics: &metrics,
+                acks: &acks,
+                peer_addr: "127.0.0.1:5044".parse().unwrap(),
+            };
+            let shutdown = CancellationToken::new();
+            let client_side = async {
+                client.write_all(&sent).await.unwrap();
+                let mut acked = Vec::new();
+                for _ in 0..2 {
+                    let mut ack = [0_u8; 6];
+                    tokio::time::timeout(Duration::from_secs(10), client.read_exact(&mut ack))
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    acked.push(u32::from_be_bytes([ack[2], ack[3], ack[4], ack[5]]));
+                }
+                shutdown.cancel();
+                acked
+            };
+            let (acked, ()) = tokio::join!(
+                client_side,
+                handle_connection(server, intake, shutdown.clone())
+            );
+            assert_eq!(acked, [3, 4], "compressed: {compressed}");
+        }
     }
 }

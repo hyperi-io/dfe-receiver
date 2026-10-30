@@ -20,6 +20,7 @@
 //! - **TLS handshake timeout**: Prevents TLS renegotiation attacks
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -30,7 +31,7 @@ use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Router};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{MissedTickBehavior, timeout};
 use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
@@ -60,9 +61,6 @@ use crate::validation::depth::{MAX_BATCH_DEPTH, MAX_PARSE_DEPTH, json_depth_with
 /// The transport label the `/ingest` listener counts under.
 const TRANSPORT: &str = "http";
 
-/// TLS handshake timeout to prevent slow TLS attacks.
-const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-
 /// How often each listener's rate limiter forgets the clients whose budget has refilled.
 const RATE_LIMIT_PRUNE_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -70,8 +68,12 @@ const RATE_LIMIT_PRUNE_INTERVAL: Duration = Duration::from_secs(5);
 /// Defends against slowloris attacks where clients send headers very slowly.
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Idle connection timeout -- close connections with no active streams.
-const CONNECTION_IDLE_TIMEOUT: Duration = Duration::from_mins(1);
+/// How long an HTTP/2 keep-alive ping may go unanswered before the connection
+/// is closed.
+pub(crate) const KEEP_ALIVE_PING_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// How many times per idle timeout a connection is checked for idleness.
+const IDLE_CHECKS_PER_TIMEOUT: u32 = 4;
 
 /// Nanoseconds in a second, the numerator of the rate limiter's period.
 const NANOS_PER_SECOND: u64 = 1_000_000_000;
@@ -82,15 +84,16 @@ const NANOS_PER_SECOND: u64 = 1_000_000_000;
 /// yields one `Bytes` per two input bytes, so a 10 MiB body would allocate a
 /// vector tens of times its size. At this cap a full body still allows about
 /// 100 bytes per event, well under any real one.
-const MAX_BATCH_EVENTS: usize = 100_000;
+pub(crate) const MAX_BATCH_EVENTS: usize = 100_000;
 
 /// Build a hyper HTTP connection builder with hardened timeouts.
 ///
 /// Used by both TLS and plain-text server paths to ensure consistent
 /// slowloris protection. The timer is required by hyper when
 /// `header_read_timeout` is set.
-fn hardened_http_builder() -> hyper_util::server::conn::auto::Builder<hyper_util::rt::TokioExecutor>
-{
+fn hardened_http_builder(
+    limits: &ConnectionLimits,
+) -> hyper_util::server::conn::auto::Builder<hyper_util::rt::TokioExecutor> {
     let mut builder =
         hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
     builder
@@ -100,7 +103,8 @@ fn hardened_http_builder() -> hyper_util::server::conn::auto::Builder<hyper_util
         .timer(hyper_util::rt::TokioTimer::new());
     builder
         .http2()
-        .keep_alive_timeout(CONNECTION_IDLE_TIMEOUT)
+        .keep_alive_interval(limits.http2_keep_alive)
+        .keep_alive_timeout(KEEP_ALIVE_PING_TIMEOUT)
         .timer(hyper_util::rt::TokioTimer::new());
     builder
 }
@@ -397,6 +401,7 @@ async fn serve(
         ip_filter,
         metrics,
         transport: TRANSPORT,
+        limits: ConnectionLimits::new(&config.server.connections),
     };
     if let Some(ref provider) = tls_provider {
         let acceptor_handle = provider.acceptor_handle();
@@ -458,16 +463,194 @@ pub(crate) struct Accept {
     pub(crate) metrics: Arc<Metrics>,
     /// The listener, as its connections and refusals are labelled.
     pub(crate) transport: &'static str,
+    pub(crate) limits: ConnectionLimits,
+}
+
+/// A connection an accept loop took: counted open, and holding its place
+/// under the listener's cap, until it drops.
+#[must_use]
+pub(crate) struct Admitted {
+    _open: ConnectionGuard,
+    _slot: Slot,
 }
 
 impl Accept {
-    /// Admit a connection from `peer`, counted open until the guard drops;
-    /// `None` when the IP filter refuses it.
-    #[must_use]
-    pub(crate) fn admit(&self, peer: SocketAddr) -> Option<ConnectionGuard> {
-        self.ip_filter
-            .admits(peer, self.transport, &self.metrics)
-            .then(|| self.metrics.open_connection(self.transport))
+    /// The accept loop of listener `transport`, under `server`'s IP filter and
+    /// connection limits.
+    pub(crate) fn new(
+        server: &crate::config::ServerConfig,
+        metrics: Arc<Metrics>,
+        transport: &'static str,
+    ) -> Self {
+        Self {
+            ip_filter: IpFilter::from_config(&server.ip_filter),
+            metrics,
+            transport,
+            limits: ConnectionLimits::new(&server.connections),
+        }
+    }
+
+    /// Admit a connection from `peer`, counted open until it drops; `None`
+    /// when the IP filter refuses it or the listener holds its most.
+    pub(crate) fn admit(&self, peer: SocketAddr) -> Option<Admitted> {
+        if !self.ip_filter.admits(peer, self.transport, &self.metrics) {
+            return None;
+        }
+        let Some(slot) = self.limits.slot() else {
+            self.metrics
+                .inc_connection_closed(self.transport, "over_limit");
+            return None;
+        };
+        Some(Admitted {
+            _open: self.metrics.open_connection(self.transport),
+            _slot: slot,
+        })
+    }
+
+    /// Wait for `stream`'s first byte. False when none arrives within the
+    /// first byte timeout, counted, or the peer closes first.
+    pub(crate) async fn first_byte(&self, stream: &TcpStream) -> bool {
+        let mut byte = [0_u8; 1];
+        match timeout(self.limits.first_byte, stream.peek(&mut byte)).await {
+            Ok(Ok(read)) => read > 0,
+            Ok(Err(_)) => false,
+            Err(_) => {
+                self.metrics
+                    .inc_connection_closed(self.transport, "no_first_byte");
+                false
+            }
+        }
+    }
+}
+
+/// The connection limits of one listener, from `server.connections`.
+#[derive(Clone)]
+pub(crate) struct ConnectionLimits {
+    open: Arc<AtomicUsize>,
+    max: usize,
+    pub(crate) first_byte: Duration,
+    pub(crate) idle: Duration,
+    pub(crate) tls_handshake: Duration,
+    pub(crate) http2_keep_alive: Duration,
+}
+
+impl ConnectionLimits {
+    pub(crate) fn new(config: &crate::config::ConnectionsConfig) -> Self {
+        Self {
+            open: Arc::default(),
+            max: config.max_per_listener,
+            first_byte: Duration::from_millis(config.first_byte_timeout_ms),
+            idle: Duration::from_millis(config.idle_timeout_ms),
+            tls_handshake: Duration::from_millis(config.tls_handshake_timeout_ms),
+            http2_keep_alive: Duration::from_millis(config.http2_keep_alive_interval_ms),
+        }
+    }
+
+    /// A place under the cap, `None` when the listener holds its most.
+    pub(crate) fn slot(&self) -> Option<Slot> {
+        let mut open = self.open.load(Ordering::Relaxed);
+        loop {
+            if self.max > 0 && open >= self.max {
+                return None;
+            }
+            match self.open.compare_exchange_weak(
+                open,
+                open + 1,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Some(Slot(Arc::clone(&self.open))),
+                Err(now) => open = now,
+            }
+        }
+    }
+}
+
+/// One connection's place under its listener's cap, given back on drop.
+pub(crate) struct Slot(Arc<AtomicUsize>);
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Requests in flight on one HTTP connection, and when the last one ended.
+#[derive(Default)]
+struct Activity {
+    in_flight: AtomicUsize,
+    last: parking_lot::Mutex<Option<tokio::time::Instant>>,
+}
+
+impl Activity {
+    fn begin(self: &Arc<Self>) -> InFlight {
+        self.in_flight.fetch_add(1, Ordering::AcqRel);
+        InFlight(Arc::clone(self))
+    }
+
+    /// Whether the connection has had no request in flight for `idle`,
+    /// counted from `opened` until its first request ends.
+    fn idle_since(&self, opened: tokio::time::Instant, idle: Duration) -> bool {
+        self.in_flight.load(Ordering::Acquire) == 0
+            && self.last.lock().unwrap_or(opened).elapsed() >= idle
+    }
+}
+
+/// One request in flight, until its response is ready or it is dropped.
+struct InFlight(Arc<Activity>);
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        *self.0.last.lock() = Some(tokio::time::Instant::now());
+        self.0.in_flight.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Serve one HTTP connection on `io` until it ends or shutdown, closing it
+/// gracefully once it has had no request in flight for the idle timeout, and
+/// outright when the peer has not let the graceful close finish by the next check.
+async fn serve_connection<I>(
+    io: I,
+    app: Router,
+    peer_addr: SocketAddr,
+    accept: &Accept,
+    shutdown: &CancellationToken,
+) where
+    I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+{
+    let activity = Arc::new(Activity::default());
+    let service = connection_service(app, peer_addr, Arc::clone(&activity));
+    let builder = hardened_http_builder(&accept.limits);
+    let conn = builder.serve_connection_with_upgrades(io, service);
+    tokio::pin!(conn);
+
+    let idle = accept.limits.idle;
+    let opened = tokio::time::Instant::now();
+    let mut check =
+        tokio::time::interval((idle / IDLE_CHECKS_PER_TIMEOUT).max(Duration::from_millis(1)));
+    check.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut closing = false;
+    loop {
+        tokio::select! {
+            () = shutdown.cancelled() => return,
+            result = conn.as_mut() => {
+                if let Err(e) = result {
+                    debug!(peer = %peer_addr, error = %e, "Connection error");
+                }
+                return;
+            }
+            _ = check.tick() => {
+                // A peer that does not finish the graceful close is dropped a check later.
+                if closing {
+                    return;
+                }
+                if activity.idle_since(opened, idle) {
+                    accept.metrics.inc_connection_closed(accept.transport, "idle");
+                    conn.as_mut().graceful_shutdown();
+                    closing = true;
+                }
+            }
+        }
     }
 }
 
@@ -633,7 +816,7 @@ pub(crate) async fn run_plain_server(
                     }
                 };
 
-                // IP filter at connection level -- reject before any HTTP work
+                // IP filter and connection cap -- reject before any HTTP work
                 let Some(open) = accept.admit(peer_addr) else {
                     drop(stream);
                     continue;
@@ -641,23 +824,15 @@ pub(crate) async fn run_plain_server(
 
                 let app = app.clone();
                 let shutdown = shutdown.clone();
+                let accept = accept.clone();
 
                 tokio::spawn(async move {
                     let _open = open;
-                    let io = hyper_util::rt::TokioIo::new(stream);
-                    let service = connection_service(app, peer_addr);
-
-                    let builder = hardened_http_builder();
-                    let conn = builder.serve_connection_with_upgrades(io, service);
-
-                    tokio::select! {
-                        _ = shutdown.cancelled() => {}
-                        result = conn => {
-                            if let Err(e) = result {
-                                debug!(peer = %peer_addr, error = %e, "Connection error");
-                            }
-                        }
+                    if !accept.first_byte(&stream).await {
+                        return;
                     }
+                    let io = hyper_util::rt::TokioIo::new(stream);
+                    serve_connection(io, app, peer_addr, &accept, &shutdown).await;
                 });
             }
         }
@@ -668,26 +843,40 @@ pub(crate) async fn run_plain_server(
 }
 
 /// The router as a hyper service for one connection, with the peer address
-/// on every request; the rate limiter refuses a request that carries none.
+/// on every request (the rate limiter refuses a request that carries none),
+/// and each request counted in flight on `activity` until its response is ready.
 fn connection_service(
     app: Router,
     peer_addr: SocketAddr,
+    activity: Arc<Activity>,
 ) -> hyper_util::service::TowerToHyperService<
-    tower::util::MapRequest<
-        Router,
-        impl FnMut(
-            axum::extract::Request<hyper::body::Incoming>,
-        ) -> axum::extract::Request<hyper::body::Incoming>
-        + Clone,
-    >,
+    impl tower::Service<
+        axum::extract::Request<hyper::body::Incoming>,
+        Response = Response,
+        Error = std::convert::Infallible,
+        Future: Send + 'static,
+    > + Clone
+    + Send
+    + 'static,
 > {
-    hyper_util::service::TowerToHyperService::new(tower::ServiceExt::map_request(
+    let addressed = tower::ServiceExt::map_request(
         app,
         move |mut request: axum::extract::Request<hyper::body::Incoming>| {
             request
                 .extensions_mut()
                 .insert(axum::extract::ConnectInfo(peer_addr));
             request
+        },
+    );
+    hyper_util::service::TowerToHyperService::new(tower::ServiceExt::map_future(
+        addressed,
+        move |answer| {
+            let in_flight = activity.begin();
+            async move {
+                let response = answer.await;
+                drop(in_flight);
+                response
+            }
         },
     ))
 }
@@ -718,7 +907,7 @@ pub(crate) async fn run_tls_server(
                     }
                 };
 
-                // IP filter at connection level -- reject before TLS handshake
+                // IP filter and connection cap -- reject before the TLS handshake
                 let Some(open) = accept.admit(peer_addr) else {
                     drop(stream);
                     continue;
@@ -728,11 +917,16 @@ pub(crate) async fn run_tls_server(
                 let app = app.clone();
                 let shutdown = shutdown.clone();
                 let metrics = accept.metrics.clone();
+                let accept = accept.clone();
 
                 tokio::spawn(async move {
                     let _open = open;
+                    if !accept.first_byte(&stream).await {
+                        return;
+                    }
                     // TLS handshake with timeout to prevent slow TLS attacks
-                    let tls_result = timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await;
+                    let tls_result =
+                        timeout(accept.limits.tls_handshake, acceptor.accept(stream)).await;
 
                     let tls_stream = match tls_result {
                         Ok(Ok(stream)) => stream,
@@ -765,19 +959,7 @@ pub(crate) async fn run_tls_server(
                     debug!(peer = %peer_addr, "TLS connection established");
 
                     let io = hyper_util::rt::TokioIo::new(tls_stream);
-                    let service = connection_service(app, peer_addr);
-
-                    let builder = hardened_http_builder();
-                    let conn = builder.serve_connection_with_upgrades(io, service);
-
-                    tokio::select! {
-                        _ = shutdown.cancelled() => {}
-                        result = conn => {
-                            if let Err(e) = result {
-                                debug!(peer = %peer_addr, error = %e, "Connection error");
-                            }
-                        }
-                    }
+                    serve_connection(io, app, peer_addr, &accept, &shutdown).await;
                 });
             }
         }

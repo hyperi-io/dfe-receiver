@@ -19,6 +19,7 @@
 //!   for direct HyperDX compatibility
 //! - **`generic`**: Normalised JSON envelope for custom routing
 
+pub mod budget;
 pub mod convert;
 
 use std::net::SocketAddr;
@@ -38,6 +39,7 @@ use crate::metrics::Metrics;
 use crate::pipeline::{Acks, BatchOutcome, PipelineState};
 use crate::server::auth::{AuthMode, TokenAuth, grpc_auth_interceptor, principal_or_listener};
 use crate::server::grpc::{count_connections, count_oversize};
+use crate::server::http::ConnectionLimits;
 use crate::server::http::{Accept, create_auth_state};
 use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
 use crate::server::traits::{BoundAddr, Listeners, ProtocolHandler};
@@ -342,6 +344,7 @@ async fn run_grpc_server(
         .map_err(|e| Error::Config(format!("invalid OTLP gRPC bind address: {e}")))?;
 
     let mode = OtlpMode::from_str(&config.mode);
+    let pipeline_server = pipeline.config().server;
     let service = OtlpService::new(pipeline, metrics.clone(), mode, acks);
 
     // Build TLS config if enabled
@@ -363,7 +366,8 @@ async fn run_grpc_server(
         None
     };
 
-    let mut builder = tonic::transport::Server::builder();
+    let limits = ConnectionLimits::new(&pipeline_server.connections);
+    let mut builder = crate::server::grpc::keep_alive(tonic::transport::Server::builder(), &limits);
 
     if let Some(tls) = tls_config {
         builder = builder
@@ -416,7 +420,7 @@ async fn run_grpc_server(
 
     router
         .serve_with_incoming_shutdown(
-            count_connections(incoming, metrics, TRANSPORT),
+            count_connections(incoming, metrics, TRANSPORT, limits),
             shutdown.cancelled_owned(),
         )
         .await
@@ -607,11 +611,7 @@ async fn run_http_server(
         build_tls_acceptor(&config.tls)?
     };
 
-    let accept = Accept {
-        ip_filter: crate::server::ip_filter::IpFilter::from_config(&server.ip_filter),
-        metrics,
-        transport: TRANSPORT,
-    };
+    let accept = Accept::new(&server, metrics, TRANSPORT);
 
     let acceptor_handle = if let Some(ref provider) = tls_provider {
         Some(provider.acceptor_handle())
@@ -711,7 +711,7 @@ fn decode_content_encoding<'a>(
 /// Supports `application/x-protobuf` (default) and `application/grpc`.
 /// OTLP/JSON (`application/json`) support requires serde integration with
 /// prost types and can be added when needed.
-fn decode_otlp_request<T: prost::Message + Default>(
+fn decode_otlp_request<T: prost::Message + Default + crate::server::budget::Budgeted>(
     headers: &axum::http::HeaderMap,
     body: &[u8],
     limit: usize,
@@ -729,6 +729,7 @@ fn decode_otlp_request<T: prost::Message + Default>(
     } else {
         // OTLP/protobuf (default)
         let body = decode_content_encoding(headers, body, limit)?;
+        budget::admit::<T>(&body)?;
         <T as prost::Message>::decode(&*body)
             .map_err(|e| Error::Validation(format!("OTLP protobuf decode failed: {e}")))
     }

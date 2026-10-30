@@ -473,14 +473,7 @@ impl Router {
             .enrichment_enabled
             .then(|| self.final_source(assigned, &found, ingest));
         let header = Header {
-            received: match (self.enrichment_enabled, found.received_at) {
-                (false, _) => Received::Skip,
-                (true, Some(at)) => Received::Swap {
-                    ms: received_ms,
-                    at,
-                },
-                (true, None) => Received::of(found.has_received, received_ms),
-            },
+            received: self.received(&found, received_ms),
             source: source.as_deref().map_or(Write::Keep, |source| {
                 Write::of(&found.source, found.source_once, source, true)
             }),
@@ -494,8 +487,7 @@ impl Router {
     }
 
     /// Hold one record's `_org_id` to `ingest`'s binding and write it, leaving
-    /// every other field as it is: the org pass for a record bound for a topic
-    /// its listener chose.
+    /// every other field as it is.
     ///
     /// # Errors
     ///
@@ -507,9 +499,42 @@ impl Router {
         ingest: &Ingest,
         tally: &mut Batch<'r>,
     ) -> Result<(Bytes, &'r str)> {
+        self.assign(payload, ingest, None, tally)
+    }
+
+    /// The header pass for a record bound for a topic its listener chose:
+    /// `source` and `_timestamp_received` written as [`route`](Self::route)
+    /// writes a source and receive time, and `_org_id` held to `ingest`'s
+    /// binding. With enrichment off only `_org_id` is written.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Validation`] when a header field must be replaced and the
+    /// record does not parse as a JSON object.
+    pub fn stamp_for_topic<'r>(
+        &'r self,
+        payload: Bytes,
+        ingest: &Ingest,
+        source: &str,
+        received_ms: u128,
+        tally: &mut Batch<'r>,
+    ) -> Result<(Bytes, &'r str)> {
+        let stamp = self.enrichment_enabled.then_some((source, received_ms));
+        self.assign(payload, ingest, stamp, tally)
+    }
+
+    /// Clamp and write `_org_id`, and `_source` and `_timestamp_received` from
+    /// `stamp` when given.
+    fn assign<'r>(
+        &'r self,
+        payload: Bytes,
+        ingest: &Ingest,
+        stamp: Option<(&str, u128)>,
+        tally: &mut Batch<'r>,
+    ) -> Result<(Bytes, &'r str)> {
         let bytes = payload.clone();
         let json = JsonPayload::trusted(&bytes);
-        let found = self.found(&json, &bytes, false);
+        let found = self.found(&json, &bytes, stamp.is_some());
         let binding = self.bindings.resolve(ingest.principal());
         let record = Record {
             json: &json,
@@ -519,11 +544,25 @@ impl Router {
         let outcome = tally.evaluate_clamped(&record, &clamp);
         let org = self.final_org(&outcome, &found, binding);
         let header = Header {
-            received: Received::Skip,
-            source: Write::Keep,
+            received: stamp.map_or(Received::Skip, |(_, ms)| self.received(&found, ms)),
+            source: stamp.map_or(Write::Keep, |(source, _)| {
+                Write::of(&found.source, found.source_once, source, true)
+            }),
             org: Write::of(&found.org, found.org_once, org, false),
         };
         Ok((header.write(payload)?, org))
+    }
+
+    /// The `_timestamp_received` write for a record with header fields `found`.
+    fn received(&self, found: &Found<'_>, received_ms: u128) -> Received {
+        match (self.enrichment_enabled, found.received_at) {
+            (false, _) => Received::Skip,
+            (true, Some(at)) => Received::Swap {
+                ms: received_ms,
+                at,
+            },
+            (true, None) => Received::of(found.has_received, received_ms),
+        }
     }
 
     /// Route a message to DLQ.
@@ -1449,5 +1488,59 @@ mod tests {
         let mut allow = Config::default();
         allow.routing.source_org_id = SourceOrgId::Allow;
         assert!(!router(&allow).strips_org_id());
+    }
+
+    /// A record bound for a topic its listener chose takes the same source,
+    /// receive time and org as a routed record, every field written once and
+    /// a sender's own value parked beside it. With enrichment off only the
+    /// org is written.
+    #[test]
+    fn a_record_for_a_listeners_topic_is_stamped_as_a_routed_one_is() {
+        let caller = credential("runzero");
+        let stamped = |router: &Router, record: &'static str| {
+            let mut tally = router.tally();
+            let (payload, org) = router
+                .stamp_for_topic(Bytes::from(record), &caller, "runzero", NOW, &mut tally)
+                .expect("stamps");
+            (
+                String::from_utf8(payload.to_vec()).unwrap(),
+                org.to_string(),
+            )
+        };
+        let r = router(&Config::default());
+        for (record, want) in [
+            (
+                r#"{"a":1}"#,
+                serde_json::json!({"a":1,"_timestamp_received":NOW as u64,"_source":"runzero","_org_id":"default"}),
+            ),
+            (
+                "{}",
+                serde_json::json!({"_timestamp_received":NOW as u64,"_source":"runzero","_org_id":"default"}),
+            ),
+            (
+                r#"{"_source":"other","_timestamp_received":1,"a":1}"#,
+                serde_json::json!({
+                    "a":1,
+                    "_source":"runzero",
+                    "_source_original":"other",
+                    "_timestamp_received":NOW as u64,
+                    "_timestamp_received_original":1,
+                    "_org_id":"default",
+                }),
+            ),
+        ] {
+            let (text, org) = stamped(&r, record);
+            let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(value, want, "{record}");
+            for key in ["\"_source\"", "\"_timestamp_received\"", "\"_org_id\""] {
+                assert_eq!(text.matches(key).count(), 1, "{key} in {text}");
+            }
+            assert_eq!(org, "default");
+        }
+
+        let mut off = Config::default();
+        off.routing.enrich = false;
+        let (text, _) = stamped(&router(&off), r#"{"a":1}"#);
+        assert_eq!(text, r#"{"a":1,"_org_id":"default"}"#);
     }
 }

@@ -40,6 +40,7 @@ use crate::error::{Error, RETRY_AFTER_SECS, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::{Acks, PipelineState};
 use crate::server::auth::{TokenAuth, principal_or_listener};
+use crate::server::budget::Shape;
 use crate::server::http::{Accept, create_auth_state};
 use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
 use crate::server::traits::{BoundAddr, ProtocolHandler};
@@ -49,6 +50,22 @@ use self::convert::{PrometheusRwMode, write_request_to_json};
 
 /// The transport label the remote-write listener counts under.
 const TRANSPORT: &str = "prometheus_rw";
+
+// A series' labels are copied into every sample event it emits.
+static LABEL: Shape = Shape::of(&[]);
+static SERIES_LABEL: Shape = Shape::shared(&[]);
+static SAMPLE: Shape = Shape::record(&[]);
+static EXEMPLAR: Shape = Shape::of(&[(1, &LABEL)]);
+static BUCKET_SPAN: Shape = Shape::of(&[]);
+static HISTOGRAM: Shape = Shape::record(&[(8, &BUCKET_SPAN), (11, &BUCKET_SPAN)]);
+static TIME_SERIES: Shape = Shape::of(&[
+    (1, &SERIES_LABEL),
+    (2, &SAMPLE),
+    (3, &EXEMPLAR),
+    (4, &HISTOGRAM),
+]);
+static METADATA: Shape = Shape::of(&[]);
+static WRITE_REQUEST: Shape = Shape::of(&[(1, &TIME_SERIES), (3, &METADATA)]);
 
 /// Prometheus Remote Write protocol handler.
 pub struct PrometheusRwHandler {
@@ -193,11 +210,7 @@ async fn run_prometheus_rw_server(
         build_tls_acceptor(&config.tls)?
     };
 
-    let accept = Accept {
-        ip_filter: crate::server::ip_filter::IpFilter::from_config(&server.ip_filter),
-        metrics,
-        transport: TRANSPORT,
-    };
+    let accept = Accept::new(&server, metrics, TRANSPORT);
 
     // Published once TLS is ready, so a failed TLS setup never reads as serving.
     let _serving = bound.publish(&listener.local_addr());
@@ -271,6 +284,14 @@ async fn write_handler(
             state.metrics.inc_requests_error("prometheus_rw");
             RwError::bad_request(&format!("snappy decompression failed: {e}"))
         })?;
+
+    // Before the decode, which an over-budget request could make gigabytes of.
+    crate::server::budget::admit(&decompressed, &WRITE_REQUEST, "remote write request").map_err(
+        |e| {
+            state.metrics.inc_requests_error("prometheus_rw");
+            RwError::bad_request(&e.to_string())
+        },
+    )?;
 
     // Protobuf decode
     let request = proto::WriteRequest::decode(decompressed.as_slice()).map_err(|e| {
@@ -377,6 +398,52 @@ mod tests {
         assert_eq!(config.mode, "native");
         assert_eq!(config.max_body_size, 10 * 1024 * 1024);
         assert_eq!(config.request_timeout_ms, 30_000);
+    }
+
+    /// A request inside the 64 MiB decompressed limit that would decode into
+    /// gigabytes is refused before the decode: one series of empty samples
+    /// past the record cap, and a 1 MiB label the native conversion copies
+    /// into each of 100 samples. A real series is admitted.
+    #[test]
+    fn a_write_request_over_its_decode_budget_is_refused() {
+        use crate::server::budget::{MAX_COPIED_BYTES, MAX_RECORDS, admit};
+
+        let series = |labels: Vec<proto::Label>, samples: usize| proto::WriteRequest {
+            timeseries: vec![proto::TimeSeries {
+                labels,
+                samples: vec![proto::Sample::default(); samples],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let label = |value: String| proto::Label {
+            name: "__name__".to_string(),
+            value,
+        };
+        const { assert!(100 << 20 > MAX_COPIED_BYTES) };
+        for (name, request, refused) in [
+            ("a real series", series(vec![label("up".into())], 100), None),
+            (
+                "samples past the cap",
+                series(vec![], MAX_RECORDS + 1),
+                Some("records"),
+            ),
+            (
+                "a large label over many samples",
+                series(vec![label("x".repeat(1 << 20))], 100),
+                Some("shared bytes"),
+            ),
+        ] {
+            let body = request.encode_to_vec();
+            match (
+                admit(&body, &WRITE_REQUEST, "remote write request"),
+                refused,
+            ) {
+                (Ok(()), None) => {}
+                (Err(e), Some(text)) => assert!(e.to_string().contains(text), "{name}: {e}"),
+                (got, want) => panic!("{name}: got {got:?}, want refusal {want:?}"),
+            }
+        }
     }
 
     // -----------------------------------------------------------------

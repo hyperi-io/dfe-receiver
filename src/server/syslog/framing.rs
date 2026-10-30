@@ -11,10 +11,13 @@
 //! Auto-detects between two framing methods per message:
 //! - **Octet counting**: `<length> <message>` (first byte is ASCII digit 1-9)
 //! - **Non-transparent framing**: newline-delimited (fallback)
+//!
+//! A frame is its bytes: the encoding is the caller's to check, so a line that
+//! is not UTF-8 costs that line and not the connection.
 
 use std::io;
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use tokio_util::codec::Decoder;
 
 /// Default maximum syslog message size (64 KB).
@@ -42,7 +45,7 @@ impl Default for SyslogFrameDecoder {
 }
 
 impl Decoder for SyslogFrameDecoder {
-    type Item = String;
+    type Item = Bytes;
     type Error = io::Error;
 
     fn decode(
@@ -69,6 +72,32 @@ impl Decoder for SyslogFrameDecoder {
             self.decode_newline_delimited(src)
         }
     }
+
+    /// A sender that closes after a last line with no newline still sent that
+    /// line, so it is the final frame. A partial octet-counted frame is not.
+    fn decode_eof(
+        &mut self,
+        src: &mut BytesMut,
+    ) -> std::result::Result<Option<Self::Item>, Self::Error> {
+        if let Some(frame) = self.decode(src)? {
+            return Ok(Some(frame));
+        }
+        let rest = src.split();
+        let rest = rest.trim_ascii();
+        if rest.is_empty() || octet_count(rest).is_some() {
+            return Ok(None);
+        }
+        Ok(Some(Bytes::copy_from_slice(rest)))
+    }
+}
+
+/// The octet count a frame opens with, when it opens `<digits><SP>`.
+fn octet_count(frame: &[u8]) -> Option<usize> {
+    if !matches!(frame.first(), Some(b'1'..=b'9')) {
+        return None;
+    }
+    let space = frame.iter().position(|&b| b == b' ')?;
+    std::str::from_utf8(&frame[..space]).ok()?.parse().ok()
 }
 
 impl SyslogFrameDecoder {
@@ -76,7 +105,7 @@ impl SyslogFrameDecoder {
     fn decode_octet_counted(
         &self,
         src: &mut BytesMut,
-    ) -> std::result::Result<Option<String>, io::Error> {
+    ) -> std::result::Result<Option<Bytes>, io::Error> {
         // Find the space separator after the length prefix
         let space_pos = match src.iter().position(|&b| b == b' ') {
             Some(pos) => pos,
@@ -131,23 +160,15 @@ impl SyslogFrameDecoder {
         }
 
         // Extract the message (skip length prefix + space)
-        let frame = src.split_to(total);
-        let msg_bytes = &frame[(space_pos + 1)..];
-
-        match std::str::from_utf8(msg_bytes) {
-            Ok(s) => Ok(Some(s.to_string())),
-            Err(_) => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "syslog message is not valid UTF-8",
-            )),
-        }
+        let frame = src.split_to(total).freeze();
+        Ok(Some(frame.slice((space_pos + 1)..)))
     }
 
     /// Decode a newline-delimited (non-transparent) frame.
     fn decode_newline_delimited(
         &self,
         src: &mut BytesMut,
-    ) -> std::result::Result<Option<String>, io::Error> {
+    ) -> std::result::Result<Option<Bytes>, io::Error> {
         // Find the newline delimiter
         let newline_pos = match src.iter().position(|&b| b == b'\n') {
             Some(pos) => pos,
@@ -177,22 +198,10 @@ impl SyslogFrameDecoder {
             ));
         }
 
-        // Extract message up to newline, consume the newline
-        let frame = src.split_to(newline_pos + 1);
-        let msg_bytes = &frame[..newline_pos];
-
-        // Skip empty lines
-        if msg_bytes.is_empty() {
-            return Ok(None);
-        }
-
-        match std::str::from_utf8(msg_bytes) {
-            Ok(s) => Ok(Some(s.to_string())),
-            Err(_) => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "syslog message is not valid UTF-8",
-            )),
-        }
+        // Extract message up to newline, consume the newline. Leading newlines
+        // were skipped, so the frame is never empty.
+        let frame = src.split_to(newline_pos + 1).freeze();
+        Ok(Some(frame.slice(..newline_pos)))
     }
 }
 
@@ -208,6 +217,14 @@ mod tests {
     use bytes::BufMut;
 
     fn decode_all(decoder: &mut SyslogFrameDecoder, data: &[u8]) -> Vec<String> {
+        decode_frames(decoder, data, false)
+            .into_iter()
+            .map(|frame| String::from_utf8(frame.to_vec()).unwrap())
+            .collect()
+    }
+
+    /// Every frame `data` holds, read to the end of the stream when `eof`.
+    fn decode_frames(decoder: &mut SyslogFrameDecoder, data: &[u8], eof: bool) -> Vec<Bytes> {
         let mut buf = BytesMut::from(data);
         let mut results = Vec::new();
         loop {
@@ -217,14 +234,50 @@ mod tests {
                 Err(e) => panic!("decode error: {e}"),
             }
         }
+        if eof && let Some(last) = decoder.decode_eof(&mut buf).unwrap() {
+            results.push(last);
+        }
         results
     }
 
+    /// The bytes sent, whether the stream then ends, and the frames expected.
+    type Case = (&'static [u8], bool, &'static [&'static [u8]]);
+
+    /// Each framing decodes, and the decoder hands back bytes and never fails
+    /// on their encoding, so a line that is not UTF-8 cannot end the
+    /// connection and lose the rest. At the end of the stream a last line with
+    /// no newline is still a frame, and a partial octet-counted frame is not.
     #[test]
-    fn test_newline_delimited_single() {
-        let mut decoder = SyslogFrameDecoder::default();
-        let msgs = decode_all(&mut decoder, b"<14>hello world\n");
-        assert_eq!(msgs, vec!["<14>hello world"]);
+    fn every_frame_survives_its_neighbours_encoding_and_a_missing_last_newline() {
+        let cases: [Case; 9] = [
+            (b"<14>hello world\n", false, &[b"<14>hello world"]),
+            // "11 " is the prefix, then 11 bytes of message.
+            (b"11 <14>hello w", false, &[b"<14>hello w"]),
+            (b"\n\n<14>hello\n\n", false, &[b"<14>hello"]),
+            (
+                b"<14>caf\xe9\n<14>next\n",
+                false,
+                &[b"<14>caf\xe9", b"<14>next"],
+            ),
+            (
+                b"9 <14>caf\xe9!9 <14>next1",
+                false,
+                &[b"<14>caf\xe9!", b"<14>next1"],
+            ),
+            (b"<14>one\n<14>last", true, &[b"<14>one", b"<14>last"]),
+            (
+                b"2026-10-31T10:00:00Z host app: no PRI",
+                true,
+                &[b"2026-10-31T10:00:00Z host app: no PRI"],
+            ),
+            (b"<14>one\n20 <14>cut", true, &[b"<14>one"]),
+            (b"<14>one\n\n \t", true, &[b"<14>one"]),
+        ];
+        for (data, eof, expected) in cases {
+            let frames = decode_frames(&mut SyslogFrameDecoder::default(), data, eof);
+            let frames: Vec<&[u8]> = frames.iter().map(|f| &f[..]).collect();
+            assert_eq!(frames, expected, "{:?}", String::from_utf8_lossy(data));
+        }
     }
 
     #[test]
@@ -232,14 +285,6 @@ mod tests {
         let mut decoder = SyslogFrameDecoder::default();
         let msgs = decode_all(&mut decoder, b"<14>msg one\n<14>msg two\n<14>msg three\n");
         assert_eq!(msgs, vec!["<14>msg one", "<14>msg two", "<14>msg three"]);
-    }
-
-    #[test]
-    fn test_octet_counted_single() {
-        let mut decoder = SyslogFrameDecoder::default();
-        let msgs = decode_all(&mut decoder, b"11 <14>hello w");
-        // "11 " is 3 bytes prefix, then 11 bytes of message = "<14>hello w"
-        assert_eq!(msgs, vec!["<14>hello w"]);
     }
 
     #[test]
@@ -282,13 +327,6 @@ mod tests {
         buf.put(&b"ial message!"[..]);
         let result = decoder.decode(&mut buf).unwrap();
         assert_eq!(result.unwrap(), "<14>partial message!");
-    }
-
-    #[test]
-    fn test_empty_lines_skipped() {
-        let mut decoder = SyslogFrameDecoder::default();
-        let msgs = decode_all(&mut decoder, b"\n\n<14>hello\n\n");
-        assert_eq!(msgs, vec!["<14>hello"]);
     }
 
     #[test]

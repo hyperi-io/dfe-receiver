@@ -491,6 +491,46 @@ async fn a_syslog_tcp_connection_is_counted_until_it_closes() {
     syslog.shutdown.cancel();
 }
 
+/// A line that is not UTF-8 costs that line only: the connection stays open,
+/// the next line on it is taken, and a last line the sender closes without a
+/// newline is taken too.
+#[tokio::test]
+async fn a_line_that_is_not_utf8_costs_only_itself() {
+    use tokio::io::AsyncWriteExt;
+
+    let syslog = start_syslog_handler(test_config()).await;
+    let wait = Duration::from_secs(5);
+
+    let mut connection = tokio::net::TcpStream::connect(syslog.tcp).await.unwrap();
+    connection
+        .write_all(b"<14>Oct 31 10:00:00 host app: caf\xe9\n<14>Oct 31 10:00:01 host app: next\n")
+        .await
+        .unwrap();
+    assert!(
+        crate::common::eventually(wait, || requests_success(&syslog.metrics) == 1).await,
+        "the line after the bad one was not taken: {} taken, {} failed",
+        requests_success(&syslog.metrics),
+        syslog.metrics.get_requests_error()
+    );
+    assert_eq!(syslog.metrics.get_requests_error(), 1);
+    assert_eq!(
+        syslog.metrics.get_active_connections(),
+        1,
+        "the connection closed"
+    );
+
+    connection
+        .write_all(b"<14>Oct 31 10:00:02 host app: last, no newline")
+        .await
+        .unwrap();
+    drop(connection);
+    assert!(
+        crate::common::eventually(wait, || requests_success(&syslog.metrics) == 2).await,
+        "the unterminated last line was not taken"
+    );
+    syslog.shutdown.cancel();
+}
+
 /// A datagram and a connection the IP filter refuses each count, and neither
 /// reaches the pipeline.
 #[tokio::test]

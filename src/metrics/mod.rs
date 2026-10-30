@@ -27,6 +27,7 @@
 //! - `receiver_body_size_rejected_total` - Oversized body rejections by transport
 //! - `receiver_ip_filter_rejected_total` - Connections and datagrams the IP filter refused, by transport
 //! - `receiver_rate_limited_total` - Requests the per-IP rate limit refused with 429, by transport
+//! - `receiver_connections_closed_total` - Connections closed for a connection limit, by transport and reason
 //! - `receiver_tls_handshake_failures_total` - TLS failures
 
 use std::sync::Arc;
@@ -731,6 +732,18 @@ impl Metrics {
         .increment(1);
     }
 
+    /// Record a connection `transport` closed for a connection limit:
+    /// `over_limit`, `no_first_byte` or `idle`.
+    #[inline]
+    pub fn inc_connection_closed(&self, transport: &str, reason: &'static str) {
+        metrics::counter!(
+            "receiver_connections_closed_total",
+            "transport" => transport.to_string(),
+            "reason" => reason
+        )
+        .increment(1);
+    }
+
     /// Record a connection, or a datagram, the IP filter refused on `transport`.
     #[inline]
     pub fn inc_ip_filter_rejected(&self, transport: &str) {
@@ -1057,6 +1070,12 @@ const RECEIVER_SERIES: &[SeriesSpec] = &[
         MetricType::Counter,
         &["transport"],
         "Connections, and syslog UDP datagrams, the IP filter refused, by transport",
+    ),
+    (
+        "receiver_connections_closed_total",
+        MetricType::Counter,
+        &["transport", "reason"],
+        "Connections closed for a connection limit (server.connections), by transport and reason: over_limit, no_first_byte, idle",
     ),
     (
         "receiver_rate_limited_total",

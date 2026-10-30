@@ -15,13 +15,17 @@ This document covers application-level hardening (80/20 effort) and cost-effecti
 | Request body size limit (413) | 10 MiB (HTTP, OTLP HTTP, HEC, RW), 1 MiB (webhook); the body extractors read to the same limit | `server.max_body_size` (HTTP, OTLP HTTP), `splunk_hec.max_body_size`, `prometheus_rw.max_body_size`, `webhook.max_body_size` |
 | Request timeout (408) | 30s, every HTTP listener | `server.request_timeout_ms` (HTTP, OTLP HTTP), `splunk_hec.request_timeout_ms`, `prometheus_rw.request_timeout_ms`, `webhook.request_timeout_ms` |
 | Slowloris protection | 5s header_read_timeout, every HTTP listener (hyper) | `HEADER_READ_TIMEOUT` |
-| Connection idle timeout | 60s, HTTP/1 keepalive + HTTP/2 | `CONNECTION_IDLE_TIMEOUT` |
+| Connections closed for a limit | Counted by transport and reason (`over_limit`, `no_first_byte`, `idle`) | `receiver_connections_closed_total` |
+| First byte timeout | 30s, every TCP listener the receiver accepts on: a connection that sends nothing by then is closed | `server.connections.first_byte_timeout_ms` |
+| Connection idle timeout | 300s with no request in flight, every HTTP listener, HTTP/1 keep-alive and HTTP/2 alike (an idle HTTP/1 connection can close sooner, on the header read timeout). A peer that does not finish the graceful close is dropped. Raw TCP listeners (syslog, Lumberjack, Fluent Forward, GELF) keep an idle connection, under the cap, since closing one under a sender loses its next line | `server.connections.idle_timeout_ms` |
+| HTTP/2 keep-alive | Ping every 60s, close after 20s unanswered, every HTTP listener and both gRPC listeners | `server.connections.http2_keep_alive_interval_ms` |
+| Connection cap | 10,000 open connections per listener, every TCP listener and both gRPC listeners; one past it is closed as it is accepted | `server.connections.max_per_listener` (0 = no cap) |
 | Concurrency limit | 10,000 in-flight requests default, per HTTP listener | `server.max_concurrent_requests` |
 | Per-IP rate limiting | GCRA via tower-governor, opt-in, per HTTP listener, keyed on the TCP peer (forwarding headers only from `server.trusted_proxies`); clients whose budget has refilled are dropped from its key map every 5s | `server.rate_limit.*`, `server.trusted_proxies` |
 | IP filter (allowlist/denylist) | CIDR trie, connection-level reject, every accept loop; an unknown mode, a bad CIDR or an empty allowlist refuses to start | `server.ip_filter.*` |
 | 503 backpressure | HTTP + gRPC ingest shed load when pipeline not ready | `Retry-After: 5` |
 | TLS termination | Per-protocol, hot-reloadable | `*.tls.enabled` |
-| TLS handshake timeout | 10s hard-coded, all TCP handlers | `TLS_HANDSHAKE_TIMEOUT` |
+| TLS handshake timeout | 10s, every TLS listener the receiver accepts on | `server.connections.tls_handshake_timeout_ms` |
 | mTLS client auth | Per-protocol | `*.tls.client_auth: required` |
 | Bearer token auth | Per-protocol, hot-reloadable | `*.auth.mode: bearer` |
 | Header auth | HTTP, against `accepted_headers` only; an unknown `*.auth.mode` refuses to start | `server.auth.mode: header` |
@@ -32,7 +36,9 @@ This document covers application-level hardening (80/20 effort) and cost-effecti
 | Memory pressure backpressure | 503 / `UNAVAILABLE` on HTTP and gRPC ingest | `DFE_RECEIVER_MEMORY_PRESSURE_THRESHOLD`, `self_regulation.*` (`buffer.*` bounds only the destination queues) |
 | Middleware ordering | Concurrency -> Timeout -> BodyLimit -> Auth -> Handler | Correct for DoS |
 | Frame size validation | GELF 1MB, Syslog 64KB, Fluent 32MB | Per-protocol limits |
-| Zip-bomb rejection | Lumberjack nested compression rejected | Hard-coded |
+| Decoded-size budget | An OTLP export, remote-write request or Vector push past 100,000 records, 1,000,000 messages or 64 MiB of resource, scope, metric or series-label bytes copied into its records, or holding a protobuf group, is refused before it decodes: 400 on HTTP, `INVALID_ARGUMENT` on gRPC. A Fluent Forward message past 1,000,000 values, 100,000 entries or 64 MiB of tag copies closes its connection, found by a scan that reads each byte once | Hard-coded |
+| Zip-bomb rejection | Lumberjack nested compression rejected; a compressed frame is decompressed one inner frame at a time and refused past 64 MiB | Hard-coded |
+| Unsettled bytes per connection | Lumberjack settles and ACKs a window in parts past 16 MiB of events | Hard-coded |
 | Health/readiness (K8s) | `/livez`, `/readyz`: 503 until every enabled listener serves, once one stops (drain included), and under memory pressure | Metrics port and the HTTP ingest port |
 | Graceful shutdown | CancellationToken + in-flight drain | All handlers |
 | Log spam prevention | Sampled (1/100) + debounced (5s) logging; a refused credential logs once per 5s per reason, an IP-filter refusal once per 5s per listener, and a counter carries every one | Per-protocol |

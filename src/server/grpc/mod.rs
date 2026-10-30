@@ -15,6 +15,7 @@
 //! Events arrive as protobuf `EventWrapper` messages and are converted
 //! to JSON bytes for the processing pipeline.
 
+mod budget;
 pub mod convert;
 
 use std::io;
@@ -38,7 +39,7 @@ use crate::error::{Error, Result};
 use crate::metrics::{ConnectionGuard, Metrics};
 use crate::pipeline::{Acks, BatchOutcome, PipelineState};
 use crate::server::auth::{AuthMode, AuthState, grpc_auth_interceptor, principal_or_listener};
-use crate::server::http::create_auth_state;
+use crate::server::http::{ConnectionLimits, Slot, create_auth_state};
 use crate::server::traits::{BoundAddr, ProtocolHandler};
 use crate::tenancy::Ingest;
 
@@ -207,6 +208,7 @@ fn push_answer(
 pub(crate) struct CountedConnection {
     stream: TcpStream,
     _open: ConnectionGuard,
+    _slot: Slot,
 }
 
 impl Connected for CountedConnection {
@@ -257,18 +259,38 @@ impl AsyncWrite for CountedConnection {
     }
 }
 
-/// `incoming` with each connection counted open on `metrics` under `transport`.
+/// `incoming` with each connection counted open on `metrics` under
+/// `transport`, and one past the listener's cap closed as it is accepted.
 pub(crate) fn count_connections(
     incoming: TcpIncoming,
     metrics: Arc<Metrics>,
     transport: &'static str,
+    limits: ConnectionLimits,
 ) -> impl Stream<Item = io::Result<CountedConnection>> {
-    tokio_stream::StreamExt::map(incoming, move |conn| {
-        conn.map(|stream| CountedConnection {
-            stream,
-            _open: metrics.open_connection(transport),
-        })
+    tokio_stream::StreamExt::filter_map(incoming, move |conn| match conn {
+        Ok(stream) => {
+            let Some(slot) = limits.slot() else {
+                metrics.inc_connection_closed(transport, "over_limit");
+                return None;
+            };
+            Some(Ok(CountedConnection {
+                stream,
+                _open: metrics.open_connection(transport),
+                _slot: slot,
+            }))
+        }
+        Err(e) => Some(Err(e)),
     })
+}
+
+/// The HTTP/2 keep-alive a tonic listener pings with, from `server.connections`.
+pub(crate) fn keep_alive(
+    builder: tonic::transport::Server,
+    limits: &ConnectionLimits,
+) -> tonic::transport::Server {
+    builder
+        .http2_keepalive_interval(Some(limits.http2_keep_alive))
+        .http2_keepalive_timeout(Some(crate::server::http::KEEP_ALIVE_PING_TIMEOUT))
 }
 
 /// A tonic server layer counting requests refused for their size.
@@ -404,7 +426,8 @@ async fn serve(
         None
     };
 
-    let mut builder = tonic::transport::Server::builder();
+    let limits = ConnectionLimits::new(&config.server.connections);
+    let mut builder = keep_alive(tonic::transport::Server::builder(), &limits);
 
     // Apply TLS
     if let Some(tls) = tls_config {
@@ -439,7 +462,7 @@ async fn serve(
 
     router
         .serve_with_incoming_shutdown(
-            count_connections(incoming, metrics, TRANSPORT),
+            count_connections(incoming, metrics, TRANSPORT, limits),
             shutdown.cancelled_owned(),
         )
         .await

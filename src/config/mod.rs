@@ -35,6 +35,7 @@ use serde::{Deserialize, Serialize};
 use scalo::scaling::{ScalingComponent, ScalingPressure, ScalingPressureConfig};
 
 use crate::error::{Error, Result};
+use crate::server::tls::ClientAuth;
 
 /// Environment variable prefix for configuration.
 pub const ENV_PREFIX: &str = "DFE_RECEIVER";
@@ -534,6 +535,8 @@ impl Config {
             ));
         }
 
+        connection_timeouts_are_set(&self.server.connections)?;
+
         // Validate buffer config
         if self.buffer.pressure_threshold < 0.0 || self.buffer.pressure_threshold > 1.0 {
             return Err(Error::Config(
@@ -561,6 +564,24 @@ impl Config {
     /// a weaker door -- it is an open one that reads as shut. Each rule below
     /// names the code that does or does not run.
     fn validate_auth(&self) -> Result<()> {
+        // A client certificate mode the TLS builders do not recognise reads
+        // as no client certificate at all, so it is refused like a mode typo.
+        for (scope, tls) in [
+            ("server", &self.server.tls),
+            ("grpc", &self.grpc.tls),
+            #[cfg(feature = "otlp")]
+            ("otlp", &self.otlp.tls),
+            ("lumberjack", &self.lumberjack.tls),
+            ("splunk_hec", &self.splunk_hec.tls),
+            ("syslog", &self.syslog.tls),
+            ("prometheus_rw", &self.prometheus_rw.tls),
+            ("fluent", &self.fluent.tls),
+            ("gelf", &self.gelf.tls),
+            ("webhook", &self.webhook.tls),
+        ] {
+            known_client_auth(scope, tls)?;
+        }
+
         // A mode the parser does not recognise is refused on every listener,
         // running or not: it is a typo whichever block it sits in.
         known_mode("server", &self.server.auth)?;
@@ -668,6 +689,31 @@ impl Config {
     }
 }
 
+/// Refuse a zero connection timeout: it would close every connection, or
+/// ping without pause.
+fn connection_timeouts_are_set(connections: &ConnectionsConfig) -> Result<()> {
+    for (key, ms) in [
+        ("first_byte_timeout_ms", connections.first_byte_timeout_ms),
+        ("idle_timeout_ms", connections.idle_timeout_ms),
+        (
+            "tls_handshake_timeout_ms",
+            connections.tls_handshake_timeout_ms,
+        ),
+        (
+            "http2_keep_alive_interval_ms",
+            connections.http2_keep_alive_interval_ms,
+        ),
+    ] {
+        if ms == 0 {
+            return Err(Error::Config(format!(
+                "server.connections.{key} is 0, which would close every connection; \
+                 set a time in milliseconds"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Refuse an IP filter [`IpFilter::parse`](crate::server::ip_filter::IpFilter::parse)
 /// rejects: an unknown mode, an entry that is not a CIDR, an empty allowlist.
 fn ip_filter_parses(scope: &str, filter: &IpFilterConfig) -> Result<()> {
@@ -724,10 +770,21 @@ fn header_credentials_configured(scope: &str, auth: &AuthConfig) -> Result<()> {
     )))
 }
 
+/// Refuse a `tls.client_auth` the TLS builders do not recognise, an empty one included.
+fn known_client_auth(scope: &str, tls: &TlsConfig) -> Result<()> {
+    if ClientAuth::parse(&tls.client_auth).is_some() {
+        return Ok(());
+    }
+    Err(Error::Config(format!(
+        "{scope}.tls.client_auth is '{}', which is not one of none, optional, required",
+        tls.client_auth
+    )))
+}
+
 /// Whether the TLS handshake on a listener refuses a client with no certificate.
 fn handshake_requires_a_client_certificate(tls: &TlsConfig) -> bool {
     tls.enabled
-        && tls.client_auth.eq_ignore_ascii_case("required")
+        && ClientAuth::parse(&tls.client_auth) == Some(ClientAuth::Required)
         && (tls.ca_file.is_some() || tls.ca_secret.is_some())
 }
 
@@ -790,7 +847,7 @@ fn cert_half_is_enforced(scope: &str, auth: &AuthConfig, tls: &TlsConfig) -> Res
              accepts every client unauthenticated"
         )));
     }
-    if !tls.client_auth.eq_ignore_ascii_case("required") {
+    if ClientAuth::parse(&tls.client_auth) != Some(ClientAuth::Required) {
         return Err(Error::Config(format!(
             "{scope}.auth.mode is '{mode}' but {scope}.tls.client_auth is '{}' -- \
              it must be 'required', or clients presenting no certificate are \
@@ -1086,6 +1143,10 @@ pub struct ServerConfig {
     /// accept loop for.
     pub ip_filter: IpFilterConfig,
 
+    /// Connection limits for every TCP listener the receiver owns an accept
+    /// loop for.
+    pub connections: ConnectionsConfig,
+
     /// TLS configuration.
     pub tls: TlsConfig,
 
@@ -1107,9 +1168,49 @@ impl Default for ServerConfig {
             rate_limit: RateLimitConfig::default(),
             trusted_proxies: Vec::new(),
             ip_filter: IpFilterConfig::default(),
+            connections: ConnectionsConfig::default(),
             tls: TlsConfig::default(),
             auth: AuthConfig::default(),
             acknowledgements: AcknowledgementsConfig::default(),
+        }
+    }
+}
+
+/// Connection limits for every TCP listener the receiver owns an accept loop
+/// for: the HTTP listeners (ingest, webhook, Splunk HEC, remote write, OTLP
+/// HTTP), and syslog TCP and TLS, Lumberjack, Fluent Forward and GELF. The two
+/// gRPC listeners (gRPC, OTLP gRPC) take the cap and the HTTP/2 settings.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(default)]
+pub struct ConnectionsConfig {
+    /// Most connections one listener holds open at once. A connection past
+    /// it is closed as it is accepted. 0 holds no limit.
+    pub max_per_listener: usize,
+
+    /// How long a new connection may wait before its first byte arrives, in
+    /// milliseconds. A connection that has sent nothing by then is closed.
+    pub first_byte_timeout_ms: u64,
+
+    /// How long an HTTP connection may stay open with no request in flight,
+    /// in milliseconds, HTTP/1 keep-alive and HTTP/2 alike.
+    pub idle_timeout_ms: u64,
+
+    /// How long a TLS client has to finish its handshake, in milliseconds.
+    pub tls_handshake_timeout_ms: u64,
+
+    /// How often an HTTP/2 connection is pinged to find a peer that has gone,
+    /// in milliseconds.
+    pub http2_keep_alive_interval_ms: u64,
+}
+
+impl Default for ConnectionsConfig {
+    fn default() -> Self {
+        Self {
+            max_per_listener: 10_000,
+            first_byte_timeout_ms: 30_000,
+            idle_timeout_ms: 300_000,
+            tls_handshake_timeout_ms: 10_000,
+            http2_keep_alive_interval_ms: 60_000,
         }
     }
 }
@@ -3501,6 +3602,61 @@ mod tests {
             err.contains("none, header, bearer, mtls, both"),
             "the error must name the valid set, got: {err}"
         );
+    }
+
+    /// A client certificate mode the TLS builders do not know starts a
+    /// listener that asks for no certificate, so it is refused on every
+    /// listener's TLS block, and each spelling they do know starts.
+    #[test]
+    fn a_client_auth_the_tls_builders_do_not_know_is_refused() {
+        for value in ["requried", "mtls", "true", ""] {
+            for scope in ["server", "gelf", "webhook"] {
+                let mut config = auth_base();
+                let tls = match scope {
+                    "server" => &mut config.server.tls,
+                    "gelf" => &mut config.gelf.tls,
+                    _ => &mut config.webhook.tls,
+                };
+                tls.client_auth = value.to_string();
+                let err = config.validate().expect_err(value).to_string();
+                assert!(
+                    err.contains(&format!("{scope}.tls.client_auth is '{value}'")),
+                    "{err}"
+                );
+            }
+        }
+        for value in ["none", "optional", "required", "Require", "REQUEST"] {
+            let mut config = auth_base();
+            config.server.tls.client_auth = value.to_string();
+            config.validate().unwrap_or_else(|e| panic!("{value}: {e}"));
+        }
+    }
+
+    /// A zero connection timeout would close every connection, so it refuses
+    /// startup, and the defaults start.
+    #[test]
+    fn a_zero_connection_timeout_is_refused() {
+        auth_base().validate().unwrap();
+        type Field = fn(&mut ConnectionsConfig) -> &mut u64;
+        let fields: [(&str, Field); 4] = [
+            ("first_byte_timeout_ms", |c| &mut c.first_byte_timeout_ms),
+            ("idle_timeout_ms", |c| &mut c.idle_timeout_ms),
+            ("tls_handshake_timeout_ms", |c| {
+                &mut c.tls_handshake_timeout_ms
+            }),
+            ("http2_keep_alive_interval_ms", |c| {
+                &mut c.http2_keep_alive_interval_ms
+            }),
+        ];
+        for (key, field) in fields {
+            let mut config = auth_base();
+            *field(&mut config.server.connections) = 0;
+            let err = config.validate().expect_err(key).to_string();
+            assert!(
+                err.contains(&format!("server.connections.{key} is 0")),
+                "{err}"
+            );
+        }
     }
 
     #[test]

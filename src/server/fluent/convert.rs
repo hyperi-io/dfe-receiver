@@ -15,6 +15,8 @@ use bytes::Bytes;
 use rmpv::Value;
 
 use crate::error::{Error, Result};
+use crate::server::budget::{MAX_COPIED_BYTES, MAX_RECORDS};
+use crate::server::fluent::scan::Scanner;
 
 /// The `_source` this listener stamps on every record it builds.
 pub const SOURCE: &str = "fluent";
@@ -156,6 +158,7 @@ pub fn fluent_to_json(msg: &Value) -> Result<Vec<Bytes>> {
     match &arr[1] {
         // Forward mode: second element is an array of [time, record] entries
         Value::Array(entries) if !entries.is_empty() && entries[0].is_array() => {
+            within_budget(tag, entries.len())?;
             let mut payloads = Vec::with_capacity(entries.len());
             for entry in entries {
                 let entry_arr = entry.as_array().ok_or_else(|| {
@@ -172,6 +175,7 @@ pub fn fluent_to_json(msg: &Value) -> Result<Vec<Bytes>> {
 
         // PackedForward mode: second element is binary (packed msgpack entries)
         Value::Binary(packed) => {
+            within_budget(tag, packed_entries(packed)?)?;
             let mut payloads = Vec::new();
             let mut cursor = &packed[..];
             while !cursor.is_empty() {
@@ -200,6 +204,31 @@ pub fn fluent_to_json(msg: &Value) -> Result<Vec<Bytes>> {
             Ok(vec![payload])
         }
     }
+}
+
+/// Refuse a message of `entries` entries past the decode budget: too many
+/// records, or a tag copied into each that adds up past the shared-byte cap.
+fn within_budget(tag: &str, entries: usize) -> Result<()> {
+    if entries > MAX_RECORDS {
+        return Err(Error::Validation(format!(
+            "Fluent Forward message carries {entries} entries, past {MAX_RECORDS}"
+        )));
+    }
+    if tag.len().saturating_mul(entries) > MAX_COPIED_BYTES {
+        return Err(Error::Validation(format!(
+            "Fluent Forward tag of {} bytes copied into {entries} entries is past {MAX_COPIED_BYTES} bytes",
+            tag.len()
+        )));
+    }
+    Ok(())
+}
+
+/// The entries a PackedForward blob holds, counted by the scanner so a blob
+/// past the value budget is refused before it decodes.
+fn packed_entries(packed: &[u8]) -> Result<usize> {
+    Scanner::count(packed).map_err(|stopped| {
+        Error::Validation(format!("Fluent PackedForward entries refused: {stopped:?}"))
+    })
 }
 
 /// Extract the chunk ID from the options map (for ACK response).

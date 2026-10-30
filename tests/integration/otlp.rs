@@ -807,3 +807,63 @@ async fn otlp_counts_open_connections_on_both_endpoints() {
     );
     otlp.shutdown.cancel();
 }
+
+/// The protobuf field `tag` holding `payload`.
+fn length_delimited(tag: u32, payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(payload.len() + 10);
+    prost::encoding::encode_key(tag, prost::encoding::WireType::LengthDelimited, &mut out);
+    prost::encoding::encode_varint(payload.len() as u64, &mut out);
+    out.extend_from_slice(payload);
+    out
+}
+
+/// Five million empty log records are about 10 KB gzipped and 10 MB on the
+/// wire, and decoded they took the binary past 2 GB. The export is refused
+/// before it decodes, the process stays small, and SIGTERM still ends it.
+#[tokio::test]
+async fn an_export_past_the_record_budget_is_refused_before_it_decodes() {
+    use std::io::Write as _;
+
+    use crate::common::peers::{Receiver, Sink, free_addr};
+
+    let sink = Sink::start().await;
+    let (mut receiver, http) = Receiver::start(&sink, || {
+        let http = free_addr();
+        let mut config = test_config();
+        config.server.bind_address = free_addr().to_string();
+        config.otlp.grpc_bind_address = free_addr().to_string();
+        config.otlp.http_bind_address = http.to_string();
+        (config, vec![http], http)
+    })
+    .await
+    .unwrap();
+
+    let records = [0x12_u8, 0x00].repeat(5_000_000);
+    let export = length_delimited(1, &length_delimited(2, &records));
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+    encoder.write_all(&export).unwrap();
+    let body = encoder.finish().unwrap();
+    assert!(body.len() < 20_000, "{} bytes gzipped", body.len());
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{http}/v1/logs"))
+        .header("content-type", "application/x-protobuf")
+        .header("content-encoding", "gzip")
+        .body(body)
+        .timeout(Duration::from_secs(30))
+        .send()
+        .await
+        .expect("the export was answered");
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "{text}");
+    assert!(text.contains("records"), "{text}");
+
+    let peak = receiver.peak_rss_kib().unwrap();
+    assert!(peak < 256 * 1024, "the receiver peaked at {peak} KiB");
+    assert!(
+        receiver.terminate(Duration::from_secs(15)).await,
+        "SIGTERM did not end the receiver. Log:\n{}",
+        receiver.log_text()
+    );
+}

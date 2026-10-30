@@ -15,10 +15,10 @@
 //! Standard port: 24224
 
 pub mod convert;
+pub mod scan;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -31,14 +31,12 @@ use crate::error::{Error, Result};
 use crate::metrics::{DropReason, Metrics};
 use crate::pipeline::{Acks, PipelineState};
 use crate::server::hold::hold_until_settled;
-use crate::server::http::Accept;
+use crate::server::http::{Accept, ConnectionLimits};
 use crate::server::ip_filter::IpFilter;
 use crate::server::traits::{BoundAddr, ProtocolHandler};
 use crate::tenancy::{Ingest, Principal};
 use convert::{extract_chunk_id, fluent_to_json};
-
-/// TLS handshake timeout.
-const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+use scan::{Scan, Scanner};
 
 /// The transport label the Fluent Forward listener counts under.
 const TRANSPORT: &str = "fluent";
@@ -89,6 +87,7 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
     let ingest = Ingest::built(Principal::Listener(TRANSPORT), convert::SOURCE);
     let mut buf = vec![0u8; 64 * 1024];
     let mut pending = Vec::new();
+    let mut scanner = Scanner::default();
 
     loop {
         tokio::select! {
@@ -123,17 +122,30 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
                     break;
                 }
 
-                // Try to decode complete msgpack values from the buffer
+                // Decode each value once the scan finds its end, so a value is
+                // decoded once rather than on every read until it completes.
                 loop {
-                    let mut cursor = &pending[..];
-                    let start_len = cursor.len();
-
-                    let msg = match rmpv::decode::read_value(&mut cursor) {
-                        Ok(val) => val,
-                        Err(_) => break, // incomplete data, wait for more
+                    let consumed = match scanner.scan(&pending) {
+                        Scan::Complete(len) => len,
+                        Scan::Incomplete => break,
+                        refused @ (Scan::OverBudget | Scan::Malformed) => {
+                            debug!(peer = %peer_addr, scan = ?refused, "Fluent Forward message refused, closing the connection");
+                            metrics.inc_requests_total("fluent");
+                            metrics.inc_parse_failure("fluent");
+                            metrics.inc_requests_error("fluent");
+                            return;
+                        }
                     };
-
-                    let consumed = start_len - cursor.len();
+                    let msg = match rmpv::decode::read_value(&mut &pending[..consumed]) {
+                        Ok(val) => val,
+                        Err(e) => {
+                            debug!(peer = %peer_addr, error = %e, "Fluent Forward message does not decode, closing the connection");
+                            metrics.inc_requests_total("fluent");
+                            metrics.inc_parse_failure("fluent");
+                            metrics.inc_requests_error("fluent");
+                            return;
+                        }
+                    };
                     metrics.inc_requests_total("fluent");
 
                     // Check for chunk ACK before processing
@@ -179,6 +191,7 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
 
                     // Remove consumed bytes
                     pending.drain(..consumed);
+                    scanner = Scanner::default();
                 }
             }
         }
@@ -213,6 +226,7 @@ async fn run_tcp(
         ip_filter,
         metrics: metrics.clone(),
         transport: TRANSPORT,
+        limits: ConnectionLimits::new(&pipeline.config().server.connections),
     };
 
     loop {
@@ -240,12 +254,16 @@ async fn run_tcp(
                 let metrics = metrics.clone();
                 let acks = acks.clone();
                 let conn_shutdown = shutdown.clone();
+                let accept = accept.clone();
 
                 if let Some(ref acceptor) = tls_acceptor {
                     let acceptor = acceptor.clone();
                     tokio::spawn(async move {
                         let _open = open;
-                        let tls_result = timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await;
+                        if !accept.first_byte(&stream).await {
+                            return;
+                        }
+                        let tls_result = timeout(accept.limits.tls_handshake, acceptor.accept(stream)).await;
                         let tls_stream = match tls_result {
                             Ok(Ok(s)) => s,
                             Ok(Err(e)) => {
@@ -268,6 +286,9 @@ async fn run_tcp(
                 } else {
                     tokio::spawn(async move {
                         let _open = open;
+                        if !accept.first_byte(&stream).await {
+                            return;
+                        }
                         handle_tcp_connection(
                             stream, pipeline, metrics, acks, conn_shutdown, peer_addr,
                             max_buffer_size,

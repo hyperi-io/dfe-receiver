@@ -135,13 +135,21 @@ pub enum ClientAuth {
 }
 
 impl ClientAuth {
-    /// Parse from string.
-    pub fn from_str(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "required" | "require" => Self::Required,
-            "optional" | "request" => Self::Optional,
-            _ => Self::None,
+    /// The mode `s` names, `None` for a value that names none.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "none" => Some(Self::None),
+            "required" | "require" => Some(Self::Required),
+            "optional" | "request" => Some(Self::Optional),
+            _ => None,
         }
+    }
+
+    /// Parse from string. Startup refuses a value [`parse`](Self::parse) does
+    /// not know, so the fallback to no client certificate is never reached
+    /// from a validated config.
+    pub fn from_str(s: &str) -> Self {
+        Self::parse(s).unwrap_or(Self::None)
     }
 }
 
@@ -513,6 +521,9 @@ mod tests {
         assert_eq!(ClientAuth::from_str("required"), ClientAuth::Required);
         assert_eq!(ClientAuth::from_str("REQUIRED"), ClientAuth::Required);
         assert_eq!(ClientAuth::from_str("unknown"), ClientAuth::None);
+        assert_eq!(ClientAuth::parse("Require"), Some(ClientAuth::Required));
+        assert_eq!(ClientAuth::parse("requried"), None);
+        assert_eq!(ClientAuth::parse(""), None);
     }
 
     #[test]
