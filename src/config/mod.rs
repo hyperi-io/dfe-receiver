@@ -694,6 +694,7 @@ impl Config {
 fn connection_timeouts_are_set(connections: &ConnectionsConfig) -> Result<()> {
     for (key, ms) in [
         ("first_byte_timeout_ms", connections.first_byte_timeout_ms),
+        ("frame_timeout_ms", connections.frame_timeout_ms),
         ("idle_timeout_ms", connections.idle_timeout_ms),
         (
             "tls_handshake_timeout_ms",
@@ -1191,6 +1192,12 @@ pub struct ConnectionsConfig {
     /// milliseconds. A connection that has sent nothing by then is closed.
     pub first_byte_timeout_ms: u64,
 
+    /// How long the rest of a frame may take to arrive once its first byte
+    /// has, in milliseconds, on syslog TCP and TLS, Lumberjack, Fluent Forward
+    /// and GELF. A connection whose frame is still not whole by then is
+    /// closed. Time between whole frames is not counted.
+    pub frame_timeout_ms: u64,
+
     /// How long an HTTP connection may stay open with no request in flight,
     /// in milliseconds, HTTP/1 keep-alive and HTTP/2 alike.
     pub idle_timeout_ms: u64,
@@ -1208,6 +1215,7 @@ impl Default for ConnectionsConfig {
         Self {
             max_per_listener: 10_000,
             first_byte_timeout_ms: 30_000,
+            frame_timeout_ms: 30_000,
             idle_timeout_ms: 300_000,
             tls_handshake_timeout_ms: 10_000,
             http2_keep_alive_interval_ms: 60_000,
@@ -3638,8 +3646,9 @@ mod tests {
     fn a_zero_connection_timeout_is_refused() {
         auth_base().validate().unwrap();
         type Field = fn(&mut ConnectionsConfig) -> &mut u64;
-        let fields: [(&str, Field); 4] = [
+        let fields: [(&str, Field); 5] = [
             ("first_byte_timeout_ms", |c| &mut c.first_byte_timeout_ms),
+            ("frame_timeout_ms", |c| &mut c.frame_timeout_ms),
             ("idle_timeout_ms", |c| &mut c.idle_timeout_ms),
             ("tls_handshake_timeout_ms", |c| {
                 &mut c.tls_handshake_timeout_ms

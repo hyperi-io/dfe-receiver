@@ -34,6 +34,7 @@ use crate::config::{RawCapture, SyslogConfig};
 use crate::error::{Error, Result};
 use crate::metrics::{DropReason, Metrics};
 use crate::pipeline::{Acks, PipelineState};
+use crate::server::frame_clock::Clocked;
 use crate::server::hold::hold_until_settled;
 use crate::server::http::{Accept, ConnectionLimits};
 use crate::server::ip_filter::IpFilter;
@@ -150,7 +151,7 @@ async fn run_udp(
 /// A frame the pipeline cannot take is held, and the socket is not read,
 /// until it can: RFC 6587 has no acknowledgement to ask the sender to retry.
 async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
-    stream: S,
+    stream: Clocked<S>,
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
     shutdown: CancellationToken,
@@ -160,7 +161,8 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
 ) {
     use tokio_stream::StreamExt;
 
-    let mut framed = FramedRead::new(stream, SyslogFrameDecoder::new(max_message_size));
+    let decoder = stream.decoder(SyslogFrameDecoder::new(max_message_size));
+    let mut framed = FramedRead::new(stream, decoder);
 
     loop {
         tokio::select! {
@@ -292,7 +294,7 @@ async fn run_tcp(
 
                         debug!(peer = %peer_addr, "Syslog TLS connection established");
                         handle_tcp_connection(
-                            tls_stream, pipeline, metrics, conn_shutdown, peer_addr,
+                            accept.clock(tls_stream), pipeline, metrics, conn_shutdown, peer_addr,
                             max_message_size, raw_capture,
                         ).await;
                     });
@@ -303,7 +305,7 @@ async fn run_tcp(
                             return;
                         }
                         handle_tcp_connection(
-                            stream, pipeline, metrics, conn_shutdown, peer_addr,
+                            accept.clock(stream), pipeline, metrics, conn_shutdown, peer_addr,
                             max_message_size, raw_capture,
                         ).await;
                     });

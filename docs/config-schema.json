@@ -30,6 +30,7 @@
         "connections": {
           "max_per_listener": 10000,
           "first_byte_timeout_ms": 30000,
+          "frame_timeout_ms": 30000,
           "idle_timeout_ms": 300000,
           "tls_handshake_timeout_ms": 10000,
           "http2_keep_alive_interval_ms": 60000
@@ -605,6 +606,7 @@
           "default": {
             "max_per_listener": 10000,
             "first_byte_timeout_ms": 30000,
+            "frame_timeout_ms": 30000,
             "idle_timeout_ms": 300000,
             "tls_handshake_timeout_ms": 10000,
             "http2_keep_alive_interval_ms": 60000
@@ -706,6 +708,13 @@
         },
         "first_byte_timeout_ms": {
           "description": "How long a new connection may wait before its first byte arrives, in\nmilliseconds. A connection that has sent nothing by then is closed.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 30000
+        },
+        "frame_timeout_ms": {
+          "description": "How long the rest of a frame may take to arrive once its first byte\nhas, in milliseconds, on syslog TCP and TLS, Lumberjack, Fluent Forward\nand GELF. A connection whose frame is still not whole by then is\nclosed. Time between whole frames is not counted.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0,

@@ -91,6 +91,7 @@ server:
   connections:
     max_per_listener: 10000             # open connections per listener; 0 = no cap
     first_byte_timeout_ms: 30000        # a connection that has sent nothing by then is closed
+    frame_timeout_ms: 30000             # syslog, Lumberjack, Fluent, GELF: a frame begun must be whole by then
     idle_timeout_ms: 300000             # an HTTP connection with no request in flight
     tls_handshake_timeout_ms: 10000
     http2_keep_alive_interval_ms: 60000 # ping, closed after 20s unanswered

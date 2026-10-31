@@ -733,7 +733,7 @@ impl Metrics {
     }
 
     /// Record a connection `transport` closed for a connection limit:
-    /// `over_limit`, `no_first_byte` or `idle`.
+    /// `over_limit`, `no_first_byte`, `frame_timeout` or `idle`.
     #[inline]
     pub fn inc_connection_closed(&self, transport: &str, reason: &'static str) {
         metrics::counter!(
@@ -1075,7 +1075,7 @@ const RECEIVER_SERIES: &[SeriesSpec] = &[
         "receiver_connections_closed_total",
         MetricType::Counter,
         &["transport", "reason"],
-        "Connections closed for a connection limit (server.connections), by transport and reason: over_limit, no_first_byte, idle",
+        "Connections closed for a connection limit (server.connections), by transport and reason: over_limit, no_first_byte, frame_timeout, idle",
     ),
     (
         "receiver_rate_limited_total",

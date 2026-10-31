@@ -15,8 +15,9 @@ This document covers application-level hardening (80/20 effort) and cost-effecti
 | Request body size limit (413) | 10 MiB (HTTP, OTLP HTTP, HEC, RW), 1 MiB (webhook); the body extractors read to the same limit | `server.max_body_size` (HTTP, OTLP HTTP), `splunk_hec.max_body_size`, `prometheus_rw.max_body_size`, `webhook.max_body_size` |
 | Request timeout (408) | 30s, every HTTP listener | `server.request_timeout_ms` (HTTP, OTLP HTTP), `splunk_hec.request_timeout_ms`, `prometheus_rw.request_timeout_ms`, `webhook.request_timeout_ms` |
 | Slowloris protection | 5s header_read_timeout, every HTTP listener (hyper) | `HEADER_READ_TIMEOUT` |
-| Connections closed for a limit | Counted by transport and reason (`over_limit`, `no_first_byte`, `idle`) | `receiver_connections_closed_total` |
+| Connections closed for a limit | Counted by transport and reason (`over_limit`, `no_first_byte`, `frame_timeout`, `idle`) | `receiver_connections_closed_total` |
 | First byte timeout | 30s, every TCP listener the receiver accepts on: a connection that sends nothing by then is closed | `server.connections.first_byte_timeout_ms` |
+| Frame timeout | 30s, every raw TCP listener (syslog TCP and TLS, Lumberjack, Fluent Forward, GELF): once a frame's first byte arrives, a frame not whole by then closes its connection and frees its place under the cap. Time between whole frames and time a frame waits on the pipeline are not counted. A 32 MiB Lumberjack or Fluent frame needs about 1 MiB/s to arrive in time | `server.connections.frame_timeout_ms` |
 | Connection idle timeout | 300s with no request in flight, every HTTP listener, HTTP/1 keep-alive and HTTP/2 alike (an idle HTTP/1 connection can close sooner, on the header read timeout). A peer that does not finish the graceful close is dropped. Raw TCP listeners (syslog, Lumberjack, Fluent Forward, GELF) keep an idle connection, under the cap, since closing one under a sender loses its next line | `server.connections.idle_timeout_ms` |
 | HTTP/2 keep-alive | Ping every 60s, close after 20s unanswered, every HTTP listener and both gRPC listeners | `server.connections.http2_keep_alive_interval_ms` |
 | Connection cap | 10,000 open connections per listener, every TCP listener and both gRPC listeners; one past it is closed as it is accepted | `server.connections.max_per_listener` (0 = no cap) |
@@ -85,6 +86,12 @@ An IP allowlist is network admission, not authentication: it says where a client
 may connect from, not who the client is, which is why it is not in the last
 column. The opt-out says in the config that anyone who can reach the port is
 accepted, so pair it with an allowlist.
+
+### Known limits
+
+The decoded-size budget does not count values inside packed scalar repeated fields. Those are the packed arrays in Vector distributions, aggregated histograms and summaries, DDSketch `k` and `n`, OTLP histogram buckets, and remote-write native histogram deltas and counts. Each decodes to at most about 8x its wire bytes, and the wire limit (`*.max_body_size` on HTTP, `grpc.max_message_size` and `otlp.max_message_size` on gRPC) already bounds those bytes.
+
+The frame timeout runs above TLS, so a client that finishes the handshake and then sends part of a TLS record is not timed. Requiring client certificates (`*.tls.client_auth: required`) closes that path.
 
 ### Upgrade note: one IP filter, every listener
 

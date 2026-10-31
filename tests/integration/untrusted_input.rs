@@ -14,6 +14,7 @@
 #![allow(clippy::expect_used)]
 #![allow(clippy::large_futures)]
 
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use bytes::{Buf, BufMut, Bytes};
@@ -21,7 +22,7 @@ use dfe_receiver::config::Config;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use crate::common::peers::{Receiver, Sink, free_addr};
+use crate::common::peers::{Cases, Receiver, Sink, free_addr};
 
 /// The most a receiver may hold resident across one of these tests.
 const PEAK_RSS_KIB: u64 = 256 * 1024;
@@ -240,4 +241,191 @@ async fn silent_idle_and_surplus_connections_are_closed() {
     );
     drop(held);
     drop(receiver);
+}
+
+/// A raw TCP listener, how it frames one record, and the first byte of a frame.
+struct RawListener {
+    name: &'static str,
+    addr: SocketAddr,
+    /// A whole frame carrying `marker`, with `sequence` where the protocol numbers events.
+    frame: fn(marker: &str, sequence: u32) -> Vec<u8>,
+    start: &'static [u8],
+}
+
+fn syslog_frame(marker: &str, _: u32) -> Vec<u8> {
+    format!("<14>Oct 31 10:00:00 host app: {marker}\n").into_bytes()
+}
+
+fn gelf_frame(marker: &str, _: u32) -> Vec<u8> {
+    format!("{{\"version\":\"1.1\",\"host\":\"h\",\"short_message\":\"{marker}\"}}\0").into_bytes()
+}
+
+fn fluent_frame(marker: &str, _: u32) -> Vec<u8> {
+    let message = rmpv::Value::Array(vec![
+        rmpv::Value::from("t"),
+        rmpv::Value::Integer(1_700_000_000.into()),
+        rmpv::Value::Map(vec![(
+            rmpv::Value::from("message"),
+            rmpv::Value::from(marker),
+        )]),
+    ]);
+    let mut frame = Vec::new();
+    rmpv::encode::write_value(&mut frame, &message).unwrap();
+    frame
+}
+
+/// A Lumberjack window of one event.
+fn lumberjack_frame(marker: &str, sequence: u32) -> Vec<u8> {
+    let payload = format!("{{\"message\":\"{marker}\"}}");
+    let mut frame = b"2W".to_vec();
+    frame.extend_from_slice(&1_u32.to_be_bytes());
+    frame.extend_from_slice(b"2J");
+    frame.extend_from_slice(&sequence.to_be_bytes());
+    frame.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_be_bytes());
+    frame.extend_from_slice(payload.as_bytes());
+    frame
+}
+
+/// A connection `addr` admitted. A listener at its cap closes a new one at
+/// once, and one under it waits for the client to speak.
+async fn admitted(addr: SocketAddr, within: Duration) -> Option<TcpStream> {
+    let deadline = Instant::now() + within;
+    while Instant::now() < deadline {
+        let mut stream = TcpStream::connect(addr).await.ok()?;
+        let mut byte = [0_u8; 1];
+        let read = tokio::time::timeout(Duration::from_millis(200), stream.read(&mut byte)).await;
+        if read.is_err() {
+            return Some(stream);
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    None
+}
+
+/// The stalled and the idle client on one listener, each case named with its verdict.
+async fn stalled_and_idle(sink: &Sink, listener: &RawListener) -> Vec<(String, bool, String)> {
+    let name = listener.name;
+    let mut cases = Vec::new();
+
+    let Some(mut stalled) = admitted(listener.addr, Duration::from_secs(5)).await else {
+        cases.push((
+            format!("{name}: first client"),
+            false,
+            "never admitted".into(),
+        ));
+        return cases;
+    };
+    let stalled_marker = format!("stalled-{name}");
+    let mut sent = (listener.frame)(&stalled_marker, 1);
+    sent.extend_from_slice(listener.start);
+    stalled.write_all(&sent).await.unwrap();
+    let landed = sink
+        .wait_for(&stalled_marker, Duration::from_secs(10))
+        .await;
+    cases.push((
+        format!("{name}: the frame before the stall lands"),
+        landed,
+        sink.dump(),
+    ));
+    let closed = closed_within(&mut stalled, Duration::from_secs(5)).await;
+    cases.push((
+        format!("{name}: a stalled frame closes its connection"),
+        closed,
+        "still open 5s after the stall".into(),
+    ));
+
+    let Some(mut idle) = admitted(listener.addr, Duration::from_secs(5)).await else {
+        cases.push((
+            format!("{name}: the cap recovers"),
+            false,
+            "a new client was not admitted".into(),
+        ));
+        return cases;
+    };
+    let before = format!("before-idle-{name}");
+    let after = format!("after-idle-{name}");
+    idle.write_all(&(listener.frame)(&before, 1)).await.unwrap();
+    let first = sink.wait_for(&before, Duration::from_secs(10)).await;
+    cases.push((format!("{name}: the cap recovers"), first, sink.dump()));
+    // Three frame timeouts with no frame in progress.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let wrote = idle.write_all(&(listener.frame)(&after, 2)).await.is_ok();
+    let next = wrote && sink.wait_for(&after, Duration::from_secs(10)).await;
+    cases.push((
+        format!("{name}: an idle connection keeps its next frame"),
+        next,
+        sink.dump(),
+    ));
+    cases
+}
+
+/// A client that sends a whole frame and the first byte of the next, then
+/// stops, is closed once the frame timeout passes, which frees the only place
+/// under the cap. A client idle between whole frames for longer than that
+/// keeps its connection, and its next frame lands.
+#[tokio::test]
+async fn a_stalled_frame_is_closed_and_an_idle_connection_is_kept() {
+    let sink = Sink::start().await;
+    let (receiver, addrs) = Receiver::start(&sink, || {
+        let addrs = [free_addr(), free_addr(), free_addr(), free_addr()];
+        let [syslog, gelf, fluent, lumberjack] = addrs;
+        let mut config = base_config();
+        config.server.connections.max_per_listener = 1;
+        config.server.connections.frame_timeout_ms = 1_000;
+        config.syslog.enabled = true;
+        config.syslog.udp_bind_address = free_addr().to_string();
+        config.syslog.tcp_bind_address = syslog.to_string();
+        config.syslog.accept_unauthenticated = true;
+        config.gelf.enabled = true;
+        config.gelf.bind_address = gelf.to_string();
+        config.gelf.accept_unauthenticated = true;
+        config.fluent.enabled = true;
+        config.fluent.bind_address = fluent.to_string();
+        config.fluent.accept_unauthenticated = true;
+        config.lumberjack.enabled = true;
+        config.lumberjack.bind_address = lumberjack.to_string();
+        config.lumberjack.accept_unauthenticated = true;
+        (config, addrs.to_vec(), addrs)
+    })
+    .await
+    .unwrap();
+
+    let [syslog, gelf, fluent, lumberjack] = addrs;
+    let listeners = [
+        RawListener {
+            name: "syslog",
+            addr: syslog,
+            frame: syslog_frame,
+            start: b"<",
+        },
+        RawListener {
+            name: "gelf",
+            addr: gelf,
+            frame: gelf_frame,
+            start: b"{",
+        },
+        RawListener {
+            name: "fluent",
+            addr: fluent,
+            frame: fluent_frame,
+            start: b"\x93",
+        },
+        RawListener {
+            name: "lumberjack",
+            addr: lumberjack,
+            frame: lumberjack_frame,
+            start: b"2",
+        },
+    ];
+    let (a, b, c, d) = tokio::join!(
+        stalled_and_idle(&sink, &listeners[0]),
+        stalled_and_idle(&sink, &listeners[1]),
+        stalled_and_idle(&sink, &listeners[2]),
+        stalled_and_idle(&sink, &listeners[3]),
+    );
+    let mut cases = Cases::default();
+    for (name, ok, detail) in [a, b, c, d].into_iter().flatten() {
+        cases.check(&name, ok, || detail);
+    }
+    cases.finish(|| receiver.log_text());
 }

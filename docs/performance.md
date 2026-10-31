@@ -175,7 +175,7 @@ cargo bench --bench throughput --features mimalloc -- --save-baseline mimalloc
 cargo bench --bench throughput -- --baseline system-allocator
 ```
 
-### Applicability audit (vs dfe-loader's PERFORMANCE.md)
+### Applicability audit (vs dfe-loader's performance.md)
 
 | Optimisation | dfe-loader | dfe-receiver |
 |---|---|---|
@@ -227,7 +227,7 @@ to the Kafka sink can't keep up (OOM risk otherwise).
 
 `server.rate_limit` — GCRA-based per-IP limit. Opt-in; disabled by default.
 Not a performance tuning dial — it's a hardening dial for internet-facing
-deployments. See `docs/HARDENING.md`.
+deployments. See `docs/hardening.md`.
 
 ### Kafka producer batching
 
@@ -303,4 +303,4 @@ cargo pgo bolt optimize --with-pgo -- --features jemalloc
 - [LLVM BOLT](https://github.com/llvm/llvm-project/tree/main/bolt)
 - [tikv-jemallocator](https://crates.io/crates/tikv-jemallocator)
 - [mimalloc](https://crates.io/crates/mimalloc)
-- dfe-loader's `docs/PERFORMANCE.md` — template this doc is modelled on
+- dfe-loader's `docs/performance.md` — template this doc is modelled on
