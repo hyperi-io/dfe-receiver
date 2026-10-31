@@ -462,7 +462,7 @@ and the same rate limit and concurrency cap, under `webhook.tls`.
 Configuring a caller end to end -- the authentication choice, the secret
 reference, the replay window, the body shape and the filter, with worked
 examples and the statuses a sender sees -- is in
-[WEBHOOK-SETUP.md](WEBHOOK-SETUP.md).
+[webhook-setup.md](webhook-setup.md).
 
 ## Deployment
 
@@ -914,7 +914,7 @@ See `config.example.yaml` for the full `flow:` block.
 ## Completed Milestones
 
 - [x] gRPC Vector sink protocol
-- [x] Sidecar transport pattern (see `docs/SIDECAR-TRANSPORTS.md`)
+- [x] Sidecar transport pattern (see `docs/sidecar-transports.md`)
 - [x] Config hot-reload via SIGHUP (routing, validation, enrichment)
 - [x] Rule-set routing with credential-bound tenancy (`rules`, `ingest_bindings`)
 - [x] `_timestamp_received` enrichment

@@ -3,7 +3,7 @@
 `POST /webhook/{caller}` accepts events pushed by a product -- an alert rule, a
 SaaS notification hook -- rather than streamed by an agent. This page is how to
 configure one end to end without reading the Rust. The design rationale and the
-request flow are in [DESIGN.md](DESIGN.md); the field-by-field grammar is in
+request flow are in [internals.md](internals.md); the field-by-field grammar is in
 `config.example.yaml` and the generated `docs/config-schema.yaml`.
 
 Every caller is declared separately and carries its own secret, topic and body

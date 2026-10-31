@@ -2,7 +2,7 @@
 
 Why the service is shaped the way it is, and the rules you cannot read off the
 code. The configuration reference is [config.example.yaml](../config.example.yaml);
-the component-by-component detail is in [DESIGN.md](DESIGN.md).
+the component-by-component detail is in [internals.md](internals.md).
 
 ## The problem
 
@@ -26,8 +26,8 @@ the stack that read untrusted input -- the loader, archiver and transforms have
 no listener an outsider reaches, and dfe-fetcher dials out rather than being
 dialled. So a dependency advisory here is not the same finding as the identical
 advisory in dfe-loader. Grade reachability first, severity second, per
-`dfe-infra/docs/THREAT-MODEL.md`. The ingest edge is
-`dfe-infra/docs/INGEST-EDGE.md`, which calls the receiver a
+`dfe-infra/docs/threat-model.md`. The ingest edge is
+`dfe-infra/docs/ingest-edge.md`, which calls the receiver a
 single-homed airlock: traffic from outside, produce to local Kafka, and Kafka
 never faces the network.
 
@@ -115,7 +115,7 @@ precedence -- profile defaults, then `librdkafka_overrides`, then the sizing
 surface, which wins. It goes wrong quietly if scalo reorders or adds a key.
 scalo-rs#26 is the long-term fix.
 
-No listener answers success for a record the pipeline did not take: a sender that reads a false success discards the record, and nothing downstream can recover it. A failure is final only when the record itself is at fault -- malformed, over a destination's size ceiling, or sent without valid credentials. Anything else tells the sender to retry, in its own protocol's terms, and a batch stops at the first record not taken. The sender resends the whole request, so the records taken before it arrive twice: duplicates, never loss. Each listener's answer, and the protocol rule behind it, is in [DESIGN.md](DESIGN.md#what-a-sender-is-told).
+No listener answers success for a record the pipeline did not take: a sender that reads a false success discards the record, and nothing downstream can recover it. A failure is final only when the record itself is at fault -- malformed, over a destination's size ceiling, or sent without valid credentials. Anything else tells the sender to retry, in its own protocol's terms, and a batch stops at the first record not taken. The sender resends the whole request, so the records taken before it arrive twice: duplicates, never loss. Each listener's answer, and the protocol rule behind it, is in [internals.md](internals.md#what-a-sender-is-told).
 
 ## Buffering: only for answers given at enqueue
 

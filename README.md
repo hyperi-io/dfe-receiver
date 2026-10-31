@@ -193,7 +193,7 @@ curl -X POST http://localhost:8080/ingest \
 
 Every listener follows the same rule in its own protocol: a record the
 receiver could not take is never answered as accepted. The per-listener
-answers are in [docs/DESIGN.md](docs/DESIGN.md#what-a-sender-is-told).
+answers are in [docs/internals.md](docs/internals.md#what-a-sender-is-told).
 
 ### POST /webhook/{caller}
 
@@ -433,7 +433,7 @@ The suite's one external door: eleven wire protocols terminated, every payload
 normalised to JSON, stamped, routed to Kafka or straight to dfe-loader over
 gRPC. It and dfe-ui are the only components reading untrusted input, so an
 advisory here outranks the same one in dfe-loader -- reachability first, per
-`dfe-infra/docs/THREAT-MODEL.md`. It is NOT a transform stage (that is
+`dfe-infra/docs/threat-model.md`. It is NOT a transform stage (that is
 dfe-loader).
 
 ### Where things live
