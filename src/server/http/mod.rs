@@ -52,6 +52,7 @@ use crate::server::auth::{
     AuthState, BearerTokenProvider, TokenAuth, principal_or_listener, token_auth_middleware,
 };
 use crate::server::client_ip::{ClientIpKey, TrustedProxies, attribute_client};
+use crate::server::frame_clock::Clocked;
 use crate::server::ip_filter::IpFilter;
 use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
 use crate::server::traits::{BoundAddr, ProtocolHandler};
@@ -521,6 +522,17 @@ impl Accept {
             }
         }
     }
+
+    /// `stream` on a raw TCP listener, closed once a frame that has begun
+    /// takes longer than the frame timeout.
+    pub(crate) fn clock<S>(&self, stream: S) -> Clocked<S> {
+        Clocked::new(
+            stream,
+            self.limits.frame,
+            Arc::clone(&self.metrics),
+            self.transport,
+        )
+    }
 }
 
 /// The connection limits of one listener, from `server.connections`.
@@ -529,6 +541,7 @@ pub(crate) struct ConnectionLimits {
     open: Arc<AtomicUsize>,
     max: usize,
     pub(crate) first_byte: Duration,
+    pub(crate) frame: Duration,
     pub(crate) idle: Duration,
     pub(crate) tls_handshake: Duration,
     pub(crate) http2_keep_alive: Duration,
@@ -540,6 +553,7 @@ impl ConnectionLimits {
             open: Arc::default(),
             max: config.max_per_listener,
             first_byte: Duration::from_millis(config.first_byte_timeout_ms),
+            frame: Duration::from_millis(config.frame_timeout_ms),
             idle: Duration::from_millis(config.idle_timeout_ms),
             tls_handshake: Duration::from_millis(config.tls_handshake_timeout_ms),
             http2_keep_alive: Duration::from_millis(config.http2_keep_alive_interval_ms),

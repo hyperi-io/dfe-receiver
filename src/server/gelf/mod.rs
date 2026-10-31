@@ -29,6 +29,7 @@ use crate::config::GelfConfig;
 use crate::error::{Error, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::{Acks, PipelineState};
+use crate::server::frame_clock::Clocked;
 use crate::server::hold::hold_until_settled;
 use crate::server::http::{Accept, ConnectionLimits};
 use crate::server::ip_filter::IpFilter;
@@ -62,47 +63,48 @@ impl Decoder for GelfFrameDecoder {
         &mut self,
         src: &mut BytesMut,
     ) -> std::result::Result<Option<Self::Item>, Self::Error> {
-        if src.is_empty() {
-            return Ok(None);
-        }
-
-        // Find null-byte delimiter
-        let null_pos = match src.iter().position(|&b| b == b'\0') {
-            Some(pos) => pos,
-            None => {
-                if src.len() > self.max_length {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "GELF message too large: {} bytes without null delimiter (max {})",
-                            src.len(),
-                            self.max_length
-                        ),
-                    ));
-                }
+        // An empty message between two delimiters is skipped, and the next one read.
+        loop {
+            if src.is_empty() {
                 return Ok(None);
             }
-        };
 
-        if null_pos > self.max_length {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "GELF message too large: {null_pos} bytes (max {})",
-                    self.max_length
-                ),
-            ));
+            // Find null-byte delimiter
+            let null_pos = match src.iter().position(|&b| b == b'\0') {
+                Some(pos) => pos,
+                None => {
+                    if src.len() > self.max_length {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "GELF message too large: {} bytes without null delimiter (max {})",
+                                src.len(),
+                                self.max_length
+                            ),
+                        ));
+                    }
+                    return Ok(None);
+                }
+            };
+
+            if null_pos > self.max_length {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "GELF message too large: {null_pos} bytes (max {})",
+                        self.max_length
+                    ),
+                ));
+            }
+
+            // Extract message up to null byte, consume the null byte
+            let frame = src.split_to(null_pos + 1);
+            let msg_bytes = &frame[..null_pos];
+
+            if !msg_bytes.is_empty() {
+                return Ok(Some(msg_bytes.to_vec()));
+            }
         }
-
-        // Extract message up to null byte, consume the null byte
-        let frame = src.split_to(null_pos + 1);
-        let msg_bytes = &frame[..null_pos];
-
-        if msg_bytes.is_empty() {
-            return Ok(None);
-        }
-
-        Ok(Some(msg_bytes.to_vec()))
     }
 }
 
@@ -115,7 +117,7 @@ impl Decoder for GelfFrameDecoder {
 /// A message the pipeline cannot take is held, and the socket is not read,
 /// until it can: null-delimited GELF has no acknowledgement to ask for a retry.
 async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
-    stream: S,
+    stream: Clocked<S>,
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
     shutdown: CancellationToken,
@@ -124,7 +126,8 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
 ) {
     use tokio_stream::StreamExt;
 
-    let mut framed = FramedRead::new(stream, GelfFrameDecoder::new(max_message_size));
+    let decoder = stream.decoder(GelfFrameDecoder::new(max_message_size));
+    let mut framed = FramedRead::new(stream, decoder);
 
     loop {
         tokio::select! {
@@ -246,7 +249,7 @@ async fn run_tcp(
                         };
 
                         handle_tcp_connection(
-                            tls_stream, pipeline, metrics, conn_shutdown, peer_addr,
+                            accept.clock(tls_stream), pipeline, metrics, conn_shutdown, peer_addr,
                             max_message_size,
                         ).await;
                     });
@@ -257,7 +260,7 @@ async fn run_tcp(
                             return;
                         }
                         handle_tcp_connection(
-                            stream, pipeline, metrics, conn_shutdown, peer_addr,
+                            accept.clock(stream), pipeline, metrics, conn_shutdown, peer_addr,
                             max_message_size,
                         ).await;
                     });
@@ -408,11 +411,17 @@ mod tests {
         assert!(decoder.decode(&mut buf).is_err());
     }
 
+    /// An empty message is skipped, and one buffered behind it is still read.
     #[test]
     fn test_frame_decoder_empty_message() {
         let mut decoder = GelfFrameDecoder::new(1024);
         let mut buf = BytesMut::from(&b"\0"[..]);
-        // Empty message between null bytes should return None
         assert!(decoder.decode(&mut buf).unwrap().is_none());
+        assert!(buf.is_empty());
+
+        let mut buf = BytesMut::from(&b"\0\0{\"short_message\":\"m\"}\0"[..]);
+        let frame = decoder.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(frame, b"{\"short_message\":\"m\"}");
+        assert!(buf.is_empty());
     }
 }

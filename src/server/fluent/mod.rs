@@ -30,6 +30,7 @@ use crate::config::FluentConfig;
 use crate::error::{Error, Result};
 use crate::metrics::{DropReason, Metrics};
 use crate::pipeline::{Acks, PipelineState};
+use crate::server::frame_clock::Clocked;
 use crate::server::hold::hold_until_settled;
 use crate::server::http::{Accept, ConnectionLimits};
 use crate::server::ip_filter::IpFilter;
@@ -73,7 +74,7 @@ async fn send_ack<S: AsyncWrite + Unpin>(stream: &mut S, chunk: &str, peer_addr:
 /// the socket not read, until the pipeline takes it.
 #[allow(clippy::too_many_arguments)]
 async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
-    mut stream: S,
+    mut stream: Clocked<S>,
     pipeline: Arc<PipelineState>,
     metrics: Arc<Metrics>,
     acks: Acks,
@@ -85,6 +86,7 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
 
     // A Forward frame carries no credential, and the converter writes `_source`.
     let ingest = Ingest::built(Principal::Listener(TRANSPORT), convert::SOURCE);
+    let clock = stream.clock();
     let mut buf = vec![0u8; 64 * 1024];
     let mut pending = Vec::new();
     let mut scanner = Scanner::default();
@@ -192,7 +194,9 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
                     // Remove consumed bytes
                     pending.drain(..consumed);
                     scanner = Scanner::default();
+                    clock.frame_ended();
                 }
+                clock.holding(!pending.is_empty());
             }
         }
     }
@@ -279,7 +283,7 @@ async fn run_tcp(
                         };
 
                         handle_tcp_connection(
-                            tls_stream, pipeline, metrics, acks, conn_shutdown, peer_addr,
+                            accept.clock(tls_stream), pipeline, metrics, acks, conn_shutdown, peer_addr,
                             max_buffer_size,
                         ).await;
                     });
@@ -290,7 +294,7 @@ async fn run_tcp(
                             return;
                         }
                         handle_tcp_connection(
-                            stream, pipeline, metrics, acks, conn_shutdown, peer_addr,
+                            accept.clock(stream), pipeline, metrics, acks, conn_shutdown, peer_addr,
                             max_buffer_size,
                         ).await;
                     });

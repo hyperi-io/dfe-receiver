@@ -32,6 +32,7 @@ use crate::config::LumberjackConfig;
 use crate::error::{Error, Result};
 use crate::metrics::{DropReason, Metrics};
 use crate::pipeline::{Acks, PipelineState};
+use crate::server::frame_clock::Clocked;
 use crate::server::http::Accept;
 use crate::server::traits::{BoundAddr, ProtocolHandler};
 use crate::tenancy::{Ingest, Principal};
@@ -204,12 +205,12 @@ async fn ack_and_close<W: AsyncWrite + Unpin>(
 /// after a partial ACK for the events before the first it could not take, so
 /// the client resends the rest and nothing behind it is acknowledged.
 async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin>(
-    stream: S,
+    mut reader: Clocked<BufReader<S>>,
     intake: Intake<'_>,
     shutdown: CancellationToken,
 ) {
     let peer_addr = intake.peer_addr;
-    let mut reader = BufReader::new(stream);
+    let clock = reader.clock();
     let mut window = Window::default();
 
     loop {
@@ -220,7 +221,10 @@ async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin>(
             }
             result = read_frame(&mut reader) => {
                 match result {
-                    Ok(Some(frame)) => frame,
+                    Ok(Some(frame)) => {
+                        clock.frame_ended();
+                        frame
+                    }
                     Ok(None) => {
                         debug!(peer = %peer_addr, "Lumberjack client disconnected");
                         break;
@@ -423,7 +427,7 @@ impl ProtocolHandler for LumberjackHandler {
 
                             debug!(peer = %peer_addr, "Lumberjack TLS connection established");
                             let intake = Intake { pipeline: &pipeline, metrics: &metrics, acks: &acks, peer_addr };
-                            handle_connection(tls_stream, intake, conn_shutdown).await;
+                            handle_connection(accept.clock(BufReader::new(tls_stream)), intake, conn_shutdown).await;
                         });
                     } else {
                         tokio::spawn(async move {
@@ -432,7 +436,7 @@ impl ProtocolHandler for LumberjackHandler {
                                 return;
                             }
                             let intake = Intake { pipeline: &pipeline, metrics: &metrics, acks: &acks, peer_addr };
-                            handle_connection(stream, intake, conn_shutdown).await;
+                            handle_connection(accept.clock(BufReader::new(stream)), intake, conn_shutdown).await;
                         });
                     }
                 }
@@ -535,9 +539,15 @@ mod tests {
                 shutdown.cancel();
                 acked
             };
+            let reader = Clocked::new(
+                BufReader::new(server),
+                Duration::from_secs(30),
+                Arc::new(Metrics::default()),
+                TRANSPORT,
+            );
             let (acked, ()) = tokio::join!(
                 client_side,
-                handle_connection(server, intake, shutdown.clone())
+                handle_connection(reader, intake, shutdown.clone())
             );
             assert_eq!(acked, [3, 4], "compressed: {compressed}");
         }
