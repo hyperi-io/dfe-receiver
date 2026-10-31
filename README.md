@@ -3,24 +3,18 @@
 [![Build Status](https://github.com/hyperi-io/dfe-receiver/actions/workflows/ci.yml/badge.svg)](https://github.com/hyperi-io/dfe-receiver/actions)
 [![License](https://img.shields.io/badge/license-BUSL--1.1-blue)](https://github.com/hyperi-io/dfe-receiver/blob/main/LICENSE)
 
-> Agents speak ten different protocols and none of them speak yours. dfe-receiver
-> terminates all of them at one door, normalises to JSON, and hands the result to
-> Kafka or straight to the loader.
+The front door of a DFE deployment. It takes events from agents in the protocols they already speak, normalises them to JSON, and hands them to Kafka or straight to dfe-loader over gRPC.
 
-High-performance HTTP/gRPC receiver for PB/s scale data ingestion.
+## What it gives you
 
-## Overview
+- One service for HTTP(S) JSON, Vector's gRPC sink, OTLP, Beats, Splunk HEC, syslog, Fluent Forward, GELF, Prometheus Remote Write and webhooks, so an agent keeps the protocol it already speaks and needs only the receiver's address and any credentials.
+- Ordered routing rules that set each record's source and org from fields it already carries, such as `data_stream.dataset`, and pick its Kafka topic from the source.
+- A sender answered only once every destination has confirmed its records, on by default for each listener that can hold its answer.
+- Each record's org held to what its sender may use. A credential or listener bound in `ingest_bindings` lands only in its own orgs, and an unbound sender only in the deployment's default org.
+- Header, bearer token and mTLS authentication.
+- Built on [scalo](https://github.com/hyperi-io/scalo-rs), so config, logs, metrics, health probes and memory backpressure work the way they do in every DFE Rust service.
 
-dfe-receiver is a native Rust data ingestion service that accepts data from multiple
-agent protocols, normalises it to JSON, and routes it to Kafka topics or dfe-loader.
-It is built on the [scalo](https://github.com/hyperi-io/scalo-rs) data-plane runtime
-(config cascade, logging, metrics, transport, TieredSink, health probes).
-
-**11 protocol handlers** (HTTP, gRPC, OTLP, Lumberjack/Beats, Splunk HEC,
-Syslog, Fluent Forward, GELF, Prometheus Remote Write, Webhook, Flow [NetFlow +
-sFlow -- **EXPERIMENTAL**]).
-
-**Supported protocols:**
+## Protocols
 
 | Protocol | Port | Source |
 |---|---|---|
@@ -37,14 +31,7 @@ sFlow -- **EXPERIMENTAL**]).
 | Prometheus Remote Write | 9091 | Prometheus, VictoriaMetrics |
 | Flow (NetFlow + sFlow) -- **EXPERIMENTAL** | 2055 / 4739 / 6343 UDP | NetFlow v5/v9, IPFIX, sFlow v5 exporters (v7 not supported) |
 
-**Core behaviour:**
-
-- Normalises all protocol data to JSON
-- Validates JSON format and optional required fields
-- Routes to Kafka topics based on configurable field extraction rules
-- Answers a sender only once every destination confirmed its records (`acknowledgements.enabled`, default on per listener)
-- A listener that answers at enqueue (acknowledgements off, or syslog, GELF and flow) buffers in memory behind a CircuitBreaker; disk spillover is opt-in (`buffer.spillover.enabled`)
-- Supports header auth, bearer tokens, and mTLS authentication
+Flow (NetFlow and sFlow) is experimental. A listener that answers at enqueue (acknowledgements off, or syslog, GELF and flow) buffers in memory behind a circuit breaker, and disk spillover is opt-in (`buffer.spillover.enabled`).
 
 ## Quick Start
 
