@@ -87,6 +87,12 @@ may connect from, not who the client is, which is why it is not in the last
 column. The opt-out says in the config that anyone who can reach the port is
 accepted, so pair it with an allowlist.
 
+### Known limits
+
+The decoded-size budget does not count values inside packed scalar repeated fields. Those are the packed arrays in Vector distributions, aggregated histograms and summaries, DDSketch `k` and `n`, OTLP histogram buckets, and remote-write native histogram deltas and counts. Each decodes to at most about 8x its wire bytes, and the wire limit (`*.max_body_size` on HTTP, `grpc.max_message_size` and `otlp.max_message_size` on gRPC) already bounds those bytes.
+
+The frame timeout runs above TLS, so a client that finishes the handshake and then sends part of a TLS record is not timed. Requiring client certificates (`*.tls.client_auth: required`) closes that path.
+
 ### Upgrade note: one IP filter, every listener
 
 `server.ip_filter` used to reach `/ingest` and the webhook intake and nothing
