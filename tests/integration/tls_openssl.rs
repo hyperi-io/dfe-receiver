@@ -61,11 +61,14 @@ fn all_tls_config(pki: &Pki, client_auth: &str, secret: &str) -> (Config, Vec<Li
     config.grpc.bind_address = add("grpc");
     config.grpc.tls = tls();
 
-    config.otlp.enabled = true;
-    config.otlp.grpc_bind_address = add("otlp-grpc");
-    config.otlp.http_bind_address = add("otlp-http");
-    config.otlp.auth.mode = "none".to_string();
-    config.otlp.tls = tls();
+    #[cfg(feature = "otlp")]
+    {
+        config.otlp.enabled = true;
+        config.otlp.grpc_bind_address = add("otlp-grpc");
+        config.otlp.http_bind_address = add("otlp-http");
+        config.otlp.auth.mode = "none".to_string();
+        config.otlp.tls = tls();
+    }
 
     config.lumberjack.enabled = true;
     config.lumberjack.bind_address = add("lumberjack");

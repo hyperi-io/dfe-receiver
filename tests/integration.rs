@@ -30,6 +30,8 @@ mod flow_netflow_e2e;
 mod flow_sflow_e2e;
 #[path = "integration/fluent.rs"]
 mod fluent;
+// Its OpenTelemetry output case ships to the OTLP listener.
+#[cfg(feature = "otlp")]
 #[path = "integration/fluent_bit.rs"]
 mod fluent_bit;
 #[path = "integration/grpc_outage.rs"]
@@ -56,6 +58,7 @@ mod logstash;
 mod lumberjack;
 #[path = "integration/named_destinations.rs"]
 mod named_destinations;
+#[cfg(feature = "otlp")]
 #[path = "integration/otel_collector.rs"]
 mod otel_collector;
 #[path = "integration/otlp.rs"]
