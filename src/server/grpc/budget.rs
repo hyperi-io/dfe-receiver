@@ -34,6 +34,7 @@ static METRIC: Shape = Shape::of(&[
     (14, &ITEMS),
     (16, &ITEMS),
     (17, &ITEMS),
+    (19, &VALUE),
     (20, &TAGS_V2_ENTRY),
     (21, &METADATA),
 ]);
@@ -99,6 +100,13 @@ mod tests {
                 items: vec![Value::default(); MAX_MESSAGES],
             })),
         };
+        // The schema deprecates field 19 and prost still decodes it, so it is written on the wire.
+        let mut metric = Vec::new();
+        prost::encoding::message::encode(19, &array, &mut metric);
+        let mut event = Vec::new();
+        prost::encoding::bytes::encode(2, &metric, &mut event);
+        let mut metadata_push = Vec::new();
+        prost::encoding::bytes::encode(1, &event, &mut metadata_push);
         for (name, body, refused) in [
             ("a real push", push(vec![log(None); 100]), None),
             (
@@ -109,6 +117,11 @@ mod tests {
             (
                 "one event, values past the cap",
                 push(vec![log(Some(array))]),
+                Some("messages"),
+            ),
+            (
+                "one metric, deprecated metadata past the cap",
+                metadata_push,
                 Some("messages"),
             ),
         ] {
