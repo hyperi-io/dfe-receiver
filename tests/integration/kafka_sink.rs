@@ -445,10 +445,27 @@ async fn a_spooled_record_the_broker_refuses_for_good_leaves_the_spool() {
     let topic = test_topic("spool-refused");
     let missing = test_topic("missing");
     create_topic(&kf, &topic, &[]).await;
+    // The producer below takes a topic missing from its metadata for 1s as
+    // gone for good, so the topic must be served before it starts.
+    wait_for_leader(&kf, &topic).await;
     let consumer = kafka_consumer(&kf, &topic).expect("consumer setup");
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     let dir = tempfile::tempdir().expect("spool dir");
+    let dlq_dir = dir.path().join("dlq");
+    let dlq = scalo::dlq::Dlq::spawn(
+        &dfe_receiver::config::DlqConfig {
+            mode: "file_only".to_string(),
+            kafka_enabled: false,
+            file_path: dlq_dir.display().to_string(),
+            ..dfe_receiver::config::DlqConfig::default()
+        }
+        .to_scalo_config(),
+        "receiver",
+        None,
+        CancellationToken::new(),
+    )
+    .expect("file DLQ");
     spool_records(
         dir.path(),
         &[
@@ -465,7 +482,7 @@ async fn a_spooled_record_the_broker_refuses_for_good_leaves_the_spool() {
     }
     let sink = KafkaSink::new(&cfg, None).expect("KafkaSink creation failed");
     let spool = TieredSink::new(
-        ScaloSinkAdapter::new(Arc::new(sink), Rejects::default()),
+        ScaloSinkAdapter::new(Arc::new(sink), Rejects::new(Some(Arc::new(dlq)), None)),
         kafka_spool(dir.path()),
     )
     .await
@@ -478,10 +495,12 @@ async fn a_spooled_record_the_broker_refuses_for_good_leaves_the_spool() {
     let left = spool.spool_len().await;
     spool.shutdown().await;
     assert_eq!(left, 0, "the refused record holds up the spool");
+    let letters = dead_letter_text(&dlq_dir);
+    assert_eq!(letters.lines().count(), 1, "dead letters: {letters}");
 
     let landed = kafka_consume_next(&consumer, Duration::from_secs(30))
         .await
-        .expect("the record behind the refused one never landed");
+        .unwrap_or_else(|| panic!("the record behind the refused one never landed: {letters}"));
     let record: serde_json::Value = serde_json::from_slice(&landed).expect("JSON record");
     assert_eq!(record["seq"], 1, "{record}");
 }
@@ -573,6 +592,57 @@ async fn held_answer(
 }
 
 /// The dead letters written under `dir`, one per line of every file in it.
+/// Every dead letter under `dir`, one per line.
+fn dead_letter_text(dir: &std::path::Path) -> String {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return String::new();
+    };
+    entries
+        .flatten()
+        .map(|entry| {
+            let path = entry.path();
+            if path.is_dir() {
+                dead_letter_text(&path)
+            } else {
+                std::fs::read_to_string(&path).unwrap_or_default()
+            }
+        })
+        .collect()
+}
+
+/// Wait until `topic`'s partition has a leader in the cluster's metadata.
+async fn wait_for_leader(kf: &crate::common::KafkaTestConfig, topic: &str) {
+    use rdkafka::consumer::{BaseConsumer, Consumer};
+
+    let mut client = rdkafka::ClientConfig::new();
+    client.set("bootstrap.servers", &kf.brokers);
+    kf.apply_sasl(&mut client);
+    let probe: BaseConsumer = client.create().expect("metadata client");
+    let topic = topic.to_string();
+    let served = tokio::task::spawn_blocking(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            let led = probe
+                .fetch_metadata(Some(&topic), Duration::from_secs(5))
+                .is_ok_and(|metadata| {
+                    metadata.topics().iter().any(|t| {
+                        t.error().is_none()
+                            && !t.partitions().is_empty()
+                            && t.partitions().iter().all(|p| p.leader() >= 0)
+                    })
+                });
+            if led {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        false
+    })
+    .await
+    .expect("metadata probe");
+    assert!(served, "the created topic never got a leader");
+}
+
 fn dead_letters(dir: &std::path::Path) -> usize {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;
