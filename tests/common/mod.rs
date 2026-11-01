@@ -8,20 +8,20 @@
 
 //! Test infrastructure helpers for dual-mode integration tests.
 //!
-//! Supports two backends controlled by `TEST_MODE` in `.env`:
-//! - `remote` (default) — remote cluster via env vars (KAFKA_BROKERS, etc.)
-//! - `docker` — dfe-docker infra profile (localhost:19092, no auth)
+//! Backends controlled by `TEST_MODE` in `.env`:
+//! - `live` (default) -- the cluster `KAFKA_BROKERS` names, else a container
+//! - `docker` -- dfe-docker infra profile (localhost:19092, no auth)
+//! - `testcontainers` -- a container per test
 
 use std::env;
 
 pub mod peers;
 
-/// Test backend mode — live services preferred, testcontainers fallback.
+/// Test backend mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TestMode {
-    /// Use live endpoints from env vars / `.env` (preferred — more realistic
-    /// and faster than spinning up containers). Falls back to `Testcontainers`
-    /// if the live endpoint is unreachable or auth fails.
+    /// Use the live endpoints env vars or `.env` name, which must work. With
+    /// none named, a container as for `Testcontainers`.
     Live,
     /// Use a local docker-compose stack from `docker-compose.test.yaml`.
     Docker,
@@ -345,6 +345,13 @@ pub fn test_topic(suffix: &str) -> String {
         suffix,
         uuid::Uuid::new_v4()
     )
+}
+
+/// A `routing.topic_suffix` no other test or earlier run shares, so a test
+/// reading a topic its source names reads only its own records on a shared
+/// broker.
+pub fn test_topic_suffix() -> String {
+    format!("_land_{}", uuid::Uuid::new_v4().simple())
 }
 
 impl KafkaTestConfig {
@@ -922,62 +929,52 @@ pub enum KafkaHandle {
     External,
 }
 
-/// Obtain a Kafka backend for tests, preferring live/docker over testcontainers.
+/// Obtain a Kafka backend for tests.
 ///
-/// Resolution order (fastest, most realistic first):
+/// 1. `TEST_MODE=docker`, or `TEST_MODE=live` with `KAFKA_BROKERS` set: that
+///    cluster, which must be reachable with the configured credentials.
+/// 2. Otherwise a fresh Kafka container. Caller drops the handle to stop it.
 ///
-/// 1. `TEST_MODE=live` (default) and `KAFKA_BROKERS` is reachable AND auth
-///    works: use the live cluster. Returns (`KafkaHandle::External`, config).
-/// 2. `TEST_MODE=docker`: use `docker-compose.test.yaml` on localhost:19092.
-/// 3. `TEST_MODE=testcontainers` OR fallback on live unreachable: spin up a
-///    fresh Kafka container. Caller drops the handle to stop it.
-///
-/// Tests that *require* a specific mode can use [`start_kafka_container`]
-/// or [`kafka_test_config`] directly.
+/// `None` only where Docker is down outside CI, by the rule of
+/// `skip_if_no_docker!`. A configured cluster that refuses, or a container
+/// that will not start, panics: a test that swapped a SASL cluster for a
+/// plaintext container, or skipped, would pass without testing what it names.
 ///
 /// `test` names any container this starts, so concurrent tests do not collide on
 /// it. Pass `test_name!()`.
 pub async fn kafka_backend(test: &str) -> Option<(KafkaHandle, KafkaTestConfig)> {
     let mode = TestMode::detect();
-
-    // Try live first (unless forced to testcontainers)
-    if matches!(mode, TestMode::Live | TestMode::Docker) {
+    let configured = match mode {
+        TestMode::Docker => true,
+        TestMode::Live => env::var_os("KAFKA_BROKERS").is_some(),
+        TestMode::Testcontainers => false,
+    };
+    if configured {
         let cfg = kafka_test_config();
-        if cfg.is_reachable() && kafka_auth_works(&cfg).await {
-            return Some((KafkaHandle::External, cfg));
-        }
-        if matches!(mode, TestMode::Docker) {
-            // Docker mode is explicit — don't silently fall back
-            assert!(
-                std::env::var_os("CI").is_none(),
-                "TEST_MODE=docker in CI but the compose stack at {} is not \
-                 reachable -- Kafka tests must RUN here, not skip.",
-                cfg.brokers
-            );
-            return None;
-        }
+        assert!(
+            cfg.is_reachable() && kafka_auth_works(&cfg).await,
+            "TEST_MODE={mode:?} names the Kafka cluster at {}, which is unreachable or \
+             refuses the configured credentials",
+            cfg.brokers
+        );
+        return Some((KafkaHandle::External, cfg));
     }
 
-    // Fall back to testcontainers
-    match start_kafka_container(test).await {
-        Ok((container, bootstrap)) => Some((
-            KafkaHandle::Container(Box::new(container)),
-            kafka_plain_config(&bootstrap),
-        )),
-        Err(e) => {
-            // Same rule as `skip_if_no_docker!`. Every caller reads `None` as
-            // "skip", so in CI a container that will not start reports green
-            // with none of the Kafka integration surface exercised. A gate that
-            // disappears along with its environment is not a gate.
-            assert!(
-                std::env::var_os("CI").is_none(),
-                "no Kafka backend in CI and the container would not start ({e}) -- \
-                 Kafka tests must RUN here, not skip. Skipping would report green \
-                 while testing nothing."
-            );
-            None
-        }
+    if !docker_available() {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "Docker daemon unreachable in CI -- Kafka tests must RUN here, not skip."
+        );
+        eprintln!("Skipping: Docker daemon not available for a Kafka container");
+        return None;
     }
+    let (container, bootstrap) = start_kafka_container(test)
+        .await
+        .unwrap_or_else(|e| panic!("Docker is up but the Kafka container would not start: {e}"));
+    Some((
+        KafkaHandle::Container(Box::new(container)),
+        kafka_plain_config(&bootstrap),
+    ))
 }
 
 /// Quick auth sanity check: issue a `fetch_metadata` call. Returns true if

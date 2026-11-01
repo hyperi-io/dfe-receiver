@@ -15,7 +15,7 @@
 //! Containers are stopped automatically when the test function returns (via
 //! `ContainerAsync`'s `Drop` impl).
 //!
-//! Tests skip (not fail) when Docker is unavailable.
+//! Tests skip when Docker is unavailable outside CI, and fail in it.
 
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
@@ -41,7 +41,6 @@ fn make_sink(kf: &crate::common::KafkaTestConfig) -> KafkaSink {
 #[tokio::test]
 async fn test_kafka_sink_send_and_consume() {
     let Some((_handle, kf)) = kafka_backend(test_name!()).await else {
-        eprintln!("Skipping: no Kafka backend available (live auth failed and Docker unreachable)");
         return;
     };
 
@@ -72,7 +71,6 @@ async fn test_kafka_sink_send_and_consume() {
 #[tokio::test]
 async fn test_kafka_sink_send_many() {
     let Some((_handle, kf)) = kafka_backend(test_name!()).await else {
-        eprintln!("Skipping: no Kafka backend available (live auth failed and Docker unreachable)");
         return;
     };
 
@@ -91,28 +89,21 @@ async fn test_kafka_sink_send_many() {
     }
     sink.flush().await.expect("flush failed");
 
-    // Collect messages with generous timeout — librdkafka may take a few
-    // seconds to materialise all 100 records to the consumer.
-    let mut count = 0;
+    // The flush confirmed every record, so every one is on the topic.
+    let mut seen = std::collections::BTreeSet::new();
     let deadline = tokio::time::Instant::now() + Duration::from_mins(1);
-    while tokio::time::Instant::now() < deadline && count < 100 {
-        match kafka_consume_next(&consumer, Duration::from_secs(5)).await {
-            Some(_) => count += 1,
-            None => {
-                // No message in 5s — break early if we've already collected most
-                if count >= 80 {
-                    break;
-                }
-            }
+    while tokio::time::Instant::now() < deadline && seen.len() < 100 {
+        if let Some(payload) = kafka_consume_next(&consumer, Duration::from_secs(5)).await {
+            let record: serde_json::Value = serde_json::from_slice(&payload).expect("JSON record");
+            seen.insert(record["seq"].as_u64().expect("seq"));
         }
     }
-    assert!(count >= 80, "expected ≥80 messages, got {count}/100");
+    assert_eq!(seen.len(), 100, "only {} of 100 records arrived", seen.len());
 }
 
 #[tokio::test]
 async fn test_kafka_sink_binary_payload() {
     let Some((_handle, kf)) = kafka_backend(test_name!()).await else {
-        eprintln!("Skipping: no Kafka backend available (live auth failed and Docker unreachable)");
         return;
     };
 
@@ -137,7 +128,6 @@ async fn test_kafka_sink_binary_payload() {
 #[tokio::test]
 async fn test_kafka_sink_large_payload() {
     let Some((_handle, kf)) = kafka_backend(test_name!()).await else {
-        eprintln!("Skipping: no Kafka backend available (live auth failed and Docker unreachable)");
         return;
     };
 
@@ -163,7 +153,6 @@ async fn test_kafka_sink_large_payload() {
 #[tokio::test]
 async fn test_kafka_sink_multiple_topics() {
     let Some((_handle, kf)) = kafka_backend(test_name!()).await else {
-        eprintln!("Skipping: no Kafka backend available (live auth failed and Docker unreachable)");
         return;
     };
 
@@ -203,7 +192,6 @@ async fn test_kafka_sink_multiple_topics() {
 #[tokio::test]
 async fn test_kafka_sink_invalid_topic_recoverable() {
     let Some((_handle, kf)) = kafka_backend(test_name!()).await else {
-        eprintln!("Skipping: no Kafka backend available (live auth failed and Docker unreachable)");
         return;
     };
 
