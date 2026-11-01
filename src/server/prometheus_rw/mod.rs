@@ -149,6 +149,13 @@ async fn run_prometheus_rw_server(
     bound: &BoundAddr,
 ) -> Result<()> {
     let auth_state = create_auth_state(&config.auth).await?;
+    crate::server::http::spawn_auth_reload_watcher(
+        pipeline.shared_config(),
+        auth_state.clone(),
+        |config| &config.prometheus_rw.auth,
+        TRANSPORT,
+        shutdown.clone(),
+    );
     let mode = PrometheusRwMode::from_str(&config.mode);
 
     // `server.ip_filter` and `server.rate_limit` govern the ingest surface, not

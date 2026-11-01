@@ -277,6 +277,13 @@ async fn run_hec_server(
 ) -> Result<()> {
     // Create auth state (reuse HTTP handler's bearer token loading)
     let auth_state = create_auth_state(&config.auth).await?;
+    crate::server::http::spawn_auth_reload_watcher(
+        pipeline.shared_config(),
+        auth_state.clone(),
+        |config| &config.splunk_hec.auth,
+        TRANSPORT,
+        shutdown.clone(),
+    );
 
     // `server.ip_filter` and `server.rate_limit` govern the ingest surface, not
     // one port of it.

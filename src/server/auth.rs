@@ -29,6 +29,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use aws_lc_rs::digest;
 use axum::body::Body;
 use axum::extract::{ConnectInfo, State};
@@ -94,28 +95,28 @@ impl AuthMode {
     }
 }
 
-/// Shared authentication state.
-#[derive(Clone)]
-pub struct AuthState {
-    pub config: Arc<AuthConfig>,
+/// One listener's authentication as one config version describes it.
+pub struct Auth {
+    pub config: AuthConfig,
     pub bearer_provider: Option<Arc<BearerTokenProvider>>,
 }
+
+/// A listener's authentication, replaced whole when its config reloads, so a
+/// request is checked against one version, never a mix of two.
+///
+/// Clones share the state: a replace reaches every clone.
+#[derive(Clone)]
+pub struct AuthState(Arc<ArcSwap<Auth>>);
 
 impl AuthState {
     /// Create new auth state from config.
     pub fn new(config: AuthConfig) -> Self {
-        Self {
-            config: Arc::new(config),
-            bearer_provider: None,
-        }
+        Self::of(config, None)
     }
 
     /// Create auth state with bearer token provider.
     pub fn with_bearer_provider(config: AuthConfig, provider: BearerTokenProvider) -> Self {
-        Self {
-            config: Arc::new(config),
-            bearer_provider: Some(Arc::new(provider)),
-        }
+        Self::of(config, Some(Arc::new(provider)))
     }
 
     /// Create auth state with an Arc-wrapped bearer token provider.
@@ -123,9 +124,34 @@ impl AuthState {
         config: AuthConfig,
         provider: Arc<BearerTokenProvider>,
     ) -> Self {
-        Self {
-            config: Arc::new(config),
-            bearer_provider: Some(provider),
+        Self::of(config, Some(provider))
+    }
+
+    fn of(config: AuthConfig, bearer_provider: Option<Arc<BearerTokenProvider>>) -> Self {
+        Self(Arc::new(ArcSwap::from_pointee(Auth {
+            config,
+            bearer_provider,
+        })))
+    }
+
+    /// The version a request is checked against.
+    #[must_use]
+    pub fn current(&self) -> Arc<Auth> {
+        self.0.load_full()
+    }
+
+    /// Check every later request against `fresh`, and stop the replaced
+    /// version's secret refresh, whose task otherwise keeps it alive.
+    pub fn replace(&self, fresh: &Self) {
+        let replaced = self.0.swap(fresh.current());
+        if let Some(provider) = &replaced.bearer_provider
+            && fresh
+                .current()
+                .bearer_provider
+                .as_ref()
+                .is_none_or(|kept| !Arc::ptr_eq(kept, provider))
+        {
+            provider.shutdown();
         }
     }
 }
@@ -576,7 +602,7 @@ pub fn grpc_auth_interceptor(
             headers.insert("authorization", hv);
         }
 
-        match validate_bearer_auth(&auth, &headers) {
+        match validate_bearer_auth(&auth.current(), &headers) {
             Ok(principal) => {
                 req.extensions_mut().insert(principal);
                 Ok(req)
@@ -616,7 +642,8 @@ pub async fn token_auth_middleware(
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
-    let auth = &gate.auth;
+    let auth = gate.auth.current();
+    let auth = auth.as_ref();
 
     // Kubelet does not send credentials, so an authenticated probe path fails
     // liveness and crashloops a pod whose service is perfectly healthy. The
@@ -700,7 +727,7 @@ pub async fn token_auth_middleware(
 /// `bearer_provider.is_some()`, so header auth is unaffected.
 #[inline]
 pub fn validate_bearer_auth(
-    auth: &AuthState,
+    auth: &Auth,
     headers: &axum::http::HeaderMap,
 ) -> std::result::Result<Principal, AuthError> {
     let Some(ref provider) = auth.bearer_provider else {
@@ -1192,7 +1219,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("authorization", "Bearer secret-token-1".parse().unwrap());
 
-        assert!(validate_bearer_auth(&auth, &headers).is_ok());
+        assert!(validate_bearer_auth(&auth.current(), &headers).is_ok());
     }
 
     #[test]
@@ -1204,7 +1231,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("authorization", "bearer secret-token-2".parse().unwrap());
 
-        assert!(validate_bearer_auth(&auth, &headers).is_ok());
+        assert!(validate_bearer_auth(&auth.current(), &headers).is_ok());
     }
 
     #[test]
@@ -1216,7 +1243,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("authorization", "Bearer wrong-token".parse().unwrap());
 
-        let err = validate_bearer_auth(&auth, &headers).expect_err("refused");
+        let err = validate_bearer_auth(&auth.current(), &headers).expect_err("refused");
         assert_eq!(err.status, StatusCode::UNAUTHORIZED);
     }
 
@@ -1228,7 +1255,7 @@ mod tests {
 
         let headers = HeaderMap::new();
 
-        let err = validate_bearer_auth(&auth, &headers).expect_err("refused");
+        let err = validate_bearer_auth(&auth.current(), &headers).expect_err("refused");
         assert_eq!(err.message, "missing_authorization_header");
     }
 
@@ -1241,7 +1268,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("authorization", "Basic dXNlcjpwYXNz".parse().unwrap());
 
-        let err = validate_bearer_auth(&auth, &headers).expect_err("refused");
+        let err = validate_bearer_auth(&auth.current(), &headers).expect_err("refused");
         assert_eq!(err.message, "invalid_bearer_format");
     }
 
@@ -1254,7 +1281,7 @@ mod tests {
         headers.insert("authorization", "Bearer any-token".parse().unwrap());
 
         // A missing provider under bearer mode must be reported, not skipped.
-        let err = validate_bearer_auth(&auth, &headers)
+        let err = validate_bearer_auth(&auth.current(), &headers)
             .expect_err("missing bearer provider must not be treated as a pass");
         assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(err.message, "server_misconfigured");
@@ -1268,7 +1295,7 @@ mod tests {
         let headers = HeaderMap::new();
 
         assert!(
-            validate_bearer_auth(&auth, &headers).is_err(),
+            validate_bearer_auth(&auth.current(), &headers).is_err(),
             "missing bearer provider must not be treated as a pass"
         );
     }
@@ -1619,8 +1646,11 @@ mod tests {
     /// it answers 500 and counts no client failure.
     #[test]
     fn a_misconfiguration_is_not_a_client_auth_failure() {
-        let err = validate_bearer_auth(&AuthState::new(bearer_config()), &HeaderMap::new())
-            .expect_err("a missing provider refuses");
+        let err = validate_bearer_auth(
+            &AuthState::new(bearer_config()).current(),
+            &HeaderMap::new(),
+        )
+        .expect_err("a missing provider refuses");
         assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
         assert!(err.reason.is_none());
 

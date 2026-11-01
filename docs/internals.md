@@ -252,6 +252,8 @@ Supports:
 - Background refresh with configurable interval
 - Token rotation without restart
 
+A config reload replaces a listener's whole auth section at once: mode, static tokens, accepted headers and secret source, with the replaced secret refresh stopped. It reaches every listener that authenticates -- `server`, `splunk_hec`, `prometheus_rw`, `otlp` (both ports) and `grpc` -- as soon as the reload lands, so a revoked credential is refused on the next request. A reloaded section that does not build, a secret source that will not load say, keeps the current one and logs an error. A gRPC or OTLP gRPC port started with `auth.mode: none` has no interceptor to reload, so turning its auth on or off takes a restart. A webhook caller's secret rotates on its own `refresh_interval_secs`.
+
 Secret source format: `provider:path[:key]`, resolved by
 `scalo::secrets::resolve` -- the receiver has no resolver of its own.
 

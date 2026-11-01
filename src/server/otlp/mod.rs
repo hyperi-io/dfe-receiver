@@ -345,6 +345,7 @@ async fn run_grpc_server(
 
     let mode = OtlpMode::from_str(&config.mode);
     let pipeline_server = pipeline.config().server;
+    let shared_config = pipeline.shared_config();
     let service = OtlpService::new(pipeline, metrics.clone(), mode, acks);
 
     // Build TLS config if enabled
@@ -365,6 +366,17 @@ async fn run_grpc_server(
     } else {
         None
     };
+    // A service registered with no interceptor takes no reload: turning auth
+    // on or off on this port is a restart.
+    if let Some(auth_state) = &auth_state {
+        crate::server::http::spawn_auth_reload_watcher(
+            shared_config,
+            auth_state.clone(),
+            |config| &config.otlp.auth,
+            TRANSPORT,
+            shutdown.clone(),
+        );
+    }
 
     let limits = ConnectionLimits::new(&pipeline_server.connections);
     let mut builder = crate::server::grpc::keep_alive(tonic::transport::Server::builder(), &limits);
@@ -571,6 +583,13 @@ async fn run_http_server(
     // closed 4317 -- with the config, and the startup log, reading as though
     // both were shut.
     let auth_state = create_auth_state(&config.auth).await?;
+    crate::server::http::spawn_auth_reload_watcher(
+        state.pipeline.shared_config(),
+        auth_state.clone(),
+        |config| &config.otlp.auth,
+        TRANSPORT,
+        shutdown.clone(),
+    );
 
     let app = Router::new()
         .route("/v1/logs", post(logs_handler))
