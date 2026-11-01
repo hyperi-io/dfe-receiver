@@ -152,6 +152,7 @@ async fn ingest_handler(body: Bytes) -> StatusCode {
 ### gRPC Server (tonic)
 
 - Vector sink protocol compatibility
+- A Vector metric becomes a record with `_vector_type: "metric"`, its name, namespace, kind, tags (`tags_v2` where sent, a multi-valued tag as an array) and `interval_ms`, and its value under its kind: `counter`, `gauge`, `set`, `distribution`, `aggregated_histogram`, `aggregated_summary` or `sketch`. One with no value is refused with `INVALID_ARGUMENT`
 - Shared routing/batching pipeline with HTTP
 - Same auth middleware (via Tower)
 
