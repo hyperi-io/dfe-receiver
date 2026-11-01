@@ -269,7 +269,7 @@ pub fn encode_ack(sequence: u32) -> [u8; 6] {
 /// The inner frames of a zlib-compressed frame, decompressed one at a time.
 ///
 /// Nothing beyond the frame being parsed is held, so a block that expands to
-/// [`MAX_DECOMPRESSED_SIZE`] costs one inner frame of memory, not all of it.
+/// the 64 MiB cap costs one inner frame of memory, not all of it.
 pub struct CompressedFrames<'a> {
     decoder: std::io::Take<flate2::read::ZlibDecoder<&'a [u8]>>,
     done: bool,
