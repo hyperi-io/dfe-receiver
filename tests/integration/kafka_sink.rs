@@ -26,8 +26,11 @@ use bytes::Bytes;
 use dfe_receiver::sink::Sink;
 use dfe_receiver::sink::kafka::KafkaSink;
 
-use crate::common::{kafka_backend, kafka_consume_next, kafka_consumer, test_topic};
-use crate::test_name;
+use crate::common::{
+    kafka_backend, kafka_consume_next, kafka_consumer, kafka_plain_config, start_kafka_container,
+    test_topic,
+};
+use crate::{skip_if_no_docker, test_name};
 
 /// Build a KafkaSink pointed at the given test backend config.
 fn make_sink(kf: &crate::common::KafkaTestConfig) -> KafkaSink {
@@ -215,6 +218,57 @@ async fn test_kafka_sink_invalid_topic_recoverable() {
         .await
         .expect("sink unusable after invalid topic attempt");
     sink.flush().await.expect("flush should succeed");
+}
+
+/// A record answered at enqueue outlives a broker outage longer than the
+/// producer's message timeout: librdkafka gives it up, the sink queues it
+/// again, and it lands once the broker is back.
+#[tokio::test]
+async fn an_enqueued_record_survives_an_outage_past_the_message_timeout() {
+    skip_if_no_docker!();
+    let (broker, bootstrap) = start_kafka_container(test_name!())
+        .await
+        .expect("Kafka container");
+    let kf = kafka_plain_config(&bootstrap);
+    let topic = test_topic("outage");
+    let consumer = kafka_consumer(&kf, &topic).expect("consumer setup");
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Paused before the sink first reaches it, so no produce request is ever
+    // in flight: a record the broker already holds would land whatever the
+    // sink did with its delivery report.
+    broker.pause().await.expect("pause the broker");
+    let mut cfg = kf.to_receiver_kafka_config();
+    cfg.librdkafka_overrides
+        .insert("message.timeout.ms".to_string(), "2000".to_string());
+    let sink = KafkaSink::new(&cfg, None).expect("KafkaSink creation failed");
+    const RECORDS: i64 = 20;
+    for seq in 0..RECORDS {
+        sink.send(&topic, Bytes::from(format!(r#"{{"seq":{seq}}}"#)))
+            .await
+            .expect("librdkafka queues locally while the broker is paused");
+    }
+    // Past message.timeout.ms, so librdkafka has given every record up.
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    broker.unpause().await.expect("unpause the broker");
+
+    let mut seen = std::collections::BTreeSet::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+    while seen.len() < RECORDS as usize && tokio::time::Instant::now() < deadline {
+        let Some(payload) = kafka_consume_next(&consumer, Duration::from_secs(5)).await else {
+            continue;
+        };
+        let record: serde_json::Value = serde_json::from_slice(&payload).expect("JSON record");
+        if let Some(seq) = record["seq"].as_i64() {
+            seen.insert(seq);
+        }
+    }
+    assert_eq!(
+        seen.len(),
+        RECORDS as usize,
+        "only {seen:?} of {RECORDS} records outlived the outage"
+    );
 }
 
 /// A flush that times out with messages in flight must return `Err`.

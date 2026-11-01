@@ -528,6 +528,7 @@ holds it.
 | `receiver_kafka_send_errors_total` | Counter | Messages librdkafka refused to queue |
 | `receiver_kafka_delivered_total` | Counter | Messages a broker acknowledged |
 | `receiver_kafka_delivery_failures_total` | Counter | Messages no broker confirmed, by `reason` (librdkafka error code); a timed-out message may still have been written |
+| `receiver_kafka_resends_total` | Counter | Messages answered at enqueue that librdkafka gave up on with a message timeout, queued again |
 | `records_dlq_total` | Counter | Messages sent to DLQ (scalo emits this one) |
 | `receiver_dlq_start_failures_total` | Counter | DLQ starts that failed, by `backend` (`kafka`, `file` or `other`); the receiver runs on without a DLQ and logs the reason at ERROR |
 | `receiver_source_org_id_stripped_total` | Counter | Records whose sender-supplied `_org_id` was removed because `routing.source_org_id` is `disallow` (the default) |

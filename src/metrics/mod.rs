@@ -1144,6 +1144,12 @@ const RECEIVER_SERIES: &[SeriesSpec] = &[
         "Records no broker confirmed, by librdkafka error code; a timed-out record may still have been written",
     ),
     (
+        "receiver_kafka_resends_total",
+        MetricType::Counter,
+        &[],
+        "Records answered at enqueue that librdkafka gave up on with a message timeout, queued again",
+    ),
+    (
         "receiver_dlq_start_failures_total",
         MetricType::Counter,
         &["backend"],
