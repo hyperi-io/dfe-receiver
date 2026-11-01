@@ -156,6 +156,13 @@ async fn ingest_handler(body: Bytes) -> StatusCode {
 - Shared routing/batching pipeline with HTTP
 - Same auth middleware (via Tower)
 
+### Prometheus Remote Write
+
+- `prometheus_rw.mode: native` (default) writes each sample, each exemplar (`_type: "exemplar"`) and each native histogram (`_type: "histogram"`) as its own record, with the series labels as top-level fields. A histogram record carries `count`, `sum`, `schema`, `zero_threshold`, `zero_count`, `reset_hint`, its buckets as `positive_offset` and `positive_bucket_counts` (and the `negative_` pair), the Prometheus index of the first bucket and every count from there with gaps filled, and `custom_values` for a custom-bucket histogram.
+- `otel` and `hyperdx` write the OTLP converter's metric shapes: an exponential schema as `exponential_histogram` (the OTel offset is the Prometheus index less one), a custom-bucket histogram as `histogram` with its bounds as `explicit_bounds`. A series' exemplars ride on its last record: `exemplars` in `otel`, the `Exemplars.*` arrays in `hyperdx`, with the `trace_id` and `span_id` labels lifted out.
+- What those shapes cannot hold is counted on `receiver_prometheus_rw_unrecorded_total{kind}`, never dropped silently: `exemplar` for exemplars sent with no sample of their series (Prometheus sends them in a series of their own), `float_histogram`, whose counts OTel keeps as integers, and `unknown_schema`. `mode: native` records all three.
+- A histogram whose spans name more than 4096 buckets, a negative gap, or more buckets than it has counts is refused as malformed with a 400.
+
 ### JSON Validation (sonic_rs)
 
 - SIMD-accelerated parsing

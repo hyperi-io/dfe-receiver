@@ -12,7 +12,8 @@
 //! Supports three output modes:
 //!
 //! - **`native`** (default): Flat JSON with labels as top-level fields.
-//!   Each `TimeSeries` + `Sample` pair produces one JSON event.
+//!   Each `TimeSeries` + `Sample` pair produces one JSON event, and so does
+//!   each exemplar and each native histogram.
 //!
 //! - **`otel`**: Generic OTel JSON envelope with snake_case fields,
 //!   RFC 3339 timestamps, and native JSON types.
@@ -22,8 +23,12 @@
 
 use std::collections::HashMap;
 
+use std::sync::atomic::AtomicU64;
+
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
+use scalo::logger::log_debounced;
+use tracing::warn;
 
 use crate::error::{Error, Result};
 
@@ -96,6 +101,247 @@ fn epoch_ms_to_ch_datetime(epoch_ms: i64) -> String {
     match DateTime::from_timestamp(secs, nanos) {
         Some(dt) => dt.format("%Y-%m-%d %H:%M:%S%.9f").to_string(),
         None => epoch_ms.to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Native histograms and exemplars
+// ---------------------------------------------------------------------------
+
+/// Buckets one native histogram may expand to, across both sides of zero. A
+/// histogram past it is refused as malformed: Prometheus emits at most 160 a
+/// side by default, and a span offset could otherwise ask for billions.
+const MAX_HISTOGRAM_BUCKETS: usize = 4096;
+
+/// The schema a native histogram with custom bucket bounds carries.
+const CUSTOM_BUCKETS_SCHEMA: i32 = -53;
+
+/// The exponential schemas, which OTel calls the scale.
+const EXPONENTIAL_SCHEMAS: std::ops::RangeInclusive<i32> = -4..=8;
+
+/// Shortest gap between two log lines about what an OTel record cannot hold.
+const UNRECORDED_LOG_INTERVAL_MS: u64 = 5_000;
+
+/// When the listener last logged what an OTel record cannot hold.
+static UNRECORDED_LOGGED: AtomicU64 = AtomicU64::new(0);
+
+/// One side of a native histogram: the Prometheus index of its first bucket
+/// and every bucket's count from there, gaps filled with zeros.
+struct Buckets {
+    offset: i32,
+    counts: Vec<f64>,
+}
+
+impl Buckets {
+    /// Expand `spans` over `deltas` (an integer histogram, each count the
+    /// previous plus its delta) or `counts` (a float histogram), adding to
+    /// `budget` the buckets it took.
+    fn expand(
+        spans: &[proto::BucketSpan],
+        deltas: &[i64],
+        counts: &[f64],
+        float: bool,
+        budget: &mut usize,
+    ) -> Result<Self> {
+        let mut values: Box<dyn Iterator<Item = f64> + '_> = if float {
+            Box::new(counts.iter().copied())
+        } else {
+            Box::new(deltas.iter().scan(0_i64, |count, delta| {
+                *count = count.saturating_add(*delta);
+                Some(*count as f64)
+            }))
+        };
+        let mut out = Vec::new();
+        let mut offset = 0;
+        for (index, span) in spans.iter().enumerate() {
+            let gap = if index == 0 {
+                offset = span.offset;
+                0
+            } else {
+                usize::try_from(span.offset).map_err(|_| malformed("a negative span gap"))?
+            };
+            let taken = gap.saturating_add(span.length as usize);
+            *budget = budget.saturating_add(taken);
+            if *budget > MAX_HISTOGRAM_BUCKETS {
+                return Err(malformed("more buckets than one histogram may hold"));
+            }
+            out.extend(std::iter::repeat_n(0.0, gap));
+            for _ in 0..span.length {
+                out.push(
+                    values
+                        .next()
+                        .ok_or_else(|| malformed("fewer counts than its spans"))?,
+                );
+            }
+        }
+        Ok(Self {
+            offset,
+            counts: out,
+        })
+    }
+
+    /// The counts as OTel's integers.
+    fn whole(&self) -> Vec<u64> {
+        self.counts
+            .iter()
+            .map(|count| count.max(0.0) as u64)
+            .collect()
+    }
+
+    /// The OTel offset: OTel bucket `i` is Prometheus bucket `i + 1`.
+    fn otel_offset(&self) -> i32 {
+        if self.counts.is_empty() {
+            0
+        } else {
+            self.offset - 1
+        }
+    }
+}
+
+fn malformed(why: &str) -> Error {
+    Error::Validation(format!("remote write native histogram: {why}"))
+}
+
+/// One native histogram, decoded.
+struct NativeHistogram {
+    float: bool,
+    count: f64,
+    zero_count: f64,
+    positive: Buckets,
+    negative: Buckets,
+}
+
+impl NativeHistogram {
+    fn decode(h: &proto::Histogram) -> Result<Self> {
+        use proto::histogram::{Count, ZeroCount};
+        let float = matches!(h.count, Some(Count::CountFloat(_)));
+        let count = match h.count {
+            Some(Count::CountInt(n)) => n as f64,
+            Some(Count::CountFloat(n)) => n,
+            None => 0.0,
+        };
+        let zero_count = match h.zero_count {
+            Some(ZeroCount::ZeroCountInt(n)) => n as f64,
+            Some(ZeroCount::ZeroCountFloat(n)) => n,
+            None => 0.0,
+        };
+        let mut budget = 0;
+        let positive = Buckets::expand(
+            &h.positive_spans,
+            &h.positive_deltas,
+            &h.positive_counts,
+            float,
+            &mut budget,
+        )?;
+        let negative = Buckets::expand(
+            &h.negative_spans,
+            &h.negative_deltas,
+            &h.negative_counts,
+            float,
+            &mut budget,
+        )?;
+        Ok(Self {
+            float,
+            count,
+            zero_count,
+            positive,
+            negative,
+        })
+    }
+
+    /// The explicit-bucket counts of a custom-bucket histogram, one per bound
+    /// and one past the last.
+    fn custom_counts(&self, bounds: usize) -> Result<Vec<u64>> {
+        let mut counts = vec![0_u64; bounds + 1];
+        let start = usize::try_from(self.positive.offset)
+            .map_err(|_| malformed("a custom bucket before the first bound"))?;
+        for (index, count) in self.positive.whole().into_iter().enumerate() {
+            *counts
+                .get_mut(start + index)
+                .ok_or_else(|| malformed("a custom bucket past the last bound"))? = count;
+        }
+        Ok(counts)
+    }
+}
+
+/// Count `n` of `kind` that an OTel-shaped record cannot hold.
+fn count_unrecorded(kind: &'static str, n: usize) {
+    if n == 0 {
+        return;
+    }
+    metrics::counter!("receiver_prometheus_rw_unrecorded_total", "kind" => kind)
+        .increment(n as u64);
+    if log_debounced(&UNRECORDED_LOGGED, UNRECORDED_LOG_INTERVAL_MS) {
+        warn!(
+            kind,
+            count = n,
+            "Remote write content an OTel-shaped record cannot hold was not recorded; \
+             mode: native records it"
+        );
+    }
+}
+
+/// A series' exemplars as the OTel modes carry them on a record.
+fn otel_exemplars(
+    exemplars: &[proto::Exemplar],
+    mode: PrometheusRwMode,
+) -> Vec<(String, serde_json::Value)> {
+    let split = |exemplar: &proto::Exemplar| {
+        let mut trace_id = String::new();
+        let mut span_id = String::new();
+        let mut attrs = serde_json::Map::new();
+        for label in &exemplar.labels {
+            match label.name.as_str() {
+                "trace_id" => trace_id.clone_from(&label.value),
+                "span_id" => span_id.clone_from(&label.value),
+                _ => {
+                    attrs.insert(label.name.clone(), label.value.clone().into());
+                }
+            }
+        }
+        (trace_id, span_id, attrs)
+    };
+    match mode {
+        PrometheusRwMode::HyperDx => {
+            let mut filtered = Vec::new();
+            let mut times = Vec::new();
+            let mut values = Vec::new();
+            let mut span_ids = Vec::new();
+            let mut trace_ids = Vec::new();
+            for exemplar in exemplars {
+                let (trace_id, span_id, attrs) = split(exemplar);
+                filtered.push(serde_json::Value::Object(attrs));
+                times.push(serde_json::json!(epoch_ms_to_ch_datetime(
+                    exemplar.timestamp
+                )));
+                values.push(serde_json::json!(exemplar.value));
+                span_ids.push(serde_json::json!(span_id));
+                trace_ids.push(serde_json::json!(trace_id));
+            }
+            vec![
+                ("Exemplars.FilteredAttributes".to_string(), filtered.into()),
+                ("Exemplars.TimeUnix".to_string(), times.into()),
+                ("Exemplars.Value".to_string(), values.into()),
+                ("Exemplars.SpanId".to_string(), span_ids.into()),
+                ("Exemplars.TraceId".to_string(), trace_ids.into()),
+            ]
+        }
+        PrometheusRwMode::OTel | PrometheusRwMode::Native => {
+            let list: Vec<serde_json::Value> = exemplars
+                .iter()
+                .map(|exemplar| {
+                    let (trace_id, span_id, attrs) = split(exemplar);
+                    serde_json::json!({
+                        "timestamp": epoch_ms_to_rfc3339_nanos(exemplar.timestamp),
+                        "value": exemplar.value,
+                        "trace_id": trace_id,
+                        "span_id": span_id,
+                        "attributes": attrs,
+                    })
+                })
+                .collect();
+            vec![("exemplars".to_string(), list.into())]
+        }
     }
 }
 
@@ -194,9 +440,64 @@ fn convert_native(request: proto::WriteRequest) -> Result<Vec<Bytes>> {
                 .map_err(|e| Error::Validation(format!("JSON serialisation failed: {e}")))?;
             events.push(Bytes::from(json));
         }
+
+        // Emit one event per native histogram
+        for histogram in &ts.histograms {
+            let obj = native_histogram_obj(&labels, histogram)?;
+            let json = serde_json::to_vec(&obj)
+                .map_err(|e| Error::Validation(format!("JSON serialisation failed: {e}")))?;
+            events.push(Bytes::from(json));
+        }
     }
 
     Ok(events)
+}
+
+/// One native-shape histogram event: the series labels plus every field the
+/// histogram carries, its buckets expanded to dense counts.
+fn native_histogram_obj(
+    labels: &serde_json::Map<String, serde_json::Value>,
+    histogram: &proto::Histogram,
+) -> Result<serde_json::Map<String, serde_json::Value>> {
+    let decoded = NativeHistogram::decode(histogram)?;
+    let mut obj = labels.clone();
+    obj.insert("_type".to_string(), serde_json::json!("histogram"));
+    obj.insert(
+        "timestamp".to_string(),
+        serde_json::Value::String(epoch_ms_to_rfc3339(histogram.timestamp)),
+    );
+    obj.insert("count".to_string(), serde_json::json!(decoded.count));
+    obj.insert("sum".to_string(), serde_json::json!(histogram.sum));
+    obj.insert("schema".to_string(), serde_json::json!(histogram.schema));
+    obj.insert(
+        "zero_threshold".to_string(),
+        serde_json::json!(histogram.zero_threshold),
+    );
+    obj.insert(
+        "zero_count".to_string(),
+        serde_json::json!(decoded.zero_count),
+    );
+    for (side, buckets) in [
+        ("positive", &decoded.positive),
+        ("negative", &decoded.negative),
+    ] {
+        obj.insert(format!("{side}_offset"), serde_json::json!(buckets.offset));
+        obj.insert(
+            format!("{side}_bucket_counts"),
+            serde_json::json!(buckets.counts),
+        );
+    }
+    obj.insert(
+        "reset_hint".to_string(),
+        serde_json::json!(histogram.reset_hint().as_str_name()),
+    );
+    if !histogram.custom_values.is_empty() {
+        obj.insert(
+            "custom_values".to_string(),
+            serde_json::json!(histogram.custom_values),
+        );
+    }
+    Ok(obj)
 }
 
 // ---------------------------------------------------------------------------
@@ -238,7 +539,9 @@ fn convert_otel(request: &proto::WriteRequest, mode: PrometheusRwMode) -> Result
             _ => "gauge",
         };
 
-        // Emit one event per sample
+        let mut series_records: Vec<serde_json::Value> = Vec::new();
+
+        // One record per sample
         for sample in &ts.samples {
             let json_value = match mode {
                 PrometheusRwMode::HyperDx => serde_json::json!({
@@ -259,14 +562,134 @@ fn convert_otel(request: &proto::WriteRequest, mode: PrometheusRwMode) -> Result
                     "resource": empty_resource,
                 }),
             };
+            series_records.push(json_value);
+        }
 
-            let json = serde_json::to_vec(&json_value)
+        // One record per native histogram
+        for histogram in &ts.histograms {
+            if let Some(record) =
+                otel_histogram(histogram, metric_name, &attrs, &empty_resource, mode)?
+            {
+                series_records.push(record);
+            }
+        }
+
+        // The series' exemplars ride on its last record, or on none.
+        if !ts.exemplars.is_empty() {
+            match series_records
+                .last_mut()
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                Some(record) => record.extend(otel_exemplars(&ts.exemplars, mode)),
+                None => count_unrecorded("exemplar", ts.exemplars.len()),
+            }
+        }
+
+        for record in &series_records {
+            let json = serde_json::to_vec(record)
                 .map_err(|e| Error::Validation(format!("JSON serialisation failed: {e}")))?;
             events.push(Bytes::from(json));
         }
     }
 
     Ok(events)
+}
+
+/// One native histogram as an OTel record: an exponential histogram for an
+/// exponential schema, an explicit-bucket histogram for custom buckets.
+/// `None`, counted, for what the OTel shape cannot hold.
+fn otel_histogram(
+    histogram: &proto::Histogram,
+    metric_name: &str,
+    attrs: &serde_json::Map<String, serde_json::Value>,
+    resource: &serde_json::Map<String, serde_json::Value>,
+    mode: PrometheusRwMode,
+) -> Result<Option<serde_json::Value>> {
+    let decoded = NativeHistogram::decode(histogram)?;
+    if decoded.float {
+        count_unrecorded("float_histogram", 1);
+        return Ok(None);
+    }
+    let count = decoded.count as u64;
+    let hyperdx = mode == PrometheusRwMode::HyperDx;
+    let record = if histogram.schema == CUSTOM_BUCKETS_SCHEMA {
+        let counts = decoded.custom_counts(histogram.custom_values.len())?;
+        if hyperdx {
+            serde_json::json!({
+                "TimeUnix": epoch_ms_to_ch_datetime(histogram.timestamp),
+                "MetricName": metric_name,
+                "Count": count,
+                "Sum": histogram.sum,
+                "Min": 0.0,
+                "Max": 0.0,
+                "BucketCounts": counts,
+                "ExplicitBounds": histogram.custom_values,
+                "Attributes": attrs,
+                "ResourceAttributes": resource,
+                "_otel_metric_type": "histogram",
+            })
+        } else {
+            serde_json::json!({
+                "_signal": "metric",
+                "_timestamp": epoch_ms_to_rfc3339_nanos(histogram.timestamp),
+                "metric_name": metric_name,
+                "metric_type": "histogram",
+                "count": count,
+                "sum": histogram.sum,
+                "min": null,
+                "max": null,
+                "bucket_counts": counts,
+                "explicit_bounds": histogram.custom_values,
+                "attributes": attrs,
+                "resource": resource,
+            })
+        }
+    } else if EXPONENTIAL_SCHEMAS.contains(&histogram.schema) {
+        let zero_count = decoded.zero_count as u64;
+        if hyperdx {
+            serde_json::json!({
+                "TimeUnix": epoch_ms_to_ch_datetime(histogram.timestamp),
+                "MetricName": metric_name,
+                "Count": count,
+                "Sum": histogram.sum,
+                "Min": 0.0,
+                "Max": 0.0,
+                "Scale": histogram.schema,
+                "ZeroCount": zero_count,
+                "PositiveOffset": decoded.positive.otel_offset(),
+                "PositiveBucketCounts": decoded.positive.whole(),
+                "NegativeOffset": decoded.negative.otel_offset(),
+                "NegativeBucketCounts": decoded.negative.whole(),
+                "Attributes": attrs,
+                "ResourceAttributes": resource,
+                "_otel_metric_type": "exponential_histogram",
+            })
+        } else {
+            serde_json::json!({
+                "_signal": "metric",
+                "_timestamp": epoch_ms_to_rfc3339_nanos(histogram.timestamp),
+                "metric_name": metric_name,
+                "metric_type": "exponential_histogram",
+                "count": count,
+                "sum": histogram.sum,
+                "min": null,
+                "max": null,
+                "scale": histogram.schema,
+                "zero_count": zero_count,
+                "zero_threshold": histogram.zero_threshold,
+                "positive_offset": decoded.positive.otel_offset(),
+                "positive_bucket_counts": decoded.positive.whole(),
+                "negative_offset": decoded.negative.otel_offset(),
+                "negative_bucket_counts": decoded.negative.whole(),
+                "attributes": attrs,
+                "resource": resource,
+            })
+        }
+    } else {
+        count_unrecorded("unknown_schema", 1);
+        return Ok(None);
+    };
+    Ok(Some(record))
 }
 
 // ---------------------------------------------------------------------------

@@ -14,6 +14,9 @@
 //! Wire format: HTTP POST -> Snappy block decompress -> protobuf decode -> JSON -> pipeline.
 
 pub mod convert;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod convert_histogram_tests;
 
 /// Generated protobuf types for Prometheus Remote Write v1.
 pub mod proto {
