@@ -401,22 +401,6 @@ impl KafkaTestConfig {
     }
 }
 
-/// Skip test if Kafka is not available in the current test mode.
-#[macro_export]
-macro_rules! skip_if_no_kafka {
-    () => {
-        let kf = $crate::common::kafka_test_config();
-        if !kf.is_reachable() {
-            eprintln!(
-                "Skipping: Kafka not reachable at {} (TEST_MODE={:?})",
-                kf.brokers,
-                $crate::common::TestMode::detect()
-            );
-            return;
-        }
-    };
-}
-
 // ---------------------------------------------------------------------------
 // Kafka consumer helper
 // ---------------------------------------------------------------------------
