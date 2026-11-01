@@ -71,17 +71,6 @@ pub(crate) fn exemplar_fields(
     ]
 }
 
-/// Add `exemplars` to `record`, a JSON object, as [`exemplar_fields`] shapes them.
-pub(crate) fn attach_exemplars(
-    record: &mut serde_json::Value,
-    exemplars: Vec<Exemplar>,
-    hyperdx: bool,
-) {
-    if let Some(object) = record.as_object_mut() {
-        object.extend(exemplar_fields(exemplars, hyperdx));
-    }
-}
-
 /// Nanoseconds since the epoch as RFC 3339 with nanosecond precision, empty
 /// for zero, which OTLP uses for "not set".
 pub(crate) fn nanos_to_rfc3339(nanos: u64) -> String {

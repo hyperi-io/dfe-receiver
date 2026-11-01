@@ -22,7 +22,7 @@ use bytes::Bytes;
 use super::pb;
 use crate::error::{Error, Result};
 use crate::server::metric_record::{
-    Exemplar, attach_exemplars, nanos_to_ch_datetime, nanos_to_rfc3339,
+    Exemplar, exemplar_fields, nanos_to_ch_datetime, nanos_to_rfc3339,
 };
 
 /// OTLP conversion output mode.
@@ -855,11 +855,12 @@ fn with_exemplars(
     dp_exemplars: &[pb::metrics::v1::Exemplar],
     mode: OtlpMode,
 ) -> serde_json::Value {
-    attach_exemplars(
-        &mut record,
-        exemplars(dp_exemplars),
-        mode == OtlpMode::HyperDx,
-    );
+    if let Some(object) = record.as_object_mut() {
+        object.extend(exemplar_fields(
+            exemplars(dp_exemplars),
+            mode == OtlpMode::HyperDx,
+        ));
+    }
     record
 }
 
