@@ -21,8 +21,9 @@
 //! returns once the record is QUEUED; whether a broker ever took it arrives
 //! later on the delivery report, which is where
 //! `receiver_kafka_delivery_failures_total` and the sink's health flag come
-//! from. [`KafkaSink::send_held`] carries a piece of a held request or a
-//! spooled record with the record, and the report settles it. A record answered at enqueue that
+//! from. [`KafkaSink::send_held`] carries a piece of a held request with the
+//! record, and the report settles it. A spooled record's confirmation is
+//! answered from the report the same way. A record answered at enqueue that
 //! librdkafka gives up on is queued again, since its sender holds no copy.
 //! Enqueue counters and the per-send duration histogram stay on the enqueue.
 
@@ -43,17 +44,26 @@ use rdkafka::util::Timeout;
 use rustc_hash::FxHashSet;
 use scalo::transport::kafka::{PRODUCER_HIGH_THROUGHPUT, producer_client_config};
 use scalo::transport::{DeliveryStatus, PieceFinalizer};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, oneshot};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, error, info, trace, warn};
 
 use crate::config::KafkaConfig;
 use crate::error::{Error, Result};
-use crate::sink::{FailureLatch, SINK_RETRY_AFTER, Sink};
+use crate::sink::{Confirmation, FailureLatch, SINK_RETRY_AFTER, Sink};
 
-/// librdkafka's delivery opaque: the piece the report settles, of a held
-/// request or a spooled record, or none for a record answered at enqueue.
-type Settlement = Box<Option<PieceFinalizer>>;
+/// What a record's delivery report settles: librdkafka's delivery opaque.
+enum Settling {
+    /// Nothing: the sender was answered at enqueue.
+    Answered,
+    /// The piece of a held request.
+    Held(PieceFinalizer),
+    /// The confirmation a caller keeping its copy waits on.
+    Confirmed(oneshot::Sender<Result<()>>),
+}
+
+/// The opaque as librdkafka carries it.
+type Settlement = Box<Settling>;
 
 /// How long the shutdown flush gives librdkafka to drain.
 const FLUSH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -172,14 +182,20 @@ impl ProducerContext for DeliveryObserver {
             }
             Err((err, msg)) => {
                 self.failed(msg.topic(), err);
-                if settlement.is_none() {
+                if matches!(*settlement, Settling::Answered) {
                     self.give_up(msg, err);
                 }
                 DeliveryStatus::Errored
             }
         };
-        if let Some(piece) = *settlement {
-            piece.report(status);
+        match *settlement {
+            Settling::Answered => {}
+            Settling::Held(piece) => piece.report(status),
+            Settling::Confirmed(answer) => {
+                let confirmed = result.as_ref().map(|_| ()).map_err(|(err, _)| refusal(err));
+                // The receiver is gone once its sender gave up waiting.
+                let _ = answer.send(confirmed);
+            }
         }
         self.state.awaiting_report.fetch_sub(1, Ordering::Relaxed);
     }
@@ -205,6 +221,37 @@ impl DeliveryObserver {
             .push_back((Box::from(msg.topic()), payload));
         metrics::counter!("receiver_kafka_resends_total").increment(1);
         self.state.resend_wake.notify_one();
+    }
+}
+
+/// Whether a delivery report's failure is the broker refusing THIS record for
+/// good, so sending it again cannot succeed.
+///
+/// Anything librdkafka can retry, or a code not listed, is not: the record is
+/// offered again rather than dead-lettered.
+fn refused_for_good(err: &KafkaError) -> bool {
+    matches!(
+        err.rdkafka_error_code(),
+        Some(
+            RDKafkaErrorCode::MessageSizeTooLarge
+                | RDKafkaErrorCode::InvalidMessageSize
+                | RDKafkaErrorCode::InvalidRecord
+                | RDKafkaErrorCode::InvalidTimestamp
+                | RDKafkaErrorCode::TopicAuthorizationFailed
+                | RDKafkaErrorCode::ClusterAuthorizationFailed
+                | RDKafkaErrorCode::InvalidTopic
+                | RDKafkaErrorCode::UnknownTopic
+                | RDKafkaErrorCode::UnknownPartition
+        )
+    )
+}
+
+/// A failed delivery report as the error a confirmation answers with.
+fn refusal(err: &KafkaError) -> Error {
+    if refused_for_good(err) {
+        Error::Rejected(format!("kafka refused the record: {err}"))
+    } else {
+        Error::Transport(format!("kafka did not deliver the record: {err}"))
     }
 }
 
@@ -331,7 +378,13 @@ async fn resend_given_up(
             let Some((topic, payload)) = delivery.given_up.lock().pop_front() else {
                 break;
             };
-            match enqueue(&producer, &delivery, &topic, &payload, Box::new(None)) {
+            match enqueue(
+                &producer,
+                &delivery,
+                &topic,
+                &payload,
+                Box::new(Settling::Answered),
+            ) {
                 Ok(()) => {}
                 // Bytes the queue took once cannot be over its ceiling, so this is unreachable in practice.
                 Err((Error::Rejected(reason), _)) => {
@@ -452,9 +505,12 @@ impl KafkaSink {
             &self.delivery,
             topic,
             payload,
-            Box::new(Some(piece)),
+            Box::new(Settling::Held(piece)),
         )
-        .map_err(|(e, settlement)| (e, *settlement))
+        .map_err(|(e, settlement)| match *settlement {
+            Settling::Held(piece) => (e, Some(piece)),
+            Settling::Answered | Settling::Confirmed(_) => (e, None),
+        })
     }
 
     /// [`Sink::flush`] with the timeout as a parameter.
@@ -515,27 +571,32 @@ impl Sink for KafkaSink {
             &self.delivery,
             topic,
             &payload,
-            Box::new(None),
+            Box::new(Settling::Answered),
         )
         .map_err(|(e, _)| e)
     }
 
-    /// Queue a record whose delivery report settles `piece`, as
-    /// [`send_held`](KafkaSink::send_held) does.
+    /// Queue a record whose delivery report answers the confirmation:
+    /// [`Error::Rejected`] when the broker refused this record for good, and
+    /// [`Error::Transport`] for any other failure.
     ///
     /// # Errors
     ///
-    /// As [`send`](Self::send), with the piece when it is still unsettled.
-    async fn send_settled(
-        &self,
-        topic: &str,
-        payload: &Bytes,
-        piece: PieceFinalizer,
-    ) -> std::result::Result<(), (Error, Option<PieceFinalizer>)> {
+    /// As [`send`](Self::send).
+    async fn send_confirmed(&self, topic: &str, payload: &Bytes) -> Result<Confirmation> {
         if self.delivery.given_up_len() > 0 {
-            return Err((queuing_again(), Some(piece)));
+            return Err(queuing_again());
         }
-        self.send_held(topic, payload, piece)
+        let (answer, confirmation) = Confirmation::pending();
+        enqueue(
+            &self.producer,
+            &self.delivery,
+            topic,
+            payload,
+            Box::new(Settling::Confirmed(answer)),
+        )
+        .map_err(|(e, _)| e)?;
+        Ok(confirmation)
     }
 
     /// Flush queued records, then report what librdkafka could not deliver.
@@ -870,6 +931,49 @@ mod tests {
             ticket.outcome().await,
             scalo::transport::ack::TicketOutcome::Rejected
         );
+    }
+
+    /// A delivery report refusing this record for good answers its
+    /// confirmation Rejected, for the reject path. One librdkafka retries, or
+    /// any code not listed, answers Transport, so the record is offered again.
+    #[test]
+    fn a_delivery_failure_is_a_refusal_only_for_codes_permanent_to_the_record() {
+        use RDKafkaErrorCode as Code;
+        let cases = [
+            (Code::MessageSizeTooLarge, true),
+            (Code::InvalidMessageSize, true),
+            (Code::InvalidRecord, true),
+            (Code::InvalidTimestamp, true),
+            (Code::TopicAuthorizationFailed, true),
+            (Code::ClusterAuthorizationFailed, true),
+            (Code::InvalidTopic, true),
+            (Code::UnknownTopic, true),
+            (Code::UnknownPartition, true),
+            (Code::MessageTimedOut, false),
+            (Code::UnknownTopicOrPartition, false),
+            (Code::NotLeaderForPartition, false),
+            (Code::NotEnoughReplicas, false),
+            (Code::RequestTimedOut, false),
+            (Code::InvalidMessage, false),
+            (Code::PurgeQueue, false),
+            (Code::PurgeInflight, false),
+            (Code::AllBrokersDown, false),
+        ];
+        for (code, for_good) in cases {
+            let refusal = refusal(&KafkaError::MessageProduction(code));
+            assert_eq!(
+                matches!(refusal, Error::Rejected(_)),
+                for_good,
+                "{code:?} answered {refusal:?}"
+            );
+            if !for_good {
+                assert!(matches!(refusal, Error::Transport(_)), "{code:?}");
+            }
+        }
+        assert!(matches!(
+            refusal(&KafkaError::Canceled),
+            Error::Transport(_)
+        ));
     }
 
     #[test]

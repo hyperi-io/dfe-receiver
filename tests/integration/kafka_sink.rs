@@ -292,12 +292,12 @@ fn spooled_record(topic: &str, payload: String) -> Record {
     }
 }
 
-/// Spool `count` records for `topic` at `dir`, numbered by `seq`.
+/// Spool `payloads` for `topic` at `dir`, in order.
 ///
 /// The producer behind the spool can hold one record and is already holding
 /// it, against a broker that does not exist, so every record it is offered
 /// is refused and spooled.
-async fn spool_records(dir: &std::path::Path, topic: &str, count: usize) {
+async fn spool_records(dir: &std::path::Path, topic: &str, payloads: &[String]) {
     let mut cfg = dfe_receiver::config::KafkaConfig {
         brokers: vec!["192.0.2.1:9092".to_string()],
         ..dfe_receiver::config::KafkaConfig::default()
@@ -314,13 +314,17 @@ async fn spool_records(dir: &std::path::Path, topic: &str, count: usize) {
     )
     .await
     .expect("spool opens");
-    for seq in 0..count {
+    for payload in payloads {
         spool
-            .send(&spooled_record(topic, format!(r#"{{"seq":{seq}}}"#)))
+            .send(&spooled_record(topic, payload.clone()))
             .await
             .expect("a full producer queue spools the record");
     }
-    assert_eq!(spool.spool_len().await, count, "not every record spooled");
+    assert_eq!(
+        spool.spool_len().await,
+        payloads.len(),
+        "not every record spooled"
+    );
     spool.shutdown().await;
 }
 
@@ -343,7 +347,10 @@ async fn a_spooled_record_stays_spooled_until_a_broker_confirms_it() {
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     let dir = tempfile::tempdir().expect("spool dir");
-    spool_records(dir.path(), &topic, RECORDS).await;
+    let payloads: Vec<String> = (0..RECORDS)
+        .map(|seq| format!(r#"{{"seq":{seq}}}"#))
+        .collect();
+    spool_records(dir.path(), &topic, &payloads).await;
 
     // Paused before the sink first reaches it, so no produce request is in
     // flight when the drain starts.
@@ -395,6 +402,76 @@ async fn a_spooled_record_stays_spooled_until_a_broker_confirms_it() {
         RECORDS,
         "only {seen:?} of {RECORDS} records landed"
     );
+}
+
+/// Create `topic`, one partition, with the topic `config` given.
+async fn create_topic(kf: &crate::common::KafkaTestConfig, topic: &str, config: &[(&str, &str)]) {
+    use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
+    use rdkafka::client::DefaultClientContext;
+
+    let mut client = rdkafka::ClientConfig::new();
+    client.set("bootstrap.servers", &kf.brokers);
+    kf.apply_sasl(&mut client);
+    let admin: AdminClient<DefaultClientContext> = client.create().expect("admin client");
+    let new_topic = config.iter().fold(
+        NewTopic::new(topic, 1, TopicReplication::Fixed(1)),
+        |new_topic, (key, value)| new_topic.set(key, value),
+    );
+    for created in admin
+        .create_topics(&[new_topic], &AdminOptions::new())
+        .await
+        .expect("create topics")
+    {
+        created.expect("topic created");
+    }
+}
+
+/// A spooled record the broker refuses for good leaves the spool through the
+/// reject path, so the records spooled behind it still drain.
+///
+/// The topic takes records of at most 1024 bytes and librdkafka sends up to
+/// its own default, so only the broker refuses the first record.
+#[tokio::test]
+async fn a_spooled_record_the_broker_refuses_for_good_leaves_the_spool() {
+    skip_if_no_docker!();
+    let (_broker, bootstrap) = start_kafka_container(test_name!())
+        .await
+        .expect("Kafka container");
+    let kf = kafka_plain_config(&bootstrap);
+    let topic = test_topic("spool-refused");
+    create_topic(&kf, &topic, &[("max.message.bytes", "1024")]).await;
+    let consumer = kafka_consumer(&kf, &topic).expect("consumer setup");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let dir = tempfile::tempdir().expect("spool dir");
+    let oversized = format!(r#"{{"seq":0,"pad":"{}"}}"#, "x".repeat(4096));
+    spool_records(dir.path(), &topic, &[oversized, r#"{"seq":1}"#.to_string()]).await;
+
+    let mut cfg = kf.to_receiver_kafka_config();
+    // Compressed, the padding would fit under the topic's limit.
+    cfg.librdkafka_overrides
+        .insert("compression.type".to_string(), "none".to_string());
+    let sink = KafkaSink::new(&cfg, None).expect("KafkaSink creation failed");
+    let spool = TieredSink::new(
+        ScaloSinkAdapter::new(Arc::new(sink), Rejects::default()),
+        kafka_spool(dir.path()),
+    )
+    .await
+    .expect("the spool reopens");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while !spool.spool_is_empty().await && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let left = spool.spool_len().await;
+    spool.shutdown().await;
+    assert_eq!(left, 0, "the refused record holds up the spool");
+
+    let landed = kafka_consume_next(&consumer, Duration::from_secs(30))
+        .await
+        .expect("the record behind the refused one never landed");
+    let record: serde_json::Value = serde_json::from_slice(&landed).expect("JSON record");
+    assert_eq!(record["seq"], 1, "{record}");
 }
 
 /// A flush that times out with messages in flight must return `Err`.

@@ -25,8 +25,9 @@
 //! A transient inner-sink failure, or a confirmation that does not come, is
 //! reported as [`SendResult::Backpressured`] (not `Fatal`) so the TieredSink
 //! keeps the record spilled rather than dropping it -- preserving
-//! at-least-once delivery across a downstream outage. A record the
-//! inner sink refuses for good is settled here through [`Rejects`] and reported
+//! at-least-once delivery across a downstream outage. A record the inner sink
+//! refuses for good, at enqueue or on its delivery report, is settled here
+//! through [`Rejects`] and reported
 //! as sent once the DLQ holds it, so it is not replayed; a DLQ write that is
 //! not confirmed reports `Backpressured`, so the record stays spilled and is
 //! offered again.
@@ -35,10 +36,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use scalo::transport::{
-    BatchFinalizer, DeliveryStatus, PieceFinalizer, Record, SendResult, TransportBase,
-    TransportResult, TransportSender,
-};
+use scalo::transport::{Record, SendResult, TransportBase, TransportResult, TransportSender};
 
 use crate::buffer::{Disposal, Rejects};
 use crate::error::Error;
@@ -95,7 +93,7 @@ impl<S: ReceiverSink + 'static> ScaloSinkAdapter<S> {
             match self.inner.send(key, payload.clone()).await {
                 Ok(()) => {}
                 Err(Error::Rejected(reason)) => {
-                    if self.settle_refused(key, payload, &reason, None).await {
+                    if !self.settle_refused(key, payload, &reason).await {
                         return SendResult::Backpressured;
                     }
                 }
@@ -108,57 +106,49 @@ impl<S: ReceiverSink + 'static> ScaloSinkAdapter<S> {
     }
 
     /// Hand every record to the inner sink, then answer once it confirmed
-    /// each one.
+    /// each one. Records refused for good are settled only once nothing in
+    /// the batch is left to retry, so a retried batch dead-letters them once.
     async fn confirm<'r>(
         &self,
         records: impl IntoIterator<Item = (&'r str, &'r Bytes)> + Send,
     ) -> SendResult {
-        let (confirmed_tx, confirmed) = tokio::sync::oneshot::channel();
-        let batch = BatchFinalizer::new(move |status| {
-            // The receiver is gone once the send was given up on.
-            let _ = confirmed_tx.send(status);
-        });
+        let mut queued = Vec::new();
+        let mut refused = Vec::new();
         for (key, payload) in records {
-            match self.inner.send_settled(key, payload, batch.piece()).await {
-                Ok(()) => {}
-                Err((Error::Rejected(reason), piece)) => {
-                    if self.settle_refused(key, payload, &reason, piece).await {
-                        return SendResult::Backpressured;
-                    }
-                }
+            match self.inner.send_confirmed(key, payload).await {
+                Ok(confirmation) => queued.push((key, payload, confirmation)),
+                Err(Error::Rejected(reason)) => refused.push((key, payload, reason)),
                 // The records already queued still land: the spool offers the
                 // batch again, so they are delivered twice, never lost.
                 Err(_) => return SendResult::Backpressured,
             }
         }
-        batch.seal();
-        match confirmed.await {
-            Ok(status) if status.should_commit() => SendResult::Ok,
-            Ok(_) | Err(_) => SendResult::Backpressured,
+        for (key, payload, confirmation) in queued {
+            match confirmation.confirmed().await {
+                Ok(()) => {}
+                Err(Error::Rejected(reason)) => refused.push((key, payload, reason)),
+                Err(_) => return SendResult::Backpressured,
+            }
         }
+        for (key, payload, reason) in refused {
+            if !self.settle_refused(key, payload, &reason).await {
+                return SendResult::Backpressured;
+            }
+        }
+        SendResult::Ok
     }
 
     /// Take a record the inner sink refuses for good off the spool through
-    /// [`Rejects`], settling its piece. Spilled, it would be replayed forever
-    /// ahead of everything behind it on disk.
+    /// [`Rejects`]. Spilled, it would be replayed forever ahead of everything
+    /// behind it on disk.
     ///
-    /// Returns whether the DLQ refused it, so it stays spilled.
-    async fn settle_refused(
-        &self,
-        key: &str,
-        payload: &Bytes,
-        reason: &str,
-        piece: Option<PieceFinalizer>,
-    ) -> bool {
-        let status = match self.rejects.dispose(key, payload, reason).await {
-            Disposal::DeadLettered => DeliveryStatus::Rejected,
-            Disposal::Dropped => DeliveryStatus::Dropped,
-            Disposal::Refused => return true,
-        };
-        if let Some(piece) = piece {
-            piece.report(status);
+    /// Returns whether it is settled: false when the DLQ refused it, so it
+    /// stays spilled.
+    async fn settle_refused(&self, key: &str, payload: &Bytes, reason: &str) -> bool {
+        match self.rejects.dispose(key, payload, reason).await {
+            Disposal::DeadLettered | Disposal::Dropped => true,
+            Disposal::Refused => false,
         }
-        false
     }
 }
 
@@ -197,6 +187,7 @@ fn routed(record: &Record) -> (&str, &Bytes) {
 mod tests {
     use super::*;
     use crate::buffer::rejects::test_dlq;
+    use crate::sink::Confirmation;
     use async_trait::async_trait;
     use parking_lot::Mutex;
     use scalo::transport::{PayloadFormat, RecordMeta};
@@ -204,13 +195,13 @@ mod tests {
 
     /// A receiver `Sink` test double: records (topic, payload) pairs, can be
     /// toggled to fail every send (to drive the Backpressured/spill path),
-    /// refuses a `bad` payload for good, and can hold the pieces it is handed
-    /// unsettled, as a broker that has not answered does.
+    /// refuses a `bad` payload for good, and can hold the confirmations it
+    /// owes unanswered, as a broker that has not reported does.
     struct FakeSink {
         healthy: AtomicBool,
         fail: AtomicBool,
         hold: AtomicBool,
-        held: Mutex<Vec<PieceFinalizer>>,
+        held: Mutex<Vec<tokio::sync::oneshot::Sender<crate::error::Result<()>>>>,
         received: Mutex<Vec<(String, Vec<u8>)>>,
     }
 
@@ -241,21 +232,18 @@ mod tests {
             Ok(())
         }
 
-        async fn send_settled(
+        async fn send_confirmed(
             &self,
             topic: &str,
             payload: &Bytes,
-            piece: PieceFinalizer,
-        ) -> std::result::Result<(), (Error, Option<PieceFinalizer>)> {
-            if let Err(e) = self.send(topic, payload.clone()).await {
-                return Err((e, Some(piece)));
+        ) -> crate::error::Result<Confirmation> {
+            self.send(topic, payload.clone()).await?;
+            if !self.hold.load(Ordering::SeqCst) {
+                return Ok(Confirmation::settled(Ok(())));
             }
-            if self.hold.load(Ordering::SeqCst) {
-                self.held.lock().push(piece);
-            } else {
-                piece.report(DeliveryStatus::Delivered);
-            }
-            Ok(())
+            let (answer, confirmation) = Confirmation::pending();
+            self.held.lock().push(answer);
+            Ok(confirmation)
         }
 
         async fn flush(&self) -> crate::error::Result<()> {
@@ -336,7 +324,7 @@ mod tests {
         assert_eq!(fake.held.lock().len(), 2, "both queued before any wait");
 
         let first = fake.held.lock().remove(0);
-        first.report(DeliveryStatus::Delivered);
+        first.send(Ok(())).unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert!(
             !answer.is_finished(),
@@ -344,7 +332,9 @@ mod tests {
         );
 
         let second = fake.held.lock().remove(0);
-        second.report(DeliveryStatus::Errored);
+        second
+            .send(Err(Error::Transport("no broker confirmed it".into())))
+            .unwrap();
         let result = tokio::time::timeout(std::time::Duration::from_secs(5), &mut answer)
             .await
             .expect("answered once both reported")
@@ -353,6 +343,63 @@ mod tests {
             matches!(result, SendResult::Backpressured),
             "got {result:?}"
         );
+    }
+
+    /// A record its delivery report refuses for good is settled through the
+    /// reject path, once the rest of the batch is confirmed; any other failed
+    /// report keeps the batch spilled.
+    #[tokio::test]
+    async fn a_delivery_refusal_is_settled_and_any_other_failure_is_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let cases = [
+            (
+                "refused, no DLQ: dropped",
+                Rejects::default(),
+                Err(Error::Rejected("kafka refused the record".into())),
+                SendResult::Ok,
+            ),
+            (
+                "refused, the DLQ refuses: kept",
+                Rejects::new(Some(test_dlq::refusing_dlq(dir.path())), None),
+                Err(Error::Rejected("kafka refused the record".into())),
+                SendResult::Backpressured,
+            ),
+            (
+                "not delivered: kept",
+                Rejects::default(),
+                Err(Error::Transport("kafka did not deliver the record".into())),
+                SendResult::Backpressured,
+            ),
+            ("delivered", Rejects::default(), Ok(()), SendResult::Ok),
+        ];
+        for (case, rejects, report, want) in cases {
+            let fake = Arc::new(FakeSink::new());
+            fake.hold.store(true, Ordering::SeqCst);
+            let adapter = Arc::new(ScaloSinkAdapter::new(Arc::clone(&fake), rejects));
+            let batch = [record("orders", b"one"), record("orders", b"two")];
+
+            let sending = Arc::clone(&adapter);
+            let answer = tokio::spawn(async move { sending.send_batch(&batch).await });
+            while fake.held.lock().len() < 2 {
+                tokio::task::yield_now().await;
+            }
+            let (first, second) = {
+                let mut held = fake.held.lock();
+                (held.remove(0), held.remove(0))
+            };
+            first.send(report).unwrap();
+            second.send(Ok(())).unwrap();
+
+            let got = tokio::time::timeout(std::time::Duration::from_secs(5), answer)
+                .await
+                .expect("answered once both reported")
+                .expect("send task");
+            assert_eq!(
+                std::mem::discriminant(&got),
+                std::mem::discriminant(&want),
+                "{case}: got {got:?}"
+            );
+        }
     }
 
     /// The hot path for a sender answered at enqueue answers once the record
@@ -372,7 +419,10 @@ mod tests {
 
         assert!(matches!(result, SendResult::Ok), "got {result:?}");
         assert_eq!(fake.received.lock().len(), 1);
-        assert!(fake.held.lock().is_empty(), "queued as a held record");
+        assert!(
+            fake.held.lock().is_empty(),
+            "queued awaiting a confirmation"
+        );
     }
 
     /// Through the real TieredSink: a record refused for good leaves the disk
