@@ -454,6 +454,20 @@ impl Config {
                 }
             }
         }
+        // An empty list sends a record nowhere and answers it delivered.
+        let lists = std::iter::once(("default".to_string(), &self.destinations.default)).chain(
+            self.destinations
+                .sources
+                .iter()
+                .map(|(source, list)| (format!("sources.{source}"), list)),
+        );
+        for (key, list) in lists {
+            if list.names().is_empty() {
+                return Err(Error::Config(format!(
+                    "destinations.{key} is an empty list: name at least one destination"
+                )));
+            }
+        }
         for name in self.destinations.referenced_names() {
             if !self.destinations.named.contains_key(name)
                 && name != BUS_DESTINATION
@@ -4267,6 +4281,35 @@ webhook:
                 err.contains("reaches the bus but transport is 'grpc'"),
                 "{yaml}: {err}"
             );
+        }
+    }
+
+    /// An empty destination list routes a record nowhere and answers it
+    /// delivered, so it is refused for the default and for a source, and the
+    /// same configs with a destination in the list validate.
+    #[test]
+    fn an_empty_destination_list_is_refused() {
+        let brokers = "kafka:\n  brokers: [\"localhost:9092\"]\n";
+        for (empty, filled, names) in [
+            (
+                "destinations:\n  default: []\n",
+                "destinations:\n  default: [kafka]\n",
+                "destinations.default",
+            ),
+            (
+                "destinations:\n  sources:\n    orders: []\n",
+                "destinations:\n  sources:\n    orders: [kafka]\n",
+                "destinations.sources.orders",
+            ),
+        ] {
+            let err = load_yaml(&format!("{brokers}{empty}"))
+                .validate()
+                .expect_err("an empty list delivers nowhere")
+                .to_string();
+            assert!(err.contains(names), "{empty}: {err}");
+            load_yaml(&format!("{brokers}{filled}"))
+                .validate()
+                .unwrap_or_else(|e| panic!("{filled}: {e}"));
         }
     }
 
