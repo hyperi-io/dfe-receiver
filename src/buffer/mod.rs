@@ -56,8 +56,8 @@ impl<S: ReceiverSink + 'static> ReceiverSink for SinkBackend<S> {
                         format: scalo::transport::PayloadFormat::Json,
                     },
                 };
-                tiered
-                    .send(&record)
+                // Every sender of this path is answered once its record is queued.
+                adapter::answered_at_enqueue(tiered.send(&record))
                     .await
                     .map_err(|e| crate::error::Error::Transport(e.to_string()))
             }

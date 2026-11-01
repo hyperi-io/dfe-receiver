@@ -21,8 +21,8 @@
 //! returns once the record is QUEUED; whether a broker ever took it arrives
 //! later on the delivery report, which is where
 //! `receiver_kafka_delivery_failures_total` and the sink's health flag come
-//! from. [`KafkaSink::send_held`] carries a piece of a held request with the
-//! record, and the report settles it. A record answered at enqueue that
+//! from. [`KafkaSink::send_held`] carries a piece of a held request or a
+//! spooled record with the record, and the report settles it. A record answered at enqueue that
 //! librdkafka gives up on is queued again, since its sender holds no copy.
 //! Enqueue counters and the per-send duration histogram stay on the enqueue.
 
@@ -51,8 +51,8 @@ use crate::config::KafkaConfig;
 use crate::error::{Error, Result};
 use crate::sink::{FailureLatch, SINK_RETRY_AFTER, Sink};
 
-/// librdkafka's delivery opaque: the held request's piece the report settles,
-/// or none for a record answered at enqueue.
+/// librdkafka's delivery opaque: the piece the report settles, of a held
+/// request or a spooled record, or none for a record answered at enqueue.
 type Settlement = Box<Option<PieceFinalizer>>;
 
 /// How long the shutdown flush gives librdkafka to drain.
@@ -347,6 +347,11 @@ async fn resend_given_up(
     }
 }
 
+/// The refusal while records librdkafka gave up on wait to be queued again.
+fn queuing_again() -> Error {
+    Error::Transport("kafka is queuing again records no broker confirmed".into())
+}
+
 /// Kafka sink backed by a `ThreadedProducer` and its delivery reports.
 pub struct KafkaSink {
     producer: ThreadedProducer<DeliveryObserver>,
@@ -503,9 +508,7 @@ impl Sink for KafkaSink {
     /// outgrow librdkafka's queue together. The enqueue error otherwise.
     async fn send(&self, topic: &str, payload: Bytes) -> Result<()> {
         if self.delivery.given_up_len() > 0 {
-            return Err(Error::Transport(
-                "kafka is queuing again records no broker confirmed".into(),
-            ));
+            return Err(queuing_again());
         }
         enqueue(
             &self.producer,
@@ -515,6 +518,24 @@ impl Sink for KafkaSink {
             Box::new(None),
         )
         .map_err(|(e, _)| e)
+    }
+
+    /// Queue a record whose delivery report settles `piece`, as
+    /// [`send_held`](KafkaSink::send_held) does.
+    ///
+    /// # Errors
+    ///
+    /// As [`send`](Self::send), with the piece when it is still unsettled.
+    async fn send_settled(
+        &self,
+        topic: &str,
+        payload: &Bytes,
+        piece: PieceFinalizer,
+    ) -> std::result::Result<(), (Error, Option<PieceFinalizer>)> {
+        if self.delivery.given_up_len() > 0 {
+            return Err((queuing_again(), Some(piece)));
+        }
+        self.send_held(topic, payload, piece)
     }
 
     /// Flush queued records, then report what librdkafka could not deliver.

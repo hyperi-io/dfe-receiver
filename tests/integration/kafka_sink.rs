@@ -20,11 +20,16 @@
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
+use dfe_receiver::buffer::Rejects;
+use dfe_receiver::buffer::adapter::ScaloSinkAdapter;
 use dfe_receiver::sink::Sink;
 use dfe_receiver::sink::kafka::KafkaSink;
+use scalo::tiered_sink::{TieredSink, TieredSinkConfig};
+use scalo::transport::{PayloadFormat, Record, RecordMeta};
 
 use crate::common::{
     kafka_backend, kafka_consume_next, kafka_consumer, kafka_plain_config, start_kafka_container,
@@ -261,6 +266,134 @@ async fn an_enqueued_record_survives_an_outage_past_the_message_timeout() {
         seen.len(),
         RECORDS as usize,
         "only {seen:?} of {RECORDS} records outlived the outage"
+    );
+}
+
+/// The spool a [`KafkaSink`] drains through, at `dir`: a pass every 5 ms, and
+/// a probe one send timeout after its circuit opens.
+fn kafka_spool(dir: &std::path::Path) -> TieredSinkConfig {
+    let mut config = TieredSinkConfig::new(dir.join("kafka"));
+    config.drain_interval_ms = 5;
+    config.circuit_reset_timeout_ms = config.send_timeout_ms;
+    config
+}
+
+/// The record a [`SinkBackend`](dfe_receiver::buffer::SinkBackend) spools for
+/// `payload` on `topic`.
+fn spooled_record(topic: &str, payload: String) -> Record {
+    Record {
+        payload: Bytes::from(payload),
+        key: Some(Arc::from(topic)),
+        headers: Vec::new(),
+        metadata: RecordMeta {
+            timestamp_ms: None,
+            format: PayloadFormat::Json,
+        },
+    }
+}
+
+/// Spool `count` records for `topic` at `dir`, numbered by `seq`.
+///
+/// The producer behind the spool can hold one record and is already holding
+/// it, against a broker that does not exist, so every record it is offered
+/// is refused and spooled.
+async fn spool_records(dir: &std::path::Path, topic: &str, count: usize) {
+    let mut cfg = dfe_receiver::config::KafkaConfig {
+        brokers: vec!["192.0.2.1:9092".to_string()],
+        ..dfe_receiver::config::KafkaConfig::default()
+    };
+    cfg.librdkafka_overrides
+        .insert("queue.buffering.max.messages".to_string(), "1".to_string());
+    let full = KafkaSink::new(&cfg, None).expect("KafkaSink creation failed");
+    full.send(topic, Bytes::from_static(b"{}"))
+        .await
+        .expect("librdkafka queues one record locally");
+    let spool = TieredSink::new(
+        ScaloSinkAdapter::new(Arc::new(full), Rejects::default()),
+        kafka_spool(dir),
+    )
+    .await
+    .expect("spool opens");
+    for seq in 0..count {
+        spool
+            .send(&spooled_record(topic, format!(r#"{{"seq":{seq}}}"#)))
+            .await
+            .expect("a full producer queue spools the record");
+    }
+    assert_eq!(spool.spool_len().await, count, "not every record spooled");
+    spool.shutdown().await;
+}
+
+/// A spooled record leaves the spool only once a broker confirms it.
+///
+/// A record the drain hands to librdkafka is held in memory until its delivery
+/// report, so a crash in between loses it unless the spool still has it. With
+/// the broker paused no report arrives, so every record stays spooled, and
+/// each lands once the broker is back.
+#[tokio::test]
+async fn a_spooled_record_stays_spooled_until_a_broker_confirms_it() {
+    const RECORDS: usize = 5;
+    skip_if_no_docker!();
+    let (broker, bootstrap) = start_kafka_container(test_name!())
+        .await
+        .expect("Kafka container");
+    let kf = kafka_plain_config(&bootstrap);
+    let topic = test_topic("spool-ack");
+    let consumer = kafka_consumer(&kf, &topic).expect("consumer setup");
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let dir = tempfile::tempdir().expect("spool dir");
+    spool_records(dir.path(), &topic, RECORDS).await;
+
+    // Paused before the sink first reaches it, so no produce request is in
+    // flight when the drain starts.
+    broker.pause().await.expect("pause the broker");
+    let mut cfg = kf.to_receiver_kafka_config();
+    cfg.librdkafka_overrides
+        .insert("message.timeout.ms".to_string(), "60000".to_string());
+    let sink = KafkaSink::new(&cfg, None).expect("KafkaSink creation failed");
+    let spool = TieredSink::new(
+        ScaloSinkAdapter::new(Arc::new(sink), Rejects::default()),
+        kafka_spool(dir.path()),
+    )
+    .await
+    .expect("the spool reopens");
+    // Long enough for the drain to offer every record, and for none to get a
+    // delivery report.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let held = spool.spool_len().await;
+    broker.unpause().await.expect("unpause the broker");
+    assert_eq!(
+        held, RECORDS,
+        "the spool let go of records no broker confirmed"
+    );
+
+    let deadline = tokio::time::Instant::now() + Duration::from_mins(1);
+    while !spool.spool_is_empty().await && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        spool.spool_is_empty().await,
+        "{} records still spooled a minute after the broker came back",
+        spool.spool_len().await
+    );
+    spool.shutdown().await;
+
+    let mut seen = std::collections::BTreeSet::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_mins(1);
+    while seen.len() < RECORDS && tokio::time::Instant::now() < deadline {
+        let Some(payload) = kafka_consume_next(&consumer, Duration::from_secs(5)).await else {
+            continue;
+        };
+        let record: serde_json::Value = serde_json::from_slice(&payload).expect("JSON record");
+        if let Some(seq) = record["seq"].as_u64() {
+            seen.insert(seq);
+        }
+    }
+    assert_eq!(
+        seen.len(),
+        RECORDS,
+        "only {seen:?} of {RECORDS} records landed"
     );
 }
 

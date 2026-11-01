@@ -21,8 +21,9 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use scalo::transport::{DeliveryStatus, PieceFinalizer};
 
-use crate::error::{RETRY_AFTER_SECS, Result};
+use crate::error::{Error, RETRY_AFTER_SECS, Result};
 
 /// Trait for message sinks (Kafka, gRPC, file).
 #[async_trait]
@@ -37,6 +38,28 @@ pub trait Sink: Send + Sync {
             self.send(topic, payload.clone()).await?;
         }
         Ok(())
+    }
+
+    /// Send a message whose confirmation settles `piece`, for a caller that
+    /// keeps its copy until then. The default settles it delivered once
+    /// [`send`](Self::send) returns, so it confirms what `send` does.
+    ///
+    /// # Errors
+    ///
+    /// The send error, with the piece when it is still unsettled.
+    async fn send_settled(
+        &self,
+        topic: &str,
+        payload: &Bytes,
+        piece: PieceFinalizer,
+    ) -> std::result::Result<(), (Error, Option<PieceFinalizer>)> {
+        match self.send(topic, payload.clone()).await {
+            Ok(()) => {
+                piece.report(DeliveryStatus::Delivered);
+                Ok(())
+            }
+            Err(e) => Err((e, Some(piece))),
+        }
     }
 
     /// Why this sink refuses `payload` for good, known before it is sent. The
