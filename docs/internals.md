@@ -885,6 +885,10 @@ decoder's verbatim output to the event's common-header `_raw` field, and works
 with either mode -- a JSON array of every record in `canonical`, the single
 record in `exploded`. See [Raw payload retention](#raw-payload-retention).
 
+### Template cache
+
+Each v9 and IPFIX exporter keeps its own templates, at most `flow.netflow.template_cache.max_per_exporter` (default 1000) of them, v9 and IPFIX together. A template past the cap evicts that exporter's oldest, counted on `flow_template_evicted_total`, so a flooding exporter holds bounded memory. An exporter whose evicted template it still uses sees template misses until it resends the template, which exporters do on a timer. At most `max_exporters` exporters are kept.
+
 ### Record kinds
 
 - `flow` -- standard NetFlow / sFlow record
@@ -912,7 +916,6 @@ See `config.example.yaml` for the full `flow:` block.
   (~1 day of hand-rolled wire decode like our v5 implementation).
 - Template-miss errors currently conflated with parse errors in metrics
   (`transport_decode_err_total{reason="template_miss"}` will be 0)
-- Template cache `max_per_exporter` not yet enforced (netgauze limitation)
 - `t_flow_start`/`t_flow_end` carry relative `sysup:<ms>` strings rather than
   absolute RFC 3339 timestamps (sysUpTime anchor resolution deferred)
 - `recvmmsg(2)` batch syscall deferred. Linux listener uses `AsyncFd::readable`

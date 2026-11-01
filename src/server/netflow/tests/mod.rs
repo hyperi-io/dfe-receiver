@@ -12,4 +12,5 @@ mod decode_nsel;
 mod decode_v5;
 mod decode_v9;
 mod proptest;
+mod template_cap;
 mod template_miss;

@@ -28,7 +28,7 @@ use crate::server::flow::schema::CanonicalRecord;
 use bytes::BytesMut;
 use netgauze_flow_pkt::codec::{FlowInfoCodec, FlowInfoCodecDecoderError};
 use netgauze_flow_pkt::ie::Field;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr};
 use thiserror::Error;
@@ -189,28 +189,73 @@ impl NetflowFields {
 /// can do LRU bookkeeping uniformly.
 struct ExporterState {
     codec: FlowInfoCodec,
+    /// Every cached template, oldest first, so the cap evicts the oldest.
+    arrivals: VecDeque<(TemplateFamily, u16)>,
+}
+
+/// Which of the codec's template maps a template id lives in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum TemplateFamily {
+    V9,
+    Ipfix,
 }
 
 impl ExporterState {
     fn new() -> Self {
         Self {
             codec: FlowInfoCodec::new(),
+            arrivals: VecDeque::new(),
         }
+    }
+
+    fn cached(&self) -> usize {
+        self.codec.netflow_templates_map().len() + self.codec.ipfix_templates_map().len()
+    }
+
+    /// Hold the cache to `max` templates, evicting the oldest first. Returns
+    /// how many were evicted.
+    ///
+    /// A template sent again replaces its entry in place, so the cache only
+    /// changes size when a template arrives or is withdrawn, and only then is
+    /// the arrival order brought up to date.
+    fn hold_to(&mut self, max: usize) -> usize {
+        if self.cached() != self.arrivals.len() {
+            let v9 = self.codec.netflow_templates_map();
+            let ipfix = self.codec.ipfix_templates_map();
+            self.arrivals.retain(|(family, id)| match family {
+                TemplateFamily::V9 => v9.contains_key(id),
+                TemplateFamily::Ipfix => ipfix.contains_key(id),
+            });
+            let known: HashSet<(TemplateFamily, u16)> = self.arrivals.iter().copied().collect();
+            let mut arrived: Vec<(TemplateFamily, u16)> = v9
+                .keys()
+                .map(|id| (TemplateFamily::V9, *id))
+                .chain(ipfix.keys().map(|id| (TemplateFamily::Ipfix, *id)))
+                .filter(|template| !known.contains(template))
+                .collect();
+            // One packet's templates have no order the map keeps, so ids order them.
+            arrived.sort_unstable_by_key(|(_, id)| *id);
+            self.arrivals.extend(arrived);
+        }
+        let mut evicted = 0;
+        while self.arrivals.len() > max {
+            let Some((family, id)) = self.arrivals.pop_front() else {
+                break;
+            };
+            let removed = match family {
+                TemplateFamily::V9 => self.codec.netflow_templates_map_mut().remove(&id).is_some(),
+                TemplateFamily::Ipfix => self.codec.ipfix_templates_map_mut().remove(&id).is_some(),
+            };
+            evicted += usize::from(removed);
+        }
+        evicted
     }
 }
 
 pub struct NetflowDecoder {
     state: HashMap<IpAddr, ExporterState>,
-    // TODO: template_cache.max_per_exporter not yet enforced.
-    //
-    // netgauze-flow-pkt 0.12's `TemplatesMap` is internal and doesn't expose a
-    // per-exporter prune API. Enforcing this cap requires either upstream
-    // netgauze support or a custom wrapper that intercepts template additions
-    // and tracks counts per exporter scope.
-    //
-    // Currently the bound on `max_exporters` (whole exporters evicted via LRU)
-    // is the only template-related backstop.
-    _max_per_exporter: usize,
+    /// Templates one exporter may hold, v9 and IPFIX together.
+    max_per_exporter: usize,
     max_exporters: usize,
     metrics: FlowMetrics,
 }
@@ -219,10 +264,16 @@ impl NetflowDecoder {
     pub fn new(max_per_exporter: usize, max_exporters: usize, metrics: FlowMetrics) -> Self {
         Self {
             state: HashMap::new(),
-            _max_per_exporter: max_per_exporter,
+            max_per_exporter,
             max_exporters,
             metrics,
         }
+    }
+
+    /// Templates cached for `source`, v9 and IPFIX together.
+    #[cfg(test)]
+    pub(crate) fn templates(&self, source: IpAddr) -> usize {
+        self.state.get(&source).map_or(0, ExporterState::cached)
     }
 
     fn ensure_exporter_slot(&mut self, source: IpAddr) -> &mut ExporterState {
@@ -269,8 +320,14 @@ impl FlowDecoder for NetflowDecoder {
         match kind {
             ProtocolKind::NetflowV5 => decode_v5(data, source),
             ProtocolKind::NetflowV9 | ProtocolKind::Ipfix => {
+                let max = self.max_per_exporter;
                 let exporter = self.ensure_exporter_slot(source);
-                decode_v9_or_ipfix(&mut exporter.codec, data, source, kind)
+                let decoded = decode_v9_or_ipfix(&mut exporter.codec, data, source, kind);
+                let evicted = exporter.hold_to(max);
+                for _ in 0..evicted {
+                    self.metrics.template_evicted_total.inc();
+                }
+                decoded
             }
             ProtocolKind::NetflowV7 => {
                 Err(NetflowError::Parse("NetFlow v7 not supported".to_string()))
