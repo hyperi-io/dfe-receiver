@@ -30,6 +30,7 @@ use dfe_receiver::sink::Sink;
 use dfe_receiver::sink::kafka::KafkaSink;
 use scalo::tiered_sink::{TieredSink, TieredSinkConfig};
 use scalo::transport::{PayloadFormat, Record, RecordMeta};
+use tokio_util::sync::CancellationToken;
 
 use crate::common::{
     kafka_backend, kafka_consume_next, kafka_consumer, kafka_plain_config, start_kafka_container,
@@ -472,6 +473,157 @@ async fn a_spooled_record_the_broker_refuses_for_good_leaves_the_spool() {
         .expect("the record behind the refused one never landed");
     let record: serde_json::Value = serde_json::from_slice(&landed).expect("JSON record");
     assert_eq!(record["seq"], 1, "{record}");
+}
+
+/// The HTTP status a held request of one `record` is answered with, through a
+/// receiver whose every record goes to `topic`.
+///
+/// `producer_max` caps the producer's `message.max.bytes`, so librdkafka
+/// refuses a larger record at enqueue. `dlq` writes dead letters under it.
+async fn held_answer(
+    kf: &crate::common::KafkaTestConfig,
+    topic: &str,
+    producer_max: Option<&str>,
+    dlq: Option<&std::path::Path>,
+    record: String,
+) -> reqwest::StatusCode {
+    use dfe_receiver::config::{
+        Config, DestinationRef, DestinationSpec, KafkaDestination, SharedConfig,
+    };
+    use dfe_receiver::pipeline::PipelineState;
+    use dfe_receiver::server::http::HttpHandler;
+    use dfe_receiver::server::traits::ProtocolHandler;
+
+    let mut config = Config::default();
+    config.server.bind_address = "127.0.0.1:0".to_string();
+    config.kafka = kf.to_receiver_kafka_config();
+    // Compressed, the padding would fit under the topic's limit.
+    config
+        .kafka
+        .librdkafka_overrides
+        .insert("compression.type".to_string(), "none".to_string());
+    if let Some(max) = producer_max {
+        config
+            .kafka
+            .librdkafka_overrides
+            .insert("message.max.bytes".to_string(), max.to_string());
+    }
+    config.destinations.named.insert(
+        "refusing".to_string(),
+        DestinationSpec {
+            grpc: None,
+            kafka: Some(KafkaDestination {
+                topic: Some(topic.to_string()),
+            }),
+        },
+    );
+    config.destinations.default = DestinationRef::One("refusing".to_string());
+    config.routing.dlq.enabled = dlq.is_some();
+    if let Some(dir) = dlq {
+        config.routing.dlq.mode = "file_only".to_string();
+        config.routing.dlq.kafka_enabled = false;
+        config.routing.dlq.file_path = dir.display().to_string();
+    }
+
+    let pipeline = Arc::new(
+        PipelineState::new(SharedConfig::new(config.clone()), CancellationToken::new())
+            .await
+            .expect("pipeline init"),
+    );
+    let handler = HttpHandler::new(
+        config.server.bind_address.clone(),
+        pipeline,
+        Arc::new(dfe_receiver::metrics::Metrics::default()),
+    );
+    let bound = handler.bound_addr();
+    let shutdown = CancellationToken::new();
+    let server_shutdown = shutdown.clone();
+    let mut task = tokio::spawn(async move { handler.start(server_shutdown).await });
+    let addr = crate::common::bound_addr("HTTP", &bound, &mut task).await;
+
+    let status = reqwest::Client::new()
+        .post(format!("http://{addr}/ingest"))
+        .header("content-type", "application/json")
+        .body(record)
+        .send()
+        .await
+        .expect("request failed")
+        .status();
+    shutdown.cancel();
+    status
+}
+
+/// The dead letters written under `dir`, one per line of every file in it.
+fn dead_letters(dir: &std::path::Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| {
+            let path = entry.path();
+            if path.is_dir() {
+                dead_letters(&path)
+            } else {
+                std::fs::read_to_string(&path).map_or(0, |text| text.lines().count())
+            }
+        })
+        .sum()
+}
+
+/// A held request whose record the broker refuses for good on its delivery
+/// report is answered as one librdkafka refuses at enqueue: accepted once a
+/// DLQ holds it, a bad request where none is configured. Neither is retried.
+#[tokio::test]
+async fn a_held_record_refused_at_delivery_is_answered_as_one_refused_at_enqueue() {
+    skip_if_no_docker!();
+    let (_broker, bootstrap) = start_kafka_container(test_name!())
+        .await
+        .expect("Kafka container");
+    let kf = kafka_plain_config(&bootstrap);
+    let topic = test_topic("held-refused");
+    create_topic(&kf, &topic, &[("max.message.bytes", "1024")]).await;
+    let record = || format!(r#"{{"pad":"{}"}}"#, "x".repeat(4096));
+
+    for (case, with_dlq, want) in [
+        ("no DLQ", false, reqwest::StatusCode::BAD_REQUEST),
+        ("file DLQ", true, reqwest::StatusCode::ACCEPTED),
+    ] {
+        let dir = tempfile::tempdir().expect("DLQ dir");
+        let enqueue_dlq = dir.path().join("enqueue");
+        let delivery_dlq = dir.path().join("delivery");
+        let dlq_at = |path: &std::path::PathBuf| with_dlq.then_some(path.clone());
+
+        let at_enqueue = held_answer(
+            &kf,
+            &topic,
+            Some("1024"),
+            dlq_at(&enqueue_dlq).as_deref(),
+            record(),
+        )
+        .await;
+        let at_delivery = held_answer(
+            &kf,
+            &topic,
+            None,
+            dlq_at(&delivery_dlq).as_deref(),
+            record(),
+        )
+        .await;
+
+        assert_eq!(at_enqueue, want, "{case}: the enqueue-time answer moved");
+        assert_eq!(
+            at_delivery, at_enqueue,
+            "{case}: a refusal on the delivery report is answered differently"
+        );
+        let want_letters = usize::from(with_dlq);
+        assert_eq!(dead_letters(&enqueue_dlq), want_letters, "{case}: enqueue");
+        assert_eq!(
+            dead_letters(&delivery_dlq),
+            want_letters,
+            "{case}: delivery"
+        );
+    }
 }
 
 /// A flush that times out with messages in flight must return `Err`.

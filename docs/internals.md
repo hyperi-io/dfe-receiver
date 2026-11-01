@@ -725,6 +725,12 @@ sequenceDiagram
         alt Delivery report within the hold
             Kafka-->>Handler: Delivered
             Handler-->>Client: 202 Accepted
+        else Refused for good, DLQ holds it
+            Kafka-->>Handler: Refused
+            Handler-->>Client: 202 Accepted
+        else Refused for good, no DLQ
+            Kafka-->>Handler: Refused
+            Handler-->>Client: 400 Bad Request
         else Not confirmed
             Handler-->>Client: 503 Service Unavailable, Retry-After
         end

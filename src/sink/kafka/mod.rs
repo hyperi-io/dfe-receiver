@@ -21,9 +21,8 @@
 //! returns once the record is QUEUED; whether a broker ever took it arrives
 //! later on the delivery report, which is where
 //! `receiver_kafka_delivery_failures_total` and the sink's health flag come
-//! from. [`KafkaSink::send_held`] carries a piece of a held request with the
-//! record, and the report settles it. A spooled record's confirmation is
-//! answered from the report the same way. A record answered at enqueue that
+//! from. [`KafkaSink::confirm`] carries a confirmation with the record, for a
+//! held request or a spooled record, and the report answers it. A record answered at enqueue that
 //! librdkafka gives up on is queued again, since its sender holds no copy.
 //! Enqueue counters and the per-send duration histogram stay on the enqueue.
 
@@ -43,7 +42,6 @@ use rdkafka::producer::{BaseRecord, DeliveryResult, Producer, ProducerContext, T
 use rdkafka::util::Timeout;
 use rustc_hash::FxHashSet;
 use scalo::transport::kafka::{PRODUCER_HIGH_THROUGHPUT, producer_client_config};
-use scalo::transport::{DeliveryStatus, PieceFinalizer};
 use tokio::sync::{Notify, oneshot};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, error, info, trace, warn};
@@ -56,9 +54,8 @@ use crate::sink::{Confirmation, FailureLatch, SINK_RETRY_AFTER, Sink};
 enum Settling {
     /// Nothing: the sender was answered at enqueue.
     Answered,
-    /// The piece of a held request.
-    Held(PieceFinalizer),
-    /// The confirmation a caller keeping its copy waits on.
+    /// The confirmation a caller keeping its copy waits on: a held request,
+    /// or a spooled record.
     Confirmed(oneshot::Sender<Result<()>>),
 }
 
@@ -175,22 +172,17 @@ impl ProducerContext for DeliveryObserver {
     type DeliveryOpaque = Settlement;
 
     fn delivery(&self, result: &DeliveryResult<'_>, settlement: Self::DeliveryOpaque) {
-        let status = match result {
-            Ok(_) => {
-                self.delivered();
-                DeliveryStatus::Delivered
-            }
+        match result {
+            Ok(_) => self.delivered(),
             Err((err, msg)) => {
                 self.failed(msg.topic(), err);
                 if matches!(*settlement, Settling::Answered) {
                     self.give_up(msg, err);
                 }
-                DeliveryStatus::Errored
             }
-        };
+        }
         match *settlement {
             Settling::Answered => {}
-            Settling::Held(piece) => piece.report(status),
             Settling::Confirmed(answer) => {
                 let confirmed = result.as_ref().map(|_| ()).map_err(|(err, _)| refusal(err));
                 // The receiver is gone once its sender gave up waiting.
@@ -487,30 +479,25 @@ impl KafkaSink {
         self.held_message_timeout
     }
 
-    /// Queue a record whose delivery report settles `piece`.
+    /// Queue a record whose delivery report answers the confirmation:
+    /// [`Error::Rejected`] when the broker refused this record for good, and
+    /// [`Error::Transport`] for any other failure.
     ///
     /// # Errors
     ///
-    /// The enqueue error, with the piece when librdkafka handed it back, so the
-    /// caller settles a record refused for good elsewhere. A piece dropped
-    /// unreported counts as `Errored`.
-    pub fn send_held(
-        &self,
-        topic: &str,
-        payload: &Bytes,
-        piece: PieceFinalizer,
-    ) -> std::result::Result<(), (Error, Option<PieceFinalizer>)> {
+    /// The enqueue error: [`Error::Rejected`] for a record librdkafka refuses
+    /// for good, [`Error::Transport`] otherwise.
+    pub fn confirm(&self, topic: &str, payload: &Bytes) -> Result<Confirmation> {
+        let (answer, confirmation) = Confirmation::pending();
         enqueue(
             &self.producer,
             &self.delivery,
             topic,
             payload,
-            Box::new(Settling::Held(piece)),
+            Box::new(Settling::Confirmed(answer)),
         )
-        .map_err(|(e, settlement)| match *settlement {
-            Settling::Held(piece) => (e, Some(piece)),
-            Settling::Answered | Settling::Confirmed(_) => (e, None),
-        })
+        .map_err(|(e, _)| e)?;
+        Ok(confirmation)
     }
 
     /// [`Sink::flush`] with the timeout as a parameter.
@@ -587,16 +574,7 @@ impl Sink for KafkaSink {
         if self.delivery.given_up_len() > 0 {
             return Err(queuing_again());
         }
-        let (answer, confirmation) = Confirmation::pending();
-        enqueue(
-            &self.producer,
-            &self.delivery,
-            topic,
-            payload,
-            Box::new(Settling::Confirmed(answer)),
-        )
-        .map_err(|(e, _)| e)?;
-        Ok(confirmation)
+        self.confirm(topic, payload)
     }
 
     /// Flush queued records, then report what librdkafka could not deliver.
@@ -833,36 +811,25 @@ mod tests {
         assert_eq!(librdkafka_runs(&client, "compression.codec"), "lz4");
     }
 
-    fn held_ticket() -> (
-        scalo::transport::ack::Tickets,
-        scalo::transport::ack::Ticket,
-    ) {
-        let tickets = scalo::transport::ack::Tickets::new("test", 1 << 20);
-        let ticket = tickets
-            .admit(2, std::time::Instant::now() + Duration::from_secs(30))
-            .expect("admitted");
-        (tickets, ticket)
-    }
-
-    /// A record no broker confirms settles its held request `Errored`.
+    /// A record no broker confirms answers its confirmation with a transient
+    /// failure, so its sender is told to retry.
     ///
     /// No broker and no Docker: `message.timeout.ms` expires locally against an
-    /// unroutable address, and the failed report reaches the request.
+    /// unroutable address, and the failed report answers the confirmation.
     #[tokio::test]
-    async fn a_delivery_failure_reaches_the_held_request() {
+    async fn a_delivery_failure_answers_the_confirmation() {
         let sink = KafkaSink::new(&unroutable_config("1000"), None).unwrap();
-        let (_tickets, ticket) = held_ticket();
 
-        sink.send_held("stranded", &Bytes::from_static(b"{}"), ticket.piece())
-            .unwrap_or_else(|(e, _)| panic!("librdkafka queues locally: {e}"));
+        let confirmation = sink
+            .confirm("stranded", &Bytes::from_static(b"{}"))
+            .unwrap_or_else(|e| panic!("librdkafka queues locally: {e}"));
 
-        let outcome = tokio::time::timeout(Duration::from_secs(20), ticket.outcome())
+        let confirmed = tokio::time::timeout(Duration::from_secs(20), confirmation.confirmed())
             .await
             .expect("the report arrives once the message timeout expires");
-        assert_eq!(
-            outcome,
-            scalo::transport::ack::TicketOutcome::Errored,
-            "a record no broker confirmed must not answer success"
+        assert!(
+            matches!(confirmed, Err(Error::Transport(_))),
+            "a record no broker confirmed must not answer success: {confirmed:?}"
         );
     }
 
@@ -909,27 +876,18 @@ mod tests {
         );
     }
 
-    /// A record refused at enqueue hands its piece back, so the caller can
+    /// A record refused at enqueue is refused for good, so the caller can
     /// dead-letter it rather than fail the whole request.
     #[tokio::test]
-    async fn a_record_refused_at_enqueue_hands_its_piece_back() {
+    async fn a_record_refused_at_enqueue_is_refused_for_good() {
         let sink = KafkaSink::new(&unroutable_config("60000"), None).unwrap();
-        let (_tickets, ticket) = held_ticket();
         let ceiling = scalo::transport::kafka::MESSAGE_MAX_BYTES as usize;
 
-        let refused = sink.send_held(
-            "events",
-            &Bytes::from(vec![b'x'; ceiling + 1]),
-            ticket.piece(),
-        );
+        let refused = sink.confirm("events", &Bytes::from(vec![b'x'; ceiling + 1]));
 
-        let Err((Error::Rejected(_), Some(piece))) = refused else {
-            panic!("expected a refusal with its piece, got {refused:?}");
-        };
-        piece.report(DeliveryStatus::Rejected);
-        assert_eq!(
-            ticket.outcome().await,
-            scalo::transport::ack::TicketOutcome::Rejected
+        assert!(
+            matches!(refused, Err(Error::Rejected(_))),
+            "got {refused:?}"
         );
     }
 

@@ -32,8 +32,8 @@ use scalo::UnifiedPressure;
 use scalo::dlq::{Dlq, DlqEntry, DlqError};
 use scalo::logger::security;
 use scalo::transport::AcknowledgementsConfig;
-use scalo::transport::DeliveryStatus;
 use scalo::transport::ack::{SinkConfirmation, Ticket};
+use scalo::transport::{DeliveryStatus, PieceFinalizer};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
@@ -50,10 +50,10 @@ use crate::error::{Error, Result};
 use crate::metrics::{Metrics, ValidationFailureReason};
 use crate::routing::{self, RouteResult, Routed, Router};
 use crate::server::traits::BoundAddr;
-use crate::sink::Sink;
 use crate::sink::file::FileSink;
 use crate::sink::grpc::GrpcSink;
 use crate::sink::kafka::KafkaSink;
+use crate::sink::{Confirmation, Sink};
 use crate::tenancy::Ingest;
 use crate::validation::depth::{self, MAX_PARSE_DEPTH};
 use crate::validation::{self, ValidationResult, Validator};
@@ -142,6 +142,12 @@ impl BatchOutcome {
     #[must_use]
     pub fn into_error(self) -> Option<Error> {
         self.unavailable.or(self.first_rejection)
+    }
+
+    /// Count a record taken earlier as refused with `error` instead.
+    fn untake(&mut self, error: Error) {
+        self.accepted = self.accepted.saturating_sub(1);
+        let _ = self.record(Err(error));
     }
 
     /// Mark the whole batch for a resend: no record in it counts as settled,
@@ -469,7 +475,20 @@ struct Dispatch<'a> {
     /// Counts the rows that fire, added to the rule counters once per request.
     tally: scalo::rules::Batch<'a>,
     grpc: Vec<(Arc<str>, Vec<Bytes>)>,
+    /// Held records the bus queued, settled once each delivery report is in.
+    bus: Vec<HeldOnBus>,
+    /// The index in the request of the record being sent.
+    record: usize,
     usage: Usage,
+}
+
+/// A held record the bus queued, waiting on its delivery report.
+struct HeldOnBus {
+    record: usize,
+    topic: Arc<str>,
+    payload: Bytes,
+    confirmation: Confirmation,
+    piece: PieceFinalizer,
 }
 
 impl<'a> Dispatch<'a> {
@@ -479,6 +498,8 @@ impl<'a> Dispatch<'a> {
             routes,
             tally: routes.router.tally(),
             grpc: Vec::new(),
+            bus: Vec::new(),
+            record: 0,
             usage: Usage::default(),
         }
     }
@@ -1122,10 +1143,13 @@ impl PipelineState {
     ) -> Usage {
         let routes = self.routes();
         let mut dispatch = Dispatch::new(ticket, &routes);
-        for payload in payloads {
+        let mut taken = Vec::with_capacity(payloads.len());
+        for (index, payload) in payloads.iter().enumerate() {
+            dispatch.record = index;
             let result = self
                 .process_inner(payload.clone(), target, ingest, &mut dispatch)
                 .await;
+            taken.push(result.is_ok());
             if outcome.record(result).is_break() {
                 break;
             }
@@ -1133,7 +1157,42 @@ impl PipelineState {
         if let Err(e) = self.send_grpc(&mut dispatch).await {
             outcome.retry_all(e);
         }
+        if outcome.unavailable.is_none() {
+            self.settle_bus(std::mem::take(&mut dispatch.bus), &mut taken, outcome)
+                .await;
+        }
         std::mem::take(&mut dispatch.usage)
+    }
+
+    /// Settle each held record the bus queued once its delivery report is in.
+    /// A report refusing the record for good takes the record through the
+    /// same disposal as a refusal at enqueue, so its sender gets the same
+    /// answer either way.
+    async fn settle_bus(
+        &self,
+        held: Vec<HeldOnBus>,
+        taken: &mut [bool],
+        outcome: &mut BatchOutcome,
+    ) {
+        for record in held {
+            match record.confirmation.confirmed().await {
+                Ok(()) => record.piece.report(DeliveryStatus::Delivered),
+                Err(Error::Rejected(reason)) => {
+                    let disposed = self
+                        .rejects
+                        .dispose_held(&record.topic, &record.payload, &reason, record.piece)
+                        .await;
+                    if let Err(e) = disposed
+                        && taken.get(record.record).copied().unwrap_or(false)
+                    {
+                        taken[record.record] = false;
+                        outcome.untake(e);
+                    }
+                }
+                // Not delivered: the piece, dropped, holds the request for a retry.
+                Err(_) => {}
+            }
+        }
     }
 
     /// Inner processing logic (after backpressure check).
@@ -1285,13 +1344,14 @@ impl PipelineState {
     }
 
     /// Send one record to a Kafka topic: through the buffer at enqueue, or
-    /// straight to the producer with a piece its delivery report settles.
+    /// straight to the producer, its piece settled from its delivery report
+    /// by [`settle_bus`](Self::settle_bus).
     #[inline]
     async fn send_to_kafka(
         &self,
         topic: &str,
         payload: &Bytes,
-        dispatch: &Dispatch<'_>,
+        dispatch: &mut Dispatch<'_>,
     ) -> Result<()> {
         let Some(ref kafka) = self.kafka else {
             return Err(Error::Config("Kafka sink not configured".into()));
@@ -1299,14 +1359,24 @@ impl PipelineState {
         let Some(ticket) = dispatch.ticket else {
             return kafka.at_enqueue().send(topic, payload.clone()).await;
         };
-        match kafka.primary.send_held(topic, payload, ticket.piece()) {
-            Ok(()) => Ok(()),
-            Err((Error::Rejected(reason), Some(piece))) => {
+        let piece = ticket.piece();
+        match kafka.primary.confirm(topic, payload) {
+            Ok(confirmation) => {
+                dispatch.bus.push(HeldOnBus {
+                    record: dispatch.record,
+                    topic: Arc::from(topic),
+                    payload: payload.clone(),
+                    confirmation,
+                    piece,
+                });
+                Ok(())
+            }
+            Err(Error::Rejected(reason)) => {
                 self.rejects
                     .dispose_held(topic, payload, &reason, piece)
                     .await
             }
-            Err((e, _unsettled)) => Err(e),
+            Err(e) => Err(e),
         }
     }
 
