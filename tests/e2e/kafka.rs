@@ -14,14 +14,15 @@
 
 //! Integration tests for sending data through the receiver to Kafka.
 //!
-//! These tests require either:
-//! 1. Environment variables from `.env` for existing Kafka cluster
-//! 2. Docker Compose with Strimzi (see docker-compose.test.yaml)
+//! The broker is the one `kafka_backend` picks: the cluster `.env` names
+//! (`KAFKA_BROKERS`, `KAFKA_SASL_*`, `KAFKA_SECURITY_PROTOCOL`), the
+//! docker-compose stack under `TEST_MODE=docker`, or a Kafka container. These
+//! run only when asked for, so a missing backend fails them.
 //!
-//! Run with: `cargo test --test integration_kafka -- --ignored`
+//! Run with: `cargo nextest run --test e2e --run-ignored all --ignore-default-filter`
 //!
 //! Environment variables:
-//! - KAFKA_BROKERS: Kafka broker addresses (default: localhost:9092)
+//! - KAFKA_BROKERS: Kafka broker addresses (unset: a Kafka container)
 //! - KAFKA_SASL_USER: SASL username (optional)
 //! - KAFKA_SASL_PASSWORD: SASL password (optional)
 //! - KAFKA_SASL_MECHANISM: SASL mechanism (optional, e.g., SCRAM-SHA-512)
@@ -39,37 +40,21 @@ use bytes::Bytes;
 use rdkafka::ClientConfig;
 use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::message::Message;
-use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
+use rdkafka::producer::{FutureProducer, FutureRecord};
 use tokio::time::timeout;
 
-use super::common::{kafka_test_config, test_topic};
+use super::common::{KafkaHandle, KafkaTestConfig, kafka_backend, test_topic};
 
-/// Check if Kafka is available (uses dual-mode config).
-async fn kafka_available() -> bool {
-    let kf = kafka_test_config();
-    if !kf.is_reachable() {
-        return false;
-    }
-
-    let mut config = ClientConfig::new();
-    config.set("bootstrap.servers", &kf.brokers);
-    config.set("socket.timeout.ms", "10000");
-    config.set("metadata.request.timeout.ms", "10000");
-    kf.apply_sasl(&mut config);
-
-    let producer: Result<FutureProducer, _> = config.create();
-    match producer {
-        Ok(p) => p
-            .client()
-            .fetch_metadata(None, Duration::from_secs(5))
-            .is_ok(),
-        Err(_) => false,
-    }
+/// The Kafka backend for a test that only runs when asked for: a missing one
+/// fails it rather than passing it untested.
+async fn required_backend() -> (KafkaHandle, KafkaTestConfig) {
+    kafka_backend()
+        .await
+        .expect("no Kafka backend: Docker is down and no cluster is configured")
 }
 
-/// Create a Kafka producer with dual-mode configuration.
-fn create_producer() -> FutureProducer {
-    let kf = kafka_test_config();
+/// Create a Kafka producer for `kf`.
+fn create_producer(kf: &KafkaTestConfig) -> FutureProducer {
     let mut config = ClientConfig::new();
     config.set("bootstrap.servers", &kf.brokers);
     config.set("message.timeout.ms", "30000");
@@ -88,9 +73,8 @@ fn send_immediately(config: &mut dfe_receiver::config::Config) {
     }
 }
 
-/// Create a Kafka consumer with dual-mode configuration.
-fn create_consumer(group_id: &str) -> StreamConsumer {
-    let kf = kafka_test_config();
+/// Create a Kafka consumer for `kf` in `group_id`.
+fn create_consumer(kf: &KafkaTestConfig, group_id: &str) -> StreamConsumer {
     let mut config = ClientConfig::new();
     config.set("bootstrap.servers", &kf.brokers);
     config.set("group.id", group_id);
@@ -109,27 +93,31 @@ fn create_consumer(group_id: &str) -> StreamConsumer {
 #[tokio::test]
 #[ignore = "requires Kafka - run with --ignored"]
 async fn test_kafka_connectivity() {
-    if !kafka_available().await {
-        eprintln!(
-            "Skipping: Kafka not available (TEST_MODE={:?})",
-            super::common::TestMode::detect()
-        );
-        return;
-    }
+    let (_kafka, kf) = required_backend().await;
+    let consumer = create_consumer(&kf, &format!("test-group-{}", uuid::Uuid::new_v4()));
+    let metadata = tokio::task::spawn_blocking(move || {
+        consumer
+            .fetch_metadata(None, Duration::from_secs(10))
+            .map(|m| m.brokers().len())
+    })
+    .await
+    .expect("metadata task");
+    assert!(
+        metadata.is_ok_and(|brokers| brokers > 0),
+        "no broker metadata from {}",
+        kf.brokers
+    );
 }
 
 /// Test sending a message directly to Kafka and consuming it.
 #[tokio::test]
 #[ignore = "requires Kafka - run with --ignored"]
 async fn test_kafka_roundtrip() {
-    if !kafka_available().await {
-        eprintln!("Skipping test: Kafka not available");
-        return;
-    }
+    let (_kafka, kf) = required_backend().await;
 
     let topic = test_topic("roundtrip");
-    let producer = create_producer();
-    let consumer = create_consumer(&format!("test-group-{}", uuid::Uuid::new_v4()));
+    let producer = create_producer(&kf);
+    let consumer = create_consumer(&kf, &format!("test-group-{}", uuid::Uuid::new_v4()));
 
     // Subscribe to topic
     consumer
@@ -177,14 +165,11 @@ async fn test_kafka_roundtrip() {
 #[tokio::test]
 #[ignore = "requires Kafka - run with --ignored"]
 async fn test_kafka_batch_send() {
-    if !kafka_available().await {
-        eprintln!("Skipping test: Kafka not available");
-        return;
-    }
+    let (_kafka, kf) = required_backend().await;
 
     let topic = test_topic("batch");
-    let producer = create_producer();
-    let consumer = create_consumer(&format!("test-group-{}", uuid::Uuid::new_v4()));
+    let producer = create_producer(&kf);
+    let consumer = create_consumer(&kf, &format!("test-group-{}", uuid::Uuid::new_v4()));
 
     consumer.subscribe(&[&topic]).expect("Failed to subscribe");
 
@@ -244,12 +229,7 @@ async fn test_receiver_kafka_sink() {
     use dfe_receiver::sink::Sink;
     use dfe_receiver::sink::kafka::KafkaSink;
 
-    if !kafka_available().await {
-        eprintln!("Skipping test: Kafka not available");
-        return;
-    }
-
-    let kf = kafka_test_config();
+    let (_kafka, kf) = required_backend().await;
     let config = kf.to_receiver_kafka_config();
 
     let topic = test_topic("sink");
@@ -267,7 +247,7 @@ async fn test_receiver_kafka_sink() {
     println!("✓ KafkaSink sent 10 messages to {topic}");
 
     // Verify messages arrived
-    let consumer = create_consumer(&format!("test-group-{}", uuid::Uuid::new_v4()));
+    let consumer = create_consumer(&kf, &format!("test-group-{}", uuid::Uuid::new_v4()));
     consumer.subscribe(&[&topic]).expect("Failed to subscribe");
 
     let mut received = 0;
@@ -292,12 +272,7 @@ async fn test_full_pipeline_to_kafka() {
     use dfe_receiver::config::SharedConfig;
     use dfe_receiver::pipeline::PipelineState;
 
-    if !kafka_available().await {
-        eprintln!("Skipping test: Kafka not available");
-        return;
-    }
-
-    let kf = kafka_test_config();
+    let (_kafka, kf) = required_backend().await;
     let mut config = kf.to_receiver_config();
 
     // Configure routing to use test topic
@@ -333,7 +308,7 @@ async fn test_full_pipeline_to_kafka() {
     tokio::time::sleep(Duration::from_secs(5)).await;
 
     // Verify messages arrived
-    let consumer = create_consumer(&format!("test-group-{}", uuid::Uuid::new_v4()));
+    let consumer = create_consumer(&kf, &format!("test-group-{}", uuid::Uuid::new_v4()));
     consumer.subscribe(&[&topic]).expect("Failed to subscribe");
 
     let mut received = 0;
@@ -361,12 +336,7 @@ async fn test_http_to_kafka() {
     use dfe_receiver::server::traits::ProtocolHandler;
     use tokio_util::sync::CancellationToken;
 
-    if !kafka_available().await {
-        eprintln!("Skipping test: Kafka not available");
-        return;
-    }
-
-    let kf = kafka_test_config();
+    let (_kafka, kf) = required_backend().await;
     let mut config = kf.to_receiver_config();
 
     // Configure routing
@@ -428,7 +398,7 @@ async fn test_http_to_kafka() {
     let _ = timeout(Duration::from_secs(5), server_handle).await;
 
     // Verify messages in Kafka
-    let consumer = create_consumer(&format!("test-group-{}", uuid::Uuid::new_v4()));
+    let consumer = create_consumer(&kf, &format!("test-group-{}", uuid::Uuid::new_v4()));
     consumer.subscribe(&[&topic]).expect("Failed to subscribe");
 
     let mut received = 0;
@@ -453,12 +423,7 @@ async fn test_category_routing() {
     use dfe_receiver::config::SharedConfig;
     use dfe_receiver::pipeline::PipelineState;
 
-    if !kafka_available().await {
-        eprintln!("Skipping test: Kafka not available");
-        return;
-    }
-
-    let kf = kafka_test_config();
+    let (_kafka, kf) = required_backend().await;
     let mut config = kf.to_receiver_config();
 
     // Configure category-based routing
@@ -532,11 +497,14 @@ async fn test_category_routing() {
         (&network_topic, "network"),
         (&default_topic, "default"),
     ] {
-        let consumer = create_consumer(&format!("test-group-{}", uuid::Uuid::new_v4()));
+        let consumer = create_consumer(&kf, &format!("test-group-{}", uuid::Uuid::new_v4()));
         consumer.subscribe(&[topic]).expect("Failed to subscribe");
 
         let result = timeout(Duration::from_secs(10), consumer.recv()).await;
-        assert!(result.is_ok(), "Expected message in {name} topic: {topic}");
+        assert!(
+            matches!(result, Ok(Ok(_))),
+            "Expected message in {name} topic {topic}, got {result:?}"
+        );
         println!("✓ Verified message in {name} topic: {topic}");
     }
 }
@@ -548,12 +516,7 @@ async fn test_dlq_routing() {
     use dfe_receiver::config::SharedConfig;
     use dfe_receiver::pipeline::PipelineState;
 
-    if !kafka_available().await {
-        eprintln!("Skipping test: Kafka not available");
-        return;
-    }
-
-    let kf = kafka_test_config();
+    let (_kafka, kf) = required_backend().await;
     let mut config = kf.to_receiver_config();
 
     // Configure DLQ
@@ -591,12 +554,15 @@ async fn test_dlq_routing() {
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // Verify message in DLQ
-    let consumer = create_consumer(&format!("test-group-{}", uuid::Uuid::new_v4()));
+    let consumer = create_consumer(&kf, &format!("test-group-{}", uuid::Uuid::new_v4()));
     consumer
         .subscribe(&[&dlq_topic])
         .expect("Failed to subscribe");
 
     let result = timeout(Duration::from_secs(10), consumer.recv()).await;
-    assert!(result.is_ok(), "Expected message in DLQ: {dlq_topic}");
+    assert!(
+        matches!(result, Ok(Ok(_))),
+        "Expected message in DLQ {dlq_topic}, got {result:?}"
+    );
     println!("✓ Verified message in DLQ: {dlq_topic}");
 }

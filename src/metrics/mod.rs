@@ -1030,6 +1030,12 @@ const RECEIVER_SERIES: &[SeriesSpec] = &[
         "Records dropped with no way to tell the sender, by transport and reason",
     ),
     (
+        "receiver_prometheus_rw_unrecorded_total",
+        MetricType::Counter,
+        &["kind"],
+        "Remote write exemplars and histograms an otel or hyperdx record cannot hold, by kind",
+    ),
+    (
         "receiver_request_duration_seconds",
         MetricType::Histogram,
         &["transport"],
@@ -1144,10 +1150,10 @@ const RECEIVER_SERIES: &[SeriesSpec] = &[
         "Records no broker confirmed, by librdkafka error code; a timed-out record may still have been written",
     ),
     (
-        "receiver_dlq_start_failures_total",
+        "receiver_kafka_resends_total",
         MetricType::Counter,
-        &["backend"],
-        "DLQ starts that failed, by the backend that refused (kafka, file or other); the receiver runs on without a DLQ",
+        &[],
+        "Records answered at enqueue that librdkafka gave up on with a message timeout, queued again",
     ),
     (
         "receiver_source_org_id_stripped_total",

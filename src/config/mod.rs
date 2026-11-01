@@ -437,33 +437,7 @@ impl Config {
             )));
         }
 
-        // Every destination a rule names must resolve, or matched records have
-        // nowhere to go and the failure only shows up under traffic.
-        for (name, spec) in &self.destinations.named {
-            match (&spec.grpc, &spec.kafka) {
-                (Some(grpc), None) if grpc.endpoint.is_empty() => {
-                    return Err(Error::Config(format!(
-                        "destinations.{name}.grpc.endpoint is required"
-                    )));
-                }
-                (Some(_), None) | (None, Some(_)) => {}
-                _ => {
-                    return Err(Error::Config(format!(
-                        "destinations.{name} needs exactly one of grpc or kafka"
-                    )));
-                }
-            }
-        }
-        for name in self.destinations.referenced_names() {
-            if !self.destinations.named.contains_key(name)
-                && name != BUS_DESTINATION
-                && name != LOADER_DESTINATION
-            {
-                return Err(Error::Config(format!(
-                    "destination '{name}' is not declared under destinations"
-                )));
-            }
-        }
+        self.destinations.validate()?;
 
         // `loader` with `loader.transport: kafka` is a bus destination, so a
         // brokerless config that routes there is refused here rather than per
@@ -2538,6 +2512,55 @@ impl Default for DestinationsConfig {
 }
 
 impl DestinationsConfig {
+    /// Refuse a declared destination without exactly one transport, an empty
+    /// destination list, and a name nothing declares: each leaves a matched
+    /// record nowhere to go, found only under traffic, and an empty list
+    /// answers it delivered.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Config`] naming the key at fault.
+    pub fn validate(&self) -> Result<()> {
+        for (name, spec) in &self.named {
+            match (&spec.grpc, &spec.kafka) {
+                (Some(grpc), None) if grpc.endpoint.is_empty() => {
+                    return Err(Error::Config(format!(
+                        "destinations.{name}.grpc.endpoint is required"
+                    )));
+                }
+                (Some(_), None) | (None, Some(_)) => {}
+                _ => {
+                    return Err(Error::Config(format!(
+                        "destinations.{name} needs exactly one of grpc or kafka"
+                    )));
+                }
+            }
+        }
+        let lists = std::iter::once(("default".to_string(), &self.default)).chain(
+            self.sources
+                .iter()
+                .map(|(source, list)| (format!("sources.{source}"), list)),
+        );
+        for (key, list) in lists {
+            if list.names().is_empty() {
+                return Err(Error::Config(format!(
+                    "destinations.{key} is an empty list: name at least one destination"
+                )));
+            }
+        }
+        for name in self.referenced_names() {
+            if !self.named.contains_key(name)
+                && name != BUS_DESTINATION
+                && name != LOADER_DESTINATION
+            {
+                return Err(Error::Config(format!(
+                    "destination '{name}' is not declared under destinations"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Every destination name the config refers to, default and per source.
     pub fn referenced_names(&self) -> impl Iterator<Item = &str> {
         self.default
@@ -2890,6 +2913,11 @@ pub struct SpilloverConfig {
 
     /// How often to check disk usage, in seconds.
     pub poll_interval_secs: u64,
+
+    /// Most bytes each sink's spool holds. Unset on Kubernetes, the cap is 90%
+    /// of the size limit of the writable volume the spool sits on, and a spool
+    /// on no such volume is refused at startup.
+    pub max_spool_bytes: Option<u64>,
 }
 
 /// Where the disk spillover spools by default, and where the deployment
@@ -2915,6 +2943,7 @@ impl Default for SpilloverConfig {
             path: default_spillover_path(),
             max_usage_percent: default_max_usage_percent(),
             poll_interval_secs: default_poll_interval_secs(),
+            max_spool_bytes: None,
         }
     }
 }
@@ -4267,6 +4296,35 @@ webhook:
                 err.contains("reaches the bus but transport is 'grpc'"),
                 "{yaml}: {err}"
             );
+        }
+    }
+
+    /// An empty destination list routes a record nowhere and answers it
+    /// delivered, so it is refused for the default and for a source, and the
+    /// same configs with a destination in the list validate.
+    #[test]
+    fn an_empty_destination_list_is_refused() {
+        let brokers = "kafka:\n  brokers: [\"localhost:9092\"]\n";
+        for (empty, filled, names) in [
+            (
+                "destinations:\n  default: []\n",
+                "destinations:\n  default: [kafka]\n",
+                "destinations.default",
+            ),
+            (
+                "destinations:\n  sources:\n    orders: []\n",
+                "destinations:\n  sources:\n    orders: [kafka]\n",
+                "destinations.sources.orders",
+            ),
+        ] {
+            let err = load_yaml(&format!("{brokers}{empty}"))
+                .validate()
+                .expect_err("an empty list delivers nowhere")
+                .to_string();
+            assert!(err.contains(names), "{empty}: {err}");
+            load_yaml(&format!("{brokers}{filled}"))
+                .validate()
+                .unwrap_or_else(|e| panic!("{filled}: {e}"));
         }
     }
 

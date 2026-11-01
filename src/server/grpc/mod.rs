@@ -368,6 +368,17 @@ impl ProtocolHandler for GrpcVectorHandler {
         } else {
             None
         };
+        // A service registered with no interceptor takes no reload: turning
+        // auth on or off on this port is a restart.
+        if let Some(auth_state) = &auth_state {
+            crate::server::http::spawn_auth_reload_watcher(
+                self.pipeline.shared_config(),
+                auth_state.clone(),
+                |config| &config.grpc.auth,
+                TRANSPORT,
+                shutdown.clone(),
+            );
+        }
 
         serve(
             &self.config,

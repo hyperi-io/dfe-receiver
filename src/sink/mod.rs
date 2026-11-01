@@ -21,8 +21,9 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use tokio::sync::oneshot;
 
-use crate::error::{RETRY_AFTER_SECS, Result};
+use crate::error::{Error, RETRY_AFTER_SECS, Result};
 
 /// Trait for message sinks (Kafka, gRPC, file).
 #[async_trait]
@@ -39,6 +40,19 @@ pub trait Sink: Send + Sync {
         Ok(())
     }
 
+    /// Send a message and hand back the sink's later answer on whether it was
+    /// delivered, for a caller that keeps its copy until then. The default
+    /// answers delivered once [`send`](Self::send) returns, so it confirms
+    /// what `send` does.
+    ///
+    /// # Errors
+    ///
+    /// The send error, when the message was not taken.
+    async fn send_confirmed(&self, topic: &str, payload: &Bytes) -> Result<Confirmation> {
+        self.send(topic, payload.clone()).await?;
+        Ok(Confirmation::settled(Ok(())))
+    }
+
     /// Why this sink refuses `payload` for good, known before it is sent. The
     /// default refuses nothing up front.
     fn refuses(&self, payload: &Bytes) -> Option<String> {
@@ -51,6 +65,43 @@ pub trait Sink: Send + Sync {
 
     /// Check if the sink is healthy.
     fn is_healthy(&self) -> bool;
+}
+
+/// A sink's answer, once it has one, on whether a message it took was
+/// delivered.
+#[must_use = "a confirmation says nothing until it is awaited"]
+#[derive(Debug)]
+pub struct Confirmation(oneshot::Receiver<Result<()>>);
+
+impl Confirmation {
+    /// A confirmation answered through the returned sender.
+    pub fn pending() -> (oneshot::Sender<Result<()>>, Self) {
+        let (answer, confirmation) = oneshot::channel();
+        (answer, Self(confirmation))
+    }
+
+    /// A confirmation already answered with `result`.
+    pub fn settled(result: Result<()>) -> Self {
+        let (answer, confirmation) = Self::pending();
+        // The receiver is held here, so the send cannot fail.
+        let _ = answer.send(result);
+        confirmation
+    }
+
+    /// Wait for the answer.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Rejected`] for a message the destination refuses for good,
+    /// and [`Error::Transport`] for any other failure, including an answer
+    /// dropped unsent.
+    pub async fn confirmed(self) -> Result<()> {
+        self.0.await.unwrap_or_else(|_| {
+            Err(Error::Transport(
+                "the sink dropped a delivery confirmation unanswered".into(),
+            ))
+        })
+    }
 }
 
 /// How long a sink that failed is reported unhealthy before traffic is let

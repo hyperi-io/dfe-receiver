@@ -15,7 +15,8 @@
 //! is more straightforward than fighting the netgauze API.
 //!
 //! v9 and IPFIX share `netgauze_flow_pkt::codec::FlowInfoCodec`, instantiated
-//! per exporter IP so each router's template cache is isolated. The canonical
+//! per exporter IP and observation domain, the scope a template id is unique
+//! in (RFC 7011 section 3.4.3), so each cache is isolated. The canonical
 //! mapping iterates the typed `ie::Field` variants that netgauze emits and
 //! populates a `NetflowFields` struct. NSEL (firewallEvent / Cisco PEN=9
 //! NF_F_FW_EVENT) and NAT44 (natEvent) discriminators flip `record_kind` to
@@ -28,7 +29,7 @@ use crate::server::flow::schema::CanonicalRecord;
 use bytes::BytesMut;
 use netgauze_flow_pkt::codec::{FlowInfoCodec, FlowInfoCodecDecoderError};
 use netgauze_flow_pkt::ie::Field;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr};
 use thiserror::Error;
@@ -189,43 +190,102 @@ impl NetflowFields {
 /// can do LRU bookkeeping uniformly.
 struct ExporterState {
     codec: FlowInfoCodec,
+    /// Every cached template, oldest first, so the cap evicts the oldest.
+    arrivals: VecDeque<(TemplateFamily, u16)>,
+}
+
+/// Which of the codec's template maps a template id lives in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum TemplateFamily {
+    V9,
+    Ipfix,
 }
 
 impl ExporterState {
     fn new() -> Self {
         Self {
             codec: FlowInfoCodec::new(),
+            arrivals: VecDeque::new(),
         }
+    }
+
+    fn cached(&self) -> usize {
+        self.codec.netflow_templates_map().len() + self.codec.ipfix_templates_map().len()
+    }
+
+    /// Hold the cache to `max` templates, evicting the oldest first. Returns
+    /// how many were evicted.
+    ///
+    /// A template sent again replaces its entry in place, so the cache only
+    /// changes size when a template arrives or is withdrawn, and only then is
+    /// the arrival order brought up to date.
+    fn hold_to(&mut self, max: usize) -> usize {
+        if self.cached() != self.arrivals.len() {
+            let v9 = self.codec.netflow_templates_map();
+            let ipfix = self.codec.ipfix_templates_map();
+            self.arrivals.retain(|(family, id)| match family {
+                TemplateFamily::V9 => v9.contains_key(id),
+                TemplateFamily::Ipfix => ipfix.contains_key(id),
+            });
+            let known: HashSet<(TemplateFamily, u16)> = self.arrivals.iter().copied().collect();
+            let mut arrived: Vec<(TemplateFamily, u16)> = v9
+                .keys()
+                .map(|id| (TemplateFamily::V9, *id))
+                .chain(ipfix.keys().map(|id| (TemplateFamily::Ipfix, *id)))
+                .filter(|template| !known.contains(template))
+                .collect();
+            // One packet's templates have no order the map keeps, so ids order them.
+            arrived.sort_unstable_by_key(|(_, id)| *id);
+            self.arrivals.extend(arrived);
+        }
+        let mut evicted = 0;
+        while self.arrivals.len() > max {
+            let Some((family, id)) = self.arrivals.pop_front() else {
+                break;
+            };
+            let removed = match family {
+                TemplateFamily::V9 => self.codec.netflow_templates_map_mut().remove(&id).is_some(),
+                TemplateFamily::Ipfix => self.codec.ipfix_templates_map_mut().remove(&id).is_some(),
+            };
+            evicted += usize::from(removed);
+        }
+        evicted
     }
 }
 
 pub struct NetflowDecoder {
-    state: HashMap<IpAddr, ExporterState>,
-    // TODO: template_cache.max_per_exporter not yet enforced.
-    //
-    // netgauze-flow-pkt 0.12's `TemplatesMap` is internal and doesn't expose a
-    // per-exporter prune API. Enforcing this cap requires either upstream
-    // netgauze support or a custom wrapper that intercepts template additions
-    // and tracks counts per exporter scope.
-    //
-    // Currently the bound on `max_exporters` (whole exporters evicted via LRU)
-    // is the only template-related backstop.
-    _max_per_exporter: usize,
+    /// Keyed by exporter IP and observation domain.
+    state: HashMap<(IpAddr, u32), ExporterState>,
+    /// Templates one exporter may hold, v9 and IPFIX together.
+    max_per_exporter: usize,
     max_exporters: usize,
     metrics: FlowMetrics,
+    raw: bool,
 }
 
 impl NetflowDecoder {
     pub fn new(max_per_exporter: usize, max_exporters: usize, metrics: FlowMetrics) -> Self {
         Self {
             state: HashMap::new(),
-            _max_per_exporter: max_per_exporter,
+            max_per_exporter,
             max_exporters,
             metrics,
+            raw: true,
         }
     }
 
-    fn ensure_exporter_slot(&mut self, source: IpAddr) -> &mut ExporterState {
+    /// Templates cached for `source` across its observation domains, v9 and
+    /// IPFIX together.
+    #[cfg(test)]
+    pub(crate) fn templates(&self, source: IpAddr) -> usize {
+        self.state
+            .iter()
+            .filter(|((ip, _), _)| *ip == source)
+            .map(|(_, exporter)| exporter.cached())
+            .sum()
+    }
+
+    fn ensure_exporter_slot(&mut self, source: (IpAddr, u32)) -> &mut ExporterState {
         // Crude LRU: if we're full and `source` is new, evict the first entry
         // we find. A proper LRU goes in with the metrics pass.
         if !self.state.contains_key(&source)
@@ -267,10 +327,17 @@ impl FlowDecoder for NetflowDecoder {
         }
 
         match kind {
-            ProtocolKind::NetflowV5 => decode_v5(data, source),
+            ProtocolKind::NetflowV5 => decode_v5(data, source, self.raw),
             ProtocolKind::NetflowV9 | ProtocolKind::Ipfix => {
-                let exporter = self.ensure_exporter_slot(source);
-                decode_v9_or_ipfix(&mut exporter.codec, data, source, kind)
+                let max = self.max_per_exporter;
+                let raw = self.raw;
+                let exporter = self.ensure_exporter_slot((source, observation_domain(data, kind)));
+                let decoded = decode_v9_or_ipfix(&mut exporter.codec, data, source, kind, raw);
+                let evicted = exporter.hold_to(max);
+                for _ in 0..evicted {
+                    self.metrics.template_evicted_total.inc();
+                }
+                decoded
             }
             ProtocolKind::NetflowV7 => {
                 Err(NetflowError::Parse("NetFlow v7 not supported".to_string()))
@@ -331,6 +398,10 @@ impl FlowDecoder for NetflowDecoder {
         buf.write_all(record.raw_json.as_bytes())
     }
 
+    fn capture_raw(&mut self, on: bool) {
+        self.raw = on;
+    }
+
     fn record_kind(record: &Self::Record) -> &'static str {
         record.fields.record_kind
     }
@@ -353,9 +424,22 @@ impl FlowDecoder for NetflowDecoder {
     }
 }
 
+/// The observation domain a v9 (`source_id`) or IPFIX header names, 0 for a
+/// header too short to carry one, which the codec then refuses.
+fn observation_domain(data: &[u8], kind: ProtocolKind) -> u32 {
+    let at = if kind == ProtocolKind::Ipfix { 12 } else { 16 };
+    data.get(at..at + 4)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map_or(0, u32::from_be_bytes)
+}
+
 // ----- v5 hand-rolled parser ------------------------------------------------
 
-fn decode_v5(data: &[u8], source: IpAddr) -> Result<DecodedPacket<NetflowRecord>, NetflowError> {
+fn decode_v5(
+    data: &[u8],
+    source: IpAddr,
+    raw: bool,
+) -> Result<DecodedPacket<NetflowRecord>, NetflowError> {
     if data.len() < V5_HEADER_BYTES {
         return Err(NetflowError::Parse(format!(
             "v5 datagram too short: {} bytes",
@@ -389,7 +473,7 @@ fn decode_v5(data: &[u8], source: IpAddr) -> Result<DecodedPacket<NetflowRecord>
     let mut records = Vec::with_capacity(count);
     for i in 0..count {
         let off = V5_HEADER_BYTES + i * V5_RECORD_BYTES;
-        let rec = parse_v5_record(&data[off..off + V5_RECORD_BYTES])?;
+        let rec = parse_v5_record(&data[off..off + V5_RECORD_BYTES], raw)?;
         records.push(rec);
     }
 
@@ -402,7 +486,7 @@ fn decode_v5(data: &[u8], source: IpAddr) -> Result<DecodedPacket<NetflowRecord>
     })
 }
 
-fn parse_v5_record(buf: &[u8]) -> Result<NetflowRecord, NetflowError> {
+fn parse_v5_record(buf: &[u8], raw: bool) -> Result<NetflowRecord, NetflowError> {
     if buf.len() < V5_RECORD_BYTES {
         return Err(NetflowError::Parse(format!(
             "v5 record short: {} bytes",
@@ -446,9 +530,14 @@ fn parse_v5_record(buf: &[u8]) -> Result<NetflowRecord, NetflowError> {
     };
     fields.ip_version = Some(4);
 
-    // For v5, the verbatim JSON is a compact representation of the structured
-    // fields. We don't have a netgauze object to serialise here, so we build
-    // one. This keeps `render_raw` cheap and avoids an extra serde dependency.
+    // v5 has no netgauze object to serialise, so the verbatim form is built
+    // from the parsed fields.
+    if !raw {
+        return Ok(NetflowRecord {
+            raw_json: String::new(),
+            fields,
+        });
+    }
     let raw_json = serde_json::to_string(&V5RawJson {
         version: 5,
         src_addr: src.to_string(),
@@ -495,6 +584,7 @@ fn decode_v9_or_ipfix(
     data: &[u8],
     source: IpAddr,
     kind: ProtocolKind,
+    raw: bool,
 ) -> Result<DecodedPacket<NetflowRecord>, NetflowError> {
     let mut buf = BytesMut::from(data);
     let flow_info = match codec.decode(&mut buf) {
@@ -512,7 +602,11 @@ fn decode_v9_or_ipfix(
 
     let mut records: Vec<NetflowRecord> = Vec::new();
     for (_set_id, fields) in flow_info.data_record_fields() {
-        let raw_json = serde_json::to_string(fields).unwrap_or_else(|_| "[]".to_string());
+        let raw_json = if raw {
+            serde_json::to_string(fields).unwrap_or_else(|_| "[]".to_string())
+        } else {
+            String::new()
+        };
         let canonical = map_fields_to_canonical(fields);
         records.push(NetflowRecord {
             raw_json,

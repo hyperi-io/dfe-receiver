@@ -15,6 +15,8 @@
 #[allow(dead_code)]
 mod common;
 
+#[path = "integration/auth_reload.rs"]
+mod auth_reload;
 #[path = "integration/config_dotenv.rs"]
 mod config_dotenv;
 // A leak check has to fail the test when the container is still there, and the
@@ -48,6 +50,8 @@ mod json_depth;
 mod json_only;
 #[path = "integration/kafka_sink.rs"]
 mod kafka_sink;
+#[path = "integration/kafka_tls.rs"]
+mod kafka_tls;
 #[path = "integration/listener_admission.rs"]
 mod listener_admission;
 #[path = "integration/listener_failures.rs"]

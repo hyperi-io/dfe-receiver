@@ -191,19 +191,23 @@ pub async fn create_auth_state(config: &AuthConfig) -> Result<AuthState> {
     }
 }
 
-/// Spawn a background task that watches for auth config changes and updates
-/// bearer tokens when the config is hot-reloaded.
+/// Spawn a task that replaces `auth_state` whole each time a config reload
+/// changes the auth section `section` picks, until `shutdown`.
 ///
-/// Compares the auth config on each `SharedConfig` version bump. If bearer
-/// tokens changed, swaps them atomically via `BearerTokenProvider::update_tokens`.
+/// The replacement is built as at startup, secret source and refresh task
+/// included, so a revoked token, header value or secret source stops working
+/// on the reload that drops it. A replacement that does not build leaves the
+/// current one in place.
 pub fn spawn_auth_reload_watcher(
     shared_config: SharedConfig,
     auth_state: AuthState,
+    section: fn(&crate::config::Config) -> &AuthConfig,
+    listener: &'static str,
     shutdown: CancellationToken,
 ) {
     tokio::spawn(async move {
         let mut rx = shared_config.subscribe();
-        let mut current_auth = shared_config.get().server.auth.clone();
+        let mut current_auth = section(&shared_config.get()).clone();
 
         loop {
             tokio::select! {
@@ -213,35 +217,34 @@ pub fn spawn_auth_reload_watcher(
                         break; // Channel closed
                     }
                     let new_config = shared_config.get();
-                    let new_auth = &new_config.server.auth;
-
-                    if *new_auth != current_auth {
-                        info!("Auth config changed, reloading");
-
-                        // Update bearer tokens if provider exists and tokens changed
-                        if let Some(ref provider) = auth_state.bearer_provider
-                            && new_auth.bearer.tokens != current_auth.bearer.tokens
-                        {
-                            provider.update_tokens(&new_auth.bearer.tokens);
-                            info!(
-                                count = new_auth.bearer.tokens.len(),
-                                "Bearer tokens reloaded from config"
+                    let new_auth = section(&new_config);
+                    if *new_auth == current_auth {
+                        continue;
+                    }
+                    match create_auth_state(new_auth).await {
+                        Ok(fresh) => {
+                            auth_state.replace(&fresh);
+                            info!(listener, "Auth configuration reloaded");
+                            security::config_changed(
+                                "auth_reload",
+                                "system",
+                                &format!("{listener} auth configuration updated via config reload"),
+                            );
+                            current_auth = new_auth.clone();
+                        }
+                        Err(e) => {
+                            error!(
+                                listener,
+                                error = %e,
+                                "Reloaded auth configuration does not build; keeping the current one"
                             );
                         }
-
-                        security::config_changed(
-                            "auth_reload",
-                            "system",
-                            "auth configuration updated via config reload",
-                        );
-
-                        current_auth = new_auth.clone();
                     }
                 }
             }
         }
 
-        debug!("Auth reload watcher stopped");
+        debug!(listener, "Auth reload watcher stopped");
     });
 }
 
@@ -283,6 +286,8 @@ async fn serve(
     spawn_auth_reload_watcher(
         pipeline.shared_config(),
         auth_state.clone(),
+        |config| &config.server.auth,
+        TRANSPORT,
         shutdown.clone(),
     );
 
@@ -1450,7 +1455,7 @@ mod tests {
         // Verify HttpState can be cloned (required for axum)
         let auth = AuthState::new(test_auth_config());
         let auth2 = auth.clone();
-        assert_eq!(auth.config.mode, auth2.config.mode);
+        assert_eq!(auth.current().config.mode, auth2.current().config.mode);
     }
 
     #[test]

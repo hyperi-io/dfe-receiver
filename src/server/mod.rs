@@ -24,6 +24,7 @@ mod hold;
 pub mod http;
 pub mod ip_filter;
 pub mod lumberjack;
+mod metric_record;
 pub mod netflow;
 #[cfg(feature = "otlp")]
 pub mod otlp;

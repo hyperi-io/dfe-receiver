@@ -33,7 +33,9 @@ use dfe_receiver::config::{Config, TlsConfig};
 use scalo::transport::TransportReceiver;
 use tokio::process::Command;
 
-use super::{claim_container_name, container_name, grpc_destination, test_labels};
+use scalo::deployment::test_support::shared_service;
+
+use super::{SUITE, grpc_destination};
 
 /// Throwaway certificates are made by this image, so the host needs no openssl.
 ///
@@ -294,12 +296,12 @@ impl Peer {
     /// The docker CLI's complaint when the image cannot be pulled, the files
     /// cannot be copied in, or the container will not start.
     pub async fn start(spec: PeerSpec<'_>) -> Result<Self, String> {
-        let name = claim_container_name(&container_name(Some(spec.test), spec.service));
+        let name = shared_service::container_name(&SUITE, Some(spec.test), spec.service);
         let mut create: Vec<String> = ["create", "--name", &name, "--network", "host"]
             .iter()
             .map(|s| (*s).to_string())
             .collect();
-        for (key, value) in test_labels(spec.service) {
+        for (key, value) in shared_service::labels(&SUITE, spec.service, std::process::id()) {
             create.extend(["--label".to_string(), format!("{key}={value}")]);
         }
         if let Some(user) = spec.user {

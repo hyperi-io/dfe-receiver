@@ -80,11 +80,13 @@ pub struct GenericCounters {
     pub if_out_discards: u64,
 }
 
-pub struct SflowDecoder;
+pub struct SflowDecoder {
+    raw: bool,
+}
 
 impl SflowDecoder {
     pub fn new() -> Self {
-        Self
+        Self { raw: true }
     }
 }
 
@@ -127,7 +129,11 @@ impl FlowDecoder for SflowDecoder {
                             break;
                         }
                     }
-                    let raw_json = serialise_flow_sample_raw(fs);
+                    let raw_json = if self.raw {
+                        serialise_flow_sample_raw(fs)
+                    } else {
+                        String::new()
+                    };
                     records.push(SflowRecord::Flow {
                         sampling_rate: fs.sampling_rate,
                         input_iface: fs.input_iface,
@@ -172,7 +178,11 @@ impl FlowDecoder for SflowDecoder {
                         }),
                         CounterRecord::Opaque { .. } => None,
                     });
-                    let raw_json = serialise_counter_sample_raw(cs);
+                    let raw_json = if self.raw {
+                        serialise_counter_sample_raw(cs)
+                    } else {
+                        String::new()
+                    };
                     records.push(SflowRecord::Counter { generic, raw_json });
                 }
                 Sample::Opaque { .. } => {
@@ -244,6 +254,10 @@ impl FlowDecoder for SflowDecoder {
             SflowRecord::Counter { raw_json, .. } => raw_json.as_bytes(),
         };
         buf.write_all(raw)
+    }
+
+    fn capture_raw(&mut self, on: bool) {
+        self.raw = on;
     }
 
     fn record_kind(record: &Self::Record) -> &'static str {

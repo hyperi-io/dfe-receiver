@@ -152,8 +152,20 @@ async fn ingest_handler(body: Bytes) -> StatusCode {
 ### gRPC Server (tonic)
 
 - Vector sink protocol compatibility
+- A Vector metric becomes a record with `_vector_type: "metric"`, its name, namespace, kind, tags (`tags_v2` where sent, a multi-valued tag as an array) and `interval_ms`, and its value under its kind: `counter`, `gauge`, `set`, `distribution`, `aggregated_histogram`, `aggregated_summary` or `sketch`. One with no value is refused with `INVALID_ARGUMENT`
 - Shared routing/batching pipeline with HTTP
 - Same auth middleware (via Tower)
+
+### OTLP metrics
+
+- Each data point is one record. An exponential histogram carries its buckets either side of zero as `positive_offset` and `positive_bucket_counts` and the `negative_` pair (`PositiveOffset`, `PositiveBucketCounts` and so on in `hyperdx` mode), with `zero_threshold` in `generic`. A data point's exemplars ride on its record: `exemplars` in `generic`, the `Exemplars.*` arrays in `hyperdx`, trace and span ids as hex. Remote write shapes its records the same way, and both modes hold every OTLP exemplar and bucket, so nothing goes uncounted.
+
+### Prometheus Remote Write
+
+- `prometheus_rw.mode: native` (default) writes each sample, each exemplar (`_type: "exemplar"`) and each native histogram (`_type: "histogram"`) as its own record, with the series labels as top-level fields. A histogram record carries `count`, `sum`, `schema`, `zero_threshold`, `zero_count`, `reset_hint`, its buckets as `positive_offset` and `positive_bucket_counts` (and the `negative_` pair), the Prometheus index of the first bucket and every count from there with gaps filled, and `custom_values` for a custom-bucket histogram.
+- `otel` and `hyperdx` write the OTLP converter's metric shapes: an exponential schema as `exponential_histogram` (the OTel offset is the Prometheus index less one), a custom-bucket histogram as `histogram` with its bounds as `explicit_bounds`. A series' exemplars ride on its last record: `exemplars` in `otel`, the `Exemplars.*` arrays in `hyperdx`, with the `trace_id` and `span_id` labels lifted out.
+- What those shapes cannot hold is counted on `receiver_prometheus_rw_unrecorded_total{kind}`, never dropped silently: `exemplar` for exemplars sent with no sample of their series (Prometheus sends them in a series of their own), `float_histogram`, whose counts OTel keeps as integers, and `unknown_schema`. `mode: native` records all three.
+- A histogram whose spans name more than 4096 buckets, a negative gap, or more buckets than it has counts is refused as malformed with a 400.
 
 ### JSON Validation (sonic_rs)
 
@@ -250,6 +262,8 @@ Supports:
 - Dynamic loading from secret managers
 - Background refresh with configurable interval
 - Token rotation without restart
+
+A config reload replaces a listener's whole auth section at once: mode, static tokens, accepted headers and secret source, with the replaced secret refresh stopped. It reaches every listener that authenticates -- `server`, `splunk_hec`, `prometheus_rw`, `otlp` (both ports) and `grpc` -- as soon as the reload lands, so a revoked credential is refused on the next request. A reloaded section that does not build, a secret source that will not load say, keeps the current one and logs an error. A gRPC or OTLP gRPC port started with `auth.mode: none` has no interceptor to reload, so turning its auth on or off takes a restart. A webhook caller's secret rotates on its own `refresh_interval_secs`.
 
 Secret source format: `provider:path[:key]`, resolved by
 `scalo::secrets::resolve` -- the receiver has no resolver of its own.
@@ -527,8 +541,9 @@ holds it.
 | `receiver_kafka_send_errors_total` | Counter | Messages librdkafka refused to queue |
 | `receiver_kafka_delivered_total` | Counter | Messages a broker acknowledged |
 | `receiver_kafka_delivery_failures_total` | Counter | Messages no broker confirmed, by `reason` (librdkafka error code); a timed-out message may still have been written |
+| `receiver_kafka_resends_total` | Counter | Messages answered at enqueue that librdkafka gave up on with a message timeout, queued again |
 | `records_dlq_total` | Counter | Messages sent to DLQ (scalo emits this one) |
-| `receiver_dlq_start_failures_total` | Counter | DLQ starts that failed, by `backend` (`kafka`, `file` or `other`); the receiver runs on without a DLQ and logs the reason at ERROR |
+| `dlq_backend_start_failures_total` | Counter | DLQ backends that failed to start, by `backend` (scalo emits this one); the receiver runs on with the others, and with none a held dead letter is not taken |
 | `receiver_source_org_id_stripped_total` | Counter | Records whose sender-supplied `_org_id` was removed because `routing.source_org_id` is `disallow` (the default) |
 | `receiver_records_rejected_total` | Counter | Records a destination can never take (over its size ceiling), on any sink, by `outcome`: `dead_lettered`, `dropped` when no DLQ is configured or no DLQ backend can hold the entry (also counted in `pipeline_dead_letters_dropped_total{reason}`), or `dlq_refused` when the DLQ did not confirm the write, so the record stays buffered or its sender is told to retry |
 
@@ -723,6 +738,12 @@ sequenceDiagram
         alt Delivery report within the hold
             Kafka-->>Handler: Delivered
             Handler-->>Client: 202 Accepted
+        else Refused for good, DLQ holds it
+            Kafka-->>Handler: Refused
+            Handler-->>Client: 202 Accepted
+        else Refused for good, no DLQ
+            Kafka-->>Handler: Refused
+            Handler-->>Client: 400 Bad Request
         else Not confirmed
             Handler-->>Client: 503 Service Unavailable, Retry-After
         end
@@ -877,6 +898,10 @@ decoder's verbatim output to the event's common-header `_raw` field, and works
 with either mode -- a JSON array of every record in `canonical`, the single
 record in `exploded`. See [Raw payload retention](#raw-payload-retention).
 
+### Template cache
+
+Each observation domain of each v9 and IPFIX exporter keeps its own templates, since a template id is unique only within its domain. It holds at most `flow.netflow.template_cache.max_per_exporter` (default 1000) of them, v9 and IPFIX together. A template past the cap evicts that exporter's oldest, counted on `flow_template_evicted_total`, so a flooding exporter holds bounded memory. An exporter whose evicted template it still uses sees template misses until it resends the template, which exporters do on a timer. At most `max_exporters` exporter and domain pairs are kept.
+
 ### Record kinds
 
 - `flow` -- standard NetFlow / sFlow record
@@ -888,6 +913,10 @@ record in `exploded`. See [Raw payload retention](#raw-payload-retention).
 
 - **Unified** (default): one listener per port accepts all flow protocols
 - **Split**: opt-in via `flow.split:` -- separate NetFlow-only and sFlow-only listeners
+
+### Topics
+
+A flow record no rules row routes goes to its listener's topic: `flow.netflow.topic` and `flow.sflow.topic`, or the `topic` of each `flow.split` side. A topic left empty is the listener's source plus `routing.topic_suffix`, so `netflow_land` and `sflow_land` by default. It goes to the destinations a record routed by default does, and the topic applies where one of them is the bus. A row that assigns the record a `_source` routes it as any other record, its topic included.
 
 ### Configuration
 
@@ -904,7 +933,6 @@ See `config.example.yaml` for the full `flow:` block.
   (~1 day of hand-rolled wire decode like our v5 implementation).
 - Template-miss errors currently conflated with parse errors in metrics
   (`transport_decode_err_total{reason="template_miss"}` will be 0)
-- Template cache `max_per_exporter` not yet enforced (netgauze limitation)
 - `t_flow_start`/`t_flow_end` carry relative `sysup:<ms>` strings rather than
   absolute RFC 3339 timestamps (sysUpTime anchor resolution deferred)
 - `recvmmsg(2)` batch syscall deferred. Linux listener uses `AsyncFd::readable`

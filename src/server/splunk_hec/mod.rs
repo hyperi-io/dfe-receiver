@@ -44,7 +44,7 @@ use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
 use crate::server::traits::{BoundAddr, ProtocolHandler};
 use crate::tenancy::{Ingest, Principal};
 
-use self::convert::{RawMetadata, hec_event_to_json, parse_hec_events, raw_to_json};
+use self::convert::{RawMetadata, hec_event_to_json, parse_hec_events, raw_lines, raw_to_json};
 
 /// The transport label the HEC listener counts under.
 const TRANSPORT: &str = "splunk_hec";
@@ -277,6 +277,13 @@ async fn run_hec_server(
 ) -> Result<()> {
     // Create auth state (reuse HTTP handler's bearer token loading)
     let auth_state = create_auth_state(&config.auth).await?;
+    crate::server::http::spawn_auth_reload_watcher(
+        pipeline.shared_config(),
+        auth_state.clone(),
+        |config| &config.splunk_hec.auth,
+        TRANSPORT,
+        shutdown.clone(),
+    );
 
     // `server.ip_filter` and `server.rate_limit` govern the ingest surface, not
     // one port of it.
@@ -502,12 +509,15 @@ async fn raw_handler(
             .or_else(|| header_str(&headers, "x-splunk-request-index")),
     };
 
+    let lines = raw_lines(&body, &metadata).map_err(|e| {
+        state.metrics.inc_parse_failure("splunk_hec");
+        state.metrics.inc_requests_error("splunk_hec");
+        HecError::invalid_data(&e.public_message())
+    })?;
+
     // Convert all lines to JSON payloads first, then batch-process.
-    let mut payloads = Vec::new();
-    for line in body.split(|&b| b == b'\n') {
-        if line.is_empty() {
-            continue;
-        }
+    let mut payloads = Vec::with_capacity(lines.len());
+    for line in lines {
         let json = raw_to_json(line, &metadata, state.raw_capture).map_err(|e| {
             state.metrics.inc_requests_error("splunk_hec");
             HecError::conversion_failed(&e)

@@ -190,11 +190,13 @@ async fn a_destination_a_reload_readdresses_sends_to_its_new_address() {
 }
 
 /// `config` spilling to disk under `dir`, for a listener that answers at
-/// enqueue: only one of those gets a buffer, and so a spool.
+/// enqueue: only one of those gets a buffer, and so a spool. Capped, as a spool
+/// outside a writable volume must be on Kubernetes.
 fn spilling(mut config: Config, dir: &Path) -> Config {
     config.buffer.spillover = SpilloverConfig {
         enabled: true,
         path: dir.to_path_buf(),
+        max_spool_bytes: Some(64 * 1024 * 1024),
         ..SpilloverConfig::default()
     };
     config.server.acknowledgements = AcknowledgementsConfig::new(false);

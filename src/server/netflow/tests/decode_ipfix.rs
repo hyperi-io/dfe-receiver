@@ -140,3 +140,23 @@ fn ipfix_canonical_render_carries_full_5tuple_and_counters() {
     assert_eq!(parsed["packets"], 12);
     assert_eq!(parsed["ip_version"], 4);
 }
+
+/// With raw capture off a record carries no verbatim form, so none is built.
+#[test]
+fn an_ipfix_record_builds_no_verbatim_form_with_raw_capture_off() {
+    let (tpl, data) = build_ipfix_template_and_data();
+    let mut dec = NetflowDecoder::new(
+        1000,
+        10_000,
+        crate::server::flow::metrics::mock::flow_metrics_for_test(),
+    );
+    dec.capture_raw(false);
+    let exporter: IpAddr = "198.51.100.5".parse().unwrap();
+    dec.decode(&tpl, exporter, ProtocolKind::Ipfix)
+        .expect("ipfix template decode");
+    let decoded = dec
+        .decode(&data, exporter, ProtocolKind::Ipfix)
+        .expect("ipfix data decode");
+    assert_eq!(decoded.records[0].raw_json, "");
+    assert!(decoded.records[0].fields.src_ip.is_some());
+}

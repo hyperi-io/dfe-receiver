@@ -21,6 +21,9 @@ use bytes::Bytes;
 
 use super::pb;
 use crate::error::{Error, Result};
+use crate::server::metric_record::{
+    Exemplar, exemplar_fields, nanos_to_ch_datetime, nanos_to_rfc3339,
+};
 
 /// OTLP conversion output mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -71,35 +74,6 @@ pub struct ConvertedPayload {
 // ---------------------------------------------------------------------------
 // Timestamp helpers
 // ---------------------------------------------------------------------------
-
-/// Convert nanosecond unix timestamp to RFC 3339 string.
-fn nanos_to_rfc3339(nanos: u64) -> String {
-    if nanos == 0 {
-        return String::new();
-    }
-    let secs = (nanos / 1_000_000_000) as i64;
-    let nsecs = (nanos % 1_000_000_000) as u32;
-    let dt = chrono::DateTime::from_timestamp(secs, nsecs);
-    match dt {
-        Some(dt) => dt.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
-        None => String::new(),
-    }
-}
-
-/// Convert nanosecond unix timestamp to a ClickHouse-compatible DateTime64(9) string.
-/// Format: "2026-02-19 14:30:00.123456789"
-fn nanos_to_ch_datetime(nanos: u64) -> String {
-    if nanos == 0 {
-        return String::new();
-    }
-    let secs = (nanos / 1_000_000_000) as i64;
-    let nsecs = (nanos % 1_000_000_000) as u32;
-    let dt = chrono::DateTime::from_timestamp(secs, nsecs);
-    match dt {
-        Some(dt) => dt.format("%Y-%m-%d %H:%M:%S%.9f").to_string(),
-        None => String::new(),
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Hex encoding helpers (trace_id, span_id)
@@ -152,16 +126,12 @@ fn any_value_to_string_value(av: &pb::common::v1::AnyValue) -> serde_json::Value
         Some(pb::common::v1::any_value::Value::BytesValue(b)) => {
             serde_json::Value::String(bytes_to_hex(b))
         }
-        Some(pb::common::v1::any_value::Value::ArrayValue(arr)) => {
-            // Serialise array as JSON string
-            let items: Vec<serde_json::Value> = arr.values.iter().map(any_value_to_json).collect();
-            serde_json::Value::String(serde_json::Value::Array(items).to_string())
-        }
-        Some(pb::common::v1::any_value::Value::KvlistValue(kvl)) => {
-            // Serialise kvlist as JSON string
-            let map = attributes_to_map(&kvl.values);
-            serde_json::Value::String(serde_json::Value::Object(map).to_string())
-        }
+        // Native JSON stringified once: a child stringified first would be
+        // escaped again by each level above it.
+        Some(
+            pb::common::v1::any_value::Value::ArrayValue(_)
+            | pb::common::v1::any_value::Value::KvlistValue(_),
+        ) => serde_json::Value::String(any_value_to_json(av).to_string()),
         None => serde_json::Value::String(String::new()),
     }
 }
@@ -637,7 +607,7 @@ fn convert_gauge_points(
             let value = number_data_point_value(dp);
             let attrs = attributes_to_map(&dp.attributes);
 
-            match mode {
+            let record = match mode {
                 OtlpMode::HyperDx => serde_json::json!({
                     "TimeUnix": nanos_to_ch_datetime(dp.time_unix_nano),
                     "MetricName": metric_name,
@@ -655,7 +625,8 @@ fn convert_gauge_points(
                     "attributes": attrs,
                     "resource": resource_attrs,
                 }),
-            }
+            };
+            with_exemplars(record, &dp.exemplars, mode)
         })
         .collect()
 }
@@ -673,7 +644,7 @@ fn convert_sum_points(
             let value = number_data_point_value(dp);
             let attrs = attributes_to_map(&dp.attributes);
 
-            match mode {
+            let record = match mode {
                 OtlpMode::HyperDx => serde_json::json!({
                     "TimeUnix": nanos_to_ch_datetime(dp.time_unix_nano),
                     "MetricName": metric_name,
@@ -691,7 +662,8 @@ fn convert_sum_points(
                     "attributes": attrs,
                     "resource": resource_attrs,
                 }),
-            }
+            };
+            with_exemplars(record, &dp.exemplars, mode)
         })
         .collect()
 }
@@ -708,7 +680,7 @@ fn convert_histogram_points(
         .map(|dp| {
             let attrs = attributes_to_map(&dp.attributes);
 
-            match mode {
+            let record = match mode {
                 OtlpMode::HyperDx => serde_json::json!({
                     "TimeUnix": nanos_to_ch_datetime(dp.time_unix_nano),
                     "MetricName": metric_name,
@@ -736,7 +708,8 @@ fn convert_histogram_points(
                     "attributes": attrs,
                     "resource": resource_attrs,
                 }),
-            }
+            };
+            with_exemplars(record, &dp.exemplars, mode)
         })
         .collect()
 }
@@ -752,8 +725,10 @@ fn convert_exp_histogram_points(
         .iter()
         .map(|dp| {
             let attrs = attributes_to_map(&dp.attributes);
+            let (positive_offset, positive_counts) = buckets(dp.positive.as_ref());
+            let (negative_offset, negative_counts) = buckets(dp.negative.as_ref());
 
-            match mode {
+            let record = match mode {
                 OtlpMode::HyperDx => serde_json::json!({
                     "TimeUnix": nanos_to_ch_datetime(dp.time_unix_nano),
                     "MetricName": metric_name,
@@ -763,6 +738,10 @@ fn convert_exp_histogram_points(
                     "Max": dp.max.unwrap_or(0.0),
                     "Scale": dp.scale,
                     "ZeroCount": dp.zero_count,
+                    "PositiveOffset": positive_offset,
+                    "PositiveBucketCounts": positive_counts,
+                    "NegativeOffset": negative_offset,
+                    "NegativeBucketCounts": negative_counts,
                     "Attributes": attrs,
                     "ResourceAttributes": resource_attrs,
                     "_otel_metric_type": "exponential_histogram",
@@ -778,12 +757,28 @@ fn convert_exp_histogram_points(
                     "max": dp.max,
                     "scale": dp.scale,
                     "zero_count": dp.zero_count,
+                    "zero_threshold": dp.zero_threshold,
+                    "positive_offset": positive_offset,
+                    "positive_bucket_counts": positive_counts,
+                    "negative_offset": negative_offset,
+                    "negative_bucket_counts": negative_counts,
                     "attributes": attrs,
                     "resource": resource_attrs,
                 }),
-            }
+            };
+            with_exemplars(record, &dp.exemplars, mode)
         })
         .collect()
+}
+
+/// One side of an exponential histogram: its offset and bucket counts, none
+/// where the point carries no buckets that side.
+fn buckets(
+    side: Option<&pb::metrics::v1::exponential_histogram_data_point::Buckets>,
+) -> (i32, &[u64]) {
+    side.map_or((0, &[]), |side| {
+        (side.offset, side.bucket_counts.as_slice())
+    })
 }
 
 /// Convert summary data points.
@@ -836,6 +831,39 @@ fn convert_summary_points(
 }
 
 /// Extract numeric value from a `NumberDataPoint`.
+/// A data point's exemplars as the metric record carries them.
+fn exemplars(exemplars: &[pb::metrics::v1::Exemplar]) -> Vec<Exemplar> {
+    exemplars
+        .iter()
+        .map(|exemplar| Exemplar {
+            time_unix_nano: exemplar.time_unix_nano,
+            value: match exemplar.value {
+                Some(pb::metrics::v1::exemplar::Value::AsDouble(d)) => d,
+                Some(pb::metrics::v1::exemplar::Value::AsInt(i)) => i as f64,
+                None => 0.0,
+            },
+            trace_id: bytes_to_hex(&exemplar.trace_id),
+            span_id: bytes_to_hex(&exemplar.span_id),
+            attributes: attributes_to_map(&exemplar.filtered_attributes),
+        })
+        .collect()
+}
+
+/// `record` with `dp_exemplars` attached as `mode` shapes them.
+fn with_exemplars(
+    mut record: serde_json::Value,
+    dp_exemplars: &[pb::metrics::v1::Exemplar],
+    mode: OtlpMode,
+) -> serde_json::Value {
+    if let Some(object) = record.as_object_mut() {
+        object.extend(exemplar_fields(
+            exemplars(dp_exemplars),
+            mode == OtlpMode::HyperDx,
+        ));
+    }
+    record
+}
+
 fn number_data_point_value(dp: &pb::metrics::v1::NumberDataPoint) -> f64 {
     match dp.value {
         Some(pb::metrics::v1::number_data_point::Value::AsDouble(d)) => d,
@@ -903,6 +931,48 @@ mod tests {
         };
         let result = any_value_to_string_value(&av);
         assert_eq!(result, serde_json::Value::String("hello".to_string()));
+    }
+
+    /// A kvlist `depth` levels deep, with a quote in its innermost string.
+    fn nested_kvlist(depth: usize) -> pb::common::v1::AnyValue {
+        let mut value = pb::common::v1::AnyValue {
+            value: Some(pb::common::v1::any_value::Value::StringValue(
+                "\"".to_string(),
+            )),
+        };
+        for _ in 0..depth {
+            value = pb::common::v1::AnyValue {
+                value: Some(pb::common::v1::any_value::Value::KvlistValue(
+                    pb::common::v1::KeyValueList {
+                        values: vec![pb::common::v1::KeyValue {
+                            key: "k".to_string(),
+                            value: Some(value),
+                        }],
+                    },
+                )),
+            };
+        }
+        value
+    }
+
+    /// A nested kvlist attribute is one JSON string of native JSON, as the
+    /// OTel Collector's ClickHouse exporter writes it, and its size grows
+    /// with its depth: re-escaping each child doubles its backslashes per
+    /// level, so 40 levels of a few bytes reach a terabyte.
+    #[test]
+    fn a_nested_kvlist_attribute_is_stringified_once() {
+        let len = |depth| {
+            let value = any_value_to_string_value(&nested_kvlist(depth));
+            value.as_str().map_or(0, str::len)
+        };
+        let (ten, twenty) = (len(10), len(20));
+        assert!(
+            twenty < 3 * ten,
+            "10 levels stringified to {ten} bytes, 20 to {twenty}"
+        );
+
+        let two = any_value_to_string_value(&nested_kvlist(2));
+        assert_eq!(two, serde_json::json!(r#"{"k":{"k":"\""}}"#));
     }
 
     #[test]

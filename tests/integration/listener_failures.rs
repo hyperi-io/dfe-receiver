@@ -487,6 +487,8 @@ async fn the_ingest_readyz_passes_with_an_unhealthy_sink() {
         path: spool.path().to_path_buf(),
         max_usage_percent: 0.000_001,
         poll_interval_secs: 1,
+        // On Kubernetes a spool outside a writable volume needs a cap.
+        max_spool_bytes: Some(64 * 1024 * 1024),
     };
     let pipeline = pipeline_for(&config).await;
 

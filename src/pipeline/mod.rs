@@ -29,11 +29,11 @@ use bytes::Bytes;
 use parking_lot::{Mutex, RwLock};
 use rustc_hash::{FxHashMap, FxHashSet};
 use scalo::UnifiedPressure;
-use scalo::dlq::{Dlq, DlqEntry, DlqError};
+use scalo::dlq::{Dlq, DlqEntry};
 use scalo::logger::security;
 use scalo::transport::AcknowledgementsConfig;
-use scalo::transport::DeliveryStatus;
 use scalo::transport::ack::{SinkConfirmation, Ticket};
+use scalo::transport::{DeliveryStatus, PieceFinalizer};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
@@ -50,10 +50,10 @@ use crate::error::{Error, Result};
 use crate::metrics::{Metrics, ValidationFailureReason};
 use crate::routing::{self, RouteResult, Routed, Router};
 use crate::server::traits::BoundAddr;
-use crate::sink::Sink;
 use crate::sink::file::FileSink;
 use crate::sink::grpc::GrpcSink;
 use crate::sink::kafka::KafkaSink;
+use crate::sink::{Confirmation, Sink};
 use crate::tenancy::Ingest;
 use crate::validation::depth::{self, MAX_PARSE_DEPTH};
 use crate::validation::{self, ValidationResult, Validator};
@@ -142,6 +142,12 @@ impl BatchOutcome {
     #[must_use]
     pub fn into_error(self) -> Option<Error> {
         self.unavailable.or(self.first_rejection)
+    }
+
+    /// Count a record taken earlier as refused with `error` instead.
+    fn untake(&mut self, error: Error) {
+        self.accepted = self.accepted.saturating_sub(1);
+        let _ = self.record(Err(error));
     }
 
     /// Mark the whole batch for a resend: no record in it counts as settled,
@@ -469,7 +475,23 @@ struct Dispatch<'a> {
     /// Counts the rows that fire, added to the rule counters once per request.
     tally: scalo::rules::Batch<'a>,
     grpc: Vec<(Arc<str>, Vec<Bytes>)>,
+    /// Held records the bus queued, settled once each delivery report is in.
+    bus: Vec<HeldOnBus>,
+    /// The index in the request of the record being sent.
+    record: usize,
     usage: Usage,
+    /// The usage each held record queued on the bus added, by record, for a
+    /// delivery report that refuses it to take back.
+    bus_usage: Vec<(usize, String, u64)>,
+}
+
+/// A held record the bus queued, waiting on its delivery report.
+struct HeldOnBus {
+    record: usize,
+    topic: Arc<str>,
+    payload: Bytes,
+    confirmation: Confirmation,
+    piece: PieceFinalizer,
 }
 
 impl<'a> Dispatch<'a> {
@@ -479,7 +501,22 @@ impl<'a> Dispatch<'a> {
             routes,
             tally: routes.router.tally(),
             grpc: Vec::new(),
+            bus: Vec::new(),
+            record: 0,
             usage: Usage::default(),
+            bus_usage: Vec::new(),
+        }
+    }
+
+    /// Count the record being sent as `bytes` taken for `org`.
+    fn count_usage(&mut self, org: &str, bytes: u64) {
+        self.usage.add(org, bytes);
+        if self
+            .bus
+            .last()
+            .is_some_and(|held| held.record == self.record)
+        {
+            self.bus_usage.push((self.record, org.to_string(), bytes));
         }
     }
 
@@ -510,6 +547,13 @@ impl Usage {
         match self.0.iter_mut().find(|(seen, _)| seen == org) {
             Some((_, total)) => *total += bytes,
             None => self.0.push((org.to_string(), bytes)),
+        }
+    }
+
+    /// Take back `bytes` counted for `org`.
+    fn remove(&mut self, org: &str, bytes: u64) {
+        if let Some((_, total)) = self.0.iter_mut().find(|(seen, _)| seen == org) {
+            *total = total.saturating_sub(bytes);
         }
     }
 
@@ -1122,10 +1166,13 @@ impl PipelineState {
     ) -> Usage {
         let routes = self.routes();
         let mut dispatch = Dispatch::new(ticket, &routes);
-        for payload in payloads {
+        let mut taken = Vec::with_capacity(payloads.len());
+        for (index, payload) in payloads.iter().enumerate() {
+            dispatch.record = index;
             let result = self
                 .process_inner(payload.clone(), target, ingest, &mut dispatch)
                 .await;
+            taken.push(result.is_ok());
             if outcome.record(result).is_break() {
                 break;
             }
@@ -1133,7 +1180,52 @@ impl PipelineState {
         if let Err(e) = self.send_grpc(&mut dispatch).await {
             outcome.retry_all(e);
         }
+        if outcome.unavailable.is_none() {
+            let held = std::mem::take(&mut dispatch.bus);
+            for record in self.settle_bus(held, &mut taken, outcome).await {
+                for (_, org, bytes) in dispatch.bus_usage.iter().filter(|(r, ..)| *r == record) {
+                    dispatch.usage.remove(org, *bytes);
+                }
+            }
+        }
         std::mem::take(&mut dispatch.usage)
+    }
+
+    /// Settle each held record the bus queued once its delivery report is in.
+    /// A report refusing the record for good takes the record through the
+    /// same disposal as a refusal at enqueue, so its sender gets the same
+    /// answer either way.
+    ///
+    /// Returns the records no longer taken, whose usage the batch must not
+    /// count.
+    async fn settle_bus(
+        &self,
+        held: Vec<HeldOnBus>,
+        taken: &mut [bool],
+        outcome: &mut BatchOutcome,
+    ) -> Vec<usize> {
+        let mut untaken = Vec::new();
+        for record in held {
+            match record.confirmation.confirmed().await {
+                Ok(()) => record.piece.report(DeliveryStatus::Delivered),
+                Err(Error::Rejected(reason)) => {
+                    let disposed = self
+                        .rejects
+                        .dispose_held(&record.topic, &record.payload, &reason, record.piece)
+                        .await;
+                    if let Err(e) = disposed
+                        && taken.get(record.record).copied().unwrap_or(false)
+                    {
+                        taken[record.record] = false;
+                        outcome.untake(e);
+                        untaken.push(record.record);
+                    }
+                }
+                // Not delivered: the piece, dropped, holds the request for a retry.
+                Err(_) => {}
+            }
+        }
+        untaken
     }
 
     /// Inner processing logic (after backpressure check).
@@ -1207,7 +1299,7 @@ impl PipelineState {
                     &mut dispatch.tally,
                 )?;
                 self.send_to_kafka(topic, &payload, dispatch).await?;
-                dispatch.usage.add(org, decoded);
+                dispatch.count_usage(org, decoded);
                 self.tap(payload).await;
                 Ok(())
             }
@@ -1245,7 +1337,7 @@ impl PipelineState {
                 self.send_to_destinations(destinations, topic.as_deref(), &payload, dispatch)
                     .await?;
                 // A dead-lettered record is not ingested, so only this arm counts usage.
-                dispatch.usage.add(org, decoded);
+                dispatch.count_usage(org, decoded);
                 trace!(
                     destinations = destinations.len(),
                     topic = topic.as_deref().unwrap_or(""),
@@ -1285,13 +1377,14 @@ impl PipelineState {
     }
 
     /// Send one record to a Kafka topic: through the buffer at enqueue, or
-    /// straight to the producer with a piece its delivery report settles.
+    /// straight to the producer, its piece settled from its delivery report
+    /// by [`settle_bus`](Self::settle_bus).
     #[inline]
     async fn send_to_kafka(
         &self,
         topic: &str,
         payload: &Bytes,
-        dispatch: &Dispatch<'_>,
+        dispatch: &mut Dispatch<'_>,
     ) -> Result<()> {
         let Some(ref kafka) = self.kafka else {
             return Err(Error::Config("Kafka sink not configured".into()));
@@ -1299,14 +1392,24 @@ impl PipelineState {
         let Some(ticket) = dispatch.ticket else {
             return kafka.at_enqueue().send(topic, payload.clone()).await;
         };
-        match kafka.primary.send_held(topic, payload, ticket.piece()) {
-            Ok(()) => Ok(()),
-            Err((Error::Rejected(reason), Some(piece))) => {
+        let piece = ticket.piece();
+        match kafka.primary.confirm(topic, payload) {
+            Ok(confirmation) => {
+                dispatch.bus.push(HeldOnBus {
+                    record: dispatch.record,
+                    topic: Arc::from(topic),
+                    payload: payload.clone(),
+                    confirmation,
+                    piece,
+                });
+                Ok(())
+            }
+            Err(Error::Rejected(reason)) => {
                 self.rejects
                     .dispose_held(topic, payload, &reason, piece)
                     .await
             }
-            Err((e, _unsettled)) => Err(e),
+            Err(e) => Err(e),
         }
     }
 
@@ -1484,16 +1587,21 @@ impl PipelineState {
             self.memory_guard.limit_bytes(),
         );
 
-        // Kafka sink stats
+        // Kafka sink stats: the records each producer holds unconfirmed, held
+        // answers' included, plus what the buffer in front of them holds.
         let mut total_queue = 0u64;
         let (mut spilled, mut drained) = (0u64, 0u64);
-        if let Some(ref kafka) = self.kafka
-            && let Some(stats) = kafka.stats().await
-        {
-            total_queue += stats.queue_size as u64;
-            spilled += stats.queued_total;
-            drained += stats.drained_total;
-            metrics.set_circuit_state(stats.circuit_state, stats.consecutive_failures);
+        if let Some(ref kafka) = self.kafka {
+            total_queue += kafka.primary.outstanding();
+            if let Some(ref enqueue_sink) = kafka.enqueue_sink {
+                total_queue += enqueue_sink.outstanding();
+            }
+            if let Some(stats) = kafka.stats().await {
+                total_queue += stats.queue_size as u64;
+                spilled += stats.queued_total;
+                drained += stats.drained_total;
+                metrics.set_circuit_state(stats.circuit_state, stats.consecutive_failures);
+            }
         }
 
         // Named destination stats
@@ -1519,9 +1627,9 @@ impl PipelineState {
         // Sync all metrics into the scaling pressure engine. This is the SHARED
         // scalo `ScalingPressure` the runtime serves at `/scaling/pressure` to
         // KEDA: `update_scaling` feeds the per-pod, locally-knowable signals --
-        // connections (the inbound concurrency proxy), queue_depth (the summed
-        // sink producer queues = the outbound term, set above via
-        // `set_batch_queue_size`), request_rate, memory, spill, and the
+        // connections (the inbound concurrency proxy), queue_depth (the records
+        // the producers hold unconfirmed plus every buffer's = the outbound term,
+        // set above via `set_batch_queue_size`), request_rate, memory, spill, and the
         // outbound circuit gate. The receiver is a push originator (inbound
         // HTTP/gRPC/syslog) so there is no inbound Kafka lag term. KEDA can also
         // scale on the gratis bare ingress metrics directly.
@@ -2019,20 +2127,13 @@ fn dlq_backends(
     Ok((dlq, Some(config.kafka.to_scalo_kafka_config()?)))
 }
 
-/// The DLQ backend whose start failed, for `receiver_dlq_start_failures_total`.
-fn dlq_start_failure_backend(err: &DlqError) -> &'static str {
-    match err {
-        DlqError::Kafka(_) => "kafka",
-        DlqError::File(_) | DlqError::Io(_) => "file",
-        _ => "other",
-    }
-}
-
 /// Start the DLQ the config asks for, or `None` when it is disabled or fails
 /// to start.
 ///
-/// A DLQ that fails to start leaves the receiver running without one, since
-/// a transport failure never stops the app.
+/// A backend that fails to start is left out, counted by scalo in
+/// `dlq_backend_start_failures_total{backend}`, and the receiver runs on with
+/// the others. With none started, a held dead letter is not taken, so its
+/// sender is told to retry.
 ///
 /// # Errors
 ///
@@ -2055,12 +2156,8 @@ fn spawn_dlq(config: &Config, shutdown: &CancellationToken) -> Result<Option<Arc
             Ok(Some(Arc::new(d)))
         }
         Err(e) => {
-            let backend = dlq_start_failure_backend(&e);
-            metrics::counter!("receiver_dlq_start_failures_total", "backend" => backend)
-                .increment(1);
             error!(
                 error = %e,
-                backend,
                 "DLQ failed to start; running without one, so a record a destination \
                  refuses for good is dropped"
             );
@@ -2108,6 +2205,7 @@ fn spillover_config(
         max_usage_percent: spillover.max_usage_percent,
         poll_interval_secs: spillover.poll_interval_secs,
     });
+    config.max_spool_bytes = spillover.max_spool_bytes;
     config
 }
 
@@ -2337,6 +2435,9 @@ mod tests {
         // Use loader destination to avoid needing Kafka brokers
         config.destinations.default = "loader".into();
         config.loader.transport = "memory".to_string();
+        // The shipped DLQ with a file path no backend can start under, so no
+        // test writes /var/spool, root or not.
+        config.routing.dlq.file_path = "/dev/null/dlq".to_string();
         config
     }
 
@@ -2413,11 +2514,13 @@ mod tests {
         }
     }
 
-    /// Spillover on, under `dir`.
+    /// Spillover on, under `dir`, capped as a spool outside a writable volume
+    /// must be on Kubernetes.
     fn spill_to(config: &mut Config, dir: &std::path::Path) {
         config.buffer.spillover = crate::config::SpilloverConfig {
             enabled: true,
             path: dir.to_path_buf(),
+            max_spool_bytes: Some(64 * 1024 * 1024),
             ..crate::config::SpilloverConfig::default()
         };
     }
@@ -2431,9 +2534,12 @@ mod tests {
             path: std::path::PathBuf::from("/var/spool/somewhere-else"),
             max_usage_percent: 0.55,
             poll_interval_secs: 17,
+            max_spool_bytes: Some(1 << 30),
         };
 
         let built = spillover_config(&spillover, Path::new(BUS_SPOOL));
+
+        assert_eq!(built.max_spool_bytes, Some(1 << 30));
 
         assert_eq!(built.spool_path, spillover.path.join("kafka"));
         let disk = built.disk_aware.unwrap();
@@ -2593,6 +2699,35 @@ mod tests {
             .kafka
             .librdkafka_overrides
             .insert("message.timeout.ms".to_string(), "1000".to_string());
+    }
+
+    /// The outbound backlog KEDA scales on counts the records the producer
+    /// still holds, so a broker falling behind shows when every listener
+    /// holds its answer and no buffer exists to count.
+    #[tokio::test]
+    async fn the_queue_depth_counts_what_the_producer_holds() {
+        let mut config = test_config();
+        unroutable_bus(&mut config);
+        config
+            .kafka
+            .librdkafka_overrides
+            .insert("message.timeout.ms".to_string(), "60000".to_string());
+        let state = test_state_with(config).await;
+        assert!(
+            state.kafka.as_ref().unwrap().queued.is_none(),
+            "every listener holds, so no buffer"
+        );
+        for n in 0..3 {
+            state
+                .process(Bytes::from(format!(r#"{{"n":{n}}}"#)), &http())
+                .await
+                .expect("librdkafka queues locally");
+        }
+
+        let metrics = Metrics::default();
+        state.update_metrics(&metrics).await;
+
+        assert_eq!(metrics.get_batch_queue_size(), 3);
     }
 
     /// A record answered at enqueue keeps librdkafka's own message timeout:
@@ -2909,8 +3044,8 @@ mod tests {
         config
     }
 
-    /// A DLQ that fails to start is counted by the backend that failed and
-    /// logged at error with the reason.
+    /// A DLQ backend that fails to start is counted by name and logged at
+    /// error, with the reason.
     #[test]
     fn a_dlq_that_fails_to_start_is_counted_and_logged_at_error() {
         let dir = tempfile::tempdir().unwrap();
@@ -2927,18 +3062,14 @@ mod tests {
             })
         });
 
-        assert!(
-            dlq.expect("a DLQ that fails to start is not fatal")
-                .is_none()
-        );
+        dlq.expect("a DLQ that fails to start is not fatal");
         assert_eq!(
-            recorder.get("receiver_dlq_start_failures_total{backend=file}"),
+            recorder.get("dlq_backend_start_failures_total{backend=file}"),
             1
         );
         let log = lines.text();
         assert!(log.contains("ERROR"), "{log}");
-        assert!(!log.contains("WARN"), "{log}");
-        assert!(log.contains("DLQ failed to start"), "{log}");
+        assert!(log.contains("no backend started"), "{log}");
         assert!(
             log.contains("failed to create DLQ writer"),
             "the reason is not in the log: {log}"
@@ -2951,7 +3082,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = test_state_with(unstartable_dlq(dir.path())).await;
 
-        assert!(state.dlq.is_none());
         state
             .process(Bytes::from(r#"{"id":1}"#), &http())
             .await
@@ -3088,25 +3218,20 @@ mod tests {
         assert_eq!(endpoint, "http://elsewhere:6000");
     }
 
+    /// Answered at enqueue, a record validation refused that no DLQ backend
+    /// can hold is dropped and counted in the DLQ's drops.
     #[tokio::test]
-    async fn test_pipeline_validation_reject() {
+    async fn an_unheld_dead_letter_with_no_dlq_backend_is_dropped_and_counted() {
         let mut config = test_config();
         config.validation.required_fields = vec!["org_id".to_string()];
         let state = test_state_with(config).await;
 
-        // A record missing a required field with dlq_on_invalid=true attempts DLQ
-        // routing, but no Kafka/DLQ sink is configured in test state -- expect
-        // config error from the fallback path
-        let result = state.process(Bytes::from(r#"{"a":1}"#), &http()).await;
-        assert!(
-            result.is_err(),
-            "expected error without DLQ sink: {result:?}"
-        );
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("Kafka sink not configured"),
-            "expected Kafka sink error, got: {err}"
-        );
+        state
+            .process(Bytes::from(r#"{"a":1}"#), &http())
+            .await
+            .unwrap();
+
+        assert_eq!(state.dlq.as_ref().map(|dlq| dlq.dropped()), Some(1));
     }
 
     /// A body that is not JSON is refused for good and counted, never sent to
@@ -4018,14 +4143,10 @@ mod tests {
         assert!(outcome.unavailable.is_none(), "{:?}", outcome.unavailable);
     }
 
-    /// A retryable failure stops the batch where it happened: the sender is
-    /// told to resend, so taking the records behind it only adds duplicates.
-    ///
-    /// The record missing its required field is routed to a DLQ topic with no
-    /// broker configured, which the receiver cannot serve now but could once
-    /// the route works.
+    /// Held, a dead letter no DLQ backend started to hold is a retryable
+    /// failure, and the sender resends the whole batch.
     #[tokio::test]
-    async fn a_retryable_failure_stops_the_batch() {
+    async fn a_held_dead_letter_with_no_dlq_backend_resends_the_batch() {
         let mut config = test_config();
         config.validation.required_fields = vec!["ok".to_string()];
         let state = test_state_with(config).await;
@@ -4035,10 +4156,11 @@ mod tests {
             Bytes::from(r#"{"ok":2}"#),
         ];
 
-        let outcome = state.process_batch(&payloads, &http()).await;
+        let outcome = state
+            .process_batch_acked(&payloads, &holding(&state), None, &http())
+            .await;
 
-        assert_eq!(outcome.accepted, 1, "the record before the failure");
-        assert_eq!(outcome.settled(), 1, "nothing after the failure is taken");
+        assert_eq!(outcome.settled(), 0);
         assert!(
             outcome
                 .unavailable

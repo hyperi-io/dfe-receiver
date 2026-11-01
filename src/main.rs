@@ -421,7 +421,6 @@ mod tests {
                 Counter,
                 &["reason"],
             ),
-            ("receiver_dlq_start_failures_total", Counter, &["backend"]),
             ("receiver_source_org_id_stripped_total", Counter, &[]),
             ("usage_ingested_bytes_total", Counter, &["org_id"]),
             ("rules_hits_total", Counter, &["rule_set", "rule"]),

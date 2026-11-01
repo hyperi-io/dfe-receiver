@@ -29,7 +29,7 @@ pub fn event_wrapper_to_json(wrapper: &event::EventWrapper) -> Result<Bytes> {
 
     let json_value = match event {
         event::event_wrapper::Event::Log(log) => log_to_json(log),
-        event::event_wrapper::Event::Metric(metric) => metric_to_json(metric),
+        event::event_wrapper::Event::Metric(metric) => metric_to_json(metric)?,
         event::event_wrapper::Event::Trace(trace) => trace_to_json(trace),
     };
 
@@ -61,8 +61,23 @@ fn log_to_json(log: &event::Log) -> serde_json::Value {
 /// Convert a Metric event to a JSON envelope.
 ///
 /// Wraps metric data with a `_vector_type` tag so the router
-/// can direct it to a metrics-specific topic.
-fn metric_to_json(metric: &event::Metric) -> serde_json::Value {
+/// can direct it to a metrics-specific topic. The value goes under its kind,
+/// the proto's oneof field name without its encoding version: `counter`,
+/// `gauge`, `set`, `distribution`, `aggregated_histogram`,
+/// `aggregated_summary` or `sketch`.
+///
+/// # Errors
+///
+/// [`Error::Validation`] for a metric with no value or an empty sketch: a
+/// record of its name alone would be answered delivered with the
+/// measurement lost.
+fn metric_to_json(metric: &event::Metric) -> Result<serde_json::Value> {
+    let Some((kind, value)) = metric.value.as_ref().and_then(metric_value_to_json) else {
+        return Err(Error::Validation(format!(
+            "Vector metric '{}' carries no value",
+            metric.name
+        )));
+    };
     let mut obj = serde_json::Map::new();
     obj.insert(
         "_vector_type".into(),
@@ -84,15 +99,28 @@ fn metric_to_json(metric: &event::Metric) -> serde_json::Value {
         obj.insert("timestamp".into(), timestamp_to_json(ts));
     }
 
-    // Tags (v1 simple map)
-    if !metric.tags_v1.is_empty() {
-        let tags: serde_json::Map<String, serde_json::Value> = metric
+    // tags_v1 holds one value per tag, so tags_v2 wins where both are sent.
+    let tags: serde_json::Map<String, serde_json::Value> = if metric.tags_v2.is_empty() {
+        metric
             .tags_v1
             .iter()
             .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
-            .collect();
+            .collect()
+    } else {
+        metric
+            .tags_v2
+            .iter()
+            .map(|(k, v)| (k.clone(), tag_values_to_json(v)))
+            .collect()
+    };
+    if !tags.is_empty() {
         obj.insert("tags".into(), serde_json::Value::Object(tags));
     }
+
+    if metric.interval_ms != 0 {
+        obj.insert("interval_ms".into(), json!(metric.interval_ms));
+    }
+    obj.insert(kind.into(), value);
 
     obj.insert(
         "kind".into(),
@@ -106,7 +134,141 @@ fn metric_to_json(metric: &event::Metric) -> serde_json::Value {
         ),
     );
 
-    serde_json::Value::Object(obj)
+    Ok(serde_json::Value::Object(obj))
+}
+
+/// One tag's values: a single value as a string, several as an array, and a
+/// bare tag (no value) as null.
+fn tag_values_to_json(tag: &event::TagValues) -> serde_json::Value {
+    let value = |v: &event::TagValue| {
+        v.value
+            .as_deref()
+            .map_or(serde_json::Value::Null, |s| json!(s))
+    };
+    match tag.values.as_slice() {
+        [one] => value(one),
+        many => serde_json::Value::Array(many.iter().map(value).collect()),
+    }
+}
+
+/// A distribution's statistic by name.
+fn statistic_name(statistic: i32) -> &'static str {
+    match event::StatisticKind::try_from(statistic) {
+        Ok(event::StatisticKind::Histogram) => "histogram",
+        Ok(event::StatisticKind::Summary) => "summary",
+        Err(_) => "unknown",
+    }
+}
+
+/// A metric value as its kind and its JSON, `None` for a sketch with no
+/// sketch inside it.
+fn metric_value_to_json(value: &event::metric::Value) -> Option<(&'static str, serde_json::Value)> {
+    use event::metric::Value as V;
+    let bucket = |upper_limit: f64, count: u64| json!({"upper_limit": upper_limit, "count": count});
+    let quantile = |q: &event::SummaryQuantile| json!({"quantile": q.quantile, "value": q.value});
+    let converted = match value {
+        V::Counter(c) => ("counter", json!({"value": c.value})),
+        V::Gauge(g) => ("gauge", json!({"value": g.value})),
+        V::Set(s) => ("set", json!({"values": s.values})),
+        V::Distribution1(d) => {
+            let samples: Vec<serde_json::Value> = d
+                .values
+                .iter()
+                .zip(&d.sample_rates)
+                .map(|(value, rate)| json!({"value": value, "rate": rate}))
+                .collect();
+            (
+                "distribution",
+                json!({"samples": samples, "statistic": statistic_name(d.statistic)}),
+            )
+        }
+        V::Distribution2(d) => {
+            let samples: Vec<serde_json::Value> = d
+                .samples
+                .iter()
+                .map(|s| json!({"value": s.value, "rate": s.rate}))
+                .collect();
+            (
+                "distribution",
+                json!({"samples": samples, "statistic": statistic_name(d.statistic)}),
+            )
+        }
+        V::AggregatedHistogram1(h) => {
+            let buckets: Vec<serde_json::Value> = h
+                .buckets
+                .iter()
+                .zip(&h.counts)
+                .map(|(&upper, &count)| bucket(upper, u64::from(count)))
+                .collect();
+            (
+                "aggregated_histogram",
+                json!({"buckets": buckets, "count": h.count, "sum": h.sum}),
+            )
+        }
+        V::AggregatedHistogram2(h) => {
+            let buckets: Vec<serde_json::Value> = h
+                .buckets
+                .iter()
+                .map(|b| bucket(b.upper_limit, u64::from(b.count)))
+                .collect();
+            (
+                "aggregated_histogram",
+                json!({"buckets": buckets, "count": h.count, "sum": h.sum}),
+            )
+        }
+        V::AggregatedHistogram3(h) => {
+            let buckets: Vec<serde_json::Value> = h
+                .buckets
+                .iter()
+                .map(|b| bucket(b.upper_limit, b.count))
+                .collect();
+            (
+                "aggregated_histogram",
+                json!({"buckets": buckets, "count": h.count, "sum": h.sum}),
+            )
+        }
+        V::AggregatedSummary1(s) => {
+            let quantiles: Vec<serde_json::Value> = s
+                .quantiles
+                .iter()
+                .zip(&s.values)
+                .map(|(q, v)| json!({"quantile": q, "value": v}))
+                .collect();
+            (
+                "aggregated_summary",
+                json!({"quantiles": quantiles, "count": s.count, "sum": s.sum}),
+            )
+        }
+        V::AggregatedSummary2(s) => {
+            let quantiles: Vec<serde_json::Value> = s.quantiles.iter().map(quantile).collect();
+            (
+                "aggregated_summary",
+                json!({"quantiles": quantiles, "count": s.count, "sum": s.sum}),
+            )
+        }
+        V::AggregatedSummary3(s) => {
+            let quantiles: Vec<serde_json::Value> = s.quantiles.iter().map(quantile).collect();
+            (
+                "aggregated_summary",
+                json!({"quantiles": quantiles, "count": s.count, "sum": s.sum}),
+            )
+        }
+        V::Sketch(sketch) => match sketch.sketch.as_ref()? {
+            event::sketch::Sketch::AgentDdSketch(dd) => (
+                "sketch",
+                json!({"agent_dd_sketch": {
+                    "count": dd.count,
+                    "min": dd.min,
+                    "max": dd.max,
+                    "sum": dd.sum,
+                    "avg": dd.avg,
+                    "k": dd.k,
+                    "n": dd.n,
+                }}),
+            ),
+        },
+    };
+    Some(converted)
 }
 
 /// Convert a Trace event to a JSON envelope.
@@ -419,6 +581,8 @@ mod tests {
                 name: "cpu_usage".to_string(),
                 namespace: "system".to_string(),
                 kind: event::metric::Kind::Absolute as i32,
+                interval_ms: 10_000,
+                value: Some(event::metric::Value::Gauge(event::Gauge { value: 0.25 })),
                 ..Default::default()
             })),
         };
@@ -428,6 +592,166 @@ mod tests {
         assert_eq!(json["_vector_type"], json!("metric"));
         assert_eq!(json["name"], json!("cpu_usage"));
         assert_eq!(json["namespace"], json!("system"));
+        assert_eq!(json["kind"], json!("absolute"));
+        assert_eq!(json["interval_ms"], json!(10_000));
+        assert_eq!(json["gauge"], json!({"value": 0.25}));
+    }
+
+    fn metric_json(value: Option<event::metric::Value>) -> Result<serde_json::Value> {
+        let wrapper = event::EventWrapper {
+            event: Some(event::event_wrapper::Event::Metric(event::Metric {
+                name: "m".to_string(),
+                value,
+                ..Default::default()
+            })),
+        };
+        event_wrapper_to_json(&wrapper).map(|bytes| serde_json::from_slice(&bytes).unwrap())
+    }
+
+    /// Each metric value variant carries its measurement into the record, the
+    /// legacy and current encodings of one kind under the same key, and a
+    /// metric with no value is refused rather than forwarded as a name alone.
+    #[test]
+    fn a_metric_carries_its_value() {
+        use event::metric::Value as V;
+        let bucket = |upper_limit, count| event::HistogramBucket { upper_limit, count };
+        let cases: [(&str, Option<V>, &str, serde_json::Value); 9] = [
+            (
+                "counter",
+                Some(V::Counter(event::Counter { value: 3.0 })),
+                "counter",
+                json!({"value": 3.0}),
+            ),
+            (
+                "gauge",
+                Some(V::Gauge(event::Gauge { value: -1.5 })),
+                "gauge",
+                json!({"value": -1.5}),
+            ),
+            (
+                "set",
+                Some(V::Set(event::Set {
+                    values: vec!["a".into(), "b".into()],
+                })),
+                "set",
+                json!({"values": ["a", "b"]}),
+            ),
+            (
+                "distribution, legacy encoding",
+                Some(V::Distribution1(event::Distribution1 {
+                    values: vec![1.0, 2.0],
+                    sample_rates: vec![1, 4],
+                    statistic: event::StatisticKind::Summary as i32,
+                })),
+                "distribution",
+                json!({"samples": [{"value": 1.0, "rate": 1}, {"value": 2.0, "rate": 4}], "statistic": "summary"}),
+            ),
+            (
+                "distribution",
+                Some(V::Distribution2(event::Distribution2 {
+                    samples: vec![event::DistributionSample {
+                        value: 1.0,
+                        rate: 2,
+                    }],
+                    statistic: event::StatisticKind::Histogram as i32,
+                })),
+                "distribution",
+                json!({"samples": [{"value": 1.0, "rate": 2}], "statistic": "histogram"}),
+            ),
+            (
+                "aggregated histogram, legacy encoding",
+                Some(V::AggregatedHistogram1(event::AggregatedHistogram1 {
+                    buckets: vec![0.5, 1.0],
+                    counts: vec![2, 3],
+                    count: 5,
+                    sum: 3.5,
+                })),
+                "aggregated_histogram",
+                json!({"buckets": [{"upper_limit": 0.5, "count": 2}, {"upper_limit": 1.0, "count": 3}], "count": 5, "sum": 3.5}),
+            ),
+            (
+                "aggregated histogram",
+                Some(V::AggregatedHistogram2(event::AggregatedHistogram2 {
+                    buckets: vec![bucket(1.0, 7)],
+                    count: 7,
+                    sum: 2.0,
+                })),
+                "aggregated_histogram",
+                json!({"buckets": [{"upper_limit": 1.0, "count": 7}], "count": 7, "sum": 2.0}),
+            ),
+            (
+                "aggregated summary",
+                Some(V::AggregatedSummary3(event::AggregatedSummary3 {
+                    quantiles: vec![event::SummaryQuantile {
+                        quantile: 0.99,
+                        value: 9.0,
+                    }],
+                    count: 10,
+                    sum: 40.0,
+                })),
+                "aggregated_summary",
+                json!({"quantiles": [{"quantile": 0.99, "value": 9.0}], "count": 10, "sum": 40.0}),
+            ),
+            (
+                "sketch",
+                Some(V::Sketch(event::Sketch {
+                    sketch: Some(event::sketch::Sketch::AgentDdSketch(
+                        event::sketch::AgentDdSketch {
+                            count: 2,
+                            min: 1.0,
+                            max: 3.0,
+                            sum: 4.0,
+                            avg: 2.0,
+                            k: vec![-1, 4],
+                            n: vec![1, 1],
+                        },
+                    )),
+                })),
+                "sketch",
+                json!({"agent_dd_sketch": {"count": 2, "min": 1.0, "max": 3.0, "sum": 4.0, "avg": 2.0, "k": [-1, 4], "n": [1, 1]}}),
+            ),
+        ];
+        for (name, value, key, want) in cases {
+            let json = metric_json(value).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(json[key], want, "{name}: {json}");
+        }
+
+        let err = metric_json(None).expect_err("a metric with no value");
+        assert!(matches!(err, Error::Validation(_)), "{err:?}");
+    }
+
+    /// `tags_v2` carries every value of a multi-valued tag and a bare tag as
+    /// null, and wins over `tags_v1`, which holds one value per tag.
+    #[test]
+    fn a_metric_carries_its_v2_tags() {
+        let tag = |values: &[Option<&str>]| event::TagValues {
+            values: values
+                .iter()
+                .map(|v| event::TagValue {
+                    value: v.map(str::to_string),
+                })
+                .collect(),
+        };
+        let wrapper = event::EventWrapper {
+            event: Some(event::event_wrapper::Event::Metric(event::Metric {
+                name: "m".to_string(),
+                tags_v1: [("host".to_string(), "b".to_string())].into(),
+                tags_v2: [
+                    ("host".to_string(), tag(&[Some("a"), Some("b")])),
+                    ("env".to_string(), tag(&[Some("prod")])),
+                    ("bare".to_string(), tag(&[None])),
+                ]
+                .into(),
+                value: Some(event::metric::Value::Counter(event::Counter { value: 1.0 })),
+                ..Default::default()
+            })),
+        };
+        let bytes = event_wrapper_to_json(&wrapper).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            json["tags"],
+            json!({"host": ["a", "b"], "env": "prod", "bare": null})
+        );
     }
 
     #[test]

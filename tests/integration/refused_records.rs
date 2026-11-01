@@ -72,6 +72,9 @@ const HELD_FOR: Duration = Duration::from_millis(400);
 // Pipelines
 // ---------------------------------------------------------------------------
 
+/// Records the refusing bus's producer holds before it refuses the next.
+const PRODUCER_HOLDS: u64 = 1;
+
 /// A config routing every record to a bus that takes nothing.
 fn bus_config() -> Config {
     let mut config = Config::default();
@@ -80,10 +83,10 @@ fn bus_config() -> Config {
     config.destinations.default = BUS_DESTINATION.into();
     config.kafka.brokers = vec![UNROUTABLE_BROKER.to_string()];
     // librdkafka takes one record, then refuses the next with QueueFull.
-    config
-        .kafka
-        .librdkafka_overrides
-        .insert("queue.buffering.max.messages".to_string(), "1".to_string());
+    config.kafka.librdkafka_overrides.insert(
+        "queue.buffering.max.messages".to_string(),
+        PRODUCER_HOLDS.to_string(),
+    );
     config.routing.dlq.enabled = false;
     answer_at_enqueue(&mut config);
     config
@@ -111,7 +114,8 @@ fn answer_at_enqueue(config: &mut Config) {
 async fn refusing_bus(config: &Config) -> Arc<PipelineState> {
     let pipeline = pipeline_for(config).await;
     let gauge = Metrics::default();
-    let room_for_one = (DEFAULT_QUEUE_RECORDS - 1) as u64;
+    // The queue depth counts the record the producer holds as well as the buffer's.
+    let room_for_one = (DEFAULT_QUEUE_RECORDS - 1) as u64 + PRODUCER_HOLDS;
     for _ in 0..=DEFAULT_QUEUE_RECORDS {
         pipeline.update_metrics(&gauge).await;
         if gauge.get_batch_queue_size() >= room_for_one {

@@ -301,10 +301,10 @@ properties:
         template_cache:
           max_per_exporter: 1000
           max_exporters: 10000
-        topic: netflow_land
+        topic: ""
       sflow:
         enabled: true
-        topic: sflow_land
+        topic: ""
       split: null
       experimental: true
       raw_capture:
@@ -425,6 +425,7 @@ properties:
         path: /var/spool/dfe-receiver
         max_usage_percent: 0.8
         poll_interval_secs: 5
+        max_spool_bytes: null
   metrics:
     description: Metrics configuration.
     $ref: "#/$defs/MetricsConfig"
@@ -1458,12 +1459,12 @@ $defs:
           template_cache:
             max_per_exporter: 1000
             max_exporters: 10000
-          topic: netflow_land
+          topic: ""
       sflow:
         $ref: "#/$defs/SflowSubConfig"
         default:
           enabled: true
-          topic: sflow_land
+          topic: ""
       split:
         description: If present, switches to split mode and `flow.enabled` MUST be false.
         anyOf:
@@ -1542,8 +1543,11 @@ $defs:
           max_per_exporter: 1000
           max_exporters: 10000
       topic:
+        description: |-
+          Kafka topic for the records no rules row routes. Empty: `netflow`
+          plus `routing.topic_suffix`.
         type: string
-        default: netflow_land
+        default: ""
   TemplateCacheConfig:
     type: object
     properties:
@@ -1564,8 +1568,11 @@ $defs:
         type: boolean
         default: true
       topic:
+        description: |-
+          Kafka topic for the records no rules row routes. Empty: `sflow` plus
+          `routing.topic_suffix`.
         type: string
-        default: sflow_land
+        default: ""
   FlowSplitConfig:
     type: object
     properties:
@@ -2402,6 +2409,7 @@ $defs:
           path: /var/spool/dfe-receiver
           max_usage_percent: 0.8
           poll_interval_secs: 5
+          max_spool_bytes: null
   SpilloverConfig:
     description: |-
       Disk spillover configuration (opt-in, default disabled).
@@ -2436,6 +2444,17 @@ $defs:
         format: uint64
         minimum: 0
         default: 5
+      max_spool_bytes:
+        description: |-
+          Most bytes each sink's spool holds. Unset on Kubernetes, the cap is 90%
+          of the size limit of the writable volume the spool sits on, and a spool
+          on no such volume is refused at startup.
+        type:
+        - integer
+        - "null"
+        format: uint64
+        minimum: 0
+        default: null
   MetricsConfig:
     description: Metrics configuration.
     type: object

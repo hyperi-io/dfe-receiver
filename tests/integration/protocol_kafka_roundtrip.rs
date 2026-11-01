@@ -8,7 +8,7 @@
 
 //! End-to-end tests that exercise the full path from an external protocol
 //! client (Prometheus RW, Splunk HEC) through the receiver to Kafka, using
-//! a testcontainers-managed Kafka broker.
+//! the run's shared Kafka broker.
 //!
 //! For OTLP, see `otlp.rs` (the existing tests already cover OTLP→pipeline).
 //! Adding Kafka to every handler test would multiply test time; instead we
@@ -36,7 +36,6 @@ use prost::Message;
 use tokio_util::sync::CancellationToken;
 
 use crate::common::{kafka_backend, kafka_consume_next, kafka_consumer, test_topic};
-use crate::test_name;
 
 /// Build a config wired to route via Kafka (rather than the in-memory loader).
 fn kafka_config(kf: &crate::common::KafkaTestConfig, topic: &str) -> Config {
@@ -64,7 +63,7 @@ fn kafka_config(kf: &crate::common::KafkaTestConfig, topic: &str) -> Config {
 
 #[tokio::test]
 async fn test_prometheus_rw_to_kafka_roundtrip() {
-    let Some((_handle, kf)) = kafka_backend(test_name!()).await else {
+    let Some((_handle, kf)) = kafka_backend().await else {
         eprintln!("Skipping: no Kafka backend available");
         return;
     };
@@ -161,7 +160,7 @@ async fn test_prometheus_rw_to_kafka_roundtrip() {
 
 #[tokio::test]
 async fn test_splunk_hec_to_kafka_roundtrip() {
-    let Some((_handle, kf)) = kafka_backend(test_name!()).await else {
+    let Some((_handle, kf)) = kafka_backend().await else {
         eprintln!("Skipping: no Kafka backend available");
         return;
     };
@@ -244,7 +243,7 @@ async fn test_webhook_to_kafka_roundtrip() {
         WebhookAuthConfig, WebhookAuthMode, WebhookBody, WebhookCallerConfig,
     };
 
-    let Some((_handle, kf)) = kafka_backend(test_name!()).await else {
+    let Some((_handle, kf)) = kafka_backend().await else {
         eprintln!("Skipping: no Kafka backend available");
         return;
     };
@@ -366,7 +365,7 @@ async fn test_webhook_array_with_a_bad_element_delivers_nothing() {
         WebhookAuthConfig, WebhookAuthMode, WebhookBody, WebhookCallerConfig,
     };
 
-    let Some((_handle, kf)) = kafka_backend(test_name!()).await else {
+    let Some((_handle, kf)) = kafka_backend().await else {
         eprintln!("Skipping: no Kafka backend available");
         return;
     };
@@ -467,7 +466,7 @@ async fn test_webhook_array_with_a_bad_element_delivers_nothing() {
 
 #[tokio::test]
 async fn test_http_to_kafka_roundtrip() {
-    let Some((_handle, kf)) = kafka_backend(test_name!()).await else {
+    let Some((_handle, kf)) = kafka_backend().await else {
         eprintln!("Skipping: no Kafka backend available");
         return;
     };

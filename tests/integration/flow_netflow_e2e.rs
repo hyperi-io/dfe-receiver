@@ -24,9 +24,9 @@
 //! - The receive path is what we want to validate; the upstream packet source
 //!   is irrelevant to the receiver's correctness.
 //!
-//! Kafka is provided by a testcontainers-managed broker (or live infra when
-//! TEST_MODE=live and KAFKA_BROKERS is reachable). The test skips gracefully
-//! when no Kafka backend is available.
+//! Kafka is the run's shared broker, or the cluster `KAFKA_BROKERS`
+//! names. Each test routes to a topic suffix of its own, so tests sharing a
+//! broker read only their own envelopes.
 
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
@@ -42,8 +42,7 @@ use dfe_receiver::server::flow::metrics::mock::flow_metrics_for_test;
 use dfe_receiver::server::traits::ProtocolHandler;
 use tokio_util::sync::CancellationToken;
 
-use crate::common::{kafka_backend, kafka_consume_next, kafka_consumer};
-use crate::test_name;
+use crate::common::{kafka_backend, kafka_consume_next, kafka_consumer, test_topic_suffix};
 
 /// Build a valid NetFlow v5 datagram with one flow record (72 bytes total).
 /// Mirrors `src/server/netflow/tests/decode_v5.rs::build_v5_packet_with_one_flow`.
@@ -121,14 +120,14 @@ fn flow_kafka_config(kf: &crate::common::KafkaTestConfig, topic_suffix: &str) ->
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn netflow_v5_end_to_end_to_kafka() {
     // ------------------------------------------------------------------
-    // 1. Kafka backend (live, docker, or testcontainers fallback).
+    // 1. Kafka backend (live, docker, or the shared broker).
     // ------------------------------------------------------------------
-    let Some((_kafka_handle, kf)) = kafka_backend(test_name!()).await else {
+    let Some((_kafka_handle, kf)) = kafka_backend().await else {
         eprintln!("Skipping: no Kafka backend available (no live infra and Docker unavailable)");
         return;
     };
 
-    let topic_suffix = "_land";
+    let topic_suffix = test_topic_suffix();
     let topic = format!("netflow{topic_suffix}");
 
     // ------------------------------------------------------------------
@@ -140,7 +139,7 @@ async fn netflow_v5_end_to_end_to_kafka() {
     // ------------------------------------------------------------------
     // 3. Start dfe-receiver flow handler.
     // ------------------------------------------------------------------
-    let config = flow_kafka_config(&kf, topic_suffix);
+    let config = flow_kafka_config(&kf, &topic_suffix);
 
     let shutdown = CancellationToken::new();
     let pipeline = Arc::new(
@@ -343,16 +342,16 @@ fn encode_pair(template: NetFlowV9Packet, data: NetFlowV9Packet) -> (Vec<u8>, Ve
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn netflow_v9_end_to_end_to_kafka() {
-    let Some((_kafka_handle, kf)) = kafka_backend(test_name!()).await else {
+    let Some((_kafka_handle, kf)) = kafka_backend().await else {
         eprintln!("Skipping: no Kafka backend available");
         return;
     };
-    let topic_suffix = "_land";
+    let topic_suffix = test_topic_suffix();
     let topic = format!("netflow{topic_suffix}");
     let consumer = kafka_consumer(&kf, &topic).expect("kafka consumer setup");
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let config = flow_kafka_config(&kf, topic_suffix);
+    let config = flow_kafka_config(&kf, &topic_suffix);
 
     let shutdown = CancellationToken::new();
     let pipeline = Arc::new(
@@ -423,16 +422,16 @@ async fn netflow_v9_end_to_end_to_kafka() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn netflow_nsel_end_to_end_to_kafka() {
-    let Some((_kafka_handle, kf)) = kafka_backend(test_name!()).await else {
+    let Some((_kafka_handle, kf)) = kafka_backend().await else {
         eprintln!("Skipping: no Kafka backend available");
         return;
     };
-    let topic_suffix = "_land";
+    let topic_suffix = test_topic_suffix();
     let topic = format!("netflow{topic_suffix}");
     let consumer = kafka_consumer(&kf, &topic).expect("kafka consumer setup");
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let config = flow_kafka_config(&kf, topic_suffix);
+    let config = flow_kafka_config(&kf, &topic_suffix);
 
     let shutdown = CancellationToken::new();
     let pipeline = Arc::new(

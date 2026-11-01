@@ -185,7 +185,8 @@ pub fn compile_rules(config: &Config) -> Result<RuleSet> {
             rules.targets
         )));
     }
-    let options = CompileOptions::from_cascade();
+    let options =
+        CompileOptions::from_cascade().map_err(|e| Error::Config(format!("rules: {e}")))?;
     let invalid = |e: scalo::rules::RulesError| Error::Config(format!("rules: {e}"));
     if config.routing.source_org_id == SourceOrgId::Allow {
         // Checked before the receiver's row goes in, so each finding names the operator's own row.
@@ -340,6 +341,8 @@ pub struct Router {
     default_topic: String,
     /// Source-to-topic remapping (pre-computed with suffix).
     source_to_topic: FxHashMap<Box<str>, String>,
+    /// The topic a listener's own config names, by the `_source` it stamps.
+    listener_topics: FxHashMap<&'static str, String>,
     /// DLQ topic.
     dlq_topic: String,
     /// DLQ enabled.
@@ -396,6 +399,7 @@ impl Router {
                     )
                 })
                 .collect(),
+            listener_topics: listener_topics(&config.flow, &routing.topic_suffix),
             dlq_topic: routing.dlq.topic.clone(),
             dlq_enabled: routing.dlq.enabled,
             default_destination: ResolvedDestinations::new(&destinations.default, destinations),
@@ -464,11 +468,22 @@ impl Router {
         let outcome = tally.evaluate_clamped(&record, &clamp);
         let org = self.final_org(&outcome, &found, binding);
         let assigned = outcome.get(self.source).map(|row| row.clone().into_value());
-        // A row picks the destinations and topic, else the default does, whatever `_source` is written.
-        let route = self.destination(
+        // A row picks the destinations and topic, else the default does, whatever `_source` is
+        // written. A listener naming a topic of its own sends there what no row routed.
+        let mut route = self.destination(
             self.enrichment_enabled
                 .then(|| assigned.as_deref().unwrap_or(&self.default_source)),
         );
+        if assigned.is_none()
+            && let Some(listener_topic) = ingest
+                .listener_stamp()
+                .and_then(|stamp| self.listener_topics.get(stamp))
+            && let RouteResult::Send {
+                topic: Some(topic), ..
+            } = &mut route
+        {
+            topic.clone_from(listener_topic);
+        }
         let source = self
             .enrichment_enabled
             .then(|| self.final_source(assigned, &found, ingest));
@@ -667,6 +682,40 @@ impl Router {
     }
 }
 
+/// The topic each enabled flow listener names, by the `_source` it stamps. A
+/// listener naming none takes its source plus `topic_suffix`.
+fn listener_topics(
+    flow: &crate::server::flow::config::FlowConfig,
+    topic_suffix: &str,
+) -> FxHashMap<&'static str, String> {
+    let mut named = Vec::new();
+    if let Some(split) = &flow.split {
+        for (source, listener) in [("netflow", &split.netflow), ("sflow", &split.sflow)] {
+            if listener.enabled {
+                named.push((source, &listener.topic));
+            }
+        }
+    } else if flow.enabled {
+        if flow.netflow.enabled {
+            named.push(("netflow", &flow.netflow.topic));
+        }
+        if flow.sflow.enabled {
+            named.push(("sflow", &flow.sflow.topic));
+        }
+    }
+    named
+        .into_iter()
+        .map(|(source, topic)| {
+            let topic = if topic.is_empty() {
+                format!("{source}{topic_suffix}")
+            } else {
+                topic.clone()
+            };
+            (source, topic)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 #[allow(clippy::uninlined_format_args)]
 mod tests {
@@ -734,6 +783,83 @@ mod tests {
             listeners: BTreeMap::from([("syslog".to_string(), bound(&["netops"]))]),
         };
         config
+    }
+
+    // --- the flow listeners' topics ---
+
+    /// A flow record no row routed goes to the topic its listener names, in
+    /// either mode.
+    #[test]
+    fn a_flow_record_goes_to_its_listeners_topic() {
+        let flow = |record: &str, stamp: &'static str, config: &Config| {
+            let r = router(config);
+            let (route, ..) = route(
+                &r,
+                &Ingest::built(Principal::Listener(stamp), stamp),
+                record,
+            );
+            route.topic().map(str::to_string)
+        };
+        let mut unified = Config::default();
+        unified.flow.enabled = true;
+        unified.flow.netflow.topic = "routers_flows".to_string();
+        unified.flow.sflow.topic = "switch_samples".to_string();
+        assert_eq!(
+            flow(r#"{"_source":"netflow"}"#, "netflow", &unified).as_deref(),
+            Some("routers_flows")
+        );
+        assert_eq!(
+            flow(r#"{"_source":"sflow"}"#, "sflow", &unified).as_deref(),
+            Some("switch_samples")
+        );
+
+        let mut split = Config::default();
+        split.flow.split = Some(
+            scalo::yaml::from_str(
+                "netflow:\n  ports: [2055]\n  topic: edge_flows\n\
+                 sflow:\n  ports: [6343]\n  topic: edge_samples\n",
+                "flow.yaml",
+                scalo::yaml::Profile::Config,
+            )
+            .expect("split config"),
+        );
+        assert_eq!(
+            flow(r#"{"_source":"netflow"}"#, "netflow", &split).as_deref(),
+            Some("edge_flows")
+        );
+
+        assert_eq!(
+            flow(r#"{"_source":"netflow"}"#, "netflow", &Config::default()).as_deref(),
+            Some("main_land"),
+            "with no flow listener the default routes it"
+        );
+    }
+
+    /// A flow listener with no topic of its own takes its source plus
+    /// `routing.topic_suffix`, as a routed record's topic does.
+    #[test]
+    fn a_flow_listeners_default_topic_follows_the_topic_suffix() {
+        let mut config = Config::default();
+        config.flow.enabled = true;
+        config.routing.topic_suffix = "_raw".to_string();
+        let r = router(&config);
+        let topic = |record: &str, stamp: &'static str| {
+            let (route, ..) = route(
+                &r,
+                &Ingest::built(Principal::Listener(stamp), stamp),
+                record,
+            );
+            route.topic().map(str::to_string)
+        };
+
+        assert_eq!(
+            topic(r#"{"_source":"netflow"}"#, "netflow").as_deref(),
+            Some("netflow_raw")
+        );
+        assert_eq!(
+            topic(r#"{"_source":"sflow"}"#, "sflow").as_deref(),
+            Some("sflow_raw")
+        );
     }
 
     // --- the default path ---
