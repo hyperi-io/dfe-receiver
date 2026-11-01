@@ -156,6 +156,10 @@ async fn ingest_handler(body: Bytes) -> StatusCode {
 - Shared routing/batching pipeline with HTTP
 - Same auth middleware (via Tower)
 
+### OTLP metrics
+
+- Each data point is one record. An exponential histogram carries its buckets either side of zero as `positive_offset` and `positive_bucket_counts` and the `negative_` pair (`PositiveOffset`, `PositiveBucketCounts` and so on in `hyperdx` mode), with `zero_threshold` in `generic`. A data point's exemplars ride on its record: `exemplars` in `generic`, the `Exemplars.*` arrays in `hyperdx`, trace and span ids as hex. Remote write shapes its records the same way, and both modes hold every OTLP exemplar and bucket, so nothing goes uncounted.
+
 ### Prometheus Remote Write
 
 - `prometheus_rw.mode: native` (default) writes each sample, each exemplar (`_type: "exemplar"`) and each native histogram (`_type: "histogram"`) as its own record, with the series labels as top-level fields. A histogram record carries `count`, `sum`, `schema`, `zero_threshold`, `zero_count`, `reset_hint`, its buckets as `positive_offset` and `positive_bucket_counts` (and the `negative_` pair), the Prometheus index of the first bucket and every count from there with gaps filled, and `custom_values` for a custom-bucket histogram.

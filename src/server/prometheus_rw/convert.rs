@@ -33,6 +33,7 @@ use tracing::warn;
 use crate::error::{Error, Result};
 
 use super::proto;
+use crate::server::metric_record::{Exemplar, exemplar_fields};
 
 /// The `_source` this listener stamps on a series that carries no `_source` label.
 pub const SOURCE: &str = "prometheus";
@@ -286,63 +287,33 @@ fn otel_exemplars(
     exemplars: &[proto::Exemplar],
     mode: PrometheusRwMode,
 ) -> Vec<(String, serde_json::Value)> {
-    let split = |exemplar: &proto::Exemplar| {
-        let mut trace_id = String::new();
-        let mut span_id = String::new();
-        let mut attrs = serde_json::Map::new();
-        for label in &exemplar.labels {
-            match label.name.as_str() {
-                "trace_id" => trace_id.clone_from(&label.value),
-                "span_id" => span_id.clone_from(&label.value),
-                _ => {
-                    attrs.insert(label.name.clone(), label.value.clone().into());
+    let read = exemplars
+        .iter()
+        .map(|exemplar| {
+            let mut trace_id = String::new();
+            let mut span_id = String::new();
+            let mut attributes = serde_json::Map::new();
+            for label in &exemplar.labels {
+                match label.name.as_str() {
+                    "trace_id" => trace_id.clone_from(&label.value),
+                    "span_id" => span_id.clone_from(&label.value),
+                    _ => {
+                        attributes.insert(label.name.clone(), label.value.clone().into());
+                    }
                 }
             }
-        }
-        (trace_id, span_id, attrs)
-    };
-    match mode {
-        PrometheusRwMode::HyperDx => {
-            let mut filtered = Vec::new();
-            let mut times = Vec::new();
-            let mut values = Vec::new();
-            let mut span_ids = Vec::new();
-            let mut trace_ids = Vec::new();
-            for exemplar in exemplars {
-                let (trace_id, span_id, attrs) = split(exemplar);
-                filtered.push(serde_json::Value::Object(attrs));
-                times.push(serde_json::json!(epoch_ms_to_ch_datetime(
-                    exemplar.timestamp
-                )));
-                values.push(serde_json::json!(exemplar.value));
-                span_ids.push(serde_json::json!(span_id));
-                trace_ids.push(serde_json::json!(trace_id));
+            Exemplar {
+                time_unix_nano: u64::try_from(exemplar.timestamp)
+                    .unwrap_or(0)
+                    .saturating_mul(1_000_000),
+                value: exemplar.value,
+                trace_id,
+                span_id,
+                attributes,
             }
-            vec![
-                ("Exemplars.FilteredAttributes".to_string(), filtered.into()),
-                ("Exemplars.TimeUnix".to_string(), times.into()),
-                ("Exemplars.Value".to_string(), values.into()),
-                ("Exemplars.SpanId".to_string(), span_ids.into()),
-                ("Exemplars.TraceId".to_string(), trace_ids.into()),
-            ]
-        }
-        PrometheusRwMode::OTel | PrometheusRwMode::Native => {
-            let list: Vec<serde_json::Value> = exemplars
-                .iter()
-                .map(|exemplar| {
-                    let (trace_id, span_id, attrs) = split(exemplar);
-                    serde_json::json!({
-                        "timestamp": epoch_ms_to_rfc3339_nanos(exemplar.timestamp),
-                        "value": exemplar.value,
-                        "trace_id": trace_id,
-                        "span_id": span_id,
-                        "attributes": attrs,
-                    })
-                })
-                .collect();
-            vec![("exemplars".to_string(), list.into())]
-        }
-    }
+        })
+        .collect();
+    exemplar_fields(read, mode == PrometheusRwMode::HyperDx)
 }
 
 // ---------------------------------------------------------------------------

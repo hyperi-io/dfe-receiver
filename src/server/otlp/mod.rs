@@ -21,6 +21,9 @@
 
 pub mod budget;
 pub mod convert;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod convert_metric_detail_tests;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
