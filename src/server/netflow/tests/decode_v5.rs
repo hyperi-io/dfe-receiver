@@ -222,3 +222,23 @@ fn rejects_wrong_protocol_kind() {
         .expect_err("wrong kind must error");
     assert!(format!("{err}").contains("wrong protocol kind"));
 }
+
+/// With raw capture off a record carries no verbatim form, so none is built.
+#[test]
+fn a_v5_record_builds_no_verbatim_form_with_raw_capture_off() {
+    let mut dec = NetflowDecoder::new(
+        1000,
+        10_000,
+        crate::server::flow::metrics::mock::flow_metrics_for_test(),
+    );
+    dec.capture_raw(false);
+    let decoded = dec
+        .decode(
+            &build_v5_packet_with_one_flow(),
+            "127.0.0.1".parse().unwrap(),
+            ProtocolKind::NetflowV5,
+        )
+        .expect("v5 decode succeeds");
+    assert!(decoded.records[0].raw_json.is_empty());
+    assert!(decoded.records[0].fields.src_ip.is_some());
+}

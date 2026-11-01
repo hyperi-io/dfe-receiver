@@ -122,3 +122,20 @@ fn counter_sample_render_raw_is_json() {
     assert_eq!(parsed["sequence_number"], 1);
     assert_eq!(parsed["num_records"], 1);
 }
+
+/// With raw capture off a sample carries no verbatim form, so none is built.
+#[test]
+fn a_counter_sample_builds_no_verbatim_form_with_raw_capture_off() {
+    let mut dec = SflowDecoder::new();
+    dec.capture_raw(false);
+    let decoded = dec
+        .decode(
+            &build_counter_sample_packet(),
+            "127.0.0.1".parse().unwrap(),
+            ProtocolKind::SflowV5,
+        )
+        .expect("decode");
+    let mut buf = Vec::new();
+    SflowDecoder::render_raw(&decoded.records[0], &mut buf).expect("render");
+    assert!(buf.is_empty(), "{}", String::from_utf8_lossy(&buf));
+}

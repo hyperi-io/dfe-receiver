@@ -65,8 +65,8 @@ impl UdpFlowListener {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         bind_addr: SocketAddr,
-        netflow: Option<NetflowDecoder>,
-        sflow: Option<SflowDecoder>,
+        mut netflow: Option<NetflowDecoder>,
+        mut sflow: Option<SflowDecoder>,
         cfg: FlowListenerConfig,
         raw: RawCapture,
         metrics: FlowMetrics,
@@ -74,6 +74,13 @@ impl UdpFlowListener {
         ip_filter: Arc<IpFilter>,
         rate_limiter: Option<Arc<PerSourceRateLimiter>>,
     ) -> Self {
+        // A record's verbatim form is built only where it is sent.
+        if let Some(decoder) = netflow.as_mut() {
+            decoder.capture_raw(raw.enabled);
+        }
+        if let Some(decoder) = sflow.as_mut() {
+            decoder.capture_raw(raw.enabled);
+        }
         Self {
             bind_addr,
             netflow,

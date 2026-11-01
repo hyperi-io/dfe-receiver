@@ -260,6 +260,7 @@ pub struct NetflowDecoder {
     max_per_exporter: usize,
     max_exporters: usize,
     metrics: FlowMetrics,
+    raw: bool,
 }
 
 impl NetflowDecoder {
@@ -269,6 +270,7 @@ impl NetflowDecoder {
             max_per_exporter,
             max_exporters,
             metrics,
+            raw: true,
         }
     }
 
@@ -325,11 +327,12 @@ impl FlowDecoder for NetflowDecoder {
         }
 
         match kind {
-            ProtocolKind::NetflowV5 => decode_v5(data, source),
+            ProtocolKind::NetflowV5 => decode_v5(data, source, self.raw),
             ProtocolKind::NetflowV9 | ProtocolKind::Ipfix => {
                 let max = self.max_per_exporter;
+                let raw = self.raw;
                 let exporter = self.ensure_exporter_slot((source, observation_domain(data, kind)));
-                let decoded = decode_v9_or_ipfix(&mut exporter.codec, data, source, kind);
+                let decoded = decode_v9_or_ipfix(&mut exporter.codec, data, source, kind, raw);
                 let evicted = exporter.hold_to(max);
                 for _ in 0..evicted {
                     self.metrics.template_evicted_total.inc();
@@ -395,6 +398,10 @@ impl FlowDecoder for NetflowDecoder {
         buf.write_all(record.raw_json.as_bytes())
     }
 
+    fn capture_raw(&mut self, on: bool) {
+        self.raw = on;
+    }
+
     fn record_kind(record: &Self::Record) -> &'static str {
         record.fields.record_kind
     }
@@ -428,7 +435,11 @@ fn observation_domain(data: &[u8], kind: ProtocolKind) -> u32 {
 
 // ----- v5 hand-rolled parser ------------------------------------------------
 
-fn decode_v5(data: &[u8], source: IpAddr) -> Result<DecodedPacket<NetflowRecord>, NetflowError> {
+fn decode_v5(
+    data: &[u8],
+    source: IpAddr,
+    raw: bool,
+) -> Result<DecodedPacket<NetflowRecord>, NetflowError> {
     if data.len() < V5_HEADER_BYTES {
         return Err(NetflowError::Parse(format!(
             "v5 datagram too short: {} bytes",
@@ -462,7 +473,7 @@ fn decode_v5(data: &[u8], source: IpAddr) -> Result<DecodedPacket<NetflowRecord>
     let mut records = Vec::with_capacity(count);
     for i in 0..count {
         let off = V5_HEADER_BYTES + i * V5_RECORD_BYTES;
-        let rec = parse_v5_record(&data[off..off + V5_RECORD_BYTES])?;
+        let rec = parse_v5_record(&data[off..off + V5_RECORD_BYTES], raw)?;
         records.push(rec);
     }
 
@@ -475,7 +486,7 @@ fn decode_v5(data: &[u8], source: IpAddr) -> Result<DecodedPacket<NetflowRecord>
     })
 }
 
-fn parse_v5_record(buf: &[u8]) -> Result<NetflowRecord, NetflowError> {
+fn parse_v5_record(buf: &[u8], raw: bool) -> Result<NetflowRecord, NetflowError> {
     if buf.len() < V5_RECORD_BYTES {
         return Err(NetflowError::Parse(format!(
             "v5 record short: {} bytes",
@@ -519,9 +530,14 @@ fn parse_v5_record(buf: &[u8]) -> Result<NetflowRecord, NetflowError> {
     };
     fields.ip_version = Some(4);
 
-    // For v5, the verbatim JSON is a compact representation of the structured
-    // fields. We don't have a netgauze object to serialise here, so we build
-    // one. This keeps `render_raw` cheap and avoids an extra serde dependency.
+    // v5 has no netgauze object to serialise, so the verbatim form is built
+    // from the parsed fields.
+    if !raw {
+        return Ok(NetflowRecord {
+            raw_json: String::new(),
+            fields,
+        });
+    }
     let raw_json = serde_json::to_string(&V5RawJson {
         version: 5,
         src_addr: src.to_string(),
@@ -568,6 +584,7 @@ fn decode_v9_or_ipfix(
     data: &[u8],
     source: IpAddr,
     kind: ProtocolKind,
+    raw: bool,
 ) -> Result<DecodedPacket<NetflowRecord>, NetflowError> {
     let mut buf = BytesMut::from(data);
     let flow_info = match codec.decode(&mut buf) {
@@ -585,7 +602,11 @@ fn decode_v9_or_ipfix(
 
     let mut records: Vec<NetflowRecord> = Vec::new();
     for (_set_id, fields) in flow_info.data_record_fields() {
-        let raw_json = serde_json::to_string(fields).unwrap_or_else(|_| "[]".to_string());
+        let raw_json = if raw {
+            serde_json::to_string(fields).unwrap_or_else(|_| "[]".to_string())
+        } else {
+            String::new()
+        };
         let canonical = map_fields_to_canonical(fields);
         records.push(NetflowRecord {
             raw_json,

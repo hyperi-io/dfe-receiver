@@ -38,6 +38,10 @@ pub trait FlowDecoder: Send + 'static {
     /// Render verbatim parser output (used by `flow.raw_capture`).
     fn render_raw(record: &Self::Record, buf: &mut Vec<u8>) -> io::Result<()>;
 
+    /// Whether `decode` builds the verbatim form `render_raw` writes, on by
+    /// default. Off, a record's verbatim form is empty.
+    fn capture_raw(&mut self, on: bool);
+
     /// Return the canonical `record_kind` string for this record.
     /// Default "flow"; SflowDecoder may return "counter" for interface samples;
     /// NetflowDecoder may return "security_event" / "nat_translation".
