@@ -113,6 +113,8 @@ Metrics for KEDA autoscaling. All services that run in K8s SHOULD emit these.
 | `scaling_circuit_open` | gauge | 1 if circuit breaker is open, 0 otherwise |
 | `scaling_memory_pressure` | gauge | Memory usage as fraction of limit (0.0-1.0) |
 
+In dfe-receiver the pressure's `queue_depth` term is the outbound backlog: the records each Kafka producer holds that no broker has confirmed yet, held answers' included, plus what every buffer and spool in front of a destination holds.
+
 ### Spool/Buffer Metrics (`spool_*`)
 
 For services with disk spillover.

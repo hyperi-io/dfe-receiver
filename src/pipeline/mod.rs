@@ -1587,16 +1587,21 @@ impl PipelineState {
             self.memory_guard.limit_bytes(),
         );
 
-        // Kafka sink stats
+        // Kafka sink stats: the records each producer holds unconfirmed, held
+        // answers' included, plus what the buffer in front of them holds.
         let mut total_queue = 0u64;
         let (mut spilled, mut drained) = (0u64, 0u64);
-        if let Some(ref kafka) = self.kafka
-            && let Some(stats) = kafka.stats().await
-        {
-            total_queue += stats.queue_size as u64;
-            spilled += stats.queued_total;
-            drained += stats.drained_total;
-            metrics.set_circuit_state(stats.circuit_state, stats.consecutive_failures);
+        if let Some(ref kafka) = self.kafka {
+            total_queue += kafka.primary.outstanding();
+            if let Some(ref enqueue_sink) = kafka.enqueue_sink {
+                total_queue += enqueue_sink.outstanding();
+            }
+            if let Some(stats) = kafka.stats().await {
+                total_queue += stats.queue_size as u64;
+                spilled += stats.queued_total;
+                drained += stats.drained_total;
+                metrics.set_circuit_state(stats.circuit_state, stats.consecutive_failures);
+            }
         }
 
         // Named destination stats
@@ -1622,9 +1627,9 @@ impl PipelineState {
         // Sync all metrics into the scaling pressure engine. This is the SHARED
         // scalo `ScalingPressure` the runtime serves at `/scaling/pressure` to
         // KEDA: `update_scaling` feeds the per-pod, locally-knowable signals --
-        // connections (the inbound concurrency proxy), queue_depth (the summed
-        // sink producer queues = the outbound term, set above via
-        // `set_batch_queue_size`), request_rate, memory, spill, and the
+        // connections (the inbound concurrency proxy), queue_depth (the records
+        // the producers hold unconfirmed plus every buffer's = the outbound term,
+        // set above via `set_batch_queue_size`), request_rate, memory, spill, and the
         // outbound circuit gate. The receiver is a push originator (inbound
         // HTTP/gRPC/syslog) so there is no inbound Kafka lag term. KEDA can also
         // scale on the gratis bare ingress metrics directly.
@@ -2696,6 +2701,35 @@ mod tests {
             .kafka
             .librdkafka_overrides
             .insert("message.timeout.ms".to_string(), "1000".to_string());
+    }
+
+    /// The outbound backlog KEDA scales on counts the records the producer
+    /// still holds, so a broker falling behind shows when every listener
+    /// holds its answer and no buffer exists to count.
+    #[tokio::test]
+    async fn the_queue_depth_counts_what_the_producer_holds() {
+        let mut config = test_config();
+        unroutable_bus(&mut config);
+        config
+            .kafka
+            .librdkafka_overrides
+            .insert("message.timeout.ms".to_string(), "60000".to_string());
+        let state = test_state_with(config).await;
+        assert!(
+            state.kafka.as_ref().unwrap().queued.is_none(),
+            "every listener holds, so no buffer"
+        );
+        for n in 0..3 {
+            state
+                .process(Bytes::from(format!(r#"{{"n":{n}}}"#)), &http())
+                .await
+                .expect("librdkafka queues locally");
+        }
+
+        let metrics = Metrics::default();
+        state.update_metrics(&metrics).await;
+
+        assert_eq!(metrics.get_batch_queue_size(), 3);
     }
 
     /// A record answered at enqueue keeps librdkafka's own message timeout:

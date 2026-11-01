@@ -501,6 +501,13 @@ impl KafkaSink {
         Ok(confirmation)
     }
 
+    /// Records the producer holds that no broker has confirmed yet: queued
+    /// or in flight, and those waiting to be queued again.
+    #[must_use]
+    pub fn outstanding(&self) -> u64 {
+        self.delivery.awaiting_report.load(Ordering::Relaxed) + self.delivery.given_up_len() as u64
+    }
+
     /// [`Sink::flush`] with the timeout as a parameter.
     ///
     /// `rd_kafka_flush` blocks until every record is delivered or the timeout
