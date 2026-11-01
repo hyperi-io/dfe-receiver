@@ -220,19 +220,20 @@ impl DeliveryObserver {
 /// good, so sending it again cannot succeed.
 ///
 /// Anything librdkafka can retry, or a code not listed, is not: the record is
-/// offered again rather than dead-lettered.
+/// offered again rather than dead-lettered. A broker's size refusal is not
+/// listed because it fails the whole batch librdkafka sent, so it names no
+/// record; librdkafka refuses an oversized record itself at enqueue.
 fn refused_for_good(err: &KafkaError) -> bool {
     matches!(
         err.rdkafka_error_code(),
         Some(
-            RDKafkaErrorCode::MessageSizeTooLarge
-                | RDKafkaErrorCode::InvalidMessageSize
-                | RDKafkaErrorCode::InvalidRecord
+            RDKafkaErrorCode::InvalidRecord
                 | RDKafkaErrorCode::InvalidTimestamp
                 | RDKafkaErrorCode::TopicAuthorizationFailed
                 | RDKafkaErrorCode::ClusterAuthorizationFailed
                 | RDKafkaErrorCode::InvalidTopic
                 | RDKafkaErrorCode::UnknownTopic
+                | RDKafkaErrorCode::UnknownTopicOrPartition
                 | RDKafkaErrorCode::UnknownPartition
         )
     )
@@ -898,8 +899,8 @@ mod tests {
     fn a_delivery_failure_is_a_refusal_only_for_codes_permanent_to_the_record() {
         use RDKafkaErrorCode as Code;
         let cases = [
-            (Code::MessageSizeTooLarge, true),
-            (Code::InvalidMessageSize, true),
+            (Code::MessageSizeTooLarge, false),
+            (Code::InvalidMessageSize, false),
             (Code::InvalidRecord, true),
             (Code::InvalidTimestamp, true),
             (Code::TopicAuthorizationFailed, true),
@@ -908,7 +909,7 @@ mod tests {
             (Code::UnknownTopic, true),
             (Code::UnknownPartition, true),
             (Code::MessageTimedOut, false),
-            (Code::UnknownTopicOrPartition, false),
+            (Code::UnknownTopicOrPartition, true),
             (Code::NotLeaderForPartition, false),
             (Code::NotEnoughReplicas, false),
             (Code::RequestTimedOut, false),

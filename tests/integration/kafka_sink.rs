@@ -293,12 +293,12 @@ fn spooled_record(topic: &str, payload: String) -> Record {
     }
 }
 
-/// Spool `payloads` for `topic` at `dir`, in order.
+/// Spool each `(topic, payload)` record at `dir`, in order.
 ///
 /// The producer behind the spool can hold one record and is already holding
 /// it, against a broker that does not exist, so every record it is offered
 /// is refused and spooled.
-async fn spool_records(dir: &std::path::Path, topic: &str, payloads: &[String]) {
+async fn spool_records(dir: &std::path::Path, records: &[(&str, String)]) {
     let mut cfg = dfe_receiver::config::KafkaConfig {
         brokers: vec!["192.0.2.1:9092".to_string()],
         ..dfe_receiver::config::KafkaConfig::default()
@@ -306,7 +306,7 @@ async fn spool_records(dir: &std::path::Path, topic: &str, payloads: &[String]) 
     cfg.librdkafka_overrides
         .insert("queue.buffering.max.messages".to_string(), "1".to_string());
     let full = KafkaSink::new(&cfg, None).expect("KafkaSink creation failed");
-    full.send(topic, Bytes::from_static(b"{}"))
+    full.send("filler", Bytes::from_static(b"{}"))
         .await
         .expect("librdkafka queues one record locally");
     let spool = TieredSink::new(
@@ -315,7 +315,7 @@ async fn spool_records(dir: &std::path::Path, topic: &str, payloads: &[String]) 
     )
     .await
     .expect("spool opens");
-    for payload in payloads {
+    for (topic, payload) in records {
         spool
             .send(&spooled_record(topic, payload.clone()))
             .await
@@ -323,7 +323,7 @@ async fn spool_records(dir: &std::path::Path, topic: &str, payloads: &[String]) 
     }
     assert_eq!(
         spool.spool_len().await,
-        payloads.len(),
+        records.len(),
         "not every record spooled"
     );
     spool.shutdown().await;
@@ -348,10 +348,10 @@ async fn a_spooled_record_stays_spooled_until_a_broker_confirms_it() {
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     let dir = tempfile::tempdir().expect("spool dir");
-    let payloads: Vec<String> = (0..RECORDS)
-        .map(|seq| format!(r#"{{"seq":{seq}}}"#))
+    let records: Vec<(&str, String)> = (0..RECORDS)
+        .map(|seq| (topic.as_str(), format!(r#"{{"seq":{seq}}}"#)))
         .collect();
-    spool_records(dir.path(), &topic, &payloads).await;
+    spool_records(dir.path(), &records).await;
 
     // Paused before the sink first reaches it, so no produce request is in
     // flight when the drain starts.
@@ -427,11 +427,19 @@ async fn create_topic(kf: &crate::common::KafkaTestConfig, topic: &str, config: 
     }
 }
 
+/// Producer settings under which librdkafka refuses a record over 1024 bytes
+/// at enqueue.
+const REFUSED_AT_ENQUEUE: &[(&str, &str)] = &[("message.max.bytes", "1024")];
+
+/// Producer settings under which a record to a topic the cluster lacks is
+/// refused for good on its delivery report, a second after it is queued.
+const REFUSED_AT_DELIVERY: &[(&str, &str)] = &[
+    ("allow.auto.create.topics", "false"),
+    ("topic.metadata.propagation.max.ms", "1000"),
+];
+
 /// A spooled record the broker refuses for good leaves the spool through the
 /// reject path, so the records spooled behind it still drain.
-///
-/// The topic takes records of at most 1024 bytes and librdkafka sends up to
-/// its own default, so only the broker refuses the first record.
 #[tokio::test]
 async fn a_spooled_record_the_broker_refuses_for_good_leaves_the_spool() {
     skip_if_no_docker!();
@@ -440,18 +448,26 @@ async fn a_spooled_record_the_broker_refuses_for_good_leaves_the_spool() {
         .expect("Kafka container");
     let kf = kafka_plain_config(&bootstrap);
     let topic = test_topic("spool-refused");
-    create_topic(&kf, &topic, &[("max.message.bytes", "1024")]).await;
+    let missing = test_topic("missing");
+    create_topic(&kf, &topic, &[]).await;
     let consumer = kafka_consumer(&kf, &topic).expect("consumer setup");
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     let dir = tempfile::tempdir().expect("spool dir");
-    let oversized = format!(r#"{{"seq":0,"pad":"{}"}}"#, "x".repeat(4096));
-    spool_records(dir.path(), &topic, &[oversized, r#"{"seq":1}"#.to_string()]).await;
+    spool_records(
+        dir.path(),
+        &[
+            (missing.as_str(), r#"{"seq":0}"#.to_string()),
+            (topic.as_str(), r#"{"seq":1}"#.to_string()),
+        ],
+    )
+    .await;
 
     let mut cfg = kf.to_receiver_kafka_config();
-    // Compressed, the padding would fit under the topic's limit.
-    cfg.librdkafka_overrides
-        .insert("compression.type".to_string(), "none".to_string());
+    for (key, value) in REFUSED_AT_DELIVERY {
+        cfg.librdkafka_overrides
+            .insert((*key).to_string(), (*value).to_string());
+    }
     let sink = KafkaSink::new(&cfg, None).expect("KafkaSink creation failed");
     let spool = TieredSink::new(
         ScaloSinkAdapter::new(Arc::new(sink), Rejects::default()),
@@ -475,24 +491,15 @@ async fn a_spooled_record_the_broker_refuses_for_good_leaves_the_spool() {
     assert_eq!(record["seq"], 1, "{record}");
 }
 
-/// The HTTP status a held request of one `record` is answered with, through a
-/// receiver whose every record goes to `topic`.
-///
-/// `producer_max` caps the producer's `message.max.bytes`, so librdkafka
-/// refuses a larger record at enqueue. `dlq` writes dead letters under it.
-async fn held_answer(
+/// A receiver whose every record goes to `topic`, its producer run with
+/// `overrides`, writing dead letters under `dlq`.
+fn bus_to(
     kf: &crate::common::KafkaTestConfig,
     topic: &str,
-    producer_max: Option<&str>,
+    overrides: &[(&str, &str)],
     dlq: Option<&std::path::Path>,
-    record: String,
-) -> reqwest::StatusCode {
-    use dfe_receiver::config::{
-        Config, DestinationRef, DestinationSpec, KafkaDestination, SharedConfig,
-    };
-    use dfe_receiver::pipeline::PipelineState;
-    use dfe_receiver::server::http::HttpHandler;
-    use dfe_receiver::server::traits::ProtocolHandler;
+) -> dfe_receiver::config::Config {
+    use dfe_receiver::config::{Config, DestinationRef, DestinationSpec, KafkaDestination};
 
     let mut config = Config::default();
     config.server.bind_address = "127.0.0.1:0".to_string();
@@ -502,11 +509,11 @@ async fn held_answer(
         .kafka
         .librdkafka_overrides
         .insert("compression.type".to_string(), "none".to_string());
-    if let Some(max) = producer_max {
+    for (key, value) in overrides {
         config
             .kafka
             .librdkafka_overrides
-            .insert("message.max.bytes".to_string(), max.to_string());
+            .insert((*key).to_string(), (*value).to_string());
     }
     config.destinations.named.insert(
         "refusing".to_string(),
@@ -524,7 +531,24 @@ async fn held_answer(
         config.routing.dlq.kafka_enabled = false;
         config.routing.dlq.file_path = dir.display().to_string();
     }
+    config
+}
 
+/// The HTTP status a held request of one `record` is answered with, through
+/// [`bus_to`] with the same arguments.
+async fn held_answer(
+    kf: &crate::common::KafkaTestConfig,
+    topic: &str,
+    overrides: &[(&str, &str)],
+    dlq: Option<&std::path::Path>,
+    record: String,
+) -> reqwest::StatusCode {
+    use dfe_receiver::config::SharedConfig;
+    use dfe_receiver::pipeline::PipelineState;
+    use dfe_receiver::server::http::HttpHandler;
+    use dfe_receiver::server::traits::ProtocolHandler;
+
+    let config = bus_to(kf, topic, overrides, dlq);
     let pipeline = Arc::new(
         PipelineState::new(SharedConfig::new(config.clone()), CancellationToken::new())
             .await
@@ -582,7 +606,8 @@ async fn a_held_record_refused_at_delivery_is_answered_as_one_refused_at_enqueue
         .expect("Kafka container");
     let kf = kafka_plain_config(&bootstrap);
     let topic = test_topic("held-refused");
-    create_topic(&kf, &topic, &[("max.message.bytes", "1024")]).await;
+    let missing = test_topic("missing");
+    create_topic(&kf, &topic, &[]).await;
     let record = || format!(r#"{{"pad":"{}"}}"#, "x".repeat(4096));
 
     for (case, with_dlq, want) in [
@@ -597,15 +622,15 @@ async fn a_held_record_refused_at_delivery_is_answered_as_one_refused_at_enqueue
         let at_enqueue = held_answer(
             &kf,
             &topic,
-            Some("1024"),
+            REFUSED_AT_ENQUEUE,
             dlq_at(&enqueue_dlq).as_deref(),
             record(),
         )
         .await;
         let at_delivery = held_answer(
             &kf,
-            &topic,
-            None,
+            &missing,
+            REFUSED_AT_DELIVERY,
             dlq_at(&delivery_dlq).as_deref(),
             record(),
         )
@@ -624,6 +649,55 @@ async fn a_held_record_refused_at_delivery_is_answered_as_one_refused_at_enqueue
             "{case}: delivery"
         );
     }
+}
+
+/// A broker's size refusal fails the whole batch librdkafka sent, so it says
+/// nothing about any one record in it: each is answered retryable, never
+/// refused for good, and a record that fits is not dead-lettered with one
+/// that does not.
+#[tokio::test]
+async fn a_broker_size_refusal_is_not_pinned_on_a_record() {
+    use dfe_receiver::config::SharedConfig;
+    use dfe_receiver::pipeline::PipelineState;
+
+    skip_if_no_docker!();
+    let (_broker, bootstrap) = start_kafka_container(test_name!())
+        .await
+        .expect("Kafka container");
+    let kf = kafka_plain_config(&bootstrap);
+    let topic = test_topic("size-refused");
+    create_topic(&kf, &topic, &[("max.message.bytes", "1024")]).await;
+    let fits = Bytes::from_static(br#"{"n":1}"#);
+    let oversized = Bytes::from(format!(r#"{{"pad":"{}"}}"#, "x".repeat(4096)));
+    let state = PipelineState::new(
+        SharedConfig::new(bus_to(&kf, &topic, &[], None)),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("pipeline init");
+    let acks = state.acks(
+        "http",
+        scalo::transport::AcknowledgementsConfig::default(),
+        Some(Duration::from_secs(30)),
+    );
+
+    let outcome = state
+        .process_batch_acked(
+            &[fits, oversized],
+            &acks,
+            None,
+            &crate::common::http_ingest(),
+        )
+        .await;
+
+    assert_eq!(
+        outcome.rejected, 0,
+        "a size refusal was pinned on a record: {outcome:?}"
+    );
+    assert!(
+        matches!(outcome.unavailable, Some(ref e) if e.is_retryable()),
+        "{outcome:?}"
+    );
 }
 
 /// A flush that times out with messages in flight must return `Err`.
