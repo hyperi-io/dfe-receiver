@@ -428,12 +428,34 @@ async fn create_topic(kf: &crate::common::KafkaTestConfig, topic: &str, config: 
 /// at enqueue.
 const REFUSED_AT_ENQUEUE: &[(&str, &str)] = &[("message.max.bytes", "1024")];
 
-/// Producer settings under which a record to a topic the cluster lacks is
-/// refused for good on its delivery report, a second after it is queued.
-const REFUSED_AT_DELIVERY: &[(&str, &str)] = &[
+/// A topic name the broker refuses as invalid, on the delivery report of
+/// every record sent to it.
+const REFUSED_AT_DELIVERY: &str = "a topic name the broker refuses!";
+
+/// Producer settings under which a topic missing from the cluster's metadata
+/// for a second fails its records' delivery reports.
+const MISSING_FOR_GOOD_AFTER_A_SECOND: &[(&str, &str)] = &[
     ("allow.auto.create.topics", "false"),
     ("topic.metadata.propagation.max.ms", "1000"),
 ];
+
+/// Rejects that dead-letter to a file DLQ under `dir`.
+fn file_rejects(dir: &std::path::Path) -> Rejects {
+    let dlq = scalo::dlq::Dlq::spawn(
+        &dfe_receiver::config::DlqConfig {
+            mode: "file_only".to_string(),
+            kafka_enabled: false,
+            file_path: dir.display().to_string(),
+            ..dfe_receiver::config::DlqConfig::default()
+        }
+        .to_scalo_config(),
+        "receiver",
+        None,
+        CancellationToken::new(),
+    )
+    .expect("file DLQ");
+    Rejects::new(Some(Arc::new(dlq)), None)
+}
 
 /// A spooled record the broker refuses for good leaves the spool through the
 /// reject path, so the records spooled behind it still drain.
@@ -443,46 +465,24 @@ async fn a_spooled_record_the_broker_refuses_for_good_leaves_the_spool() {
         return;
     };
     let topic = test_topic("spool-refused");
-    let missing = test_topic("missing");
     create_topic(&kf, &topic, &[]).await;
-    // The producer below takes a topic missing from its metadata for 1s as
-    // gone for good, so the topic must be served before it starts.
-    wait_for_leader(&kf, &topic).await;
     let consumer = kafka_consumer(&kf, &topic).expect("consumer setup");
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     let dir = tempfile::tempdir().expect("spool dir");
     let dlq_dir = dir.path().join("dlq");
-    let dlq = scalo::dlq::Dlq::spawn(
-        &dfe_receiver::config::DlqConfig {
-            mode: "file_only".to_string(),
-            kafka_enabled: false,
-            file_path: dlq_dir.display().to_string(),
-            ..dfe_receiver::config::DlqConfig::default()
-        }
-        .to_scalo_config(),
-        "receiver",
-        None,
-        CancellationToken::new(),
-    )
-    .expect("file DLQ");
     spool_records(
         dir.path(),
         &[
-            (missing.as_str(), r#"{"seq":0}"#.to_string()),
+            (REFUSED_AT_DELIVERY, r#"{"seq":0}"#.to_string()),
             (topic.as_str(), r#"{"seq":1}"#.to_string()),
         ],
     )
     .await;
 
-    let mut cfg = kf.to_receiver_kafka_config();
-    for (key, value) in REFUSED_AT_DELIVERY {
-        cfg.librdkafka_overrides
-            .insert((*key).to_string(), (*value).to_string());
-    }
-    let sink = KafkaSink::new(&cfg, None).expect("KafkaSink creation failed");
+    let sink = make_sink(&kf);
     let spool = TieredSink::new(
-        ScaloSinkAdapter::new(Arc::new(sink), Rejects::new(Some(Arc::new(dlq)), None)),
+        ScaloSinkAdapter::new(Arc::new(sink), file_rejects(&dlq_dir)),
         kafka_spool(dir.path()),
     )
     .await
@@ -610,39 +610,6 @@ fn dead_letter_text(dir: &std::path::Path) -> String {
         .collect()
 }
 
-/// Wait until `topic`'s partition has a leader in the cluster's metadata.
-async fn wait_for_leader(kf: &crate::common::KafkaTestConfig, topic: &str) {
-    use rdkafka::consumer::{BaseConsumer, Consumer};
-
-    let mut client = rdkafka::ClientConfig::new();
-    client.set("bootstrap.servers", &kf.brokers);
-    kf.apply_sasl(&mut client);
-    let probe: BaseConsumer = client.create().expect("metadata client");
-    let topic = topic.to_string();
-    let served = tokio::task::spawn_blocking(move || {
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
-        while std::time::Instant::now() < deadline {
-            let led = probe
-                .fetch_metadata(Some(&topic), Duration::from_secs(5))
-                .is_ok_and(|metadata| {
-                    metadata.topics().iter().any(|t| {
-                        t.error().is_none()
-                            && !t.partitions().is_empty()
-                            && t.partitions().iter().all(|p| p.leader() >= 0)
-                    })
-                });
-            if led {
-                return true;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        false
-    })
-    .await
-    .expect("metadata probe");
-    assert!(served, "the created topic never got a leader");
-}
-
 fn dead_letters(dir: &std::path::Path) -> usize {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;
@@ -669,7 +636,6 @@ async fn a_held_record_refused_at_delivery_is_answered_as_one_refused_at_enqueue
         return;
     };
     let topic = test_topic("held-refused");
-    let missing = test_topic("missing");
     create_topic(&kf, &topic, &[]).await;
     let record = || format!(r#"{{"pad":"{}"}}"#, "x".repeat(4096));
 
@@ -692,8 +658,8 @@ async fn a_held_record_refused_at_delivery_is_answered_as_one_refused_at_enqueue
         .await;
         let at_delivery = held_answer(
             &kf,
-            &missing,
             REFUSED_AT_DELIVERY,
+            &[],
             dlq_at(&delivery_dlq).as_deref(),
             record(),
         )
@@ -846,24 +812,29 @@ async fn a_held_record_refused_for_good_counts_no_usage() {
         return;
     };
     let topic = test_topic("held-usage");
-    let missing = test_topic("missing");
     create_topic(&kf, &topic, &[]).await;
     let small = Bytes::from_static(br#"{"n":1}"#);
     let oversized = Bytes::from(format!(r#"{{"pad":"{}"}}"#, "x".repeat(4096)));
 
     for (case, to, overrides, record, want) in [
-        ("taken", &topic, &[][..], &small, (1, 0, small.len())),
+        (
+            "taken",
+            topic.as_str(),
+            &[][..],
+            &small,
+            (1, 0, small.len()),
+        ),
         (
             "refused at enqueue",
-            &topic,
+            topic.as_str(),
             REFUSED_AT_ENQUEUE,
             &oversized,
             (0, 1, 0),
         ),
         (
             "refused at delivery",
-            &missing,
             REFUSED_AT_DELIVERY,
+            &[],
             &small,
             (0, 1, 0),
         ),
@@ -941,4 +912,88 @@ async fn test_kafka_sink_flush_timeout_is_an_error_not_a_clean_shutdown() {
         !sink.is_healthy(),
         "a sink that could not flush must not report healthy"
     );
+}
+
+/// A record to a topic the broker does not serve yet stays spooled and lands
+/// once the topic exists: a topic that is new, or not yet propagated, is
+/// never taken as gone for good.
+#[tokio::test]
+async fn a_spooled_record_to_a_topic_not_yet_served_lands_once_it_is() {
+    let Some((_broker, kf)) = kafka_backend().await else {
+        return;
+    };
+    let topic = test_topic("not-yet");
+    let dir = tempfile::tempdir().expect("spool dir");
+    let dlq_dir = dir.path().join("dlq");
+    spool_records(dir.path(), &[(topic.as_str(), r#"{"seq":0}"#.to_string())]).await;
+
+    let mut cfg = kf.to_receiver_kafka_config();
+    for (key, value) in MISSING_FOR_GOOD_AFTER_A_SECOND {
+        cfg.librdkafka_overrides
+            .insert((*key).to_string(), (*value).to_string());
+    }
+    let sink = Arc::new(KafkaSink::new(&cfg, None).expect("KafkaSink creation failed"));
+    let spool = TieredSink::new(
+        ScaloSinkAdapter::new(Arc::clone(&sink), file_rejects(&dlq_dir)),
+        kafka_spool(dir.path()),
+    )
+    .await
+    .expect("the spool reopens");
+
+    // Past the producer's propagation window, so the topic reads as missing.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while sink.is_healthy() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        !sink.is_healthy(),
+        "the missing topic never failed a delivery"
+    );
+    let consumer = kafka_consumer(&kf, &topic).expect("consumer setup");
+    create_topic(&kf, &topic, &[]).await;
+
+    let landed = kafka_consume_next(&consumer, Duration::from_secs(60)).await;
+    let left = spool.spool_len().await;
+    spool.shutdown().await;
+    let letters = dead_letter_text(&dlq_dir);
+    assert_eq!(letters, "", "the record was dead-lettered");
+    let landed = landed.unwrap_or_else(|| panic!("the record never landed, {left} still spooled"));
+    let record: serde_json::Value = serde_json::from_slice(&landed).expect("JSON record");
+    assert_eq!(record["seq"], 0, "{record}");
+}
+
+/// A record answered at enqueue to a topic the broker does not serve yet is
+/// queued again until the topic exists, since its sender holds no copy.
+#[tokio::test]
+async fn an_answered_record_to_a_topic_not_yet_served_lands_once_it_is() {
+    let Some((_broker, kf)) = kafka_backend().await else {
+        return;
+    };
+    let topic = test_topic("answered-not-yet");
+    let mut cfg = kf.to_receiver_kafka_config();
+    for (key, value) in MISSING_FOR_GOOD_AFTER_A_SECOND {
+        cfg.librdkafka_overrides
+            .insert((*key).to_string(), (*value).to_string());
+    }
+    let sink = KafkaSink::new(&cfg, None).expect("KafkaSink creation failed");
+    sink.send(&topic, Bytes::from_static(br#"{"seq":0}"#))
+        .await
+        .expect("librdkafka queues the record");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while sink.is_healthy() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        !sink.is_healthy(),
+        "the missing topic never failed a delivery"
+    );
+    let consumer = kafka_consumer(&kf, &topic).expect("consumer setup");
+    create_topic(&kf, &topic, &[]).await;
+
+    let landed = kafka_consume_next(&consumer, Duration::from_secs(60))
+        .await
+        .expect("the record never landed");
+    let record: serde_json::Value = serde_json::from_slice(&landed).expect("JSON record");
+    assert_eq!(record["seq"], 0, "{record}");
 }

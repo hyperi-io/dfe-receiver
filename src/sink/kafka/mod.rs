@@ -68,6 +68,10 @@ const FLUSH_TIMEOUT: Duration = Duration::from_secs(30);
 /// Sampled counter for Kafka enqueue errors (log 1 in 1000).
 static KAFKA_ERRORS: AtomicU64 = AtomicU64::new(0);
 
+/// Sampled counter for delivery reports naming a topic the cluster does not
+/// serve (log 1 in 1000).
+static MISSING_TOPIC: AtomicU64 = AtomicU64::new(0);
+
 /// What the broker did with the records the sink queued.
 ///
 /// Written by [`DeliveryObserver`] on librdkafka's own polling thread, read by
@@ -155,6 +159,16 @@ impl DeliveryObserver {
         )
         .increment(1);
         self.state.failures.trip();
+        if topic_missing(err) && scalo::logger::log_sampled(&MISSING_TOPIC, 1000) {
+            let total = MISSING_TOPIC.load(Ordering::Relaxed);
+            error!(
+                topic,
+                error = %err,
+                total,
+                "Kafka topic not served by the cluster; its records are kept and \
+                 offered again until it is (logged 1 in 1000)"
+            );
+        }
         if self.state.first_failure_on(topic) {
             error!(
                 topic,
@@ -197,12 +211,14 @@ impl DeliveryObserver {
     /// Keep a record answered at enqueue that librdkafka gave up on, for the
     /// resend task to queue again.
     ///
-    /// Only a message timeout qualifies: librdkafka retries every retriable
-    /// failure itself until then, so any other code is a refusal no resend
-    /// clears.
+    /// A message timeout qualifies, and so does a topic the cluster does not
+    /// serve yet, which a new or unpropagated topic reads as. librdkafka
+    /// retries every other retriable failure itself until the timeout, so any
+    /// other code is a refusal no resend clears.
     fn give_up(&self, msg: &rdkafka::message::BorrowedMessage<'_>, err: &KafkaError) {
         if !self.state.resends.load(Ordering::Relaxed)
-            || err.rdkafka_error_code() != Some(RDKafkaErrorCode::MessageTimedOut)
+            || !(err.rdkafka_error_code() == Some(RDKafkaErrorCode::MessageTimedOut)
+                || topic_missing(err))
         {
             return;
         }
@@ -222,7 +238,8 @@ impl DeliveryObserver {
 /// Anything librdkafka can retry, or a code not listed, is not: the record is
 /// offered again rather than dead-lettered. A broker's size refusal is not
 /// listed because it fails the whole batch librdkafka sent, so it names no
-/// record; librdkafka refuses an oversized record itself at enqueue.
+/// record. librdkafka refuses an oversized record itself at enqueue. A topic
+/// the cluster does not serve is not listed either, see [`topic_missing`].
 fn refused_for_good(err: &KafkaError) -> bool {
     matches!(
         err.rdkafka_error_code(),
@@ -232,10 +249,22 @@ fn refused_for_good(err: &KafkaError) -> bool {
                 | RDKafkaErrorCode::TopicAuthorizationFailed
                 | RDKafkaErrorCode::ClusterAuthorizationFailed
                 | RDKafkaErrorCode::InvalidTopic
-                | RDKafkaErrorCode::UnknownTopic
-                | RDKafkaErrorCode::UnknownTopicOrPartition
                 | RDKafkaErrorCode::UnknownPartition
         )
+    )
+}
+
+/// Whether a delivery report names a topic the cluster does not serve.
+///
+/// A topic just created, or not yet propagated to the broker asked, reads the
+/// same as one that will never exist, so its records are kept and offered
+/// again rather than refused for good. One that never exists is a config
+/// error, shown by the log, the `reason` on
+/// `receiver_kafka_delivery_failures_total` and the sink reading unhealthy.
+fn topic_missing(err: &KafkaError) -> bool {
+    matches!(
+        err.rdkafka_error_code(),
+        Some(RDKafkaErrorCode::UnknownTopic | RDKafkaErrorCode::UnknownTopicOrPartition)
     )
 }
 
@@ -913,10 +942,10 @@ mod tests {
             (Code::TopicAuthorizationFailed, true),
             (Code::ClusterAuthorizationFailed, true),
             (Code::InvalidTopic, true),
-            (Code::UnknownTopic, true),
+            (Code::UnknownTopic, false),
             (Code::UnknownPartition, true),
             (Code::MessageTimedOut, false),
-            (Code::UnknownTopicOrPartition, true),
+            (Code::UnknownTopicOrPartition, false),
             (Code::NotLeaderForPartition, false),
             (Code::NotEnoughReplicas, false),
             (Code::RequestTimedOut, false),
