@@ -380,29 +380,31 @@ This means the sidecar is self-regulating — set an appropriate disk buffer siz
 
 ### Sidecar readiness depending on receiver
 
-The sidecar should not be marked ready until receiver is accepting connections.
-Use an `initContainer` to wait for receiver's health endpoint:
+An init container cannot wait for the receiver: every init container must exit before any container in the pod starts, the receiver included, so one waiting on the receiver holds the pod in `Init` for good. The sidecar needs no wait. Vector retries a sink that refuses connections and buffers meanwhile, and the pod is Ready only once every container's readiness probe passes, so the receiver's `/readyz` keeps it out of the Service until the receiver takes traffic.
+
+Where the sidecar must not start sending until the receiver answers, wait in the sidecar's own command:
 
 ```yaml
 # pod spec
-initContainers:
-  - name: wait-for-receiver
-    image: curlimages/curl:8.6.0
+containers:
+  - name: dfe-receiver
+    # ...
+    readinessProbe:
+      httpGet:
+        path: /readyz
+        port: 8080
+
+  - name: vector-sidecar
+    image: timberio/vector:0.57.0-alpine
     command:
       - sh
       - -c
       - |
-        until curl -sf http://localhost:8080/livez; do
+        until wget -q -O /dev/null http://localhost:8080/readyz; do
           echo "waiting for receiver..."
           sleep 2
         done
-
-containers:
-  - name: dfe-receiver
-    # ...
-
-  - name: vector-sidecar
-    # ...
+        exec vector --config /etc/vector/vector.yaml
     readinessProbe:
       httpGet:
         path: /health
