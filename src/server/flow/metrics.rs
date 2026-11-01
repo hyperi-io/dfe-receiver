@@ -200,6 +200,12 @@ const FLOW_SERIES: &[SeriesSpec] = &[
         "Flow packets dropped by the per-source UDP rate limiter",
     ),
     (
+        "flow_rate_limit_evicted_total",
+        MetricType::Counter,
+        &[],
+        "Per-source rate-limit buckets evicted to keep the limiter within cache_size",
+    ),
+    (
         "flow_records_emitted_total",
         MetricType::Counter,
         &["transport", "mode"],

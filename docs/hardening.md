@@ -23,6 +23,7 @@ This document covers application-level hardening (80/20 effort) and cost-effecti
 | Connection cap | 10,000 open connections per listener, every TCP listener and both gRPC listeners; one past it is closed as it is accepted | `server.connections.max_per_listener` (0 = no cap) |
 | Concurrency limit | 10,000 in-flight requests default, per HTTP listener | `server.max_concurrent_requests` |
 | Per-IP rate limiting | GCRA via tower-governor, opt-in, per HTTP listener, keyed on the TCP peer (forwarding headers only from `server.trusted_proxies`); clients whose budget has refilled are dropped from its key map every 5s | `server.rate_limit.*`, `server.trusted_proxies` |
+| Flow per-source rate limiting | Token bucket per UDP source, opt-in. The bucket map never holds more than `cache_size` (default 4096) sources: a new source past it evicts an idle bucket where one is among the first 32 looked at, else the first, counted on `flow_rate_limit_evicted_total`, so spoofed sources cannot grow it | `flow.rate_limit.*` |
 | IP filter (allowlist/denylist) | CIDR trie, connection-level reject, every accept loop; an unknown mode, a bad CIDR or an empty allowlist refuses to start | `server.ip_filter.*` |
 | 503 backpressure | HTTP + gRPC ingest shed load when pipeline not ready | `Retry-After: 5` |
 | TLS termination | Per-protocol, hot-reloadable | `*.tls.enabled` |

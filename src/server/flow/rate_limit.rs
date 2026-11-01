@@ -1,15 +1,19 @@
 //! Per-source-IP token-bucket rate limiter for UDP listeners.
 //!
 //! Sharded via DashMap. Each entry: (tokens, last_refill_micros) packed into
-//! one AtomicU64 for lock-free CAS-based refill. Bounded by LRU eviction
-//! (cache_size). Disabled mode short-circuits to always-allow with zero
-//! overhead.
+//! one AtomicU64 for lock-free CAS-based refill. A new source past
+//! `cache_size` evicts a bucket first, an idle one where it can find one, so
+//! spoofed sources cannot grow the map. Disabled mode short-circuits to
+//! always-allow with zero overhead.
 
 use crate::server::flow::config::RateLimitConfig;
 use dashmap::DashMap;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
+
+/// Buckets a full cache looks at for an idle one before it evicts the first.
+const EVICTION_SCAN: usize = 32;
 
 pub struct PerSourceRateLimiter {
     cfg: RateLimitConfig,
@@ -63,6 +67,9 @@ impl PerSourceRateLimiter {
 
     /// `try_acquire` at a supplied clock reading, so tests run without real time.
     fn acquire_at(&self, src: IpAddr, now_us: u32) -> bool {
+        if self.buckets.len() >= self.cfg.cache_size && !self.buckets.contains_key(&src) {
+            self.make_room(now_us);
+        }
         let entry = self
             .buckets
             .entry(src)
@@ -105,26 +112,32 @@ impl PerSourceRateLimiter {
         }
     }
 
-    /// LRU eviction -- called periodically (e.g. every minute) to bound memory.
-    /// Removes buckets when cache exceeds `cfg.cache_size`. Simple strategy:
-    /// DashMap doesn't expose insertion order, so we remove arbitrary entries
-    /// until back under capacity. Operators tune cache_size = 4x expected
-    /// steady-state distinct sources.
-    pub fn evict_lru(&self) {
-        if self.buckets.len() <= self.cfg.cache_size {
-            return;
+    /// Evict one bucket for a new source: the first idle one among the
+    /// first [`EVICTION_SCAN`] looked at, else the first of them. An idle
+    /// bucket has refilled to the burst, so a new bucket for its source
+    /// starts where it would have.
+    fn make_room(&self, now_us: u32) {
+        let mut victim = None;
+        for entry in self.buckets.iter().take(EVICTION_SCAN) {
+            if self.is_idle(entry.value(), now_us) {
+                victim = Some(*entry.key());
+                break;
+            }
+            victim.get_or_insert(*entry.key());
         }
-        let target = self.cfg.cache_size;
-        let to_remove = self.buckets.len() - target;
-        let keys: Vec<_> = self
-            .buckets
-            .iter()
-            .take(to_remove)
-            .map(|e| *e.key())
-            .collect();
-        for k in keys {
-            self.buckets.remove(&k);
+        if let Some(src) = victim
+            && self.buckets.remove(&src).is_some()
+        {
+            metrics::counter!("flow_rate_limit_evicted_total").increment(1);
         }
+    }
+
+    /// Whether `bucket` has refilled to the burst by `now_us`.
+    fn is_idle(&self, bucket: &AtomicBucket, now_us: u32) -> bool {
+        let (tokens, last_us) = unpack(bucket.state.load(Ordering::Acquire));
+        let elapsed_us = now_us.wrapping_sub(last_us);
+        let refill = u64::from(elapsed_us) * u64::from(self.cfg.packets_per_second) / 1_000_000;
+        u64::from(tokens) + refill >= u64::from(self.cfg.burst)
     }
 
     #[cfg(test)]
@@ -226,21 +239,48 @@ mod tests {
         }
     }
 
+    /// A flood of new sources, spoofed ones included, never holds more
+    /// buckets than `cache_size` between sweeps, and each bucket evicted is
+    /// counted.
     #[test]
-    fn evict_when_over_capacity() {
-        let cfg = RateLimitConfig {
+    fn a_flood_of_sources_holds_no_more_buckets_than_the_cache() {
+        let recorder = crate::buffer::rejects::CountedKeys::default();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let rl = PerSourceRateLimiter::new(RateLimitConfig {
             enabled: true,
             packets_per_second: 100,
             burst: 1,
             cache_size: 4,
-        };
-        let rl = PerSourceRateLimiter::new(cfg);
+        });
         for i in 0..10 {
-            let _ = rl.try_acquire(ip(i));
+            assert!(rl.acquire_at(ip(i), 0), "a new source has a token");
         }
-        assert!(rl.bucket_count() > 4);
-        rl.evict_lru();
-        assert!(rl.bucket_count() <= 4);
+        assert_eq!(rl.bucket_count(), 4);
+        assert_eq!(recorder.get("flow_rate_limit_evicted_total{}"), 6);
+        assert!(
+            !rl.acquire_at(ip(9), 0),
+            "the newest source lost the bucket it just spent"
+        );
+    }
+
+    /// A full cache evicts an idle bucket, refilled to the burst and so the
+    /// same as a new one, before a source still being throttled.
+    #[test]
+    fn a_full_cache_evicts_an_idle_bucket_before_a_throttled_one() {
+        let rl = PerSourceRateLimiter::new(RateLimitConfig {
+            enabled: true,
+            packets_per_second: 1,
+            burst: 1,
+            cache_size: 2,
+        });
+        assert!(rl.acquire_at(ip(1), 0));
+        assert!(rl.acquire_at(ip(2), 3_000_000));
+        // Source 1 has refilled by now, source 2 has not.
+        assert!(rl.acquire_at(ip(3), 3_500_000));
+        assert!(
+            !rl.acquire_at(ip(2), 3_500_000),
+            "the throttled source was evicted, so it got a fresh burst"
+        );
     }
 
     #[test]
@@ -264,17 +304,17 @@ mod tests {
     }
 
     #[test]
-    fn the_default_cache_size_holds_a_source() {
-        // A zero cache_size evicts every bucket on each sweep.
+    fn the_default_cache_size_holds_more_than_one_source() {
+        // A zero or one cache_size evicts a bucket for every new source.
         let rl = PerSourceRateLimiter::new(RateLimitConfig {
             enabled: true,
             ..Default::default()
         });
         let _ = rl.try_acquire(ip(1));
-        rl.evict_lru();
+        let _ = rl.try_acquire(ip(2));
         assert_eq!(
             rl.bucket_count(),
-            1,
+            2,
             "the default cache_size evicts the bucket it just created"
         );
     }
