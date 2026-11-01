@@ -17,6 +17,7 @@ use serde::Deserialize;
 
 use crate::config::RawCapture;
 use crate::error::{Error, Result};
+use crate::server::budget::{MAX_COPIED_BYTES, MAX_RECORDS};
 use crate::server::raw_capture;
 
 /// A single Splunk HEC event as sent to `/services/collector/event`.
@@ -56,12 +57,18 @@ pub struct HecEvent {
 ///
 /// The body is NDJSON (concatenated JSON objects, not a JSON array).
 /// Uses `serde_json::StreamDeserializer` which handles objects with or
-/// without newline separators.
+/// without newline separators. A body of more than [`MAX_RECORDS`] events is
+/// refused, as a batched `/ingest` request is.
 pub fn parse_hec_events(body: &[u8]) -> Result<Vec<HecEvent>> {
     let stream = serde_json::Deserializer::from_slice(body).into_iter::<HecEvent>();
 
     let mut events = Vec::new();
     for result in stream {
+        if events.len() == MAX_RECORDS {
+            return Err(Error::Validation(format!(
+                "HEC request carries more than {MAX_RECORDS} events, send smaller batches"
+            )));
+        }
         let event = result.map_err(|e| Error::Validation(format!("HEC event parse error: {e}")))?;
 
         // The `event` field is required and must not be null
@@ -156,6 +163,45 @@ pub struct RawMetadata {
     pub source: Option<String>,
     pub sourcetype: Option<String>,
     pub index: Option<String>,
+}
+
+impl RawMetadata {
+    /// Bytes of metadata copied into every line's record.
+    fn copied_bytes(&self) -> usize {
+        [&self.host, &self.source, &self.sourcetype, &self.index]
+            .into_iter()
+            .flatten()
+            .map(String::len)
+            .sum()
+    }
+}
+
+/// The non-empty lines of a `/raw` body, one record each.
+///
+/// # Errors
+///
+/// [`Error::Validation`] for more than [`MAX_RECORDS`] lines, or `metadata`
+/// copied into them past [`MAX_COPIED_BYTES`]: a body within its size limit
+/// can split into millions of records, each carrying a copy of the metadata.
+pub fn raw_lines<'a>(body: &'a [u8], metadata: &RawMetadata) -> Result<Vec<&'a [u8]>> {
+    let lines: Vec<&[u8]> = body
+        .split(|&b| b == b'\n')
+        .filter(|line| !line.is_empty())
+        // Bounds the split itself, before the count below refuses it.
+        .take(MAX_RECORDS + 1)
+        .collect();
+    if lines.len() > MAX_RECORDS {
+        return Err(Error::Validation(format!(
+            "HEC raw request carries more than {MAX_RECORDS} lines, send smaller batches"
+        )));
+    }
+    if metadata.copied_bytes().saturating_mul(lines.len()) > MAX_COPIED_BYTES {
+        return Err(Error::Validation(format!(
+            "HEC raw request metadata copied into {} lines is past {MAX_COPIED_BYTES} bytes",
+            lines.len()
+        )));
+    }
+    Ok(lines)
 }
 
 /// Convert a raw text line to pipeline-ready JSON bytes.
@@ -331,6 +377,63 @@ mod tests {
     fn test_invalid_json() {
         let err = parse_hec_events(b"not json at all").unwrap_err();
         assert!(err.to_string().contains("parse error"));
+    }
+
+    /// Each body against the decode budget: events and raw lines at and past
+    /// the record cap, and request metadata copied into every raw line at and
+    /// past the shared-byte cap.
+    #[test]
+    fn a_request_past_the_decode_budget_is_refused() {
+        let events = |n: usize| r#"{"event":1}"#.repeat(n);
+        let lines = |n: usize| "a\n".repeat(n);
+        let host = |bytes: usize| RawMetadata {
+            host: Some("h".repeat(bytes)),
+            ..RawMetadata::default()
+        };
+        let none = RawMetadata::default();
+        let per_line = MAX_COPIED_BYTES / 1000;
+        let cases: [(&str, Result<usize>, Option<&str>); 6] = [
+            (
+                "events at the cap",
+                parse_hec_events(events(MAX_RECORDS).as_bytes()).map(|e| e.len()),
+                None,
+            ),
+            (
+                "events past the cap",
+                parse_hec_events(events(MAX_RECORDS + 1).as_bytes()).map(|e| e.len()),
+                Some("events"),
+            ),
+            (
+                "raw lines at the cap, blank lines uncounted",
+                raw_lines(format!("\n{}", lines(MAX_RECORDS)).as_bytes(), &none).map(|l| l.len()),
+                None,
+            ),
+            (
+                "raw lines past the cap",
+                raw_lines(lines(MAX_RECORDS + 1).as_bytes(), &none).map(|l| l.len()),
+                Some("lines"),
+            ),
+            (
+                "metadata copied to the cap",
+                raw_lines(lines(1000).as_bytes(), &host(per_line)).map(|l| l.len()),
+                None,
+            ),
+            (
+                "metadata copied past the cap",
+                raw_lines(lines(1000).as_bytes(), &host(per_line + 1)).map(|l| l.len()),
+                Some("metadata"),
+            ),
+        ];
+        for (name, got, refused) in cases {
+            match (got, refused) {
+                (Ok(n), None) => assert!(n > 0, "{name}: nothing split"),
+                (Err(e), Some(text)) => {
+                    assert!(matches!(e, Error::Validation(_)), "{name}: {e:?}");
+                    assert!(e.to_string().contains(text), "{name}: {e}");
+                }
+                (got, want) => panic!("{name}: got {got:?}, want refusal {want:?}"),
+            }
+        }
     }
 
     #[test]
