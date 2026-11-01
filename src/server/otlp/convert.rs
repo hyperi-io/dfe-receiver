@@ -152,16 +152,12 @@ fn any_value_to_string_value(av: &pb::common::v1::AnyValue) -> serde_json::Value
         Some(pb::common::v1::any_value::Value::BytesValue(b)) => {
             serde_json::Value::String(bytes_to_hex(b))
         }
-        Some(pb::common::v1::any_value::Value::ArrayValue(arr)) => {
-            // Serialise array as JSON string
-            let items: Vec<serde_json::Value> = arr.values.iter().map(any_value_to_json).collect();
-            serde_json::Value::String(serde_json::Value::Array(items).to_string())
-        }
-        Some(pb::common::v1::any_value::Value::KvlistValue(kvl)) => {
-            // Serialise kvlist as JSON string
-            let map = attributes_to_map(&kvl.values);
-            serde_json::Value::String(serde_json::Value::Object(map).to_string())
-        }
+        // Native JSON stringified once: a child stringified first would be
+        // escaped again by each level above it.
+        Some(
+            pb::common::v1::any_value::Value::ArrayValue(_)
+            | pb::common::v1::any_value::Value::KvlistValue(_),
+        ) => serde_json::Value::String(any_value_to_json(av).to_string()),
         None => serde_json::Value::String(String::new()),
     }
 }
@@ -903,6 +899,48 @@ mod tests {
         };
         let result = any_value_to_string_value(&av);
         assert_eq!(result, serde_json::Value::String("hello".to_string()));
+    }
+
+    /// A kvlist `depth` levels deep, with a quote in its innermost string.
+    fn nested_kvlist(depth: usize) -> pb::common::v1::AnyValue {
+        let mut value = pb::common::v1::AnyValue {
+            value: Some(pb::common::v1::any_value::Value::StringValue(
+                "\"".to_string(),
+            )),
+        };
+        for _ in 0..depth {
+            value = pb::common::v1::AnyValue {
+                value: Some(pb::common::v1::any_value::Value::KvlistValue(
+                    pb::common::v1::KeyValueList {
+                        values: vec![pb::common::v1::KeyValue {
+                            key: "k".to_string(),
+                            value: Some(value),
+                        }],
+                    },
+                )),
+            };
+        }
+        value
+    }
+
+    /// A nested kvlist attribute is one JSON string of native JSON, as the
+    /// OTel Collector's ClickHouse exporter writes it, and its size grows
+    /// with its depth: re-escaping each child doubles its backslashes per
+    /// level, so 40 levels of a few bytes reach a terabyte.
+    #[test]
+    fn a_nested_kvlist_attribute_is_stringified_once() {
+        let len = |depth| {
+            let value = any_value_to_string_value(&nested_kvlist(depth));
+            value.as_str().map_or(0, str::len)
+        };
+        let (ten, twenty) = (len(10), len(20));
+        assert!(
+            twenty < 3 * ten,
+            "10 levels stringified to {ten} bytes, 20 to {twenty}"
+        );
+
+        let two = any_value_to_string_value(&nested_kvlist(2));
+        assert_eq!(two, serde_json::json!(r#"{"k":{"k":"\""}}"#));
     }
 
     #[test]
