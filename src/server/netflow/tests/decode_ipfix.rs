@@ -157,6 +157,6 @@ fn an_ipfix_record_builds_no_verbatim_form_with_raw_capture_off() {
     let decoded = dec
         .decode(&data, exporter, ProtocolKind::Ipfix)
         .expect("ipfix data decode");
-    assert!(decoded.records[0].raw_json.is_empty());
+    assert_eq!(decoded.records[0].raw_json, "");
     assert!(decoded.records[0].fields.src_ip.is_some());
 }

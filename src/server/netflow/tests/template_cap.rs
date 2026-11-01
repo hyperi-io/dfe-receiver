@@ -145,10 +145,10 @@ fn a_template_id_is_scoped_to_its_observation_domain() {
         )
         .expect("domain 8 template");
 
-    let decoded = decoder
+    let packet = decoder
         .decode(&data(400), exporter, ProtocolKind::Ipfix)
         .expect("domain 7 data");
-    let fields = &decoded.records[0].fields;
+    let fields = &packet.records[0].fields;
     assert_eq!(fields.src_ip, Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))));
     assert_eq!(fields.dst_ip, None, "decoded under domain 8's template");
 }

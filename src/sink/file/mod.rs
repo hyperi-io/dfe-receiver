@@ -87,7 +87,7 @@ impl Sink for FileSink {
 
     /// Flush the write buffer to disk.
     async fn flush(&self) -> Result<()> {
-        self.blocking("flush", |w| w.flush()).await
+        self.blocking("flush", Write::flush).await
     }
 
     /// File sink is always considered healthy.

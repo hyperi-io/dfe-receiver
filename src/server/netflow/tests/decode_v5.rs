@@ -239,6 +239,6 @@ fn a_v5_record_builds_no_verbatim_form_with_raw_capture_off() {
             ProtocolKind::NetflowV5,
         )
         .expect("v5 decode succeeds");
-    assert!(decoded.records[0].raw_json.is_empty());
+    assert_eq!(decoded.records[0].raw_json, "");
     assert!(decoded.records[0].fields.src_ip.is_some());
 }
