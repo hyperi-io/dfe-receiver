@@ -2913,6 +2913,11 @@ pub struct SpilloverConfig {
 
     /// How often to check disk usage, in seconds.
     pub poll_interval_secs: u64,
+
+    /// Most bytes each sink's spool holds. Unset on Kubernetes, the cap is 90%
+    /// of the size limit of the writable volume the spool sits on, and a spool
+    /// on no such volume is refused at startup.
+    pub max_spool_bytes: Option<u64>,
 }
 
 /// Where the disk spillover spools by default, and where the deployment
@@ -2938,6 +2943,7 @@ impl Default for SpilloverConfig {
             path: default_spillover_path(),
             max_usage_percent: default_max_usage_percent(),
             poll_interval_secs: default_poll_interval_secs(),
+            max_spool_bytes: None,
         }
     }
 }

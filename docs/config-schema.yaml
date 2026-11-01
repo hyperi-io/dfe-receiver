@@ -425,6 +425,7 @@ properties:
         path: /var/spool/dfe-receiver
         max_usage_percent: 0.8
         poll_interval_secs: 5
+        max_spool_bytes: null
   metrics:
     description: Metrics configuration.
     $ref: "#/$defs/MetricsConfig"
@@ -2402,6 +2403,7 @@ $defs:
           path: /var/spool/dfe-receiver
           max_usage_percent: 0.8
           poll_interval_secs: 5
+          max_spool_bytes: null
   SpilloverConfig:
     description: |-
       Disk spillover configuration (opt-in, default disabled).
@@ -2436,6 +2438,17 @@ $defs:
         format: uint64
         minimum: 0
         default: 5
+      max_spool_bytes:
+        description: |-
+          Most bytes each sink's spool holds. Unset on Kubernetes, the cap is 90%
+          of the size limit of the writable volume the spool sits on, and a spool
+          on no such volume is refused at startup.
+        type:
+        - integer
+        - "null"
+        format: uint64
+        minimum: 0
+        default: null
   MetricsConfig:
     description: Metrics configuration.
     type: object

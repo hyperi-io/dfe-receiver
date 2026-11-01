@@ -2205,6 +2205,7 @@ fn spillover_config(
         max_usage_percent: spillover.max_usage_percent,
         poll_interval_secs: spillover.poll_interval_secs,
     });
+    config.max_spool_bytes = spillover.max_spool_bytes;
     config
 }
 
@@ -2513,11 +2514,13 @@ mod tests {
         }
     }
 
-    /// Spillover on, under `dir`.
+    /// Spillover on, under `dir`, capped as a spool outside a writable volume
+    /// must be on Kubernetes.
     fn spill_to(config: &mut Config, dir: &std::path::Path) {
         config.buffer.spillover = crate::config::SpilloverConfig {
             enabled: true,
             path: dir.to_path_buf(),
+            max_spool_bytes: Some(64 * 1024 * 1024),
             ..crate::config::SpilloverConfig::default()
         };
     }
@@ -2531,9 +2534,12 @@ mod tests {
             path: std::path::PathBuf::from("/var/spool/somewhere-else"),
             max_usage_percent: 0.55,
             poll_interval_secs: 17,
+            max_spool_bytes: Some(1 << 30),
         };
 
         let built = spillover_config(&spillover, Path::new(BUS_SPOOL));
+
+        assert_eq!(built.max_spool_bytes, Some(1 << 30));
 
         assert_eq!(built.spool_path, spillover.path.join("kafka"));
         let disk = built.disk_aware.unwrap();

@@ -595,6 +595,7 @@ buffer:
     path: /var/spool/dfe-receiver
     max_usage_percent: 0.8  # pause spool writes when disk exceeds 80%
     poll_interval_secs: 5
+    # max_spool_bytes: 9663676416  # bytes per sink's spool. Unset on Kubernetes: 90% of the volume's sizeLimit
 
 file_sink:
   enabled: false  # set true to write all processed messages to a file (debug only)

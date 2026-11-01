@@ -499,7 +499,8 @@
           "enabled": false,
           "path": "/var/spool/dfe-receiver",
           "max_usage_percent": 0.8,
-          "poll_interval_secs": 5
+          "poll_interval_secs": 5,
+          "max_spool_bytes": null
         }
       }
     },
@@ -2638,7 +2639,8 @@
             "enabled": false,
             "path": "/var/spool/dfe-receiver",
             "max_usage_percent": 0.8,
-            "poll_interval_secs": 5
+            "poll_interval_secs": 5,
+            "max_spool_bytes": null
           }
         }
       }
@@ -2669,6 +2671,16 @@
           "format": "uint64",
           "minimum": 0,
           "default": 5
+        },
+        "max_spool_bytes": {
+          "description": "Most bytes each sink's spool holds. Unset on Kubernetes, the cap is 90%\nof the size limit of the writable volume the spool sits on, and a spool\non no such volume is refused at startup.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "default": null
         }
       }
     },
