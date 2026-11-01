@@ -700,6 +700,146 @@ async fn a_broker_size_refusal_is_not_pinned_on_a_record() {
     );
 }
 
+/// A recorder summing every series of one counter, whatever its labels.
+struct CounterTotal {
+    name: &'static str,
+    total: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl CounterTotal {
+    fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            total: Arc::default(),
+        }
+    }
+
+    fn get(&self) -> u64 {
+        self.total.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+struct Adds(Arc<std::sync::atomic::AtomicU64>);
+
+impl metrics::CounterFn for Adds {
+    fn increment(&self, value: u64) {
+        self.0
+            .fetch_add(value, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn absolute(&self, _: u64) {}
+}
+
+impl metrics::Recorder for CounterTotal {
+    fn describe_counter(
+        &self,
+        _: metrics::KeyName,
+        _: Option<metrics::Unit>,
+        _: metrics::SharedString,
+    ) {
+    }
+    fn describe_gauge(
+        &self,
+        _: metrics::KeyName,
+        _: Option<metrics::Unit>,
+        _: metrics::SharedString,
+    ) {
+    }
+    fn describe_histogram(
+        &self,
+        _: metrics::KeyName,
+        _: Option<metrics::Unit>,
+        _: metrics::SharedString,
+    ) {
+    }
+
+    fn register_counter(&self, key: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Counter {
+        if key.name() == self.name {
+            metrics::Counter::from_arc(Arc::new(Adds(Arc::clone(&self.total))))
+        } else {
+            metrics::Counter::noop()
+        }
+    }
+
+    fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
+        metrics::Gauge::noop()
+    }
+
+    fn register_histogram(
+        &self,
+        _: &metrics::Key,
+        _: &metrics::Metadata<'_>,
+    ) -> metrics::Histogram {
+        metrics::Histogram::noop()
+    }
+}
+
+/// A held record refused for good adds no usage, on its delivery report as at
+/// enqueue: usage counts only what was taken.
+#[tokio::test]
+async fn a_held_record_refused_for_good_counts_no_usage() {
+    use dfe_receiver::config::SharedConfig;
+    use dfe_receiver::pipeline::PipelineState;
+
+    skip_if_no_docker!();
+    let (_broker, bootstrap) = start_kafka_container(test_name!())
+        .await
+        .expect("Kafka container");
+    let kf = kafka_plain_config(&bootstrap);
+    let topic = test_topic("held-usage");
+    let missing = test_topic("missing");
+    create_topic(&kf, &topic, &[]).await;
+    let small = Bytes::from_static(br#"{"n":1}"#);
+    let oversized = Bytes::from(format!(r#"{{"pad":"{}"}}"#, "x".repeat(4096)));
+
+    for (case, to, overrides, record, want) in [
+        ("taken", &topic, &[][..], &small, (1, 0, small.len())),
+        (
+            "refused at enqueue",
+            &topic,
+            REFUSED_AT_ENQUEUE,
+            &oversized,
+            (0, 1, 0),
+        ),
+        (
+            "refused at delivery",
+            &missing,
+            REFUSED_AT_DELIVERY,
+            &small,
+            (0, 1, 0),
+        ),
+    ] {
+        let usage = CounterTotal::new("usage_ingested_bytes_total");
+        let _local = metrics::set_default_local_recorder(&usage);
+        let state = PipelineState::new(
+            SharedConfig::new(bus_to(&kf, to, overrides, None)),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("pipeline init");
+        let acks = state.acks(
+            "http",
+            scalo::transport::AcknowledgementsConfig::default(),
+            Some(Duration::from_secs(30)),
+        );
+
+        let outcome = state
+            .process_batch_acked(
+                std::slice::from_ref(record),
+                &acks,
+                None,
+                &crate::common::http_ingest(),
+            )
+            .await;
+
+        assert_eq!(
+            (outcome.accepted, outcome.rejected, usage.get() as usize),
+            want,
+            "{case}: (accepted, rejected, usage bytes) from {outcome:?}"
+        );
+    }
+}
+
 /// A flush that times out with messages in flight must return `Err`.
 ///
 /// `PipelineOrchestrator::run` gates its shutdown handling on

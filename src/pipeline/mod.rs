@@ -480,6 +480,9 @@ struct Dispatch<'a> {
     /// The index in the request of the record being sent.
     record: usize,
     usage: Usage,
+    /// The usage each held record queued on the bus added, by record, for a
+    /// delivery report that refuses it to take back.
+    bus_usage: Vec<(usize, String, u64)>,
 }
 
 /// A held record the bus queued, waiting on its delivery report.
@@ -501,6 +504,19 @@ impl<'a> Dispatch<'a> {
             bus: Vec::new(),
             record: 0,
             usage: Usage::default(),
+            bus_usage: Vec::new(),
+        }
+    }
+
+    /// Count the record being sent as `bytes` taken for `org`.
+    fn count_usage(&mut self, org: &str, bytes: u64) {
+        self.usage.add(org, bytes);
+        if self
+            .bus
+            .last()
+            .is_some_and(|held| held.record == self.record)
+        {
+            self.bus_usage.push((self.record, org.to_string(), bytes));
         }
     }
 
@@ -531,6 +547,13 @@ impl Usage {
         match self.0.iter_mut().find(|(seen, _)| seen == org) {
             Some((_, total)) => *total += bytes,
             None => self.0.push((org.to_string(), bytes)),
+        }
+    }
+
+    /// Take back `bytes` counted for `org`.
+    fn remove(&mut self, org: &str, bytes: u64) {
+        if let Some((_, total)) = self.0.iter_mut().find(|(seen, _)| seen == org) {
+            *total = total.saturating_sub(bytes);
         }
     }
 
@@ -1158,8 +1181,12 @@ impl PipelineState {
             outcome.retry_all(e);
         }
         if outcome.unavailable.is_none() {
-            self.settle_bus(std::mem::take(&mut dispatch.bus), &mut taken, outcome)
-                .await;
+            let held = std::mem::take(&mut dispatch.bus);
+            for record in self.settle_bus(held, &mut taken, outcome).await {
+                for (_, org, bytes) in dispatch.bus_usage.iter().filter(|(r, ..)| *r == record) {
+                    dispatch.usage.remove(org, *bytes);
+                }
+            }
         }
         std::mem::take(&mut dispatch.usage)
     }
@@ -1168,12 +1195,16 @@ impl PipelineState {
     /// A report refusing the record for good takes the record through the
     /// same disposal as a refusal at enqueue, so its sender gets the same
     /// answer either way.
+    ///
+    /// Returns the records no longer taken, whose usage the batch must not
+    /// count.
     async fn settle_bus(
         &self,
         held: Vec<HeldOnBus>,
         taken: &mut [bool],
         outcome: &mut BatchOutcome,
-    ) {
+    ) -> Vec<usize> {
+        let mut untaken = Vec::new();
         for record in held {
             match record.confirmation.confirmed().await {
                 Ok(()) => record.piece.report(DeliveryStatus::Delivered),
@@ -1187,12 +1218,14 @@ impl PipelineState {
                     {
                         taken[record.record] = false;
                         outcome.untake(e);
+                        untaken.push(record.record);
                     }
                 }
                 // Not delivered: the piece, dropped, holds the request for a retry.
                 Err(_) => {}
             }
         }
+        untaken
     }
 
     /// Inner processing logic (after backpressure check).
@@ -1266,7 +1299,7 @@ impl PipelineState {
                     &mut dispatch.tally,
                 )?;
                 self.send_to_kafka(topic, &payload, dispatch).await?;
-                dispatch.usage.add(org, decoded);
+                dispatch.count_usage(org, decoded);
                 self.tap(payload).await;
                 Ok(())
             }
@@ -1304,7 +1337,7 @@ impl PipelineState {
                 self.send_to_destinations(destinations, topic.as_deref(), &payload, dispatch)
                     .await?;
                 // A dead-lettered record is not ingested, so only this arm counts usage.
-                dispatch.usage.add(org, decoded);
+                dispatch.count_usage(org, decoded);
                 trace!(
                     destinations = destinations.len(),
                     topic = topic.as_deref().unwrap_or(""),
