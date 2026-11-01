@@ -44,12 +44,11 @@ use rdkafka::producer::{FutureProducer, FutureRecord};
 use tokio::time::timeout;
 
 use super::common::{KafkaHandle, KafkaTestConfig, kafka_backend, test_topic};
-use crate::test_name;
 
 /// The Kafka backend for a test that only runs when asked for: a missing one
 /// fails it rather than passing it untested.
-async fn required_backend(test: &str) -> (KafkaHandle, KafkaTestConfig) {
-    kafka_backend(test)
+async fn required_backend() -> (KafkaHandle, KafkaTestConfig) {
+    kafka_backend()
         .await
         .expect("no Kafka backend: Docker is down and no cluster is configured")
 }
@@ -94,7 +93,7 @@ fn create_consumer(kf: &KafkaTestConfig, group_id: &str) -> StreamConsumer {
 #[tokio::test]
 #[ignore = "requires Kafka - run with --ignored"]
 async fn test_kafka_connectivity() {
-    let (_kafka, kf) = required_backend(test_name!()).await;
+    let (_kafka, kf) = required_backend().await;
     let consumer = create_consumer(&kf, &format!("test-group-{}", uuid::Uuid::new_v4()));
     let metadata = tokio::task::spawn_blocking(move || {
         consumer
@@ -114,7 +113,7 @@ async fn test_kafka_connectivity() {
 #[tokio::test]
 #[ignore = "requires Kafka - run with --ignored"]
 async fn test_kafka_roundtrip() {
-    let (_kafka, kf) = required_backend(test_name!()).await;
+    let (_kafka, kf) = required_backend().await;
 
     let topic = test_topic("roundtrip");
     let producer = create_producer(&kf);
@@ -166,7 +165,7 @@ async fn test_kafka_roundtrip() {
 #[tokio::test]
 #[ignore = "requires Kafka - run with --ignored"]
 async fn test_kafka_batch_send() {
-    let (_kafka, kf) = required_backend(test_name!()).await;
+    let (_kafka, kf) = required_backend().await;
 
     let topic = test_topic("batch");
     let producer = create_producer(&kf);
@@ -230,7 +229,7 @@ async fn test_receiver_kafka_sink() {
     use dfe_receiver::sink::Sink;
     use dfe_receiver::sink::kafka::KafkaSink;
 
-    let (_kafka, kf) = required_backend(test_name!()).await;
+    let (_kafka, kf) = required_backend().await;
     let config = kf.to_receiver_kafka_config();
 
     let topic = test_topic("sink");
@@ -273,7 +272,7 @@ async fn test_full_pipeline_to_kafka() {
     use dfe_receiver::config::SharedConfig;
     use dfe_receiver::pipeline::PipelineState;
 
-    let (_kafka, kf) = required_backend(test_name!()).await;
+    let (_kafka, kf) = required_backend().await;
     let mut config = kf.to_receiver_config();
 
     // Configure routing to use test topic
@@ -337,7 +336,7 @@ async fn test_http_to_kafka() {
     use dfe_receiver::server::traits::ProtocolHandler;
     use tokio_util::sync::CancellationToken;
 
-    let (_kafka, kf) = required_backend(test_name!()).await;
+    let (_kafka, kf) = required_backend().await;
     let mut config = kf.to_receiver_config();
 
     // Configure routing
@@ -424,7 +423,7 @@ async fn test_category_routing() {
     use dfe_receiver::config::SharedConfig;
     use dfe_receiver::pipeline::PipelineState;
 
-    let (_kafka, kf) = required_backend(test_name!()).await;
+    let (_kafka, kf) = required_backend().await;
     let mut config = kf.to_receiver_config();
 
     // Configure category-based routing
@@ -517,7 +516,7 @@ async fn test_dlq_routing() {
     use dfe_receiver::config::SharedConfig;
     use dfe_receiver::pipeline::PipelineState;
 
-    let (_kafka, kf) = required_backend(test_name!()).await;
+    let (_kafka, kf) = required_backend().await;
     let mut config = kf.to_receiver_config();
 
     // Configure DLQ

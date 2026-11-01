@@ -1,6 +1,6 @@
 // Project:   dfe-receiver
 // File:      tests/integration/kafka_sink.rs
-// Purpose:   End-to-end Kafka sink tests via testcontainers
+// Purpose:   End-to-end Kafka sink tests against a real broker
 // Language:  Rust
 //
 // License:   BUSL-1.1
@@ -8,12 +8,9 @@
 
 //! Kafka sink integration tests.
 //!
-//! These tests spin up a fresh Kafka container per test via testcontainers-rs,
-//! produce a message via `Sink::send`, then consume it back and verify the
-//! payload round-trips correctly.
-//!
-//! Containers are stopped automatically when the test function returns (via
-//! `ContainerAsync`'s `Drop` impl).
+//! These tests produce through the sink to the run's shared broker, then consume
+//! it back and verify the payload round-trips correctly. A test that pauses its
+//! broker holds one of its own, removed when it drops.
 //!
 //! Tests skip when Docker is unavailable outside CI, and fail in it.
 
@@ -46,7 +43,7 @@ fn make_sink(kf: &crate::common::KafkaTestConfig) -> KafkaSink {
 
 #[tokio::test]
 async fn test_kafka_sink_send_and_consume() {
-    let Some((_handle, kf)) = kafka_backend(test_name!()).await else {
+    let Some((_handle, kf)) = kafka_backend().await else {
         return;
     };
 
@@ -76,7 +73,7 @@ async fn test_kafka_sink_send_and_consume() {
 
 #[tokio::test]
 async fn test_kafka_sink_send_many() {
-    let Some((_handle, kf)) = kafka_backend(test_name!()).await else {
+    let Some((_handle, kf)) = kafka_backend().await else {
         return;
     };
 
@@ -114,7 +111,7 @@ async fn test_kafka_sink_send_many() {
 
 #[tokio::test]
 async fn test_kafka_sink_binary_payload() {
-    let Some((_handle, kf)) = kafka_backend(test_name!()).await else {
+    let Some((_handle, kf)) = kafka_backend().await else {
         return;
     };
 
@@ -138,7 +135,7 @@ async fn test_kafka_sink_binary_payload() {
 
 #[tokio::test]
 async fn test_kafka_sink_large_payload() {
-    let Some((_handle, kf)) = kafka_backend(test_name!()).await else {
+    let Some((_handle, kf)) = kafka_backend().await else {
         return;
     };
 
@@ -163,7 +160,7 @@ async fn test_kafka_sink_large_payload() {
 
 #[tokio::test]
 async fn test_kafka_sink_multiple_topics() {
-    let Some((_handle, kf)) = kafka_backend(test_name!()).await else {
+    let Some((_handle, kf)) = kafka_backend().await else {
         return;
     };
 
@@ -202,7 +199,7 @@ async fn test_kafka_sink_multiple_topics() {
 
 #[tokio::test]
 async fn test_kafka_sink_invalid_topic_recoverable() {
-    let Some((_handle, kf)) = kafka_backend(test_name!()).await else {
+    let Some((_handle, kf)) = kafka_backend().await else {
         return;
     };
 
@@ -442,11 +439,9 @@ const REFUSED_AT_DELIVERY: &[(&str, &str)] = &[
 /// reject path, so the records spooled behind it still drain.
 #[tokio::test]
 async fn a_spooled_record_the_broker_refuses_for_good_leaves_the_spool() {
-    skip_if_no_docker!();
-    let (_broker, bootstrap) = start_kafka_container(test_name!())
-        .await
-        .expect("Kafka container");
-    let kf = kafka_plain_config(&bootstrap);
+    let Some((_broker, kf)) = kafka_backend().await else {
+        return;
+    };
     let topic = test_topic("spool-refused");
     let missing = test_topic("missing");
     create_topic(&kf, &topic, &[]).await;
@@ -600,11 +595,9 @@ fn dead_letters(dir: &std::path::Path) -> usize {
 /// DLQ holds it, a bad request where none is configured. Neither is retried.
 #[tokio::test]
 async fn a_held_record_refused_at_delivery_is_answered_as_one_refused_at_enqueue() {
-    skip_if_no_docker!();
-    let (_broker, bootstrap) = start_kafka_container(test_name!())
-        .await
-        .expect("Kafka container");
-    let kf = kafka_plain_config(&bootstrap);
+    let Some((_broker, kf)) = kafka_backend().await else {
+        return;
+    };
     let topic = test_topic("held-refused");
     let missing = test_topic("missing");
     create_topic(&kf, &topic, &[]).await;
@@ -660,11 +653,9 @@ async fn a_broker_size_refusal_is_not_pinned_on_a_record() {
     use dfe_receiver::config::SharedConfig;
     use dfe_receiver::pipeline::PipelineState;
 
-    skip_if_no_docker!();
-    let (_broker, bootstrap) = start_kafka_container(test_name!())
-        .await
-        .expect("Kafka container");
-    let kf = kafka_plain_config(&bootstrap);
+    let Some((_broker, kf)) = kafka_backend().await else {
+        return;
+    };
     let topic = test_topic("size-refused");
     create_topic(&kf, &topic, &[("max.message.bytes", "1024")]).await;
     let fits = Bytes::from_static(br#"{"n":1}"#);
@@ -781,11 +772,9 @@ async fn a_held_record_refused_for_good_counts_no_usage() {
     use dfe_receiver::config::SharedConfig;
     use dfe_receiver::pipeline::PipelineState;
 
-    skip_if_no_docker!();
-    let (_broker, bootstrap) = start_kafka_container(test_name!())
-        .await
-        .expect("Kafka container");
-    let kf = kafka_plain_config(&bootstrap);
+    let Some((_broker, kf)) = kafka_backend().await else {
+        return;
+    };
     let topic = test_topic("held-usage");
     let missing = test_topic("missing");
     create_topic(&kf, &topic, &[]).await;

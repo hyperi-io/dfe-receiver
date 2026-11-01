@@ -24,7 +24,7 @@
 //! - The receive path is what we want to validate; the upstream packet source
 //!   is irrelevant to the receiver's correctness.
 //!
-//! Kafka is a testcontainers-managed broker, or the cluster `KAFKA_BROKERS`
+//! Kafka is the run's shared broker, or the cluster `KAFKA_BROKERS`
 //! names. Each test routes to a topic suffix of its own, so tests sharing a
 //! broker read only their own envelopes.
 
@@ -43,7 +43,6 @@ use dfe_receiver::server::traits::ProtocolHandler;
 use tokio_util::sync::CancellationToken;
 
 use crate::common::{kafka_backend, kafka_consume_next, kafka_consumer, test_topic_suffix};
-use crate::test_name;
 
 /// Build a valid NetFlow v5 datagram with one flow record (72 bytes total).
 /// Mirrors `src/server/netflow/tests/decode_v5.rs::build_v5_packet_with_one_flow`.
@@ -121,9 +120,9 @@ fn flow_kafka_config(kf: &crate::common::KafkaTestConfig, topic_suffix: &str) ->
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn netflow_v5_end_to_end_to_kafka() {
     // ------------------------------------------------------------------
-    // 1. Kafka backend (live, docker, or testcontainers fallback).
+    // 1. Kafka backend (live, docker, or the shared broker).
     // ------------------------------------------------------------------
-    let Some((_kafka_handle, kf)) = kafka_backend(test_name!()).await else {
+    let Some((_kafka_handle, kf)) = kafka_backend().await else {
         eprintln!("Skipping: no Kafka backend available (no live infra and Docker unavailable)");
         return;
     };
@@ -343,7 +342,7 @@ fn encode_pair(template: NetFlowV9Packet, data: NetFlowV9Packet) -> (Vec<u8>, Ve
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn netflow_v9_end_to_end_to_kafka() {
-    let Some((_kafka_handle, kf)) = kafka_backend(test_name!()).await else {
+    let Some((_kafka_handle, kf)) = kafka_backend().await else {
         eprintln!("Skipping: no Kafka backend available");
         return;
     };
@@ -423,7 +422,7 @@ async fn netflow_v9_end_to_end_to_kafka() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn netflow_nsel_end_to_end_to_kafka() {
-    let Some((_kafka_handle, kf)) = kafka_backend(test_name!()).await else {
+    let Some((_kafka_handle, kf)) = kafka_backend().await else {
         eprintln!("Skipping: no Kafka backend available");
         return;
     };

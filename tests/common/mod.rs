@@ -11,7 +11,7 @@
 //! Backends controlled by `TEST_MODE` in `.env`:
 //! - `live` (default) -- the cluster `KAFKA_BROKERS` names, else a container
 //! - `docker` -- dfe-docker infra profile (localhost:19092, no auth)
-//! - `testcontainers` -- a container per test
+//! - `testcontainers` -- the run's shared broker, one container for every test
 
 use std::env;
 
@@ -25,7 +25,7 @@ pub enum TestMode {
     Live,
     /// Use a local docker-compose stack from `docker-compose.test.yaml`.
     Docker,
-    /// Use ephemeral testcontainers-rs containers (CI / no live infra).
+    /// Use the run's shared containers (CI / no live infra).
     Testcontainers,
 }
 
@@ -309,7 +309,7 @@ impl KafkaTestConfig {
 ///
 /// Live mode: from env vars (KAFKA_BROKERS, KAFKA_SASL_*, etc.)
 /// Docker mode: `localhost:19092`, PLAINTEXT, no SASL.
-/// Testcontainers mode: callers should use [`start_kafka_container`] directly.
+/// Testcontainers mode: callers use [`kafka_backend`], which starts the shared broker.
 pub fn kafka_test_config() -> KafkaTestConfig {
     load_dotenv();
     match TestMode::detect() {
@@ -525,16 +525,11 @@ macro_rules! skip_if_no_vault {
 }
 
 // ---------------------------------------------------------------------------
-// testcontainers-rs helpers (auto-lifecycle: containers stop when dropped)
+// Docker
 // ---------------------------------------------------------------------------
 //
-// Tests that need a guaranteed-clean backend (rather than relying on live
-// services with potentially stale credentials) use testcontainers-rs. The
-// returned ContainerAsync is dropped at the end of each test, which
-// triggers Docker to stop and remove the container automatically.
-//
-// Tests skip gracefully when Docker is unavailable LOCALLY, and fail hard in
-// CI -- see `skip_if_no_docker!`.
+// Tests skip when Docker is unavailable LOCALLY, and fail hard in CI -- see
+// `skip_if_no_docker!`.
 
 /// Check if Docker daemon is reachable.
 pub fn docker_available() -> bool {
@@ -571,29 +566,27 @@ macro_rules! skip_if_no_docker {
 }
 
 // =============================================================================
-// Test image pins
+// Backing services
 // =============================================================================
 //
-// Pinned HERE rather than left to testcontainers-modules' defaults, which lag
-// badly: testcontainers-modules 0.15 defaults Kafka to 3.8.0. A tag baked into a dependency's
-// source is invisible to dependency review -- Renovate reads Cargo.toml,
-// correctly reports the crate current, and never sees the image. Hoisting the
-// tags out is what puts them back under review, hence the annotations.
+// One container per service per test run, shared by every nextest process,
+// through scalo's `test_support::shared_service`: the first process to ask
+// starts it, the rest join it by name, and a watcher removes it once the run
+// ends, whether it passed, failed or was interrupted. Tests on a shared service
+// keep to their own topics and secret paths. A test that stops its broker holds
+// one of its own instead ([`start_kafka_container`]), removed when it drops.
 
-/// The JVM image: `apache/kafka-native` before 4.4.0 segfaults in `getpwuid` on ~2% of starts.
-///
-/// The Kafka DFE deploys, held equal to dfe-infra `versions.yaml` `kafka-version`
-/// for the current stack: Strimzi 1.2.0 runs 4.3.1 at most.
-///
-/// renovate: datasource=docker depName=apache/kafka
-const KAFKA_TAG: &str = "4.3.1";
+use scalo::deployment::test_support::shared_service::{
+    self, OwnedContainer, Ready, ServiceSpec, SharedContainer, Suite,
+};
+use scalo::transport::kafka::test_support::{KAFKA_PORT, kafka_spec, shared_kafka};
 
-/// Digest of `KAFKA_TAG`, apart from it because the Renovate regex stops at a colon.
-const KAFKA_DIGEST: &str =
-    "sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837";
-
-/// A JVM broker takes 5-12 s to become ready, longer on a busy runner, so 60 s is too tight.
-const KAFKA_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+/// This repo's suite: its containers' names, labels and run log.
+pub const SUITE: Suite = Suite {
+    repo: "dfe-receiver",
+    manifest_dir: env!("CARGO_MANIFEST_DIR"),
+    tmp_dir: option_env!("CARGO_TARGET_TMPDIR"),
+};
 
 /// OpenBao, not hashicorp/vault. The estate runs OpenBao and so does the
 /// sibling fetcher's harness; testing the secrets path against the product we
@@ -601,291 +594,99 @@ const KAFKA_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 /// exercises is identical across both.
 ///
 /// renovate: datasource=docker depName=openbao/openbao
-pub const OPENBAO_TAG: &str = "2.6.1";
+pub const OPENBAO_IMAGE: &str =
+    "openbao/openbao:2.6.1@sha256:5b2486ab0fb90bbc788cc345b0a08616dfb375873ee8be5df3a2fd4d378a67e0";
 
-// =============================================================================
-// Container naming and cleanup
-// =============================================================================
-//
-// Every container this suite starts carries a name that says which repo, which
-// suite and which backing service it is, so an operator looking at `docker ps`
-// can tell what left it behind. testcontainers' default is a random hex name,
-// which is untraceable the moment one survives.
-//
-// Naming: `dfe-receiver-test-integration-<test>-<service>`, because every
-// container here is owned by exactly ONE test. nextest runs each test in its own
-// process, so nothing is shared even when it looks like it should be -- the 13
-// tests calling `kafka_backend()` start 13 brokers. That was already true with
-// testcontainers' random names; the only thing a single shared name would add is
-// a collision, where the first test wins and the rest fail the start and skip.
-// `container_name` still takes `None` for a container started once for a whole
-// binary, but no suite does that today.
-//
-// Cleanup is belt AND braces, because `Drop` alone is not enough:
-//
-//   - Normal completion and a panic both unwind, so `Drop` stops the container.
-//   - A SIGKILL, an abort, or Ctrl-C on the test run does NOT. `Drop` never
-//     runs and the container survives.
-//
-// testcontainers-rs 0.27 has no resource reaper (no Ryuk), so the second case
-// is the one that leaves crap behind. A deterministic name would then make it
-// WORSE than a random one -- the leaked container holds the name and every
-// later run fails with "name already in use". `claim_container_name` closes
-// that: a container holding the name whose owner process has exited is removed,
-// so a leak costs the next run nothing and self-heals. One whose owner is still
-// alive belongs to a concurrent run on the same host and is left alone.
-//
-// The label goes on as well, so a sweep can find these regardless of name:
-//   docker rm -f $(docker ps -aq --filter label=io.hyperi.test.suite=dfe-receiver-integration)
+/// The root token the OpenBao dev server issues.
+pub const OPENBAO_ROOT_TOKEN: &str = "root";
 
-/// Label marking every container this suite starts, for bulk cleanup.
-pub const TEST_SUITE_LABEL: (&str, &str) = ("io.hyperi.test.suite", "dfe-receiver-integration");
-
-/// Labels for a container this suite starts: what it is, and whose run owns it.
-///
-/// The name says what and why; these say WHO, which is what you need when
-/// several runs share a machine and one has left something behind. The pid is
-/// the owning test process -- `ps -p <pid>` answers "is that run still alive, or
-/// is this rubbish I can remove?".
-#[must_use]
-pub fn test_labels(service: &str) -> Vec<(String, String)> {
-    vec![
-        (
-            TEST_SUITE_LABEL.0.to_string(),
-            TEST_SUITE_LABEL.1.to_string(),
-        ),
-        (
-            "io.hyperi.test.repo".to_string(),
-            "dfe-receiver".to_string(),
-        ),
-        ("io.hyperi.test.service".to_string(), service.to_string()),
-        (
-            "io.hyperi.test.owner-pid".to_string(),
-            std::process::id().to_string(),
-        ),
-    ]
-}
-
-/// Container name for a backing service in this suite.
-///
-/// Pass `Some(test)` -- the owning test -- for anything a test starts for itself,
-/// which is everything here. `None` is for a container started once for a whole
-/// test binary; nothing does that today, and using it from several tests would
-/// make them collide on the name rather than share the container.
-///
-/// Names are lowercased and non-alphanumerics collapse to `-`, because Docker
-/// only accepts `[a-zA-Z0-9][a-zA-Z0-9_.-]*`, and the test paths `test_name!`
-/// produces have colons in them.
-#[must_use]
-pub fn container_name(test: Option<&str>, service: &str) -> String {
-    let slug = |s: &str| {
-        s.chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() {
-                    c.to_ascii_lowercase()
-                } else {
-                    '-'
-                }
-            })
-            .collect::<String>()
-    };
-    test.map_or_else(
-        || format!("dfe-receiver-test-integration-{}", slug(service)),
-        |t| {
-            format!(
-                "dfe-receiver-test-integration-{}-{}",
-                slug(t),
-                slug(service)
-            )
-        },
-    )
-}
-
-/// The name of the test this expands inside, for naming its containers.
-///
-/// Rust has no way to read the current test's name, and a hand-written literal
-/// per call site would drift the moment a test is renamed. `type_name` of a
-/// function declared right here reports the path it is nested in, which is the
-/// calling test -- hence a macro: expanded in a helper it would report the helper.
-///
-/// An `async fn` body becomes a generated future, so the path picks up
-/// `::{{closure}}`; the trailing generated segments are trimmed off.
-#[macro_export]
-macro_rules! test_name {
-    () => {{
-        fn probe() {}
-        fn path_of<T>(_: T) -> &'static str {
-            std::any::type_name::<T>()
-        }
-        let mut name = path_of(probe);
-        name = name.strip_suffix("::probe").unwrap_or(name);
-        name = name.strip_suffix("::{{closure}}").unwrap_or(name);
-        name.rsplit("::").next().unwrap_or(name)
-    }};
-}
-
-/// Who holds a container name, as far as its owner-pid label can say.
-#[derive(Debug, PartialEq, Eq)]
-enum NameHolder {
-    /// No container holds the name.
-    Free,
-    /// The owning test process has exited, so the container is a leak.
-    Leaked,
-    /// The owner is alive, or the container carries no owner to check.
-    Held,
-}
-
-/// Whether process `pid` is alive on this host. `ps` failing to run counts as
-/// alive, so a container is never removed on a guess.
-fn process_alive(pid: u32) -> bool {
-    std::process::Command::new("ps")
-        .args(["-p", &pid.to_string()])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map_or(true, |s| s.success())
-}
-
-/// Classify the container holding `name` by its `io.hyperi.test.owner-pid` label.
-fn name_holder(name: &str) -> NameHolder {
-    let Ok(out) = std::process::Command::new("docker")
-        .args([
-            "inspect",
-            "--type",
-            "container",
-            "--format",
-            r#"{{index .Config.Labels "io.hyperi.test.owner-pid"}}"#,
-            name,
-        ])
-        .output()
-    else {
-        return NameHolder::Free;
-    };
-    // Read as "no such container"; the start that follows reports any other Docker fault.
-    if !out.status.success() {
-        return NameHolder::Free;
-    }
-    let owner = String::from_utf8_lossy(&out.stdout).trim().parse::<u32>();
-    match owner {
-        // This process has not created it yet, so its pid was reused from a dead run.
-        Ok(pid) if pid == std::process::id() => NameHolder::Leaked,
-        Ok(pid) if !process_alive(pid) => NameHolder::Leaked,
-        Ok(_) | Err(_) => NameHolder::Held,
-    }
-}
-
-/// The name to start a container under: `name`, or `name-<pid>` when a live
-/// run on this host already holds it.
-///
-/// A holder is removed only when its owner-pid label names an exited process,
-/// so a concurrent run's container, or one with no owner label, is never
-/// touched. The owner check reads this host's process table, which the
-/// `127.0.0.1` bootstrap addresses below already assume is the Docker host.
-pub fn claim_container_name(name: &str) -> String {
-    let own = format!("{name}-{}", std::process::id());
-    for candidate in [name, own.as_str()] {
-        match name_holder(candidate) {
-            NameHolder::Free => return candidate.to_string(),
-            NameHolder::Leaked => {
-                let _ = std::process::Command::new("docker")
-                    .args(["rm", "--force", "--volumes", candidate])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status();
-                return candidate.to_string();
-            }
-            NameHolder::Held => {}
-        }
-    }
-    own
-}
-
-/// Start a Kafka container and return (container_handle, bootstrap_address).
-///
-/// The returned handle holds the container alive; drop it to stop the container.
-///
-/// `test` names the calling test and goes into the container name, so concurrent
-/// tests do not collide on it. Pass `test_name!()`.
-///
-/// # Errors
-///
-/// Returns an error if Docker is unavailable or the container fails to start.
-pub async fn start_kafka_container(
-    test: &str,
-) -> Result<
-    (
-        testcontainers::ContainerAsync<testcontainers_modules::kafka::apache::Kafka>,
-        String,
-    ),
-    String,
-> {
-    use testcontainers::ImageExt;
-    use testcontainers::runners::AsyncRunner;
-    use testcontainers_modules::kafka::apache;
-
-    let name = claim_container_name(&container_name(Some(test), "kafka"));
-    let node = apache::Kafka::default()
-        .with_jvm_image()
-        .with_tag(format!("{KAFKA_TAG}@{KAFKA_DIGEST}"))
-        .with_container_name(&name)
-        .with_labels(test_labels("kafka"))
-        .with_startup_timeout(KAFKA_STARTUP_TIMEOUT)
-        .start()
-        .await
-        .map_err(|e| format!("failed to start Kafka container: {e}"))?;
-
-    let port = node
-        .get_host_port_ipv4(apache::KAFKA_PORT)
-        .await
-        .map_err(|e| format!("failed to get Kafka port: {e}"))?;
-
-    let bootstrap = format!("127.0.0.1:{port}");
-    Ok((node, bootstrap))
-}
-
-/// Start an OpenBao container in dev mode.
-///
-/// Returns (container_handle, url, root_token). Dev mode only -- an in-memory
-/// server with a fixed root token, never a production shape.
+/// An OpenBao dev server: in memory, with [`OPENBAO_ROOT_TOKEN`], never a
+/// production shape.
 ///
 /// The env vars are `BAO_`-prefixed and the readiness line reads "OpenBao
 /// server started!". The `VAULT_`-prefixed spellings are silently ignored: set
 /// `VAULT_DEV_ROOT_TOKEN_ID` and the server issues a random token instead, so
 /// every subsequent request 403s with nothing pointing at the cause.
-pub async fn start_vault_container(
-    test: &str,
-) -> Result<
-    (
-        testcontainers::ContainerAsync<testcontainers::GenericImage>,
-        String,
-        String,
-    ),
-    String,
-> {
-    use testcontainers::core::{IntoContainerPort, WaitFor};
-    use testcontainers::runners::AsyncRunner;
-    use testcontainers::{GenericImage, ImageExt};
+fn openbao_spec() -> ServiceSpec {
+    ServiceSpec {
+        ports: vec![8200],
+        env: vec![
+            (
+                "BAO_DEV_ROOT_TOKEN_ID".to_string(),
+                OPENBAO_ROOT_TOKEN.to_string(),
+            ),
+            (
+                "BAO_DEV_LISTEN_ADDRESS".to_string(),
+                "0.0.0.0:8200".to_string(),
+            ),
+        ],
+        args: vec!["server".to_string(), "-dev".to_string()],
+        ready: Ready::Log("OpenBao server started"),
+        ..ServiceSpec::new("openbao", OPENBAO_IMAGE, std::time::Duration::from_secs(60))
+    }
+}
 
-    let name = claim_container_name(&container_name(Some(test), "openbao"));
-    let node = GenericImage::new("openbao/openbao", OPENBAO_TAG)
-        .with_exposed_port(8200u16.tcp())
-        .with_wait_for(WaitFor::message_on_stdout("OpenBao server started"))
-        .with_env_var("BAO_DEV_ROOT_TOKEN_ID", "root")
-        .with_env_var("BAO_DEV_LISTEN_ADDRESS", "0.0.0.0:8200")
-        .with_cmd(["server", "-dev"])
-        .with_container_name(&name)
-        .with_labels(test_labels("openbao"))
-        .start()
-        .await
-        .map_err(|e| format!("failed to start OpenBao container: {e}"))?;
+/// The run's shared OpenBao dev server and its URL.
+///
+/// # Panics
+///
+/// When no Docker daemon answers, or the server cannot be started or joined.
+pub async fn shared_openbao() -> (SharedContainer, String) {
+    static SHARED: std::sync::OnceLock<SharedContainer> = std::sync::OnceLock::new();
+    let container = tokio::task::spawn_blocking(|| {
+        SHARED
+            .get_or_init(|| shared_service::acquire(&SUITE, &openbao_spec()))
+            .clone()
+    })
+    .await
+    .unwrap_or_else(|e| panic!("acquire the shared OpenBao server: {e}"));
+    let url = format!("http://{}", container.addr(8200));
+    (container, url)
+}
 
-    let port = node
-        .get_host_port_ipv4(8200)
-        .await
-        .map_err(|e| format!("failed to get OpenBao port: {e}"))?;
+/// A Kafka broker one test holds alone, for a test that pauses it. Removed
+/// when it drops.
+pub struct OwnedBroker(OwnedContainer);
 
-    let url = format!("http://127.0.0.1:{port}");
-    Ok((node, url, "root".to_string()))
+impl OwnedBroker {
+    /// Freeze the broker, so a produce request gets no answer.
+    pub async fn pause(&self) -> Result<(), String> {
+        self.docker("pause").await
+    }
+
+    /// Thaw a paused broker.
+    pub async fn unpause(&self) -> Result<(), String> {
+        self.docker("unpause").await
+    }
+
+    async fn docker(&self, verb: &'static str) -> Result<(), String> {
+        let name = self.0.container.name.clone();
+        let out = tokio::task::spawn_blocking(move || shared_service::docker(&[verb, &name]))
+            .await
+            .map_err(|e| format!("docker {verb}: {e}"))?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(String::from_utf8_lossy(&out.stderr).into_owned())
+        }
+    }
+}
+
+/// Start a Kafka broker `test` holds alone and return it with its bootstrap
+/// address. Pass `test_name!()`.
+///
+/// # Errors
+///
+/// Returns an error if Docker is unavailable or the broker fails to start.
+pub async fn start_kafka_container(test: &str) -> Result<(OwnedBroker, String), String> {
+    let name = shared_service::container_name(&SUITE, Some(test), "kafka");
+    let owned = tokio::task::spawn_blocking(move || {
+        shared_service::start_alone(&SUITE, &kafka_spec(None), &name)
+    })
+    .await
+    .map_err(|e| format!("failed to start Kafka container: {e}"))?;
+    let bootstrap = owned.container.addr(KAFKA_PORT);
+    Ok((OwnedBroker(owned), bootstrap))
 }
 
 /// Build a test Kafka config from a bootstrap address (no SASL/TLS).
@@ -900,15 +701,11 @@ pub fn kafka_plain_config(bootstrap: &str) -> KafkaTestConfig {
     }
 }
 
-/// Kafka-container lifecycle handle: holds either a testcontainers container
-/// (dropped → stopped) or nothing when using live/docker infrastructure.
-///
-/// The `Container` variant is boxed to equalise variant sizes (avoids
-/// `clippy::large_enum_variant`).
+/// Where a test's Kafka broker lives.
 #[allow(dead_code)]
 pub enum KafkaHandle {
-    /// Testcontainers-managed Kafka; container stops on drop.
-    Container(Box<testcontainers::ContainerAsync<testcontainers_modules::kafka::apache::Kafka>>),
+    /// The run's shared broker, removed when the run ends.
+    Shared(SharedContainer),
     /// External Kafka (live or docker-compose); nothing to manage.
     External,
 }
@@ -917,16 +714,13 @@ pub enum KafkaHandle {
 ///
 /// 1. `TEST_MODE=docker`, or `TEST_MODE=live` with `KAFKA_BROKERS` set: that
 ///    cluster, which must be reachable with the configured credentials.
-/// 2. Otherwise a fresh Kafka container. Caller drops the handle to stop it.
+/// 2. Otherwise the run's shared broker.
 ///
 /// `None` only where Docker is down outside CI, by the rule of
-/// `skip_if_no_docker!`. A configured cluster that refuses, or a container
-/// that will not start, panics: a test that swapped a SASL cluster for a
-/// plaintext container, or skipped, would pass without testing what it names.
-///
-/// `test` names any container this starts, so concurrent tests do not collide on
-/// it. Pass `test_name!()`.
-pub async fn kafka_backend(test: &str) -> Option<(KafkaHandle, KafkaTestConfig)> {
+/// `skip_if_no_docker!`. A configured cluster that refuses, or a broker that
+/// will not start, panics: a test that swapped a SASL cluster for a plaintext
+/// broker, or skipped, would pass without testing what it names.
+pub async fn kafka_backend() -> Option<(KafkaHandle, KafkaTestConfig)> {
     let mode = TestMode::detect();
     let configured = match mode {
         TestMode::Docker => true,
@@ -952,13 +746,32 @@ pub async fn kafka_backend(test: &str) -> Option<(KafkaHandle, KafkaTestConfig)>
         eprintln!("Skipping: Docker daemon not available for a Kafka container");
         return None;
     }
-    let (container, bootstrap) = start_kafka_container(test)
-        .await
-        .unwrap_or_else(|e| panic!("Docker is up but the Kafka container would not start: {e}"));
-    Some((
-        KafkaHandle::Container(Box::new(container)),
-        kafka_plain_config(&bootstrap),
-    ))
+    let broker = shared_kafka(SUITE).await;
+    let bootstrap = broker.addr(KAFKA_PORT);
+    Some((KafkaHandle::Shared(broker), kafka_plain_config(&bootstrap)))
+}
+
+/// The name of the test this expands inside, for naming its containers.
+///
+/// Rust has no way to read the current test's name, and a hand-written literal
+/// per call site would drift the moment a test is renamed. `type_name` of a
+/// function declared right here reports the path it is nested in, which is the
+/// calling test -- hence a macro: expanded in a helper it would report the helper.
+///
+/// An `async fn` body becomes a generated future, so the path picks up
+/// `::{{closure}}`; the trailing generated segments are trimmed off.
+#[macro_export]
+macro_rules! test_name {
+    () => {{
+        fn probe() {}
+        fn path_of<T>(_: T) -> &'static str {
+            std::any::type_name::<T>()
+        }
+        let mut name = path_of(probe);
+        name = name.strip_suffix("::probe").unwrap_or(name);
+        name = name.strip_suffix("::{{closure}}").unwrap_or(name);
+        name.rsplit("::").next().unwrap_or(name)
+    }};
 }
 
 /// Quick auth sanity check: issue a `fetch_metadata` call. Returns true if

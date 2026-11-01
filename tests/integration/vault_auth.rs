@@ -36,8 +36,8 @@ use dfe_receiver::server::webhook::auth::{AuthFailure, CallerAuth};
 use dfe_receiver::tenancy::Principal;
 use tempfile::NamedTempFile;
 
-use crate::common::start_vault_container;
-use crate::{skip_if_no_docker, test_name};
+use crate::common::{OPENBAO_ROOT_TOKEN, docker_available, shared_openbao};
+use crate::skip_if_no_docker;
 
 /// Write tokens to a temp file and return the path (held open by the caller).
 fn write_token_file(tokens: &[&str]) -> NamedTempFile {
@@ -520,7 +520,7 @@ async fn test_tls_material_from_a_missing_file_names_the_path() {
 
 /// A running OpenBao dev container with one KV v2 secret written into it.
 struct OpenBao {
-    _container: testcontainers::ContainerAsync<testcontainers::GenericImage>,
+    _container: scalo::deployment::test_support::shared_service::SharedContainer,
     url: String,
     root_token: String,
     /// The KV v2 path the secret was written under, `secret/data/...` form.
@@ -530,15 +530,17 @@ struct OpenBao {
 impl OpenBao {
     /// Start the container and write `fields` at a fresh path under `secret/`.
     /// `None` means Docker is not available or the write failed; callers skip.
-    async fn with_secret(test: &str, fields: serde_json::Value) -> Option<Self> {
-        let (container, url, root_token) = match start_vault_container(test).await {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("Skipping: {e}");
-                return None;
-            }
-        };
-        tokio::time::sleep(Duration::from_secs(1)).await;
+    async fn with_secret(fields: serde_json::Value) -> Option<Self> {
+        if !docker_available() {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "Docker daemon unreachable in CI -- OpenBao tests must RUN here, not skip."
+            );
+            eprintln!("Skipping: Docker daemon not available for OpenBao");
+            return None;
+        }
+        let (container, url) = shared_openbao().await;
+        let root_token = OPENBAO_ROOT_TOKEN.to_string();
 
         let path = format!("secret/data/test/{}", uuid::Uuid::new_v4());
         let bao = Self {
@@ -605,11 +607,8 @@ impl OpenBao {
 #[tokio::test]
 async fn test_bearer_tokens_loaded_from_vault_container() {
     skip_if_no_docker!();
-    let Some(bao) = OpenBao::with_secret(
-        test_name!(),
-        serde_json::json!({ "tokens": "vault-token-1\nvault-token-2" }),
-    )
-    .await
+    let Some(bao) =
+        OpenBao::with_secret(serde_json::json!({ "tokens": "vault-token-1\nvault-token-2" })).await
     else {
         return;
     };
@@ -647,11 +646,8 @@ async fn test_tls_material_loads_from_vault_container() {
     let cert_pem = std::fs::read_to_string(&cert).unwrap();
     let key_pem = std::fs::read_to_string(&key).unwrap();
 
-    let Some(bao) = OpenBao::with_secret(
-        test_name!(),
-        serde_json::json!({ "cert": cert_pem, "key": key_pem }),
-    )
-    .await
+    let Some(bao) =
+        OpenBao::with_secret(serde_json::json!({ "cert": cert_pem, "key": key_pem })).await
     else {
         return;
     };
@@ -679,11 +675,8 @@ async fn test_tls_material_loads_from_vault_container() {
 #[tokio::test]
 async fn test_webhook_header_secret_from_openbao_and_rotation() {
     skip_if_no_docker!();
-    let Some(bao) = OpenBao::with_secret(
-        test_name!(),
-        serde_json::json!({ "webhook": "first-shared-secret" }),
-    )
-    .await
+    let Some(bao) =
+        OpenBao::with_secret(serde_json::json!({ "webhook": "first-shared-secret" })).await
     else {
         return;
     };
@@ -743,11 +736,8 @@ async fn test_webhook_header_secret_from_openbao_and_rotation() {
 #[tokio::test]
 async fn test_webhook_hmac_secret_from_openbao() {
     skip_if_no_docker!();
-    let Some(bao) = OpenBao::with_secret(
-        test_name!(),
-        serde_json::json!({ "signing": "openbao-held-signing-secret" }),
-    )
-    .await
+    let Some(bao) =
+        OpenBao::with_secret(serde_json::json!({ "signing": "openbao-held-signing-secret" })).await
     else {
         return;
     };
