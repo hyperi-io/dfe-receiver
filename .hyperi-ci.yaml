@@ -37,6 +37,9 @@ test:
     features: default
     # The APP_ENV tests rely on nextest running each test in its own process.
     nextest: true
+  # A release runs the full tier, the ignored Kafka e2e tests included. docs/testing.md says which tests are which.
+  full:
+    required_for_release: true
 build:
   enabled: true
   strategies:
