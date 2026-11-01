@@ -144,7 +144,9 @@ pub struct NetflowSubConfig {
     pub enabled: bool,
     #[serde(default)]
     pub template_cache: TemplateCacheConfig,
-    #[serde(default = "default_netflow_topic")]
+    /// Kafka topic for the records no rules row routes. Empty: `netflow`
+    /// plus `routing.topic_suffix`.
+    #[serde(default)]
     pub topic: String,
 }
 
@@ -153,20 +155,18 @@ impl Default for NetflowSubConfig {
         Self {
             enabled: true,
             template_cache: TemplateCacheConfig::default(),
-            topic: default_netflow_topic(),
+            topic: String::new(),
         }
     }
-}
-
-fn default_netflow_topic() -> String {
-    "netflow_land".into()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct SflowSubConfig {
     #[serde(default = "yes")]
     pub enabled: bool,
-    #[serde(default = "default_sflow_topic")]
+    /// Kafka topic for the records no rules row routes. Empty: `sflow` plus
+    /// `routing.topic_suffix`.
+    #[serde(default)]
     pub topic: String,
 }
 
@@ -174,13 +174,9 @@ impl Default for SflowSubConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            topic: default_sflow_topic(),
+            topic: String::new(),
         }
     }
-}
-
-fn default_sflow_topic() -> String {
-    "sflow_land".into()
 }
 
 fn yes() -> bool {

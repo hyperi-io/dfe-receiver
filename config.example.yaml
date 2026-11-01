@@ -663,7 +663,7 @@ flow:
     template_cache:
       max_per_exporter: 1000
       max_exporters: 10000
-    topic: "netflow_land"
+    topic: ""  # empty = netflow + routing.topic_suffix (netflow_land)
   sflow:
     enabled: true
-    topic: "sflow_land"
+    topic: ""  # empty = sflow + routing.topic_suffix (sflow_land)

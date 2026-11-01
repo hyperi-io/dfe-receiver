@@ -916,7 +916,7 @@ Each observation domain of each v9 and IPFIX exporter keeps its own templates, s
 
 ### Topics
 
-A flow record no rules row routes goes to its listener's topic: `flow.netflow.topic` (default `netflow_land`) and `flow.sflow.topic` (default `sflow_land`), or the `topic` of each `flow.split` side. It goes to the destinations a record routed by default does, and the topic applies where one of them is the bus. A row that assigns the record a `_source` routes it as any other record, its topic included.
+A flow record no rules row routes goes to its listener's topic: `flow.netflow.topic` and `flow.sflow.topic`, or the `topic` of each `flow.split` side. A topic left empty is the listener's source plus `routing.topic_suffix`, so `netflow_land` and `sflow_land` by default. It goes to the destinations a record routed by default does, and the topic applies where one of them is the bus. A row that assigns the record a `_source` routes it as any other record, its topic included.
 
 ### Configuration
 

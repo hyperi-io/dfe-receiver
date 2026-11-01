@@ -399,7 +399,7 @@ impl Router {
                     )
                 })
                 .collect(),
-            listener_topics: listener_topics(&config.flow),
+            listener_topics: listener_topics(&config.flow, &routing.topic_suffix),
             dlq_topic: routing.dlq.topic.clone(),
             dlq_enabled: routing.dlq.enabled,
             default_destination: ResolvedDestinations::new(&destinations.default, destinations),
@@ -682,26 +682,38 @@ impl Router {
     }
 }
 
-/// The topic each enabled flow listener names, by the `_source` it stamps.
+/// The topic each enabled flow listener names, by the `_source` it stamps. A
+/// listener naming none takes its source plus `topic_suffix`.
 fn listener_topics(
     flow: &crate::server::flow::config::FlowConfig,
+    topic_suffix: &str,
 ) -> FxHashMap<&'static str, String> {
-    let mut topics = FxHashMap::default();
+    let mut named = Vec::new();
     if let Some(split) = &flow.split {
         for (source, listener) in [("netflow", &split.netflow), ("sflow", &split.sflow)] {
             if listener.enabled {
-                topics.insert(source, listener.topic.clone());
+                named.push((source, &listener.topic));
             }
         }
     } else if flow.enabled {
         if flow.netflow.enabled {
-            topics.insert("netflow", flow.netflow.topic.clone());
+            named.push(("netflow", &flow.netflow.topic));
         }
         if flow.sflow.enabled {
-            topics.insert("sflow", flow.sflow.topic.clone());
+            named.push(("sflow", &flow.sflow.topic));
         }
     }
-    topics
+    named
+        .into_iter()
+        .map(|(source, topic)| {
+            let topic = if topic.is_empty() {
+                format!("{source}{topic_suffix}")
+            } else {
+                topic.clone()
+            };
+            (source, topic)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -820,6 +832,33 @@ mod tests {
             flow(r#"{"_source":"netflow"}"#, "netflow", &Config::default()).as_deref(),
             Some("main_land"),
             "with no flow listener the default routes it"
+        );
+    }
+
+    /// A flow listener with no topic of its own takes its source plus
+    /// `routing.topic_suffix`, as a routed record's topic does.
+    #[test]
+    fn a_flow_listeners_default_topic_follows_the_topic_suffix() {
+        let mut config = Config::default();
+        config.flow.enabled = true;
+        config.routing.topic_suffix = "_raw".to_string();
+        let r = router(&config);
+        let topic = |record: &str, stamp: &'static str| {
+            let (route, ..) = route(
+                &r,
+                &Ingest::built(Principal::Listener(stamp), stamp),
+                record,
+            );
+            route.topic().map(str::to_string)
+        };
+
+        assert_eq!(
+            topic(r#"{"_source":"netflow"}"#, "netflow").as_deref(),
+            Some("netflow_raw")
+        );
+        assert_eq!(
+            topic(r#"{"_source":"sflow"}"#, "sflow").as_deref(),
+            Some("sflow_raw")
         );
     }
 
