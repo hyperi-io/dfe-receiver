@@ -29,7 +29,7 @@ use bytes::Bytes;
 use parking_lot::{Mutex, RwLock};
 use rustc_hash::{FxHashMap, FxHashSet};
 use scalo::UnifiedPressure;
-use scalo::dlq::{Dlq, DlqEntry, DlqError};
+use scalo::dlq::{Dlq, DlqEntry};
 use scalo::logger::security;
 use scalo::transport::AcknowledgementsConfig;
 use scalo::transport::ack::{SinkConfirmation, Ticket};
@@ -2127,20 +2127,13 @@ fn dlq_backends(
     Ok((dlq, Some(config.kafka.to_scalo_kafka_config()?)))
 }
 
-/// The DLQ backend whose start failed, for `receiver_dlq_start_failures_total`.
-fn dlq_start_failure_backend(err: &DlqError) -> &'static str {
-    match err {
-        DlqError::Kafka(_) => "kafka",
-        DlqError::File(_) | DlqError::Io(_) => "file",
-        _ => "other",
-    }
-}
-
 /// Start the DLQ the config asks for, or `None` when it is disabled or fails
 /// to start.
 ///
-/// A DLQ that fails to start leaves the receiver running without one, since
-/// a transport failure never stops the app.
+/// A backend that fails to start is left out, counted by scalo in
+/// `dlq_backend_start_failures_total{backend}`, and the receiver runs on with
+/// the others. With none started, a held dead letter is not taken, so its
+/// sender is told to retry.
 ///
 /// # Errors
 ///
@@ -2163,12 +2156,8 @@ fn spawn_dlq(config: &Config, shutdown: &CancellationToken) -> Result<Option<Arc
             Ok(Some(Arc::new(d)))
         }
         Err(e) => {
-            let backend = dlq_start_failure_backend(&e);
-            metrics::counter!("receiver_dlq_start_failures_total", "backend" => backend)
-                .increment(1);
             error!(
                 error = %e,
-                backend,
                 "DLQ failed to start; running without one, so a record a destination \
                  refuses for good is dropped"
             );
@@ -2445,6 +2434,9 @@ mod tests {
         // Use loader destination to avoid needing Kafka brokers
         config.destinations.default = "loader".into();
         config.loader.transport = "memory".to_string();
+        // The shipped DLQ with a file path no backend can start under, so no
+        // test writes /var/spool, root or not.
+        config.routing.dlq.file_path = "/dev/null/dlq".to_string();
         config
     }
 
@@ -3046,8 +3038,8 @@ mod tests {
         config
     }
 
-    /// A DLQ that fails to start is counted by the backend that failed and
-    /// logged at error with the reason.
+    /// A DLQ backend that fails to start is counted by name and logged at
+    /// error, with the reason.
     #[test]
     fn a_dlq_that_fails_to_start_is_counted_and_logged_at_error() {
         let dir = tempfile::tempdir().unwrap();
@@ -3064,18 +3056,14 @@ mod tests {
             })
         });
 
-        assert!(
-            dlq.expect("a DLQ that fails to start is not fatal")
-                .is_none()
-        );
+        dlq.expect("a DLQ that fails to start is not fatal");
         assert_eq!(
-            recorder.get("receiver_dlq_start_failures_total{backend=file}"),
+            recorder.get("dlq_backend_start_failures_total{backend=file}"),
             1
         );
         let log = lines.text();
         assert!(log.contains("ERROR"), "{log}");
-        assert!(!log.contains("WARN"), "{log}");
-        assert!(log.contains("DLQ failed to start"), "{log}");
+        assert!(log.contains("no backend started"), "{log}");
         assert!(
             log.contains("failed to create DLQ writer"),
             "the reason is not in the log: {log}"
@@ -3088,7 +3076,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = test_state_with(unstartable_dlq(dir.path())).await;
 
-        assert!(state.dlq.is_none());
         state
             .process(Bytes::from(r#"{"id":1}"#), &http())
             .await
@@ -3225,25 +3212,20 @@ mod tests {
         assert_eq!(endpoint, "http://elsewhere:6000");
     }
 
+    /// Answered at enqueue, a record validation refused that no DLQ backend
+    /// can hold is dropped and counted in the DLQ's drops.
     #[tokio::test]
-    async fn test_pipeline_validation_reject() {
+    async fn an_unheld_dead_letter_with_no_dlq_backend_is_dropped_and_counted() {
         let mut config = test_config();
         config.validation.required_fields = vec!["org_id".to_string()];
         let state = test_state_with(config).await;
 
-        // A record missing a required field with dlq_on_invalid=true attempts DLQ
-        // routing, but no Kafka/DLQ sink is configured in test state -- expect
-        // config error from the fallback path
-        let result = state.process(Bytes::from(r#"{"a":1}"#), &http()).await;
-        assert!(
-            result.is_err(),
-            "expected error without DLQ sink: {result:?}"
-        );
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("Kafka sink not configured"),
-            "expected Kafka sink error, got: {err}"
-        );
+        state
+            .process(Bytes::from(r#"{"a":1}"#), &http())
+            .await
+            .unwrap();
+
+        assert_eq!(state.dlq.as_ref().map(|dlq| dlq.dropped()), Some(1));
     }
 
     /// A body that is not JSON is refused for good and counted, never sent to
@@ -4155,14 +4137,10 @@ mod tests {
         assert!(outcome.unavailable.is_none(), "{:?}", outcome.unavailable);
     }
 
-    /// A retryable failure stops the batch where it happened: the sender is
-    /// told to resend, so taking the records behind it only adds duplicates.
-    ///
-    /// The record missing its required field is routed to a DLQ topic with no
-    /// broker configured, which the receiver cannot serve now but could once
-    /// the route works.
+    /// Held, a dead letter no DLQ backend started to hold is a retryable
+    /// failure, and the sender resends the whole batch.
     #[tokio::test]
-    async fn a_retryable_failure_stops_the_batch() {
+    async fn a_held_dead_letter_with_no_dlq_backend_resends_the_batch() {
         let mut config = test_config();
         config.validation.required_fields = vec!["ok".to_string()];
         let state = test_state_with(config).await;
@@ -4172,10 +4150,11 @@ mod tests {
             Bytes::from(r#"{"ok":2}"#),
         ];
 
-        let outcome = state.process_batch(&payloads, &http()).await;
+        let outcome = state
+            .process_batch_acked(&payloads, &holding(&state), None, &http())
+            .await;
 
-        assert_eq!(outcome.accepted, 1, "the record before the failure");
-        assert_eq!(outcome.settled(), 1, "nothing after the failure is taken");
+        assert_eq!(outcome.settled(), 0);
         assert!(
             outcome
                 .unavailable

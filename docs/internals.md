@@ -543,7 +543,7 @@ holds it.
 | `receiver_kafka_delivery_failures_total` | Counter | Messages no broker confirmed, by `reason` (librdkafka error code); a timed-out message may still have been written |
 | `receiver_kafka_resends_total` | Counter | Messages answered at enqueue that librdkafka gave up on with a message timeout, queued again |
 | `records_dlq_total` | Counter | Messages sent to DLQ (scalo emits this one) |
-| `receiver_dlq_start_failures_total` | Counter | DLQ starts that failed, by `backend` (`kafka`, `file` or `other`); the receiver runs on without a DLQ and logs the reason at ERROR |
+| `dlq_backend_start_failures_total` | Counter | DLQ backends that failed to start, by `backend` (scalo emits this one); the receiver runs on with the others, and with none a held dead letter is not taken |
 | `receiver_source_org_id_stripped_total` | Counter | Records whose sender-supplied `_org_id` was removed because `routing.source_org_id` is `disallow` (the default) |
 | `receiver_records_rejected_total` | Counter | Records a destination can never take (over its size ceiling), on any sink, by `outcome`: `dead_lettered`, `dropped` when no DLQ is configured or no DLQ backend can hold the entry (also counted in `pipeline_dead_letters_dropped_total{reason}`), or `dlq_refused` when the DLQ did not confirm the write, so the record stays buffered or its sender is told to retry |
 

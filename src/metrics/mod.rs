@@ -1156,12 +1156,6 @@ const RECEIVER_SERIES: &[SeriesSpec] = &[
         "Records answered at enqueue that librdkafka gave up on with a message timeout, queued again",
     ),
     (
-        "receiver_dlq_start_failures_total",
-        MetricType::Counter,
-        &["backend"],
-        "DLQ starts that failed, by the backend that refused (kafka, file or other); the receiver runs on without a DLQ",
-    ),
-    (
         "receiver_source_org_id_stripped_total",
         MetricType::Counter,
         &[],
