@@ -437,47 +437,7 @@ impl Config {
             )));
         }
 
-        // Every destination a rule names must resolve, or matched records have
-        // nowhere to go and the failure only shows up under traffic.
-        for (name, spec) in &self.destinations.named {
-            match (&spec.grpc, &spec.kafka) {
-                (Some(grpc), None) if grpc.endpoint.is_empty() => {
-                    return Err(Error::Config(format!(
-                        "destinations.{name}.grpc.endpoint is required"
-                    )));
-                }
-                (Some(_), None) | (None, Some(_)) => {}
-                _ => {
-                    return Err(Error::Config(format!(
-                        "destinations.{name} needs exactly one of grpc or kafka"
-                    )));
-                }
-            }
-        }
-        // An empty list sends a record nowhere and answers it delivered.
-        let lists = std::iter::once(("default".to_string(), &self.destinations.default)).chain(
-            self.destinations
-                .sources
-                .iter()
-                .map(|(source, list)| (format!("sources.{source}"), list)),
-        );
-        for (key, list) in lists {
-            if list.names().is_empty() {
-                return Err(Error::Config(format!(
-                    "destinations.{key} is an empty list: name at least one destination"
-                )));
-            }
-        }
-        for name in self.destinations.referenced_names() {
-            if !self.destinations.named.contains_key(name)
-                && name != BUS_DESTINATION
-                && name != LOADER_DESTINATION
-            {
-                return Err(Error::Config(format!(
-                    "destination '{name}' is not declared under destinations"
-                )));
-            }
-        }
+        self.destinations.validate()?;
 
         // `loader` with `loader.transport: kafka` is a bus destination, so a
         // brokerless config that routes there is refused here rather than per
@@ -2552,6 +2512,55 @@ impl Default for DestinationsConfig {
 }
 
 impl DestinationsConfig {
+    /// Refuse a declared destination without exactly one transport, an empty
+    /// destination list, and a name nothing declares: each leaves a matched
+    /// record nowhere to go, found only under traffic, and an empty list
+    /// answers it delivered.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Config`] naming the key at fault.
+    pub fn validate(&self) -> Result<()> {
+        for (name, spec) in &self.named {
+            match (&spec.grpc, &spec.kafka) {
+                (Some(grpc), None) if grpc.endpoint.is_empty() => {
+                    return Err(Error::Config(format!(
+                        "destinations.{name}.grpc.endpoint is required"
+                    )));
+                }
+                (Some(_), None) | (None, Some(_)) => {}
+                _ => {
+                    return Err(Error::Config(format!(
+                        "destinations.{name} needs exactly one of grpc or kafka"
+                    )));
+                }
+            }
+        }
+        let lists = std::iter::once(("default".to_string(), &self.default)).chain(
+            self.sources
+                .iter()
+                .map(|(source, list)| (format!("sources.{source}"), list)),
+        );
+        for (key, list) in lists {
+            if list.names().is_empty() {
+                return Err(Error::Config(format!(
+                    "destinations.{key} is an empty list: name at least one destination"
+                )));
+            }
+        }
+        for name in self.referenced_names() {
+            if !self.named.contains_key(name)
+                && name != BUS_DESTINATION
+                && name != LOADER_DESTINATION
+            {
+                return Err(Error::Config(format!(
+                    "destination '{name}' is not declared under destinations"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Every destination name the config refers to, default and per source.
     pub fn referenced_names(&self) -> impl Iterator<Item = &str> {
         self.default

@@ -98,7 +98,12 @@ async fn test_kafka_sink_send_many() {
             seen.insert(record["seq"].as_u64().expect("seq"));
         }
     }
-    assert_eq!(seen.len(), 100, "only {} of 100 records arrived", seen.len());
+    assert_eq!(
+        seen.len(),
+        100,
+        "only {} of 100 records arrived",
+        seen.len()
+    );
 }
 
 #[tokio::test]
@@ -213,6 +218,7 @@ async fn test_kafka_sink_invalid_topic_recoverable() {
 /// again, and it lands once the broker is back.
 #[tokio::test]
 async fn an_enqueued_record_survives_an_outage_past_the_message_timeout() {
+    const RECORDS: i64 = 20;
     skip_if_no_docker!();
     let (broker, bootstrap) = start_kafka_container(test_name!())
         .await
@@ -231,7 +237,6 @@ async fn an_enqueued_record_survives_an_outage_past_the_message_timeout() {
     cfg.librdkafka_overrides
         .insert("message.timeout.ms".to_string(), "2000".to_string());
     let sink = KafkaSink::new(&cfg, None).expect("KafkaSink creation failed");
-    const RECORDS: i64 = 20;
     for seq in 0..RECORDS {
         sink.send(&topic, Bytes::from(format!(r#"{{"seq":{seq}}}"#)))
             .await

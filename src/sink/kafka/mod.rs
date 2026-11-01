@@ -321,7 +321,10 @@ fn enqueue(
 
 /// Queue again, oldest first, every record answered at enqueue that
 /// librdkafka gave up on, until the sink is dropped.
-async fn resend_given_up(producer: ThreadedProducer<DeliveryObserver>, delivery: Arc<DeliveryState>) {
+async fn resend_given_up(
+    producer: ThreadedProducer<DeliveryObserver>,
+    delivery: Arc<DeliveryState>,
+) {
     loop {
         delivery.resend_wake.notified().await;
         loop {
@@ -406,10 +409,9 @@ impl KafkaSink {
 
         let resender = tokio::runtime::Handle::try_current().ok().map(|runtime| {
             delivery.resends.store(true, Ordering::Relaxed);
-            AbortOnDropHandle::new(runtime.spawn(resend_given_up(
-                producer.clone(),
-                Arc::clone(&delivery),
-            )))
+            AbortOnDropHandle::new(
+                runtime.spawn(resend_given_up(producer.clone(), Arc::clone(&delivery))),
+            )
         });
 
         Ok(Self {
@@ -804,7 +806,10 @@ mod tests {
         while !sink.delivery.failures.is_tripped() && tokio::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        assert!(sink.delivery.failures.is_tripped(), "no report gave the record up");
+        assert!(
+            sink.delivery.failures.is_tripped(),
+            "no report gave the record up"
+        );
         // Past several message timeouts.
         tokio::time::sleep(Duration::from_secs(2)).await;
         assert_eq!(held(&sink), 1, "the sink no longer holds the record");
@@ -816,7 +821,10 @@ mod tests {
             .lock()
             .push_back((Box::from("stranded"), Bytes::from_static(b"{}")));
         let refused = sink.send("stranded", Bytes::from_static(b"{}")).await;
-        assert!(matches!(refused, Err(Error::Transport(_))), "got {refused:?}");
+        assert!(
+            matches!(refused, Err(Error::Transport(_))),
+            "got {refused:?}"
+        );
     }
 
     /// A record refused at enqueue hands its piece back, so the caller can

@@ -140,7 +140,11 @@ fn metric_to_json(metric: &event::Metric) -> Result<serde_json::Value> {
 /// One tag's values: a single value as a string, several as an array, and a
 /// bare tag (no value) as null.
 fn tag_values_to_json(tag: &event::TagValues) -> serde_json::Value {
-    let value = |v: &event::TagValue| v.value.as_deref().map_or(serde_json::Value::Null, |s| json!(s));
+    let value = |v: &event::TagValue| {
+        v.value
+            .as_deref()
+            .map_or(serde_json::Value::Null, |s| json!(s))
+    };
     match tag.values.as_slice() {
         [one] => value(one),
         many => serde_json::Value::Array(many.iter().map(value).collect()),
