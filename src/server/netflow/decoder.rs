@@ -15,7 +15,8 @@
 //! is more straightforward than fighting the netgauze API.
 //!
 //! v9 and IPFIX share `netgauze_flow_pkt::codec::FlowInfoCodec`, instantiated
-//! per exporter IP so each router's template cache is isolated. The canonical
+//! per exporter IP and observation domain, the scope a template id is unique
+//! in (RFC 7011 section 3.4.3), so each cache is isolated. The canonical
 //! mapping iterates the typed `ie::Field` variants that netgauze emits and
 //! populates a `NetflowFields` struct. NSEL (firewallEvent / Cisco PEN=9
 //! NF_F_FW_EVENT) and NAT44 (natEvent) discriminators flip `record_kind` to
@@ -253,7 +254,8 @@ impl ExporterState {
 }
 
 pub struct NetflowDecoder {
-    state: HashMap<IpAddr, ExporterState>,
+    /// Keyed by exporter IP and observation domain.
+    state: HashMap<(IpAddr, u32), ExporterState>,
     /// Templates one exporter may hold, v9 and IPFIX together.
     max_per_exporter: usize,
     max_exporters: usize,
@@ -270,13 +272,18 @@ impl NetflowDecoder {
         }
     }
 
-    /// Templates cached for `source`, v9 and IPFIX together.
+    /// Templates cached for `source` across its observation domains, v9 and
+    /// IPFIX together.
     #[cfg(test)]
     pub(crate) fn templates(&self, source: IpAddr) -> usize {
-        self.state.get(&source).map_or(0, ExporterState::cached)
+        self.state
+            .iter()
+            .filter(|((ip, _), _)| *ip == source)
+            .map(|(_, exporter)| exporter.cached())
+            .sum()
     }
 
-    fn ensure_exporter_slot(&mut self, source: IpAddr) -> &mut ExporterState {
+    fn ensure_exporter_slot(&mut self, source: (IpAddr, u32)) -> &mut ExporterState {
         // Crude LRU: if we're full and `source` is new, evict the first entry
         // we find. A proper LRU goes in with the metrics pass.
         if !self.state.contains_key(&source)
@@ -321,7 +328,7 @@ impl FlowDecoder for NetflowDecoder {
             ProtocolKind::NetflowV5 => decode_v5(data, source),
             ProtocolKind::NetflowV9 | ProtocolKind::Ipfix => {
                 let max = self.max_per_exporter;
-                let exporter = self.ensure_exporter_slot(source);
+                let exporter = self.ensure_exporter_slot((source, observation_domain(data, kind)));
                 let decoded = decode_v9_or_ipfix(&mut exporter.codec, data, source, kind);
                 let evicted = exporter.hold_to(max);
                 for _ in 0..evicted {
@@ -408,6 +415,15 @@ impl FlowDecoder for NetflowDecoder {
     fn is_template_miss(err: &Self::DecodeError) -> bool {
         matches!(err, NetflowError::TemplateMiss { .. })
     }
+}
+
+/// The observation domain a v9 (`source_id`) or IPFIX header names, 0 for a
+/// header too short to carry one, which the codec then refuses.
+fn observation_domain(data: &[u8], kind: ProtocolKind) -> u32 {
+    let at = if kind == ProtocolKind::Ipfix { 12 } else { 16 };
+    data.get(at..at + 4)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map_or(0, u32::from_be_bytes)
 }
 
 // ----- v5 hand-rolled parser ------------------------------------------------

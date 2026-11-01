@@ -1,6 +1,6 @@
 //  Project:      dfe-receiver
 //  File:         src/server/netflow/tests/template_cap.rs
-//  Purpose:      The per-exporter template cap holds against a template flood
+//  Purpose:      Template caching: the per-exporter cap and observation-domain scope
 //  Language:     Rust
 //
 //  License:      BUSL-1.1
@@ -98,4 +98,57 @@ fn an_exporter_holds_no_more_templates_than_the_cap() {
         .decode(&templates(300..302), other, ProtocolKind::Ipfix)
         .expect("another exporter");
     assert_eq!(decoder.templates(other), 2, "the cap is per exporter");
+}
+
+/// An IPFIX packet from observation domain `domain` carrying template `id`
+/// over the one field `field`.
+fn template_in(domain: u32, id: u16, field: ie::IE) -> Vec<u8> {
+    let packet = IpfixPacket::new(
+        Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+        1,
+        domain,
+        Box::new([IpfixSet::Template(Box::new([TemplateRecord::new(
+            id,
+            Box::new([FieldSpecifier::new(field, 4).unwrap()]),
+        )]))]),
+    );
+    let mut buf = BytesMut::new();
+    FlowInfoCodec::new()
+        .encode(FlowInfo::IPFIX(packet), &mut buf)
+        .expect("encode template");
+    buf.to_vec()
+}
+
+/// Template ids are scoped to their observation domain: two domains of one
+/// exporter reusing an id with different layouts each decode by their own.
+#[test]
+fn a_template_id_is_scoped_to_its_observation_domain() {
+    let mut decoder = NetflowDecoder::new(
+        16,
+        10_000,
+        crate::server::flow::metrics::mock::flow_metrics_for_test(),
+    );
+    let exporter: IpAddr = "198.51.100.9".parse().unwrap();
+
+    decoder
+        .decode(
+            &template_in(7, 400, ie::IE::sourceIPv4Address),
+            exporter,
+            ProtocolKind::Ipfix,
+        )
+        .expect("domain 7 template");
+    decoder
+        .decode(
+            &template_in(8, 400, ie::IE::destinationIPv4Address),
+            exporter,
+            ProtocolKind::Ipfix,
+        )
+        .expect("domain 8 template");
+
+    let decoded = decoder
+        .decode(&data(400), exporter, ProtocolKind::Ipfix)
+        .expect("domain 7 data");
+    let fields = &decoded.records[0].fields;
+    assert_eq!(fields.src_ip, Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))));
+    assert_eq!(fields.dst_ip, None, "decoded under domain 8's template");
 }

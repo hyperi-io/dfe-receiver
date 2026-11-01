@@ -900,7 +900,7 @@ record in `exploded`. See [Raw payload retention](#raw-payload-retention).
 
 ### Template cache
 
-Each v9 and IPFIX exporter keeps its own templates, at most `flow.netflow.template_cache.max_per_exporter` (default 1000) of them, v9 and IPFIX together. A template past the cap evicts that exporter's oldest, counted on `flow_template_evicted_total`, so a flooding exporter holds bounded memory. An exporter whose evicted template it still uses sees template misses until it resends the template, which exporters do on a timer. At most `max_exporters` exporters are kept.
+Each observation domain of each v9 and IPFIX exporter keeps its own templates, since a template id is unique only within its domain. It holds at most `flow.netflow.template_cache.max_per_exporter` (default 1000) of them, v9 and IPFIX together. A template past the cap evicts that exporter's oldest, counted on `flow_template_evicted_total`, so a flooding exporter holds bounded memory. An exporter whose evicted template it still uses sees template misses until it resends the template, which exporters do on a timer. At most `max_exporters` exporter and domain pairs are kept.
 
 ### Record kinds
 
