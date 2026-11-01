@@ -1030,6 +1030,12 @@ const RECEIVER_SERIES: &[SeriesSpec] = &[
         "Records dropped with no way to tell the sender, by transport and reason",
     ),
     (
+        "receiver_prometheus_rw_unrecorded_total",
+        MetricType::Counter,
+        &["kind"],
+        "Remote write exemplars and histograms an otel or hyperdx record cannot hold, by kind",
+    ),
+    (
         "receiver_request_duration_seconds",
         MetricType::Histogram,
         &["transport"],
