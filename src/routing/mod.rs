@@ -185,7 +185,8 @@ pub fn compile_rules(config: &Config) -> Result<RuleSet> {
             rules.targets
         )));
     }
-    let options = CompileOptions::from_cascade();
+    let options =
+        CompileOptions::from_cascade().map_err(|e| Error::Config(format!("rules: {e}")))?;
     let invalid = |e: scalo::rules::RulesError| Error::Config(format!("rules: {e}"));
     if config.routing.source_org_id == SourceOrgId::Allow {
         // Checked before the receiver's row goes in, so each finding names the operator's own row.
