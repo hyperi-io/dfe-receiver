@@ -97,7 +97,9 @@ static PORTS_TAKEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32:
 /// its config before it starts. nextest runs tests as concurrent processes, and
 /// two of them asking the kernel for a free port can be given the same one. Each
 /// process therefore draws from a window picked by its pid, and falls back to the
-/// kernel's choice only once the window is used up.
+/// kernel's choice only once the window is used up. Two pids that share a window
+/// differ by a multiple of [`PORT_WINDOWS`], so the walk starts at an offset taken
+/// from the quotient and the pair do not draw the same port first.
 ///
 /// # Panics
 ///
@@ -106,13 +108,15 @@ static PORTS_TAKEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32:
 pub fn free_port() -> u16 {
     use std::sync::atomic::Ordering;
 
-    let window = PORT_BASE + (std::process::id() % PORT_WINDOWS) * PORT_WINDOW;
+    let pid = std::process::id();
+    let window = PORT_BASE + (pid % PORT_WINDOWS) * PORT_WINDOW;
+    let start = (pid / PORT_WINDOWS) % PORT_WINDOW;
     loop {
         let taken = PORTS_TAKEN.fetch_add(1, Ordering::Relaxed);
         if taken >= PORT_WINDOW {
             break;
         }
-        let port = window + taken;
+        let port = window + (start + taken) % PORT_WINDOW;
         if std::net::TcpListener::bind(("127.0.0.1", u16::try_from(port).unwrap_or(0))).is_ok() {
             return u16::try_from(port).unwrap_or(0);
         }
