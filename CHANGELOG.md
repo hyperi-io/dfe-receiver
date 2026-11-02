@@ -3,6 +3,15 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.15.61](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.60...v1.15.61) (2026-11-02)
+
+### Bug Fixes
+
+* bound ingest decodes and close silent, idle and surplus connections ([#230](https://github.com/hyperi-io/dfe-receiver/issues/230)) ([a9e792d](https://github.com/hyperi-io/dfe-receiver/commit/a9e792d9bd0782afe65fa438b5961d7620778a1a))
+* close a raw TCP connection whose frame stops arriving part way ([#231](https://github.com/hyperi-io/dfe-receiver/issues/231)) ([fde614c](https://github.com/hyperi-io/dfe-receiver/commit/fde614c406cfb534bfa6994d31b02aa20dcc23fd))
+* **kafka:** hold spooled records until broker delivery ([#233](https://github.com/hyperi-io/dfe-receiver/issues/233)) ([b52839c](https://github.com/hyperi-io/dfe-receiver/commit/b52839c23d3981837218bcd1ce5f41d9efec2323))
+* take libz-sys 1.1.31 for RUSTSEC-2026-0418 ([#229](https://github.com/hyperi-io/dfe-receiver/issues/229)) ([5ced27c](https://github.com/hyperi-io/dfe-receiver/commit/5ced27c49ee78708d7ebae7bb1123aa75369fa4a))
+
 ## [1.15.60](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.59...v1.15.60) (2026-10-29)
 
 ### Bug Fixes
