@@ -38,26 +38,31 @@ pub fn contract() -> DeploymentContract {
     DeploymentContract {
         app_name: "dfe-receiver".into(),
         binary_name: "dfe-receiver".into(),
-        native_deps: NativeDepsContract::for_scalo_features(
-            &[
-                "config",
-                "config-reload",
-                "logger",
-                "metrics",
-                "http-server",
-                "transport-kafka",
-                "transport-grpc",
-                "dlq-kafka",
-                "spool",
-                "tiered-sink",
-                "runtime",
-                "secrets",
-                "scaling",
-                "cli",
-                "deployment",
-            ],
-            &base_image,
-        ),
+        native_deps: {
+            let mut deps = NativeDepsContract::for_scalo_features(
+                &[
+                    "config",
+                    "config-reload",
+                    "logger",
+                    "metrics",
+                    "http-server",
+                    "transport-kafka",
+                    "transport-grpc",
+                    "dlq-kafka",
+                    "spool",
+                    "tiered-sink",
+                    "runtime",
+                    "secrets",
+                    "scaling",
+                    "cli",
+                    "deployment",
+                ],
+                &base_image,
+            );
+            // The wait-for-engine init container probes /readyz with curl from this image.
+            deps.apt_packages.push("curl".into());
+            deps
+        },
         base_image,
         image_profile: ImageProfile::Production,
         description: "High-performance HTTP/gRPC receiver for PB/s scale data ingestion".into(),
