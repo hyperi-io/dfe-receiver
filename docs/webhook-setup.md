@@ -115,7 +115,7 @@ The CEL filter is compiled at load, so a malformed expression is a startup
 error rather than a per-request surprise. A record the filter drops still
 answers 202: the sender did nothing wrong and must not retry.
 
-`contains` matches a substring of a string only. Test list membership with `"pii" in tags` and a map key with `"region" in meta`; `tags.contains("pii")` on a list is an evaluation error, and an expression that errors drops the record.
+`contains` matches a substring of a string only. Test list membership with `"pii" in tags` and a map key with `"region" in meta`; `tags.contains("pii")` on a list is an evaluation error. A filter that errors on a record, or answers with something other than a boolean or a number, refuses the whole request with a 500 `filter_error`, and nothing is delivered. Only a filter that answers false drops a record.
 
 On the shared listener the caller's secret is the only credential needed --
 `server.auth` does not apply to the webhook routes -- while `server.tls`,

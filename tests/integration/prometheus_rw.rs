@@ -527,3 +527,91 @@ async fn a_source_label_is_the_senders_and_is_parked() {
     assert_eq!(c["_source"], "node", "{c}");
     assert_eq!(c["_source_original"], "custom", "{c}");
 }
+
+/// A receiver whose loader is an in-process destination, so a test sees what
+/// was stored.
+async fn start_with_destination() -> (
+    CancellationToken,
+    Arc<Metrics>,
+    String,
+    scalo::transport::grpc::GrpcTransport,
+) {
+    let (endpoint, destination) = crate::common::grpc_destination().await;
+    let mut config = test_config();
+    config.loader.transport = "grpc".to_string();
+    config.loader.grpc_endpoint = Some(endpoint);
+    config.routing.dlq.enabled = false;
+    let (shutdown, metrics, url) = start_rw_handler(config).await;
+    (shutdown, metrics, url, destination)
+}
+
+/// A Remote Write 2.0 body decodes as an empty 1.0 request, so it is refused
+/// 415 and counted, and a 1.0 request on the same listener still lands.
+#[tokio::test]
+async fn a_remote_write_v2_request_is_refused_415_and_stores_nothing() {
+    let (shutdown, metrics, url, destination) = start_with_destination().await;
+    let client = reqwest::Client::new();
+    // Field 5 is a 2.0 `timeseries`, which a 1.0 decoder skips as unknown.
+    let v2_body = snap::raw::Encoder::new()
+        .compress_vec(&[0x2a, 0x04, 0x0a, 0x02, 0x08, 0x01])
+        .unwrap();
+
+    let resp = client
+        .post(format!("{url}/api/v1/write"))
+        .header(
+            "Content-Type",
+            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+        )
+        .header("Content-Encoding", "snappy")
+        .header("X-Prometheus-Remote-Write-Version", "2.0.0")
+        .body(v2_body)
+        .send()
+        .await
+        .expect("request failed");
+    assert_eq!(resp.status(), 415, "{}", resp.text().await.unwrap());
+    assert_eq!(metrics.get_unsupported_encoding_total(), 1);
+    assert_eq!(metrics.get_requests_success(), 0);
+    let stored = crate::common::stored_within(&destination, 0, Duration::from_millis(500)).await;
+    assert!(stored.is_empty(), "a refused v2 request stored {stored:?}");
+
+    let resp = client
+        .post(format!("{url}/api/v1/write"))
+        .header("Content-Type", "application/x-protobuf")
+        .header("Content-Encoding", "snappy")
+        .body(encode_write_request(&proto::WriteRequest {
+            timeseries: vec![make_timeseries("up", 1.0, 1_709_540_000_000)],
+            metadata: vec![],
+        }))
+        .send()
+        .await
+        .expect("request failed");
+    assert_eq!(resp.status(), 204);
+    let stored = crate::common::stored_within(&destination, 1, Duration::from_secs(10)).await;
+    assert_eq!(stored.len(), 1);
+    shutdown.cancel();
+}
+
+/// A non-empty 1.0 body that decodes to no series is answered 204, as the
+/// spec has it for a request with nothing to write, and counted so it shows.
+#[tokio::test]
+async fn a_v1_body_that_decodes_to_no_series_is_counted() {
+    let (shutdown, metrics, url, destination) = start_with_destination().await;
+    let unknown_field = snap::raw::Encoder::new()
+        .compress_vec(&[0x2a, 0x04, 0x0a, 0x02, 0x08, 0x01])
+        .unwrap();
+
+    let resp = reqwest::Client::new()
+        .post(format!("{url}/api/v1/write"))
+        .header("Content-Type", "application/x-protobuf")
+        .header("Content-Encoding", "snappy")
+        .body(unknown_field)
+        .send()
+        .await
+        .expect("request failed");
+
+    assert_eq!(resp.status(), 204);
+    assert_eq!(metrics.get_empty_decodes_total(), 1);
+    let stored = crate::common::stored_within(&destination, 0, Duration::from_millis(500)).await;
+    assert!(stored.is_empty(), "stored {stored:?}");
+    shutdown.cancel();
+}

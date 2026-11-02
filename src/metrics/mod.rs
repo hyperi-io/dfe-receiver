@@ -25,6 +25,8 @@
 //! - `receiver_validation_failures_total` - Validation failures by reason
 //! - `receiver_request_timeouts_total` - Request timeouts by transport (slow loris indicator)
 //! - `receiver_body_size_rejected_total` - Oversized body rejections by transport
+//! - `receiver_unsupported_encoding_total` - Requests refused 415 for a `Content-Encoding` or media type the receiver does not read, by transport
+//! - `receiver_empty_decodes_total` - Non-empty bodies that decoded to no records, by transport
 //! - `receiver_ip_filter_rejected_total` - Connections and datagrams the IP filter refused, by transport
 //! - `receiver_rate_limited_total` - Requests the per-IP rate limit refused with 429, by transport
 //! - `receiver_connections_closed_total` - Connections closed for a connection limit, by transport and reason
@@ -194,6 +196,8 @@ pub struct Metrics {
     validation_failures_missing_field: AtomicU64,
     request_timeouts_total: AtomicU64,
     body_size_rejected_total: AtomicU64,
+    unsupported_encoding_total: AtomicU64,
+    empty_decodes_total: AtomicU64,
     ip_filter_rejected_total: AtomicU64,
     rate_limited_total: AtomicU64,
     tls_handshake_failures_total: AtomicU64,
@@ -277,6 +281,8 @@ impl Metrics {
             validation_failures_missing_field: AtomicU64::new(0),
             request_timeouts_total: AtomicU64::new(0),
             body_size_rejected_total: AtomicU64::new(0),
+            unsupported_encoding_total: AtomicU64::new(0),
+            empty_decodes_total: AtomicU64::new(0),
             ip_filter_rejected_total: AtomicU64::new(0),
             rate_limited_total: AtomicU64::new(0),
             tls_handshake_failures_total: AtomicU64::new(0),
@@ -732,6 +738,31 @@ impl Metrics {
         .increment(1);
     }
 
+    /// Record a request refused 415 (or gRPC `UNIMPLEMENTED`) on `transport`
+    /// for a `Content-Encoding` or media type the receiver does not read.
+    #[inline]
+    pub fn inc_unsupported_encoding(&self, transport: &str) {
+        self.unsupported_encoding_total
+            .fetch_add(1, Ordering::Relaxed);
+        metrics::counter!(
+            "receiver_unsupported_encoding_total",
+            "transport" => transport.to_string()
+        )
+        .increment(1);
+    }
+
+    /// Record a non-empty body on `transport` that decoded to no records and
+    /// was answered as accepted.
+    #[inline]
+    pub fn inc_empty_decode(&self, transport: &str) {
+        self.empty_decodes_total.fetch_add(1, Ordering::Relaxed);
+        metrics::counter!(
+            "receiver_empty_decodes_total",
+            "transport" => transport.to_string()
+        )
+        .increment(1);
+    }
+
     /// Record a connection `transport` closed for a connection limit:
     /// `over_limit`, `no_first_byte`, `frame_timeout` or `idle`.
     #[inline]
@@ -857,7 +888,19 @@ impl Metrics {
         self.request_timeouts_total.load(Ordering::Relaxed)
     }
 
-    /// Get IP-filter rejection count.
+    /// Get the requests refused for an unsupported encoding or media type.
+    #[inline]
+    pub fn get_unsupported_encoding_total(&self) -> u64 {
+        self.unsupported_encoding_total.load(Ordering::Relaxed)
+    }
+
+    /// Get the non-empty bodies that decoded to no records.
+    #[inline]
+    pub fn get_empty_decodes_total(&self) -> u64 {
+        self.empty_decodes_total.load(Ordering::Relaxed)
+    }
+
+    /// Get the IP-filter rejection count.
     #[inline]
     pub fn get_ip_filter_rejected_total(&self) -> u64 {
         self.ip_filter_rejected_total.load(Ordering::Relaxed)
@@ -1070,6 +1113,18 @@ const RECEIVER_SERIES: &[SeriesSpec] = &[
         MetricType::Counter,
         &["transport"],
         "Requests refused for their size, by transport (HTTP 413, gRPC OUT_OF_RANGE or RESOURCE_EXHAUSTED)",
+    ),
+    (
+        "receiver_unsupported_encoding_total",
+        MetricType::Counter,
+        &["transport"],
+        "Requests refused for a Content-Encoding or media type the receiver does not read, by transport (HTTP 415, gRPC UNIMPLEMENTED)",
+    ),
+    (
+        "receiver_empty_decodes_total",
+        MetricType::Counter,
+        &["transport"],
+        "Non-empty request bodies that decoded to no records and were answered as accepted, by transport",
     ),
     (
         "receiver_ip_filter_rejected_total",

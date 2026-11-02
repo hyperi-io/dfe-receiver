@@ -9,7 +9,7 @@
 //! Splunk HEC protocol handler.
 //!
 //! Implements a Splunk HEC-compatible HTTP server that accepts events via:
-//! - `POST /services/collector/event` -- JSON events with metadata
+//! - `POST /services/collector/event` (and the bare `/services/collector`) -- JSON events with metadata
 //! - `POST /services/collector/raw` -- Raw text events
 //! - `GET  /services/collector/health` -- Health check
 //!
@@ -17,6 +17,7 @@
 
 pub mod convert;
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -39,6 +40,7 @@ use crate::error::{Error, RETRY_AFTER_SECS, Result};
 use crate::metrics::Metrics;
 use crate::pipeline::{Acks, BatchOutcome, PipelineState};
 use crate::server::auth::{TokenAuth, principal_or_listener};
+use crate::server::content_encoding::{self, EncodingError};
 use crate::server::http::{Accept, create_auth_state};
 use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
 use crate::server::traits::{BoundAddr, ProtocolHandler};
@@ -196,6 +198,19 @@ impl HecError {
         }
     }
 
+    /// The answer for a body whose `Content-Encoding` could not be undone: 415
+    /// for an encoding the receiver does not read, 400 for a bad gzip body,
+    /// 413 for one over the limit once decompressed.
+    fn encoding(e: &EncodingError) -> Self {
+        Self {
+            status: e.status(),
+            response: HecResponse {
+                text: format!("Invalid data format: {e}"),
+                code: 6,
+            },
+        }
+    }
+
     /// Splunk's own answer when it cannot take every event: 503, code 9. HEC
     /// senders retry a 503 and honour `Retry-After`.
     fn server_busy() -> Self {
@@ -260,6 +275,8 @@ struct HecState {
     /// When a request is answered: once every destination confirmed, or at
     /// enqueue.
     acks: Acks,
+    /// Bound on a request body once its `Content-Encoding` is undone.
+    max_body_size: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -298,10 +315,14 @@ async fn run_hec_server(
         pipeline,
         metrics: metrics.clone(),
         raw_capture,
+        max_body_size,
     };
 
     // Build router with HEC endpoints
     let app = Router::new()
+        // Splunk answers the bare path as `/event`; the OTel Collector's
+        // splunkhec exporter and Splunk's own forwarders post to it.
+        .route("/services/collector", post(event_handler))
         .route("/services/collector/event", post(event_handler))
         .route("/services/collector/event/1.0", post(event_handler))
         .route("/services/collector/raw", post(raw_handler))
@@ -388,6 +409,7 @@ fn sender(principal: Option<&Extension<Principal>>) -> Ingest {
 async fn event_handler(
     State(state): State<HecState>,
     principal: Option<Extension<Principal>>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> std::result::Result<Json<HecResponse>, HecError> {
     let ingest = sender(principal.as_ref());
@@ -411,6 +433,8 @@ async fn event_handler(
         state.metrics.inc_requests_error("splunk_hec");
         return Err(HecError::no_data());
     }
+
+    let body = decode_body(&state, &headers, &body)?;
 
     let events = parse_hec_events(&body).map_err(|e| {
         state.metrics.inc_parse_failure("splunk_hec");
@@ -489,6 +513,8 @@ async fn raw_handler(
         return Err(HecError::no_data());
     }
 
+    let body = decode_body(&state, &headers, &body)?;
+
     // Extract metadata from query parameters, falling back to headers
     let metadata = RawMetadata {
         host: params
@@ -539,6 +565,26 @@ async fn raw_handler(
         "HEC raw request completed"
     );
     batch_answer(&state, "splunk_hec_raw", line_count, outcome)
+}
+
+/// Undo the request's `Content-Encoding` (gzip is what the OTel Collector's
+/// splunkhec exporter and Splunk's forwarders send), refusing any other so the
+/// compressed bytes are never read as events.
+fn decode_body<'a>(
+    state: &HecState,
+    headers: &HeaderMap,
+    body: &'a [u8],
+) -> std::result::Result<Cow<'a, [u8]>, HecError> {
+    let decoded = content_encoding::decode(headers, body, state.max_body_size).map_err(|e| {
+        e.count(&state.metrics, TRANSPORT);
+        state.metrics.inc_requests_error(TRANSPORT);
+        HecError::encoding(&e)
+    })?;
+    if decoded.is_empty() {
+        state.metrics.inc_requests_error(TRANSPORT);
+        return Err(HecError::no_data());
+    }
+    Ok(decoded)
 }
 
 /// `GET /services/collector/health` -- Health check.

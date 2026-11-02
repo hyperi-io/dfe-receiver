@@ -28,6 +28,7 @@ pub mod auth;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::{Duration, SystemTime};
 
 use axum::body::Bytes;
@@ -40,7 +41,7 @@ use axum::{Json, Router};
 use rustc_hash::FxHashMap;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::config::{Config, WebhookBody, WebhookCallerConfig, WebhookConfig};
 use crate::error::{Error, Result, unavailable_response};
@@ -117,6 +118,10 @@ impl ProtocolHandler for WebhookHandler {
     }
 }
 
+/// Sampled counter for requests refused because a filter could not judge a
+/// record (log 1 in 100).
+static FILTER_FAILURES: AtomicU64 = AtomicU64::new(0);
+
 /// One declared caller, compiled for the request path.
 struct Caller {
     name: Arc<str>,
@@ -152,16 +157,20 @@ impl Caller {
     ///
     /// # Errors
     ///
-    /// Returns `record_not_an_object` for an element that is not a JSON
-    /// object, and prepares none of the records.
-    fn prepare(&self, records: Vec<Bytes>) -> Result<Prepared> {
+    /// [`Unpreparable::Record`] for an element that is not a JSON object, or
+    /// not JSON at all under a filter. [`Unpreparable::Filter`] for a record
+    /// the filter could not judge: a record it was never going to deliver must
+    /// not be acknowledged, so the request is refused and none is prepared.
+    fn prepare(&self, records: Vec<Bytes>) -> std::result::Result<Prepared, Unpreparable> {
         let mut prepared = Vec::with_capacity(records.len());
         let mut dropped = 0usize;
         for record in records {
             if !is_json_object(&record) {
-                return Err(Error::Validation(NOT_AN_OBJECT.into()));
+                return Err(Unpreparable::Record(Error::Validation(
+                    NOT_AN_OBJECT.into(),
+                )));
             }
-            if !self.keeps(&record) {
+            if !self.keeps(&record)? {
                 dropped += 1;
                 continue;
             }
@@ -174,27 +183,42 @@ impl Caller {
     }
 
     /// The filter's verdict on one record: a boolean as itself, a number by
-    /// non-zero, anything else and every evaluation error as a drop.
-    fn keeps(&self, record: &[u8]) -> bool {
+    /// non-zero. A filter that errors on the record, or answers with anything
+    /// else, is a failure and not a drop.
+    fn keeps(&self, record: &[u8]) -> std::result::Result<bool, Unpreparable> {
         let Some(program) = &self.filter else {
-            return true;
+            return Ok(true);
         };
         let Ok(serde_json::Value::Object(map)) =
             serde_json::from_slice::<serde_json::Value>(record)
         else {
-            return false;
+            return Err(Unpreparable::Record(Error::Validation(
+                "record_not_json".into(),
+            )));
         };
-        let Ok(context) = scalo::expression::build_context(&map) else {
-            return false;
-        };
+        let context = scalo::expression::build_context(&map)
+            .map_err(|e| Unpreparable::Filter(format!("context: {e}")))?;
         match program.execute(&context) {
-            Ok(cel::Value::Bool(b)) => b,
-            Ok(cel::Value::Int(n)) => n != 0,
-            Ok(cel::Value::UInt(n)) => n != 0,
-            Ok(cel::Value::Float(f)) => f != 0.0,
-            _ => false,
+            Ok(cel::Value::Bool(b)) => Ok(b),
+            Ok(cel::Value::Int(n)) => Ok(n != 0),
+            Ok(cel::Value::UInt(n)) => Ok(n != 0),
+            Ok(cel::Value::Float(f)) => Ok(f != 0.0),
+            Ok(other) => Err(Unpreparable::Filter(format!(
+                "answered {other:?}, not a boolean or a number"
+            ))),
+            Err(e) => Err(Unpreparable::Filter(e.to_string())),
         }
     }
+}
+
+/// Why a request's records could not be prepared for delivery.
+#[derive(Debug)]
+enum Unpreparable {
+    /// A record at fault, answered with its own error.
+    Record(Error),
+    /// The caller's filter could not judge a record. The cause is logged, not
+    /// sent: it names the receiver's own configuration.
+    Filter(String),
 }
 
 /// The records of one request ready for delivery, and how many the filter
@@ -454,9 +478,21 @@ async fn webhook_handler(
 
     let Prepared { records, dropped } = match caller.prepare(records) {
         Ok(prepared) => prepared,
-        Err(e) => {
+        Err(Unpreparable::Record(e)) => {
             state.metrics.inc_requests_error(TRANSPORT);
             return e.into_response();
+        }
+        // A 5xx, so the sender keeps the request and the failure shows on its side.
+        Err(Unpreparable::Filter(cause)) => {
+            state.metrics.inc_requests_error(TRANSPORT);
+            if scalo::logger::log_sampled(&FILTER_FAILURES, 100) {
+                warn!(caller = %caller.name, error = %cause, "webhook filter could not judge a record; request refused (1 in 100)");
+            }
+            return Refused {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                reason: "filter_error",
+            }
+            .into_response();
         }
     };
 
@@ -540,8 +576,8 @@ mod tests {
         let records = vec![Bytes::from(r#"{"a":1}"#), Bytes::from("5")];
         let err = array_caller(None).prepare(records).unwrap_err();
         assert!(
-            matches!(err, Error::Validation(ref reason) if reason == "record_not_an_object"),
-            "{err}"
+            matches!(err, Unpreparable::Record(Error::Validation(ref reason)) if reason == "record_not_an_object"),
+            "{err:?}"
         );
     }
 

@@ -156,3 +156,75 @@ async fn a_posted_object_stays_a_single_event() {
 
     shutdown.cancel();
 }
+
+fn gzip(data: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(data).unwrap();
+    encoder.finish().unwrap()
+}
+
+/// A gzip body is undone before the split, so its elements land as events
+/// rather than as compressed bytes, and any other encoding is refused 415
+/// with nothing stored.
+#[tokio::test]
+async fn ingest_reads_gzip_and_refuses_other_encodings() {
+    let array = br#"[{"event_category":"a"},{"event_category":"b"}]"#;
+    // (Content-Encoding, body, status, records stored)
+    let cases = vec![
+        (Some("gzip"), gzip(array), 202, 2),
+        (None, array.to_vec(), 202, 2),
+        (Some("zstd"), gzip(array), 415, 0),
+        (Some("br"), array.to_vec(), 415, 0),
+        (Some("gzip"), b"not gzip".to_vec(), 400, 0),
+    ];
+    for (encoding, body, status, stored) in cases {
+        let (endpoint, loader) = crate::common::grpc_destination().await;
+        let (url, shutdown) = start_receiver(&endpoint).await;
+        let mut request = reqwest::Client::new()
+            .post(format!("{url}/ingest"))
+            .header("content-type", "application/json");
+        if let Some(encoding) = encoding {
+            request = request.header("content-encoding", encoding);
+        }
+
+        let resp = request.body(body).send().await.expect("request failed");
+
+        assert_eq!(resp.status().as_u16(), status, "{encoding:?}");
+        let wait = Duration::from_secs(if stored == 0 { 1 } else { 10 });
+        let records = crate::common::stored_within(&loader, stored, wait).await;
+        assert_eq!(records.len(), stored, "{encoding:?}: {records:?}");
+        for (record, want) in records.iter().zip(["a", "b"]) {
+            let text = String::from_utf8_lossy(record);
+            assert!(text.contains(want), "{encoding:?}: {text}");
+        }
+        shutdown.cancel();
+    }
+}
+
+/// A gzip body that inflates past `server.max_body_size` is refused 413.
+#[tokio::test]
+async fn ingest_refuses_a_gzip_bomb() {
+    let (endpoint, loader) = crate::common::grpc_destination().await;
+    let mut config = receiver_config(&endpoint);
+    config.server.max_body_size = 2048;
+    let (addr, shutdown) = start_http(config).await;
+    let bomb = gzip(&vec![b' '; 1 << 20]);
+    assert!(
+        bomb.len() < 2048,
+        "test setup: the bomb must fit the wire cap"
+    );
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{addr}/ingest"))
+        .header("content-encoding", "gzip")
+        .body(bomb)
+        .send()
+        .await
+        .expect("request failed");
+
+    assert_eq!(resp.status(), 413);
+    let records = crate::common::stored_within(&loader, 0, Duration::from_secs(1)).await;
+    assert!(records.is_empty(), "stored {} records", records.len());
+    shutdown.cancel();
+}

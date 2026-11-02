@@ -41,7 +41,8 @@ use crate::error::{Error, Result, unavailable_response};
 use crate::metrics::Metrics;
 use crate::pipeline::{Acks, BatchOutcome, PipelineState};
 use crate::server::auth::{AuthMode, TokenAuth, grpc_auth_interceptor, principal_or_listener};
-use crate::server::grpc::{count_connections, count_oversize};
+use crate::server::content_encoding;
+use crate::server::grpc::{count_connections, count_oversize, count_unsupported_encoding};
 use crate::server::http::ConnectionLimits;
 use crate::server::http::{Accept, create_auth_state};
 use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
@@ -389,7 +390,9 @@ async fn run_grpc_server(
             .tls_config(tls)
             .map_err(|e| Error::Tls(format!("OTLP gRPC TLS error: {e}")))?;
     }
-    let mut builder = builder.layer(count_oversize(metrics.clone(), TRANSPORT));
+    let mut builder = builder
+        .layer(count_oversize(metrics.clone(), TRANSPORT))
+        .layer(count_unsupported_encoding(metrics.clone(), TRANSPORT));
 
     // Register all three OTLP services on the same server, sharing one held
     // answer ceiling. tonic requires separate service instances for each trait
@@ -507,9 +510,7 @@ async fn run_http_server(
         state.metrics.add_bytes_received("otlp", body.len() as u64);
 
         let request = decode_otlp_request::<pb::collector::logs::v1::ExportLogsServiceRequest>(
-            &headers,
-            &body,
-            state.max_body_size,
+            &state, &headers, &body,
         )?;
 
         let payloads = convert::convert_logs(&request, state.mode)?;
@@ -535,9 +536,7 @@ async fn run_http_server(
         state.metrics.add_bytes_received("otlp", body.len() as u64);
 
         let request = decode_otlp_request::<pb::collector::trace::v1::ExportTraceServiceRequest>(
-            &headers,
-            &body,
-            state.max_body_size,
+            &state, &headers, &body,
         )?;
 
         let payloads = convert::convert_traces(&request, state.mode)?;
@@ -563,9 +562,7 @@ async fn run_http_server(
         state.metrics.add_bytes_received("otlp", body.len() as u64);
 
         let request = decode_otlp_request::<pb::collector::metrics::v1::ExportMetricsServiceRequest>(
-            &headers,
-            &body,
-            state.max_body_size,
+            &state, &headers, &body,
         )?;
 
         let payloads = convert::convert_metrics(&request, state.mode)?;
@@ -692,69 +689,35 @@ async fn export_over_http<R: prost::Message>(
     }
 }
 
-/// Undo the request's `Content-Encoding`, keeping the decoded body within `limit` bytes.
-///
-/// `identity` and gzip are supported. The decoder stops one byte past `limit`, so a
-/// small compressed body cannot expand into memory beyond it.
-fn decode_content_encoding<'a>(
-    headers: &axum::http::HeaderMap,
-    body: &'a [u8],
-    limit: usize,
-) -> Result<std::borrow::Cow<'a, [u8]>> {
-    use std::io::Read;
-
-    let encoding = headers
-        .get(axum::http::header::CONTENT_ENCODING)
-        .and_then(|v| v.to_str().ok())
-        .map_or("identity", str::trim);
-    if encoding.eq_ignore_ascii_case("identity") {
-        return Ok(std::borrow::Cow::Borrowed(body));
-    }
-    if !encoding.eq_ignore_ascii_case("gzip") {
-        return Err(Error::Validation(format!(
-            "OTLP Content-Encoding '{encoding}' is not supported; use gzip or none"
-        )));
-    }
-    let mut decoded = Vec::new();
-    flate2::read::GzDecoder::new(body)
-        .take(limit as u64 + 1)
-        .read_to_end(&mut decoded)
-        .map_err(|e| Error::Validation(format!("OTLP gzip body is not valid: {e}")))?;
-    if decoded.len() > limit {
-        return Err(Error::Validation(format!(
-            "OTLP body is over the {limit} byte limit once decompressed"
-        )));
-    }
-    Ok(std::borrow::Cow::Owned(decoded))
-}
-
 /// Decode an OTLP HTTP request body (protobuf), gzip-compressed or not.
 ///
-/// Supports `application/x-protobuf` (default) and `application/grpc`.
-/// OTLP/JSON (`application/json`) support requires serde integration with
-/// prost types and can be added when needed.
+/// Supports `application/x-protobuf` (default). The generated types carry no
+/// serde derives, so OTLP/JSON (`application/json`) and any `Content-Encoding`
+/// other than gzip are refused with a 415 naming what is read, and counted.
 fn decode_otlp_request<T: prost::Message + Default + crate::server::budget::Budgeted>(
+    state: &OtlpHttpState,
     headers: &axum::http::HeaderMap,
     body: &[u8],
-    limit: usize,
 ) -> Result<T> {
+    let (metrics, limit) = (&state.metrics, state.max_body_size);
     let content_type = headers
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/x-protobuf");
 
     if content_type.contains("json") {
-        // OTLP/JSON not yet supported -- requires serde derives on prost types
-        Err(Error::Validation(
-            "OTLP/JSON content-type not yet supported; use application/x-protobuf".into(),
-        ))
-    } else {
-        // OTLP/protobuf (default)
-        let body = decode_content_encoding(headers, body, limit)?;
-        budget::admit::<T>(&body)?;
-        <T as prost::Message>::decode(&*body)
-            .map_err(|e| Error::Validation(format!("OTLP protobuf decode failed: {e}")))
+        metrics.inc_unsupported_encoding(TRANSPORT);
+        return Err(Error::UnsupportedMedia(
+            "OTLP/JSON is not supported; send application/x-protobuf".into(),
+        ));
     }
+    let body = content_encoding::decode(headers, body, limit).map_err(|e| {
+        e.count(metrics, TRANSPORT);
+        Error::from(e)
+    })?;
+    budget::admit::<T>(&body)?;
+    <T as prost::Message>::decode(&*body)
+        .map_err(|e| Error::Validation(format!("OTLP protobuf decode failed: {e}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -856,78 +819,5 @@ impl ProtocolHandler for OtlpHandler {
 
         info!("OTLP handler stopped");
         Ok(())
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod tests {
-    use std::io::Write;
-
-    use axum::http::{HeaderMap, HeaderValue, header::CONTENT_ENCODING};
-
-    use super::decode_content_encoding;
-
-    fn gzip(data: &[u8]) -> Vec<u8> {
-        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        encoder.write_all(data).unwrap();
-        encoder.finish().unwrap()
-    }
-
-    fn headers(encoding: Option<&'static str>) -> HeaderMap {
-        let mut headers = HeaderMap::new();
-        if let Some(encoding) = encoding {
-            headers.insert(CONTENT_ENCODING, HeaderValue::from_static(encoding));
-        }
-        headers
-    }
-
-    /// One request: its `Content-Encoding`, body and limit, and the decoded length or the error text expected.
-    struct Case<'a> {
-        encoding: Option<&'static str>,
-        payload: &'a [u8],
-        limit: usize,
-        want: Result<usize, &'static str>,
-    }
-
-    #[test]
-    fn content_encoding_cases() {
-        let body = b"0123456789".repeat(100);
-        let packed = gzip(&body);
-        let bomb = gzip(&vec![0_u8; 1 << 20]);
-        let case = |encoding, payload, limit, want| Case {
-            encoding,
-            payload,
-            limit,
-            want,
-        };
-
-        let cases = vec![
-            case(None, &body[..], 1 << 20, Ok(body.len())),
-            case(Some("identity"), &body[..], 1 << 20, Ok(body.len())),
-            case(Some("gzip"), &packed[..], 1 << 20, Ok(body.len())),
-            case(Some("GZIP"), &packed[..], 1 << 20, Ok(body.len())),
-            case(Some("gzip"), &packed[..], body.len(), Ok(body.len())),
-            case(Some("gzip"), &packed[..], body.len() - 1, Err("over the")),
-            case(Some("gzip"), &bomb[..], 1024, Err("over the")),
-            case(Some("gzip"), b"not gzip at all", 1 << 20, Err("not valid")),
-            case(Some("zstd"), &packed[..], 1 << 20, Err("not supported")),
-        ];
-        for Case {
-            encoding,
-            payload,
-            limit,
-            want,
-        } in cases
-        {
-            let got = decode_content_encoding(&headers(encoding), payload, limit);
-            match want {
-                Ok(len) => assert_eq!(got.unwrap().len(), len, "{encoding:?} limit {limit}"),
-                Err(text) => {
-                    let message = got.unwrap_err().to_string();
-                    assert!(message.contains(text), "{encoding:?}: {message}");
-                }
-            }
-        }
     }
 }
