@@ -237,7 +237,9 @@ syslog:
   udp_bind_address: "0.0.0.0:514"
   tcp_bind_address: "0.0.0.0:514"
   tls_bind_address: "0.0.0.0:6514"
-  max_message_size: 65536  # 64KB
+  max_message_size: 65536  # 64KB; a larger message is skipped and counted as dropped
+  max_frame_size: 262144  # 256KB; an octet count above this is read as an LF line
+  timezone: "UTC"  # offset for an RFC 3164 stamp with none, e.g. "+10:00"
 
   # TLS for secure syslog (RFC 5425, port 6514)
   tls:

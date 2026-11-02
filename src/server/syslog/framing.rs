@@ -8,33 +8,109 @@
 
 //! Syslog TCP framing codec (RFC 6587).
 //!
-//! Auto-detects between two framing methods per message:
-//! - **Octet counting**: `<length> <message>` (first byte is ASCII digit 1-9)
-//! - **Non-transparent framing**: newline-delimited (fallback)
+//! Each frame is either octet-counted (`<count> <message>`) or one LF-terminated
+//! line. A frame is octet-counted only when it opens with a count, ONE space and
+//! the `<` of a PRI, so a line that happens to open with digits, like
+//! `2026 Oct 11 ...`, is read as a line and does not swallow the bytes after it.
+//!
+//! A message over the size limit costs that message and never the connection:
+//! an octet-counted one is skipped by its count, a line up to its LF. Each is
+//! counted for [`SyslogFrameDecoder::take_discarded`]. A count above the frame
+//! limit is not trusted as a count, and that frame is read as a line.
 //!
 //! A frame is its bytes: the encoding is the caller's to check, so a line that
 //! is not UTF-8 costs that line and not the connection.
 
 use std::io;
 
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use tokio_util::codec::Decoder;
 
-/// Default maximum syslog message size (64 KB).
-const DEFAULT_MAX_LENGTH: usize = 64 * 1024;
+/// Default maximum syslog message size (64 KiB).
+pub const DEFAULT_MAX_LENGTH: usize = 64 * 1024;
+
+/// Default largest octet count trusted as one (256 KiB).
+pub const DEFAULT_MAX_FRAME: usize = 256 * 1024;
+
+/// Where the decoder is between frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum State {
+    /// At the start of a frame.
+    Start,
+    /// Inside an oversize octet-counted message, with this many bytes left.
+    Skip(usize),
+    /// Inside an oversize line, up to its LF.
+    Discard,
+}
+
+/// How a frame opens.
+enum Opening {
+    /// `<count> <`: an octet-counted frame whose message starts after `header` bytes.
+    Counted { header: usize, count: usize },
+    /// Digits so far with nothing yet to tell a count from a line.
+    Undecided,
+    /// Anything else, framed by its LF.
+    Line,
+}
 
 /// Syslog TCP framing decoder implementing RFC 6587.
-///
-/// Auto-detects octet-counting vs newline-delimited framing per message
-/// by peeking at the first byte of each frame.
 pub struct SyslogFrameDecoder {
     max_length: usize,
+    max_frame: usize,
+    state: State,
+    discarded: u64,
 }
 
 impl SyslogFrameDecoder {
-    /// Create a new decoder with the specified maximum message size.
+    /// A decoder taking messages up to `max_length` bytes, with counts trusted
+    /// up to [`DEFAULT_MAX_FRAME`].
     pub fn new(max_length: usize) -> Self {
-        Self { max_length }
+        Self::with_max_frame(max_length, DEFAULT_MAX_FRAME)
+    }
+
+    /// A decoder taking messages up to `max_length` bytes, with counts trusted
+    /// up to `max_frame`, raised to `max_length` when below it.
+    pub fn with_max_frame(max_length: usize, max_frame: usize) -> Self {
+        Self {
+            max_length,
+            max_frame: max_frame.max(max_length),
+            state: State::Start,
+            discarded: 0,
+        }
+    }
+
+    /// Messages discarded for their size since the last call.
+    pub fn take_discarded(&mut self) -> u64 {
+        std::mem::take(&mut self.discarded)
+    }
+
+    /// How the frame at the start of `src` opens.
+    fn opening(&self, src: &[u8]) -> Opening {
+        if !matches!(src.first(), Some(b'1'..=b'9')) {
+            return Opening::Line;
+        }
+        let mut count: usize = 0;
+        for (i, &b) in src.iter().enumerate() {
+            if b.is_ascii_digit() {
+                count = match count
+                    .checked_mul(10)
+                    .and_then(|c| c.checked_add(usize::from(b - b'0')))
+                {
+                    Some(c) if c <= self.max_frame => c,
+                    _ => return Opening::Line,
+                };
+                continue;
+            }
+            return match (b, src.get(i + 1)) {
+                (b' ', Some(b'<')) => Opening::Counted {
+                    header: i + 1,
+                    count,
+                },
+                (b' ', None) => Opening::Undecided,
+                _ => Opening::Line,
+            };
+        }
+        Opening::Undecided
     }
 }
 
@@ -48,160 +124,90 @@ impl Decoder for SyslogFrameDecoder {
     type Item = Bytes;
     type Error = io::Error;
 
-    fn decode(
-        &mut self,
-        src: &mut BytesMut,
-    ) -> std::result::Result<Option<Self::Item>, Self::Error> {
-        if src.is_empty() {
-            return Ok(None);
-        }
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        loop {
+            match self.state {
+                State::Start => {}
+                State::Skip(left) => {
+                    let take = left.min(src.len());
+                    src.advance(take);
+                    if take < left {
+                        self.state = State::Skip(left - take);
+                        return Ok(None);
+                    }
+                    self.state = State::Start;
+                }
+                State::Discard => {
+                    let Some(lf) = memchr::memchr(b'\n', src) else {
+                        src.clear();
+                        return Ok(None);
+                    };
+                    src.advance(lf + 1);
+                    self.state = State::Start;
+                }
+            }
 
-        // Skip leading newlines (empty lines between messages)
-        while !src.is_empty() && src[0] == b'\n' {
-            let _ = src.split_to(1);
-        }
+            let blank = src.iter().take_while(|&&b| b == b'\n').count();
+            src.advance(blank);
+            if src.is_empty() {
+                return Ok(None);
+            }
 
-        if src.is_empty() {
-            return Ok(None);
-        }
+            match self.opening(src) {
+                Opening::Counted { header, count } if count > self.max_length => {
+                    self.discarded += 1;
+                    src.advance(header);
+                    self.state = State::Skip(count);
+                    continue;
+                }
+                Opening::Counted { header, count } => {
+                    let total = header + count;
+                    if src.len() < total {
+                        src.reserve(total - src.len());
+                        return Ok(None);
+                    }
+                    let frame = src.split_to(total).freeze();
+                    return Ok(Some(frame.slice(header..)));
+                }
+                Opening::Undecided => return Ok(None),
+                Opening::Line => {}
+            }
 
-        // Auto-detect framing: if first byte is ASCII digit 1-9, use octet counting
-        if src[0] >= b'1' && src[0] <= b'9' {
-            self.decode_octet_counted(src)
-        } else {
-            self.decode_newline_delimited(src)
+            match memchr::memchr(b'\n', src) {
+                Some(lf) if lf <= self.max_length => {
+                    let frame = src.split_to(lf + 1).freeze();
+                    return Ok(Some(frame.slice(..lf)));
+                }
+                Some(lf) => {
+                    self.discarded += 1;
+                    src.advance(lf + 1);
+                }
+                None if src.len() > self.max_length => {
+                    self.discarded += 1;
+                    src.clear();
+                    self.state = State::Discard;
+                    return Ok(None);
+                }
+                None => return Ok(None),
+            }
         }
     }
 
     /// A sender that closes after a last line with no newline still sent that
     /// line, so it is the final frame. A partial octet-counted frame is not.
-    fn decode_eof(
-        &mut self,
-        src: &mut BytesMut,
-    ) -> std::result::Result<Option<Self::Item>, Self::Error> {
+    fn decode_eof(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         if let Some(frame) = self.decode(src)? {
             return Ok(Some(frame));
         }
         let rest = src.split();
         let rest = rest.trim_ascii();
-        if rest.is_empty() || octet_count(rest).is_some() {
+        if rest.is_empty()
+            || self.state != State::Start
+            || matches!(self.opening(rest), Opening::Counted { .. })
+        {
             return Ok(None);
         }
         Ok(Some(Bytes::copy_from_slice(rest)))
-    }
-}
-
-/// The octet count a frame opens with, when it opens `<digits><SP>`.
-fn octet_count(frame: &[u8]) -> Option<usize> {
-    if !matches!(frame.first(), Some(b'1'..=b'9')) {
-        return None;
-    }
-    let space = frame.iter().position(|&b| b == b' ')?;
-    std::str::from_utf8(&frame[..space]).ok()?.parse().ok()
-}
-
-impl SyslogFrameDecoder {
-    /// Decode an octet-counted frame: `<length><SP><message>`.
-    fn decode_octet_counted(
-        &self,
-        src: &mut BytesMut,
-    ) -> std::result::Result<Option<Bytes>, io::Error> {
-        // Find the space separator after the length prefix
-        let space_pos = match src.iter().position(|&b| b == b' ') {
-            Some(pos) => pos,
-            None => {
-                // Haven't received the full length prefix yet
-                if src.len() > 10 {
-                    // Length prefix shouldn't be more than ~10 digits
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "octet count prefix too long",
-                    ));
-                }
-                return Ok(None);
-            }
-        };
-
-        // Parse the length prefix
-        let length_str = match std::str::from_utf8(&src[..space_pos]) {
-            Ok(s) => s,
-            Err(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "octet count prefix is not valid UTF-8",
-                ));
-            }
-        };
-
-        let msg_len: usize = match length_str.parse() {
-            Ok(n) => n,
-            Err(_) => {
-                // Not a valid number — fall back to newline framing
-                return self.decode_newline_delimited(src);
-            }
-        };
-
-        if msg_len > self.max_length {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "syslog message too large: {msg_len} bytes (max {max})",
-                    max = self.max_length
-                ),
-            ));
-        }
-
-        // Total bytes needed: length prefix + space + message
-        let total = space_pos + 1 + msg_len;
-        if src.len() < total {
-            // Reserve space for the full message
-            src.reserve(total - src.len());
-            return Ok(None);
-        }
-
-        // Extract the message (skip length prefix + space)
-        let frame = src.split_to(total).freeze();
-        Ok(Some(frame.slice((space_pos + 1)..)))
-    }
-
-    /// Decode a newline-delimited (non-transparent) frame.
-    fn decode_newline_delimited(
-        &self,
-        src: &mut BytesMut,
-    ) -> std::result::Result<Option<Bytes>, io::Error> {
-        // Find the newline delimiter
-        let newline_pos = match src.iter().position(|&b| b == b'\n') {
-            Some(pos) => pos,
-            None => {
-                // Check if buffer exceeds max length
-                if src.len() > self.max_length {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "syslog message too large: {} bytes without newline (max {})",
-                            src.len(),
-                            self.max_length
-                        ),
-                    ));
-                }
-                return Ok(None);
-            }
-        };
-
-        if newline_pos > self.max_length {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "syslog message too large: {newline_pos} bytes (max {max})",
-                    max = self.max_length
-                ),
-            ));
-        }
-
-        // Extract message up to newline, consume the newline. Leading newlines
-        // were skipped, so the frame is never empty.
-        let frame = src.split_to(newline_pos + 1).freeze();
-        Ok(Some(frame.slice(..newline_pos)))
     }
 }
 
@@ -214,143 +220,246 @@ impl SyslogFrameDecoder {
 mod tests {
     use super::*;
 
-    use bytes::BufMut;
-
-    fn decode_all(decoder: &mut SyslogFrameDecoder, data: &[u8]) -> Vec<String> {
-        decode_frames(decoder, data, false)
-            .into_iter()
-            .map(|frame| String::from_utf8(frame.to_vec()).unwrap())
-            .collect()
-    }
-
-    /// Every frame `data` holds, read to the end of the stream when `eof`.
-    fn decode_frames(decoder: &mut SyslogFrameDecoder, data: &[u8], eof: bool) -> Vec<Bytes> {
-        let mut buf = BytesMut::from(data);
-        let mut results = Vec::new();
-        loop {
-            match decoder.decode(&mut buf) {
-                Ok(Some(msg)) => results.push(msg),
-                Ok(None) => break,
-                Err(e) => panic!("decode error: {e}"),
+    /// Every frame `data` holds, fed `chunk` bytes at a time and read to the
+    /// end of the stream when `eof`, with the count of messages discarded.
+    fn decode_chunked(
+        decoder: &mut SyslogFrameDecoder,
+        data: &[u8],
+        chunk: usize,
+        eof: bool,
+    ) -> (Vec<Bytes>, u64) {
+        let mut buf = BytesMut::new();
+        let mut frames = Vec::new();
+        for piece in data.chunks(chunk.max(1)) {
+            buf.extend_from_slice(piece);
+            while let Some(frame) = decoder.decode(&mut buf).unwrap() {
+                frames.push(frame);
             }
         }
         if eof && let Some(last) = decoder.decode_eof(&mut buf).unwrap() {
-            results.push(last);
+            frames.push(last);
         }
-        results
+        (frames, decoder.take_discarded())
     }
 
-    /// The bytes sent, whether the stream then ends, and the frames expected.
-    type Case = (&'static [u8], bool, &'static [&'static [u8]]);
+    /// The bytes sent, whether the stream then ends, the frames expected and
+    /// how many messages are discarded for their size.
+    struct Case {
+        name: &'static str,
+        data: Vec<u8>,
+        eof: bool,
+        frames: &'static [&'static [u8]],
+        discarded: u64,
+    }
 
-    /// Each framing decodes, and the decoder hands back bytes and never fails
-    /// on their encoding, so a line that is not UTF-8 cannot end the
-    /// connection and lose the rest. At the end of the stream a last line with
-    /// no newline is still a frame, and a partial octet-counted frame is not.
-    #[test]
-    fn every_frame_survives_its_neighbours_encoding_and_a_missing_last_newline() {
-        let cases: [Case; 9] = [
-            (b"<14>hello world\n", false, &[b"<14>hello world"]),
-            // "11 " is the prefix, then 11 bytes of message.
-            (b"11 <14>hello w", false, &[b"<14>hello w"]),
-            (b"\n\n<14>hello\n\n", false, &[b"<14>hello"]),
-            (
-                b"<14>caf\xe9\n<14>next\n",
+    fn case(
+        name: &'static str,
+        data: impl Into<Vec<u8>>,
+        eof: bool,
+        frames: &'static [&'static [u8]],
+        discarded: u64,
+    ) -> Case {
+        Case {
+            name,
+            data: data.into(),
+            eof,
+            frames,
+            discarded,
+        }
+    }
+
+    /// The default limits, except where a case sets its own.
+    fn cases() -> Vec<Case> {
+        let big_octet = format!("70000 <14>{}", "a".repeat(70_000 - 4));
+        let big_line = format!("<14>{}\n", "b".repeat(70_000));
+        vec![
+            case("lf", *b"<14>hello world\n", false, &[b"<14>hello world"], 0),
+            case("octet", *b"11 <14>hello w", false, &[b"<14>hello w"], 0),
+            case(
+                "octet_pair",
+                *b"11 <14>msg one11 <14>msg two",
+                false,
+                &[b"<14>msg one", b"<14>msg two"],
+                0,
+            ),
+            case(
+                "blank_lines",
+                *b"\n\n<14>hello\n\n",
+                false,
+                &[b"<14>hello"],
+                0,
+            ),
+            // A frame is its bytes: an invalid UTF-8 neighbour costs nothing.
+            case(
+                "lf_not_utf8",
+                *b"<14>caf\xe9\n<14>next\n",
                 false,
                 &[b"<14>caf\xe9", b"<14>next"],
+                0,
             ),
-            (
-                b"9 <14>caf\xe9!9 <14>next1",
+            case(
+                "octet_not_utf8",
+                *b"9 <14>caf\xe9!9 <14>next1",
                 false,
                 &[b"<14>caf\xe9!", b"<14>next1"],
+                0,
             ),
-            (b"<14>one\n<14>last", true, &[b"<14>one", b"<14>last"]),
-            (
-                b"2026-10-31T10:00:00Z host app: no PRI",
+            // Digits that open a line are not a count.
+            case(
+                "line_opens_with_a_year",
+                *b"2026 Oct 11 22:14:15 host app: no PRI\n<14>next\n",
+                false,
+                &[b"2026 Oct 11 22:14:15 host app: no PRI", b"<14>next"],
+                0,
+            ),
+            case(
+                "line_opens_with_a_sequence_number",
+                *b"123456: Mar  1 18:46:11.407: %SYS-5-CONFIG_I\n<14>next\n",
+                false,
+                &[b"123456: Mar  1 18:46:11.407: %SYS-5-CONFIG_I", b"<14>next"],
+                0,
+            ),
+            case(
+                "digits_space_no_pri",
+                *b"11 hello world\n<14>x\n",
+                false,
+                &[b"11 hello world", b"<14>x"],
+                0,
+            ),
+            case(
+                "digits_two_spaces",
+                *b"11  <14>hello\n",
+                false,
+                &[b"11  <14>hello"],
+                0,
+            ),
+            case("zero_count", *b"0 <14>x\n", false, &[b"0 <14>x"], 0),
+            // Oversize messages cost themselves and nothing after them.
+            case(
+                "oversize_octet_is_skipped",
+                format!("{big_octet}11 <14>hello w"),
+                false,
+                &[b"<14>hello w"],
+                1,
+            ),
+            case(
+                "oversize_line_is_skipped",
+                format!("{big_line}<14>ok\n"),
+                false,
+                &[b"<14>ok"],
+                1,
+            ),
+            case(
+                "two_oversize_lines",
+                format!("{big_line}{big_line}<14>ok\n"),
+                false,
+                &[b"<14>ok"],
+                2,
+            ),
+            // A count past the frame limit is read as a line.
+            case(
+                "untrusted_count_is_a_line",
+                *b"9999999 <14>hello\n<14>next\n",
+                false,
+                &[b"9999999 <14>hello", b"<14>next"],
+                0,
+            ),
+            case(
+                "overflowing_count_is_a_line",
+                *b"99999999999999999999999 <14>x\n",
+                false,
+                &[b"99999999999999999999999 <14>x"],
+                0,
+            ),
+            // At the end of the stream a last line with no LF is a frame, and a
+            // partial octet-counted frame is not.
+            case(
+                "last_line_no_lf",
+                *b"<14>one\n<14>last",
+                true,
+                &[b"<14>one", b"<14>last"],
+                0,
+            ),
+            case(
+                "last_line_no_pri",
+                *b"2026-10-31T10:00:00Z host app: no PRI",
                 true,
                 &[b"2026-10-31T10:00:00Z host app: no PRI"],
+                0,
             ),
-            (b"<14>one\n20 <14>cut", true, &[b"<14>one"]),
-            (b"<14>one\n\n \t", true, &[b"<14>one"]),
-        ];
-        for (data, eof, expected) in cases {
-            let frames = decode_frames(&mut SyslogFrameDecoder::default(), data, eof);
-            let frames: Vec<&[u8]> = frames.iter().map(|f| &f[..]).collect();
-            assert_eq!(frames, expected, "{:?}", String::from_utf8_lossy(data));
+            case(
+                "partial_octet_at_eof",
+                *b"<14>one\n20 <14>cut",
+                true,
+                &[b"<14>one"],
+                0,
+            ),
+            case(
+                "trailing_whitespace_at_eof",
+                *b"<14>one\n\n \t",
+                true,
+                &[b"<14>one"],
+                0,
+            ),
+            case(
+                "lone_number_at_eof",
+                *b"<14>one\n2026",
+                true,
+                &[b"<14>one", b"2026"],
+                0,
+            ),
+            case(
+                "oversize_line_cut_by_eof",
+                format!("<14>{}", "c".repeat(70_000)),
+                true,
+                &[],
+                1,
+            ),
+        ]
+    }
+
+    /// Each case decodes the same whether its bytes arrive at once, in small
+    /// pieces or one at a time.
+    #[test]
+    fn frames_survive_oversize_neighbours_digit_led_lines_and_split_reads() {
+        let mut failures = Vec::new();
+        for c in cases() {
+            for chunk in [c.data.len(), 7, 1] {
+                let mut decoder = SyslogFrameDecoder::default();
+                let (frames, discarded) = decode_chunked(&mut decoder, &c.data, chunk, c.eof);
+                let frames: Vec<&[u8]> = frames.iter().map(|f| &f[..]).collect();
+                if frames != c.frames || discarded != c.discarded {
+                    failures.push(format!(
+                        "{} (chunk {chunk}): got {} frames {:?}, discarded {discarded}",
+                        c.name,
+                        frames.len(),
+                        frames
+                            .iter()
+                            .map(|f| String::from_utf8_lossy(&f[..f.len().min(40)]))
+                            .collect::<Vec<_>>(),
+                    ));
+                }
+            }
         }
+        assert!(failures.is_empty(), "\n{}", failures.join("\n"));
     }
 
+    /// The frame limit is never below the message limit, so every count a
+    /// message may carry is trusted.
     #[test]
-    fn test_newline_delimited_multiple() {
-        let mut decoder = SyslogFrameDecoder::default();
-        let msgs = decode_all(&mut decoder, b"<14>msg one\n<14>msg two\n<14>msg three\n");
-        assert_eq!(msgs, vec!["<14>msg one", "<14>msg two", "<14>msg three"]);
-    }
-
-    #[test]
-    fn test_octet_counted_multiple() {
-        let mut decoder = SyslogFrameDecoder::default();
-        let mut data = BytesMut::new();
-        let msg1 = "<14>msg one";
-        let msg2 = "<14>msg two";
-        data.put(format!("{} {}", msg1.len(), msg1).as_bytes());
-        data.put(format!("{} {}", msg2.len(), msg2).as_bytes());
-        let frames = decode_all(&mut decoder, &data);
-        assert_eq!(frames, vec!["<14>msg one", "<14>msg two"]);
-    }
-
-    #[test]
-    fn test_partial_read_newline() {
-        let mut decoder = SyslogFrameDecoder::default();
-        let mut buf = BytesMut::from(&b"<14>partial"[..]);
-
-        // No newline yet — should return None
-        let result = decoder.decode(&mut buf).unwrap();
-        assert!(result.is_none());
-
-        // Add the rest
-        buf.put(&b" message\n"[..]);
-        let result = decoder.decode(&mut buf).unwrap();
-        assert_eq!(result.unwrap(), "<14>partial message");
-    }
-
-    #[test]
-    fn test_partial_read_octet_counted() {
-        let mut decoder = SyslogFrameDecoder::default();
-        let mut buf = BytesMut::from(&b"20 <14>part"[..]);
-
-        // Not enough data yet
-        let result = decoder.decode(&mut buf).unwrap();
-        assert!(result.is_none());
-
-        // Add the rest (need 20 bytes total message)
-        buf.put(&b"ial message!"[..]);
-        let result = decoder.decode(&mut buf).unwrap();
-        assert_eq!(result.unwrap(), "<14>partial message!");
-    }
-
-    #[test]
-    fn test_oversized_message_rejected() {
-        let mut decoder = SyslogFrameDecoder::new(10);
-        let mut buf =
-            BytesMut::from(&b"<14>this is a very long message that exceeds the limit\n"[..]);
-        let result = decoder.decode(&mut buf);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_oversized_octet_counted_rejected() {
-        let mut decoder = SyslogFrameDecoder::new(10);
-        let mut buf = BytesMut::from(&b"50 <14>this message is too large"[..]);
-        let result = decoder.decode(&mut buf);
-        assert!(result.is_err());
+    fn frame_limit_is_raised_to_the_message_limit() {
+        let mut decoder = SyslogFrameDecoder::with_max_frame(100, 10);
+        let msg = format!("<14>{}", "x".repeat(96));
+        let data = format!("100 {msg}");
+        let (frames, discarded) = decode_chunked(&mut decoder, data.as_bytes(), 3, false);
+        assert_eq!(frames, vec![Bytes::from(msg)]);
+        assert_eq!(discarded, 0);
     }
 
     #[test]
     fn test_empty_input() {
         let mut decoder = SyslogFrameDecoder::default();
         let mut buf = BytesMut::new();
-        let result = decoder.decode(&mut buf).unwrap();
-        assert!(result.is_none());
+        assert!(decoder.decode(&mut buf).unwrap().is_none());
     }
 }
