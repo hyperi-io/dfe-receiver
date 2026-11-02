@@ -16,6 +16,7 @@
 pub mod convert;
 pub mod framing;
 
+use std::borrow::Cow;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -49,6 +50,18 @@ const TRANSPORT: &str = "syslog";
 /// A syslog line carries no credential, and the listener writes its `_source`.
 fn listener_ingest() -> Ingest {
     Ingest::built(Principal::Listener(TRANSPORT), convert::SOURCE)
+}
+
+/// Decode a message as text. RFC 3164 bodies are arbitrary bytes and RFC 5424
+/// promises UTF-8 only behind a BOM, so a message that is not valid UTF-8 is
+/// kept with each invalid sequence replaced by U+FFFD and counted. Valid input
+/// is borrowed, not copied.
+fn decode_lossy<'a>(bytes: &'a [u8], metrics: &Metrics) -> Cow<'a, str> {
+    let text = String::from_utf8_lossy(bytes);
+    if matches!(text, Cow::Owned(_)) {
+        metrics.inc_lossy_decode(TRANSPORT);
+    }
+    text
 }
 
 /// Maximum UDP datagram buffer size.
@@ -103,17 +116,9 @@ async fn run_udp(
                 metrics.inc_requests_total("syslog");
                 metrics.add_bytes_received("syslog", len as u64);
 
-                let raw = match std::str::from_utf8(&buf[..len]) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        debug!(peer = %peer_addr, error = %e, "Syslog UDP: invalid UTF-8");
-                        metrics.inc_parse_failure("syslog");
-                        metrics.inc_requests_error("syslog");
-                        continue;
-                    }
-                };
+                let raw = decode_lossy(&buf[..len], &metrics);
 
-                match syslog_to_json(raw, raw_capture) {
+                match syslog_to_json(&raw, raw_capture) {
                     Ok(payload) => {
                         if let Err(e) = pipeline.process(payload, &listener_ingest()).await {
                             debug!(peer = %peer_addr, error = %e, "Failed to process syslog UDP event");
@@ -176,13 +181,8 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
                         metrics.inc_requests_total("syslog");
                         metrics.add_bytes_received("syslog", frame.len() as u64);
 
-                        let Ok(raw) = std::str::from_utf8(&frame) else {
-                            debug!(peer = %peer_addr, "Syslog TCP: invalid UTF-8");
-                            metrics.inc_parse_failure("syslog");
-                            metrics.inc_requests_error("syslog");
-                            continue;
-                        };
-                        match syslog_to_json(raw, raw_capture) {
+                        let raw = decode_lossy(&frame, &metrics);
+                        match syslog_to_json(&raw, raw_capture) {
                             Ok(payload) => {
                                 let held = [payload];
                                 if !hold_until_settled(&pipeline, &held, &metrics, "syslog", &shutdown, &Acks::at_enqueue(), &listener_ingest()).await {
@@ -500,6 +500,30 @@ mod tests {
         assert_eq!(config.tls_bind_address, "0.0.0.0:6514");
         assert_eq!(config.max_message_size, 64 * 1024);
         assert!(!config.tls.enabled);
+    }
+
+    /// Valid UTF-8 is borrowed and not counted. Invalid bytes become U+FFFD
+    /// and the message is counted once, wherever the bad byte sits.
+    #[test]
+    fn decode_lossy_borrows_valid_input_and_counts_invalid_input() {
+        let metrics = Metrics::default();
+
+        let valid = decode_lossy("<14>caf\u{e9}".as_bytes(), &metrics);
+        assert!(matches!(valid, Cow::Borrowed(_)));
+        assert_eq!(metrics.get_lossy_decodes_total(), 0);
+
+        for (bytes, expected) in [
+            (&b"<14>caf\xe9"[..], "<14>caf\u{fffd}"),
+            (
+                &b"<14>h\xffst app: x\xc3"[..],
+                "<14>h\u{fffd}st app: x\u{fffd}",
+            ),
+            (&b"\xff"[..], "\u{fffd}"),
+        ] {
+            let before = metrics.get_lossy_decodes_total();
+            assert_eq!(decode_lossy(bytes, &metrics), expected);
+            assert_eq!(metrics.get_lossy_decodes_total(), before + 1);
+        }
     }
 
     /// A datagram the pipeline cannot take is counted as dropped: UDP has no

@@ -47,6 +47,16 @@ use scalo::metrics::{
 };
 use scalo::scaling::{RateWindow, ScalingPressure};
 
+/// Count a message on `transport` kept after a lossy UTF-8 decode, for a
+/// converter that holds no [`Metrics`].
+pub fn count_lossy_decode(transport: &str) {
+    metrics::counter!(
+        "receiver_lossy_decodes_total",
+        "transport" => transport.to_string()
+    )
+    .increment(1);
+}
+
 /// Reason for authentication failure (for metrics labels).
 #[derive(Debug, Clone, Copy)]
 pub enum AuthFailureReason {
@@ -200,6 +210,7 @@ pub struct Metrics {
     empty_decodes_total: AtomicU64,
     ip_filter_rejected_total: AtomicU64,
     rate_limited_total: AtomicU64,
+    lossy_decodes_total: AtomicU64,
     tls_handshake_failures_total: AtomicU64,
 
     // Gauge atomics (for scaling read-back)
@@ -285,6 +296,7 @@ impl Metrics {
             empty_decodes_total: AtomicU64::new(0),
             ip_filter_rejected_total: AtomicU64::new(0),
             rate_limited_total: AtomicU64::new(0),
+            lossy_decodes_total: AtomicU64::new(0),
             tls_handshake_failures_total: AtomicU64::new(0),
             batch_queue_size: AtomicU64::new(0),
             batch_queue_bytes: AtomicU64::new(0),
@@ -787,6 +799,14 @@ impl Metrics {
         .increment(1);
     }
 
+    /// Record a message on `transport` that was not valid UTF-8, and was kept
+    /// with each invalid byte sequence replaced by U+FFFD.
+    #[inline]
+    pub fn inc_lossy_decode(&self, transport: &str) {
+        self.lossy_decodes_total.fetch_add(1, Ordering::Relaxed);
+        count_lossy_decode(transport);
+    }
+
     /// Record a request the per-IP rate limit refused on `transport` (429).
     #[inline]
     pub fn inc_rate_limited(&self, transport: &str) {
@@ -904,6 +924,12 @@ impl Metrics {
     #[inline]
     pub fn get_ip_filter_rejected_total(&self) -> u64 {
         self.ip_filter_rejected_total.load(Ordering::Relaxed)
+    }
+
+    /// Get the count of messages kept after a lossy UTF-8 decode.
+    #[inline]
+    pub fn get_lossy_decodes_total(&self) -> u64 {
+        self.lossy_decodes_total.load(Ordering::Relaxed)
     }
 
     /// Get rate-limit refusal count.
@@ -1139,6 +1165,12 @@ const RECEIVER_SERIES: &[SeriesSpec] = &[
         "Connections closed for a connection limit (server.connections), by transport and reason: over_limit, no_first_byte, frame_timeout, idle",
     ),
     (
+        "receiver_lossy_decodes_total",
+        MetricType::Counter,
+        &["transport"],
+        "Syslog messages and Fluent Forward records that were not valid UTF-8 and were kept with invalid bytes replaced by U+FFFD, by transport",
+    ),
+    (
         "receiver_rate_limited_total",
         MetricType::Counter,
         &["transport"],
@@ -1215,6 +1247,12 @@ const RECEIVER_SERIES: &[SeriesSpec] = &[
         MetricType::Counter,
         &[],
         "Records whose sender-supplied _org_id was removed (routing.source_org_id: disallow)",
+    ),
+    (
+        "receiver_original_stripped_total",
+        MetricType::Counter,
+        &[],
+        "Records whose event.original / log.original copy of the raw line was removed because message carries it (not when tagged preserve_original_event)",
     ),
     (
         "usage_ingested_bytes_total",

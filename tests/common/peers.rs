@@ -46,6 +46,9 @@ pub const OPENSSL_IMAGE: &str =
 /// renovate: datasource=docker depName=fluent/fluent-bit
 pub const FLUENT_BIT_IMAGE: &str = "fluent/fluent-bit:5.1.5@sha256:2740f387f6e68fab66d28e4fa6a853387b9cab6ffb4cb78958f69bba4eb0e7b4";
 
+/// renovate: datasource=docker depName=fluent/fluentd
+pub const FLUENTD_IMAGE: &str = "fluent/fluentd:v1.20.1-1.0@sha256:188ca130e9998adb2587cfa09416336b6d3bc309153b4564c48f9023fda12124";
+
 /// renovate: datasource=docker depName=otel/opentelemetry-collector-contrib
 pub const OTEL_COLLECTOR_IMAGE: &str = "otel/opentelemetry-collector-contrib:0.164.0@sha256:340c9ca6a36617084c6661bdc4f0fe92b7cda5a805d61673ec8db375fddc522b";
 

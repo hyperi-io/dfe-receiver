@@ -1257,6 +1257,13 @@ impl PipelineState {
         } else {
             payload
         };
+        // A copy of the line beside `message` is dropped from a record the receiver forwards
+        // as sent. A record bound for the DLQ keeps what the sender wrote.
+        let payload = if matches!(validation, ValidationResult::Valid) {
+            routing::strip_original(payload)
+        } else {
+            payload
+        };
 
         match validation {
             ValidationResult::Valid => {

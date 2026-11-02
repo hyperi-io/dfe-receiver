@@ -491,11 +491,11 @@ async fn a_syslog_tcp_connection_is_counted_until_it_closes() {
     syslog.shutdown.cancel();
 }
 
-/// A line that is not UTF-8 costs that line only: the connection stays open,
-/// the next line on it is taken, and a last line the sender closes without a
-/// newline is taken too.
+/// A line that is not UTF-8 is taken and counted as a lossy decode: the
+/// connection stays open, the next line on it is taken, and a last line the
+/// sender closes without a newline is taken too.
 #[tokio::test]
-async fn a_line_that_is_not_utf8_costs_only_itself() {
+async fn a_line_that_is_not_utf8_is_taken_and_counted() {
     use tokio::io::AsyncWriteExt;
 
     let syslog = start_syslog_handler(test_config()).await;
@@ -507,12 +507,13 @@ async fn a_line_that_is_not_utf8_costs_only_itself() {
         .await
         .unwrap();
     assert!(
-        crate::common::eventually(wait, || requests_success(&syslog.metrics) == 1).await,
-        "the line after the bad one was not taken: {} taken, {} failed",
+        crate::common::eventually(wait, || requests_success(&syslog.metrics) == 2).await,
+        "both lines should be taken: {} taken, {} failed",
         requests_success(&syslog.metrics),
         syslog.metrics.get_requests_error()
     );
-    assert_eq!(syslog.metrics.get_requests_error(), 1);
+    assert_eq!(syslog.metrics.get_requests_error(), 0);
+    assert_eq!(syslog.metrics.get_lossy_decodes_total(), 1);
     assert_eq!(
         syslog.metrics.get_active_connections(),
         1,
@@ -525,9 +526,10 @@ async fn a_line_that_is_not_utf8_costs_only_itself() {
         .unwrap();
     drop(connection);
     assert!(
-        crate::common::eventually(wait, || requests_success(&syslog.metrics) == 2).await,
+        crate::common::eventually(wait, || requests_success(&syslog.metrics) == 3).await,
         "the unterminated last line was not taken"
     );
+    assert_eq!(syslog.metrics.get_lossy_decodes_total(), 1);
     syslog.shutdown.cancel();
 }
 
@@ -604,4 +606,88 @@ async fn an_unbound_syslog_listener_delivers_into_the_default_org() {
         assert_eq!(record["_org_id"], "default", "{record}");
         assert!(record.get("_source_original").is_none(), "{record}");
     }
+}
+
+/// A message with an invalid byte in its header or its body lands over UDP and
+/// TCP, parsed, with the byte replaced by U+FFFD. TLS reads through the same
+/// connection handler as plain TCP.
+#[tokio::test]
+async fn a_message_that_is_not_utf8_lands_parsed_over_udp_and_tcp() {
+    use scalo::transport::TransportReceiver;
+    use tokio::io::AsyncWriteExt;
+
+    let (loader_endpoint, loader) = crate::common::grpc_destination().await;
+    let mut config = test_config();
+    config.loader.transport = "grpc".to_string();
+    config.loader.grpc_endpoint = Some(loader_endpoint);
+    config.routing.dlq.enabled = false;
+    let syslog = start_syslog_handler(config).await;
+
+    let udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut tcp = tokio::net::TcpStream::connect(syslog.tcp).await.unwrap();
+
+    // (transport, wire bytes, field the replacement character must land in, expected value)
+    let cases: [(&str, &[u8], &str, &str); 4] = [
+        (
+            "udp",
+            b"<14>Oct 31 10:00:00 ho\xffst udpheader: body",
+            "hostname",
+            "ho\u{fffd}st",
+        ),
+        (
+            "udp",
+            b"<14>Oct 31 10:00:00 udpbody app: caf\xe9 au lait",
+            "message",
+            "caf\u{fffd} au lait",
+        ),
+        (
+            "tcp",
+            b"<14>Oct 31 10:00:00 ho\xffst tcpheader: body\n",
+            "hostname",
+            "ho\u{fffd}st",
+        ),
+        (
+            "tcp",
+            b"<14>Oct 31 10:00:00 tcpbody app: caf\xe9 au lait\n",
+            "message",
+            "caf\u{fffd} au lait",
+        ),
+    ];
+    for (transport, wire, _, _) in &cases {
+        if *transport == "udp" {
+            udp.send_to(wire, syslog.udp).await.unwrap();
+        } else {
+            tcp.write_all(wire).await.unwrap();
+        }
+    }
+    tcp.flush().await.unwrap();
+
+    let mut received = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while received.len() < cases.len() && tokio::time::Instant::now() < deadline {
+        if let Ok(batch) = loader.recv(cases.len()).await {
+            received.extend(batch.records.into_iter().map(|r| r.payload));
+        }
+    }
+    drop(tcp);
+    syslog.shutdown.cancel();
+
+    assert_eq!(
+        received.len(),
+        cases.len(),
+        "every message reaches the loader"
+    );
+    let records: Vec<serde_json::Value> = received
+        .iter()
+        .map(|payload| serde_json::from_slice(payload).unwrap())
+        .collect();
+    for (transport, _, field, expected) in &cases {
+        let found = records.iter().any(|record| record[field] == *expected);
+        assert!(
+            found,
+            "{transport}: no record with {field} = {expected:?} in {records:?}"
+        );
+    }
+    assert_eq!(syslog.metrics.get_lossy_decodes_total(), 4);
+    assert_eq!(syslog.metrics.get_requests_error(), 0);
 }
