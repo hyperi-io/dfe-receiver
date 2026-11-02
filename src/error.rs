@@ -26,6 +26,11 @@ pub enum Error {
     #[error("JSON validation failed: {0}")]
     Validation(String),
 
+    /// The request's media type or `Content-Encoding` is one the receiver does
+    /// not read, so the sender is told to change it (415).
+    #[error("unsupported media: {0}")]
+    UnsupportedMedia(String),
+
     /// Routing error (no matching route, invalid field).
     #[error("routing error: {0}")]
     Routing(String),
@@ -90,7 +95,11 @@ impl Error {
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         match self {
-            Error::Validation(_) | Error::Routing(_) | Error::Rejected(_) | Error::Auth(_) => false,
+            Error::Validation(_)
+            | Error::UnsupportedMedia(_)
+            | Error::Routing(_)
+            | Error::Rejected(_)
+            | Error::Auth(_) => false,
             Error::Config(_)
             | Error::Kafka(_)
             | Error::Io(_)
@@ -109,7 +118,7 @@ impl Error {
     #[must_use]
     pub fn public_message(&self) -> String {
         match self {
-            Error::Validation(msg) | Error::Auth(msg) => msg.clone(),
+            Error::Validation(msg) | Error::UnsupportedMedia(msg) | Error::Auth(msg) => msg.clone(),
             Error::Routing(_) => "routing error".to_string(),
             Error::Rejected(_) => "record rejected".to_string(),
             Error::Buffer(_) => "service under pressure".to_string(),
@@ -171,6 +180,8 @@ impl IntoResponse for Error {
     fn into_response(self) -> Response {
         let status = if matches!(self, Error::Auth(_)) {
             StatusCode::UNAUTHORIZED
+        } else if matches!(self, Error::UnsupportedMedia(_)) {
+            StatusCode::UNSUPPORTED_MEDIA_TYPE
         } else if self.is_retryable() {
             StatusCode::SERVICE_UNAVAILABLE
         } else {
@@ -206,6 +217,7 @@ mod tests {
         let cases = vec![
             (Error::Config("c".into()), "configuration error: c"),
             (Error::Validation("v".into()), "JSON validation failed: v"),
+            (Error::UnsupportedMedia("m".into()), "unsupported media: m"),
             (Error::Routing("r".into()), "routing error: r"),
             (Error::Kafka("k".into()), "Kafka error: k"),
             (Error::Tls("t".into()), "TLS error: t"),
@@ -401,6 +413,7 @@ mod tests {
         vec![
             Error::Config("c".into()),
             Error::Validation("v".into()),
+            Error::UnsupportedMedia("m".into()),
             Error::Routing("r".into()),
             Error::Kafka("k".into()),
             Error::Io(std::io::Error::other("io")),
@@ -422,7 +435,11 @@ mod tests {
         for err in every_variant() {
             let record_at_fault = matches!(
                 err,
-                Error::Validation(_) | Error::Routing(_) | Error::Rejected(_) | Error::Auth(_)
+                Error::Validation(_)
+                    | Error::UnsupportedMedia(_)
+                    | Error::Routing(_)
+                    | Error::Rejected(_)
+                    | Error::Auth(_)
             );
             assert_eq!(err.is_retryable(), !record_at_fault, "{err}");
         }

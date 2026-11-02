@@ -316,6 +316,31 @@ pub(crate) fn count_oversize(
     })
 }
 
+/// A tonic server layer counting requests that name a `grpc-encoding` the
+/// server does not decode.
+///
+/// tonic answers those `UNIMPLEMENTED` with `grpc-accept-encoding` listing what
+/// it does read (gzip), before any handler runs, so a request-side check is the
+/// only place the refusal is seen.
+#[cfg(feature = "otlp")]
+pub(crate) fn count_unsupported_encoding<B>(
+    metrics: Arc<Metrics>,
+    transport: &'static str,
+) -> tower::util::MapRequestLayer<impl Fn(http::Request<B>) -> http::Request<B> + Clone> {
+    tower::util::MapRequestLayer::new(move |request: http::Request<B>| {
+        let encoding = request
+            .headers()
+            .get("grpc-encoding")
+            .and_then(|v| v.to_str().ok());
+        if encoding
+            .is_some_and(|e| !e.eq_ignore_ascii_case("gzip") && !e.eq_ignore_ascii_case("identity"))
+        {
+            metrics.inc_unsupported_encoding(transport);
+        }
+        request
+    })
+}
+
 /// gRPC/Vector protocol handler wrapping the existing tonic server.
 pub struct GrpcVectorHandler {
     config: Config,

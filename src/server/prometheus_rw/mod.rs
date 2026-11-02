@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Extension, Router};
@@ -53,6 +53,9 @@ use self::convert::{PrometheusRwMode, write_request_to_json};
 
 /// The transport label the remote-write listener counts under.
 const TRANSPORT: &str = "prometheus_rw";
+
+/// Sampled counter for bodies that decoded to no series (log 1 in 100).
+static EMPTY_DECODES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 // A series' labels are copied into every sample event it emits.
 static LABEL: Shape = Shape::of(&[]);
@@ -254,6 +257,7 @@ async fn run_prometheus_rw_server(
 async fn write_handler(
     State(state): State<RwState>,
     principal: Option<Extension<Principal>>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> std::result::Result<StatusCode, RwError> {
     // A `_source` label is the sender's: only the converter's own stamp stands when no rule sets one.
@@ -269,6 +273,18 @@ async fn write_handler(
     if body.is_empty() {
         state.metrics.inc_requests_error("prometheus_rw");
         return Err(RwError::bad_request("empty request body"));
+    }
+
+    // A v2 body would decode as an empty v1 request and be answered 204 with
+    // every sample unread. The spec lets a receiver answer 415, which a
+    // Prometheus 3 sender takes as the cue to fall back to v1.
+    if is_write_v2(&headers) {
+        state.metrics.inc_unsupported_encoding("prometheus_rw");
+        state.metrics.inc_requests_error("prometheus_rw");
+        return Err(RwError::unsupported_media(
+            "Remote Write 2.0 is not supported; send Remote Write 1.0 \
+             (application/x-protobuf, Content-Encoding: snappy)",
+        ));
     }
 
     // Snappy block decompress (with decompression bomb guard)
@@ -310,6 +326,18 @@ async fn write_handler(
         RwError::bad_request(&format!("protobuf decode failed: {e}"))
     })?;
 
+    // A body that held bytes and no series or metadata read as nothing we
+    // know, and the sender is told it was taken. Counted so it shows.
+    if request.timeseries.is_empty() && request.metadata.is_empty() && !decompressed.is_empty() {
+        state.metrics.inc_empty_decode("prometheus_rw");
+        if scalo::logger::log_sampled(&EMPTY_DECODES, 100) {
+            warn!(
+                bytes = decompressed.len(),
+                "Remote Write body decoded to no series (1 in 100)"
+            );
+        }
+    }
+
     // Convert to JSON events
     let events = write_request_to_json(request, state.mode).map_err(|e| {
         warn!(error = %e, "Remote Write conversion failed");
@@ -339,6 +367,15 @@ async fn write_handler(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Whether the request declares Remote Write 2.0 in its `Content-Type`
+/// (`proto=io.prometheus.write.v2.Request`).
+fn is_write_v2(headers: &HeaderMap) -> bool {
+    headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.to_ascii_lowercase().contains("io.prometheus.write.v2"))
+}
+
 // ---------------------------------------------------------------------------
 // Error type
 // ---------------------------------------------------------------------------
@@ -365,6 +402,13 @@ impl RwError {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: "internal error".to_string(),
+        }
+    }
+
+    fn unsupported_media(msg: &str) -> Self {
+        Self {
+            status: StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            message: msg.to_string(),
         }
     }
 

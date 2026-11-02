@@ -807,6 +807,7 @@ volumetric and reputation-based defence.
 | Per-client rate limit | A GCRA limiter per HTTP listener (ingest, webhook, HEC, remote write, OTLP HTTP), keyed on the TCP peer or the client a trusted proxy names, answering 429 | `server.rate_limit`, `server.trusted_proxies` |
 | In-flight request cap | Per HTTP listener | `server.max_concurrent_requests` |
 | Body size and request timeout | Every HTTP listener, answering 413 and 408 | `server.*`, `splunk_hec.*`, `prometheus_rw.*`, `webhook.*` |
+| Request `Content-Encoding` | `/ingest`, Splunk HEC and OTLP HTTP undo gzip within the body size limit once decompressed (413 over it) and answer 415 for any other encoding. Remote write answers 415 for a 2.0 request. Each 415 counts on `receiver_unsupported_encoding_total` | `server.max_body_size`, `splunk_hec.max_body_size` |
 
 The rate limiter drops a client's entry once its budget has refilled, checked
 every 5 seconds, so its memory follows the clients seen recently, not every

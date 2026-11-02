@@ -800,3 +800,29 @@ async fn kafka_auth_works(cfg: &KafkaTestConfig) -> bool {
     .await
     .unwrap_or(false)
 }
+
+/// The records the stand-in destination received, collected until `expected`
+/// arrive or `wait` passes.
+///
+/// With `expected` 0 it waits out `wait` and returns whatever came, which is
+/// how a test shows a refused request stored nothing.
+pub async fn stored_within(
+    destination: &scalo::transport::grpc::GrpcTransport,
+    expected: usize,
+    wait: std::time::Duration,
+) -> Vec<Vec<u8>> {
+    use scalo::transport::TransportReceiver;
+
+    let deadline = tokio::time::Instant::now() + wait;
+    let mut records = Vec::new();
+    while (expected == 0 || records.len() < expected) && tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout_at(deadline, destination.recv(10)).await {
+            Ok(Ok(batch)) if !batch.records.is_empty() => {
+                records.extend(batch.records.into_iter().map(|r| r.payload.to_vec()));
+            }
+            Ok(_) => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+            Err(_) => break,
+        }
+    }
+    records
+}

@@ -72,6 +72,10 @@ static KAFKA_ERRORS: AtomicU64 = AtomicU64::new(0);
 /// serve (log 1 in 1000).
 static MISSING_TOPIC: AtomicU64 = AtomicU64::new(0);
 
+/// Sampled counter for delivery reports refusing the receiver's own access
+/// (log 1 in 1000).
+static NOT_AUTHORISED: AtomicU64 = AtomicU64::new(0);
+
 /// What the broker did with the records the sink queued.
 ///
 /// Written by [`DeliveryObserver`] on librdkafka's own polling thread, read by
@@ -169,6 +173,16 @@ impl DeliveryObserver {
                  offered again until it is (logged 1 in 1000)"
             );
         }
+        if authorization_failed(err) && scalo::logger::log_sampled(&NOT_AUTHORISED, 1000) {
+            let total = NOT_AUTHORISED.load(Ordering::Relaxed);
+            error!(
+                topic,
+                error = %err,
+                total,
+                "Kafka broker refused the receiver's credentials or ACLs; its records \
+                 are kept and offered again until the ACL is fixed (logged 1 in 1000)"
+            );
+        }
         if self.state.first_failure_on(topic) {
             error!(
                 topic,
@@ -212,13 +226,15 @@ impl DeliveryObserver {
     /// resend task to queue again.
     ///
     /// A message timeout qualifies, and so does a topic the cluster does not
-    /// serve yet, which a new or unpropagated topic reads as. librdkafka
-    /// retries every other retriable failure itself until the timeout, so any
-    /// other code is a refusal no resend clears.
+    /// serve yet, which a new or unpropagated topic reads as, and so does an
+    /// authorization failure, which an ACL change clears. librdkafka retries
+    /// every other retriable failure itself until the timeout, so any other
+    /// code is a refusal no resend clears.
     fn give_up(&self, msg: &rdkafka::message::BorrowedMessage<'_>, err: &KafkaError) {
         if !self.state.resends.load(Ordering::Relaxed)
             || !(err.rdkafka_error_code() == Some(RDKafkaErrorCode::MessageTimedOut)
-                || topic_missing(err))
+                || topic_missing(err)
+                || authorization_failed(err))
         {
             return;
         }
@@ -239,15 +255,16 @@ impl DeliveryObserver {
 /// offered again rather than dead-lettered. A broker's size refusal is not
 /// listed because it fails the whole batch librdkafka sent, so it names no
 /// record. librdkafka refuses an oversized record itself at enqueue. A topic
-/// the cluster does not serve is not listed either, see [`topic_missing`].
+/// the cluster does not serve is not listed either, see [`topic_missing`]. An
+/// authorization failure is not listed: it is the receiver's ACL, not the
+/// record, and the next record fails the same way until an operator fixes it,
+/// see [`authorization_failed`].
 fn refused_for_good(err: &KafkaError) -> bool {
     matches!(
         err.rdkafka_error_code(),
         Some(
             RDKafkaErrorCode::InvalidRecord
                 | RDKafkaErrorCode::InvalidTimestamp
-                | RDKafkaErrorCode::TopicAuthorizationFailed
-                | RDKafkaErrorCode::ClusterAuthorizationFailed
                 | RDKafkaErrorCode::InvalidTopic
                 | RDKafkaErrorCode::UnknownPartition
         )
@@ -265,6 +282,21 @@ fn topic_missing(err: &KafkaError) -> bool {
     matches!(
         err.rdkafka_error_code(),
         Some(RDKafkaErrorCode::UnknownTopic | RDKafkaErrorCode::UnknownTopicOrPartition)
+    )
+}
+
+/// Whether a delivery report is the broker refusing the receiver's own access
+/// (topic or cluster ACL).
+///
+/// The record is sound and a corrected ACL takes it, so it is kept and
+/// offered again rather than refused for good and acknowledged as lost.
+fn authorization_failed(err: &KafkaError) -> bool {
+    matches!(
+        err.rdkafka_error_code(),
+        Some(
+            RDKafkaErrorCode::TopicAuthorizationFailed
+                | RDKafkaErrorCode::ClusterAuthorizationFailed
+        )
     )
 }
 
@@ -939,8 +971,8 @@ mod tests {
             (Code::InvalidMessageSize, false),
             (Code::InvalidRecord, true),
             (Code::InvalidTimestamp, true),
-            (Code::TopicAuthorizationFailed, true),
-            (Code::ClusterAuthorizationFailed, true),
+            (Code::TopicAuthorizationFailed, false),
+            (Code::ClusterAuthorizationFailed, false),
             (Code::InvalidTopic, true),
             (Code::UnknownTopic, false),
             (Code::UnknownPartition, true),

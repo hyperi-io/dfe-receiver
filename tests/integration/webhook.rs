@@ -673,6 +673,51 @@ async fn a_filtered_out_record_is_dropped_and_still_202() {
     started.shutdown.cancel();
 }
 
+/// A filter that cannot judge a record is a failure, not a drop: the request
+/// is answered 500 `filter_error` and counted as an error, never 202, and an
+/// array with one unjudgeable element delivers none of its elements.
+#[tokio::test]
+async fn a_record_the_filter_cannot_judge_is_refused_not_dropped() {
+    // (body shape, filter, request body)
+    let cases = [
+        (
+            WebhookBody::Single,
+            r#"severity == "high""#,
+            r#"{"other":1}"#,
+        ),
+        (WebhookBody::Single, "severity", r#"{"severity":"high"}"#),
+        (
+            WebhookBody::Array,
+            r#"severity == "high""#,
+            r#"[{"severity":"high"},{"other":1}]"#,
+        ),
+    ];
+    for (shape, filter, body) in cases {
+        let (_file, source) = secret_file(HMAC_SECRET);
+        let mut caller = hmac_caller("pager", &source);
+        caller.body = shape;
+        caller.filter = filter.to_string();
+        let started = start_own_listener(own_listener_config(vec![caller]), None).await;
+
+        let resp = post_signed(&started.url, "pager", HMAC_SECRET, now_secs(), body).await;
+
+        assert_eq!(resp.status(), 500, "{filter} on {body}");
+        let answer: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(answer["error"], "filter_error", "{filter} on {body}");
+        assert_eq!(
+            started.metrics.get_requests_success(),
+            0,
+            "{filter} on {body}"
+        );
+        assert_eq!(
+            started.metrics.get_requests_error(),
+            1,
+            "{filter} on {body}"
+        );
+        started.shutdown.cancel();
+    }
+}
+
 // =============================================================================
 // Shared listener
 // =============================================================================

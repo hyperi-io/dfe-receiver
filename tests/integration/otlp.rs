@@ -498,28 +498,80 @@ async fn test_otlp_http_invalid_protobuf() {
     otlp.shutdown.cancel();
 }
 
-/// Test that OTLP HTTP rejects unsupported JSON content-type.
+/// What the OTLP HTTP endpoint will not read is refused 415 with the supported
+/// forms named, and counted: OTLP/JSON and any `Content-Encoding` but gzip.
 #[tokio::test]
-async fn test_otlp_http_json_unsupported() {
+async fn otlp_http_refuses_json_and_other_encodings_with_415() {
+    let body = build_logs_request().encode_to_vec();
+    // (Content-Type, Content-Encoding, text the answer names)
+    let cases = [
+        ("application/json", None, "application/x-protobuf"),
+        ("application/x-protobuf", Some("zstd"), "gzip"),
+        ("application/x-protobuf", Some("snappy"), "gzip"),
+        ("application/x-protobuf", Some("deflate"), "gzip"),
+    ];
+    for (content_type, encoding, names) in cases {
+        let otlp = start_otlp_handler(test_config()).await;
+        let mut request = reqwest::Client::new()
+            .post(format!("http://{}/v1/logs", otlp.http))
+            .header("content-type", content_type);
+        if let Some(encoding) = encoding {
+            request = request.header("content-encoding", encoding);
+        }
+
+        let resp = request
+            .body(body.clone())
+            .send()
+            .await
+            .expect("Failed to send request");
+
+        assert_eq!(resp.status(), 415, "{content_type} {encoding:?}");
+        let text = resp.text().await.unwrap();
+        assert!(text.contains(names), "{content_type} {encoding:?}: {text}");
+        assert_eq!(otlp.metrics.get_unsupported_encoding_total(), 1);
+        assert_eq!(otlp.metrics.get_requests_success(), 0);
+        otlp.shutdown.cancel();
+    }
+}
+
+/// A gRPC export compressed with an encoding the server does not read is
+/// answered `UNIMPLEMENTED`, with `grpc-accept-encoding` naming gzip, and counted.
+#[tokio::test]
+async fn otlp_grpc_refuses_an_unsupported_encoding_and_counts_it() {
     let otlp = start_otlp_handler(test_config()).await;
+    let payload = build_logs_request().encode_to_vec();
+    let mut frame = vec![1_u8];
+    frame.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_be_bytes());
+    frame.extend_from_slice(&payload);
 
-    let client = reqwest::Client::new();
-
-    let resp = client
-        .post(format!("http://{}/v1/logs", otlp.http))
-        .header("content-type", "application/json")
-        .body(r#"{"resourceLogs":[]}"#)
+    let resp = reqwest::Client::builder()
+        .http2_prior_knowledge()
+        .build()
+        .unwrap()
+        .post(format!(
+            "http://{}/opentelemetry.proto.collector.logs.v1.LogsService/Export",
+            otlp.grpc
+        ))
+        .header("content-type", "application/grpc")
+        .header("te", "trailers")
+        .header("grpc-encoding", "zstd")
+        .body(frame)
         .send()
         .await
-        .expect("Failed to send request");
-
-    assert!(
-        resp.status().is_client_error() || resp.status().is_server_error(),
-        "Expected error for unsupported JSON content-type, got {}",
-        resp.status()
-    );
-
+        .expect("Failed to send gRPC request");
+    let status = resp
+        .headers()
+        .get("grpc-status")
+        .map(|v| v.to_str().unwrap().to_string());
+    let accepts = resp
+        .headers()
+        .get("grpc-accept-encoding")
+        .map(|v| v.to_str().unwrap().to_string());
     otlp.shutdown.cancel();
+
+    assert_eq!(status.as_deref(), Some("12"), "UNIMPLEMENTED");
+    assert!(accepts.is_some_and(|a| a.contains("gzip")));
+    assert_eq!(otlp.metrics.get_unsupported_encoding_total(), 1);
 }
 
 /// Test bytes received tracking across multiple requests.

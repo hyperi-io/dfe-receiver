@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -52,6 +52,7 @@ use crate::server::auth::{
     AuthState, BearerTokenProvider, TokenAuth, principal_or_listener, token_auth_middleware,
 };
 use crate::server::client_ip::{ClientIpKey, TrustedProxies, attribute_client};
+use crate::server::content_encoding;
 use crate::server::frame_clock::Clocked;
 use crate::server::ip_filter::IpFilter;
 use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
@@ -257,6 +258,8 @@ pub struct HttpState {
     pub ip_filter: IpFilter,
     /// When `/ingest` answers: once every destination confirmed, or at enqueue.
     pub acks: Acks,
+    /// Bound on a request body once its `Content-Encoding` is undone.
+    pub max_body_size: usize,
 }
 
 /// Run the HTTP server with optional TLS.
@@ -304,6 +307,7 @@ async fn serve(
             config.server.acknowledgements,
             Some(request_timeout),
         ),
+        max_body_size: config.server.max_body_size,
     };
 
     // Build TLS: use TlsCertProvider with hot-reload if secrets configured,
@@ -1004,6 +1008,7 @@ pub(crate) async fn run_tls_server(
 async fn ingest_handler(
     State(state): State<HttpState>,
     principal: Option<Extension<Principal>>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> std::result::Result<impl axum::response::IntoResponse, Error> {
     let ingest = Ingest::sent(principal_or_listener(
@@ -1035,6 +1040,19 @@ async fn ingest_handler(
 
     // Note: Auth is validated in middleware layer (token_auth_middleware)
     // No additional validation here - middleware handles all auth modes
+
+    // gzip is undone, any other encoding is refused: compressed bytes would
+    // otherwise be stored as the event.
+    let body = match content_encoding::decode(&headers, &body, state.max_body_size) {
+        Ok(std::borrow::Cow::Borrowed(_)) => body,
+        Ok(std::borrow::Cow::Owned(decoded)) => Bytes::from(decoded),
+        Err(e) => {
+            e.count(&state.metrics, TRANSPORT);
+            state.metrics.inc_requests_error("http");
+            let answer = axum::Json(serde_json::json!({ "error": e.to_string() }));
+            return Ok((e.status(), answer).into_response());
+        }
+    };
 
     // Process through pipeline (timed)
     let start = std::time::Instant::now();
@@ -1241,6 +1259,7 @@ mod tests {
             metrics: Arc::new(Metrics::default()),
             auth: AuthState::new(config.server.auth.clone()),
             ip_filter: IpFilter::from_config(&config.server.ip_filter),
+            max_body_size: config.server.max_body_size,
         };
         let app = Router::new()
             .route("/ingest", post(ingest_handler))

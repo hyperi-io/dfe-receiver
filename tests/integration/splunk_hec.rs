@@ -369,3 +369,126 @@ async fn test_hec_versioned_endpoint() {
 
     shutdown.cancel();
 }
+
+// =============================================================================
+// Content-Encoding and the bare route
+// =============================================================================
+
+fn gzip(data: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(data).unwrap();
+    encoder.finish().unwrap()
+}
+
+/// A receiver whose loader is an in-process destination, so a test sees what
+/// was stored.
+async fn start_with_destination(
+    max_body_size: Option<usize>,
+) -> (
+    CancellationToken,
+    Arc<Metrics>,
+    String,
+    scalo::transport::grpc::GrpcTransport,
+) {
+    let (endpoint, destination) = crate::common::grpc_destination().await;
+    let mut config = test_config();
+    config.loader.transport = "grpc".to_string();
+    config.loader.grpc_endpoint = Some(endpoint);
+    config.routing.dlq.enabled = false;
+    if let Some(size) = max_body_size {
+        config.splunk_hec.max_body_size = size;
+    }
+    let (shutdown, metrics, url) = start_hec_handler(config).await;
+    (shutdown, metrics, url, destination)
+}
+
+/// What a sender's body and path get from the listener, and how many records
+/// land: gzip is undone on `/event`, the bare path and `/raw` (the OTel
+/// Collector's splunkhec exporter gzips by default), and any other encoding is
+/// refused 415 with nothing stored.
+#[tokio::test]
+async fn hec_reads_gzip_and_refuses_other_encodings() {
+    // (path, Content-Encoding, body, status, records stored)
+    let events = br#"{"event":"one"}{"event":"two"}"#;
+    let lines = b"line one\nline two\nline three\n";
+    let cases = vec![
+        ("event", Some("gzip"), gzip(events), 200, 2),
+        ("event", None, events.to_vec(), 200, 2),
+        ("", None, events.to_vec(), 200, 2),
+        ("", Some("gzip"), gzip(events), 200, 2),
+        ("raw", Some("gzip"), gzip(lines), 200, 3),
+        ("event", Some("zstd"), gzip(events), 415, 0),
+        ("raw", Some("deflate"), gzip(lines), 415, 0),
+        ("event", Some("gzip"), b"not gzip".to_vec(), 400, 0),
+        ("raw", Some("gzip"), b"not gzip".to_vec(), 400, 0),
+    ];
+    for (path, encoding, body, status, stored) in cases {
+        let (shutdown, metrics, url, destination) = start_with_destination(None).await;
+        let mut request = reqwest::Client::new().post(format!(
+            "{url}/services/collector{}",
+            if path.is_empty() {
+                String::new()
+            } else {
+                format!("/{path}")
+            }
+        ));
+        if let Some(encoding) = encoding {
+            request = request.header("Content-Encoding", encoding);
+        }
+        let resp = request.body(body).send().await.expect("request failed");
+        let got = resp.status().as_u16();
+        let text = resp.text().await.unwrap();
+        assert_eq!(got, status, "{path} {encoding:?}: {text}");
+
+        let wait = if stored == 0 {
+            std::time::Duration::from_millis(500)
+        } else {
+            std::time::Duration::from_secs(10)
+        };
+        let records = crate::common::stored_within(&destination, stored, wait).await;
+        assert_eq!(records.len(), stored, "{path} {encoding:?}: {records:?}");
+        if path == "raw" && stored > 0 {
+            let messages: Vec<String> = records
+                .iter()
+                .map(|r| {
+                    let v: serde_json::Value = serde_json::from_slice(r).unwrap();
+                    v["message"].as_str().unwrap().to_string()
+                })
+                .collect();
+            assert_eq!(messages, ["line one", "line two", "line three"]);
+        }
+        assert_eq!(
+            metrics.get_unsupported_encoding_total(),
+            u64::from(status == 415),
+            "{path} {encoding:?}"
+        );
+        shutdown.cancel();
+    }
+}
+
+/// A gzip body that inflates past `max_body_size` is refused 413 and stores
+/// nothing: the cap applies to the decompressed bytes, not the wire bytes.
+#[tokio::test]
+async fn hec_refuses_a_gzip_bomb() {
+    let (shutdown, _metrics, url, destination) = start_with_destination(Some(2048)).await;
+    let bomb = gzip(&vec![b'a'; 1 << 20]);
+    assert!(
+        bomb.len() < 2048,
+        "test setup: the bomb must fit the wire cap"
+    );
+
+    let resp = reqwest::Client::new()
+        .post(format!("{url}/services/collector/raw"))
+        .header("Content-Encoding", "gzip")
+        .body(bomb)
+        .send()
+        .await
+        .expect("request failed");
+
+    assert_eq!(resp.status(), 413);
+    let stored =
+        crate::common::stored_within(&destination, 0, std::time::Duration::from_millis(500)).await;
+    assert!(stored.is_empty(), "stored {} records", stored.len());
+    shutdown.cancel();
+}
