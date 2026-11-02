@@ -3,6 +3,14 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.15.62](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.61...v1.15.62) (2026-11-02)
+
+### Bug Fixes
+
+* **deps:** update pulldown-cmark to 0.13.6 ([5b80dca](https://github.com/hyperi-io/dfe-receiver/commit/5b80dca96bf246e741965e1c8883c802116c6b19))
+* **image:** restore curl for wait-for-engine ([e73d04f](https://github.com/hyperi-io/dfe-receiver/commit/e73d04f65fdb206aadb8cde5deeee5b11bda5fcb))
+* **tests:** vary the starting port offset by pid ([0e5047d](https://github.com/hyperi-io/dfe-receiver/commit/0e5047d8280b0477d2e831f10023787b93e6bb01))
+
 ## [1.15.61](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.60...v1.15.61) (2026-11-02)
 
 ### Bug Fixes
