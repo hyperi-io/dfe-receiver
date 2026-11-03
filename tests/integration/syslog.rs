@@ -35,6 +35,8 @@ use dfe_receiver::server::syslog::SyslogHandler;
 use dfe_receiver::server::traits::ProtocolHandler;
 use tokio_util::sync::CancellationToken;
 
+use crate::common::receive_records;
+
 /// Check if logger binary is available and supports --server flag.
 fn has_logger() -> bool {
     Command::new("logger")
@@ -690,29 +692,6 @@ async fn a_message_that_is_not_utf8_lands_parsed_over_udp_and_tcp() {
     }
     assert_eq!(syslog.metrics.get_lossy_decodes_total(), 4);
     assert_eq!(syslog.metrics.get_requests_error(), 0);
-}
-
-/// Every record the loader receives within `within`, until `count` have arrived.
-async fn receive_records(
-    loader: &scalo::transport::grpc::GrpcTransport,
-    count: usize,
-    within: Duration,
-) -> Vec<serde_json::Value> {
-    use scalo::transport::TransportReceiver;
-
-    let mut records = Vec::new();
-    let deadline = tokio::time::Instant::now() + within;
-    while records.len() < count && tokio::time::Instant::now() < deadline {
-        if let Ok(batch) = loader.recv(count).await {
-            records.extend(
-                batch
-                    .records
-                    .into_iter()
-                    .map(|r| serde_json::from_slice::<serde_json::Value>(&r.payload).unwrap()),
-            );
-        }
-    }
-    records
 }
 
 /// Over TCP an oversize message costs itself and nothing after it, a line

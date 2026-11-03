@@ -38,6 +38,8 @@ mod fluent;
 mod fluent_bit;
 #[path = "integration/fluentd.rs"]
 mod fluentd;
+#[path = "integration/gelf.rs"]
+mod gelf;
 #[path = "integration/grpc_outage.rs"]
 mod grpc_outage;
 #[path = "integration/grpc_sink.rs"]
