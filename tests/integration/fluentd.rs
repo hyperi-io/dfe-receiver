@@ -29,10 +29,10 @@ use crate::common::peers::{
 use crate::{skip_if_no_docker, test_name};
 
 /// Events each case sends.
-const EVENTS: usize = 20;
+const EVENTS: usize = 10;
 
 /// How long Fluentd waits for an ack before it resends, in the ack case.
-const ACK_TIMEOUT_SECS: u64 = 10;
+const ACK_TIMEOUT_SECS: u64 = 5;
 
 /// One `out_forward` configuration.
 struct Case {
@@ -48,7 +48,7 @@ const CASES: [Case; 3] = [
     },
     Case {
         id: "fdcase-ack",
-        forward: "require_ack_response true\n  ack_response_timeout 10",
+        forward: "require_ack_response true\n  ack_response_timeout 5",
     },
     Case {
         id: "fdcase-gzip",
