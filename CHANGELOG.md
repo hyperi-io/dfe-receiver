@@ -3,6 +3,14 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.15.63](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.62...v1.15.63) (2026-11-03)
+
+### Bug Fixes
+
+* **receiver:** decode syslog, strip originals, fix Fluent Forward chunks ([847324d](https://github.com/hyperi-io/dfe-receiver/commit/847324d53af6a3cdcd5a37a730b11c5e23922652))
+* **receiver:** stop acknowledging records the receiver never stored ([3270b95](https://github.com/hyperi-io/dfe-receiver/commit/3270b95f180c72eb5ee01e084f5f50d5615729e8))
+* **syslog:** skip oversize frames, batch reads, close idle peers ([#241](https://github.com/hyperi-io/dfe-receiver/issues/241)) ([9c8098b](https://github.com/hyperi-io/dfe-receiver/commit/9c8098bca0c6e594d134e5dd82689a6bcae0ddc6))
+
 ## [1.15.62](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.61...v1.15.62) (2026-11-02)
 
 ### Bug Fixes
