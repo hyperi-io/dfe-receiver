@@ -32,6 +32,17 @@ use crate::{skip_if_no_docker, test_name};
 /// The event time Fluent Bit stamps on the forward cases (2023-11-14T22:13:20Z).
 const FIXED_TIME: u64 = 1_700_000_000;
 
+/// The plaintext receiver's GELF message limit, under the oversize case's records.
+const GELF_LIMIT: usize = 4_096;
+
+/// A `dummy` input emitting `samples` records each over [`GELF_LIMIT`].
+fn oversize_input(id: &str, samples: usize) -> String {
+    let filler = "x".repeat(GELF_LIMIT * 2);
+    format!(
+        "    - name: dummy\n      tag: {id}\n      dummy: '{{\"message\":\"{id} {filler}\",\"case\":\"{id}\",\"source_host\":\"fbhost\"}}'\n      samples: {samples}\n      rate: {samples}\n"
+    )
+}
+
 /// How a Fluent Bit output reaches the receiver.
 #[derive(Clone, Copy)]
 enum Tls {
@@ -170,6 +181,7 @@ async fn fluent_bit_ships_to_every_listener_over_tls() {
         plain_cfg.gelf.enabled = true;
         plain_cfg.gelf.bind_address = plain_gelf.to_string();
         plain_cfg.gelf.accept_unauthenticated = true;
+        plain_cfg.gelf.max_message_size = GELF_LIMIT;
         let ready = vec![plain_http, plain_forward, plain_gelf];
         (plain_cfg, ready, (plain_forward, plain_gelf))
     })
@@ -335,6 +347,17 @@ async fn fluent_bit_ships_to_every_listener_over_tls() {
             dummy_input("fbcase-gelf-plain", 5, false),
             output("gelf", "fbcase-gelf-plain", plain_gelf, Tls::Off, gelf_extra),
         ),
+        // One output carries both inputs, so oversize records share its connections.
+        case(
+            "fbcase-oversize-gelf-small",
+            Some(5),
+            format!(
+                "{}{}",
+                dummy_input("fbcase-oversize-gelf-small", 5, false),
+                oversize_input("fbcase-oversize-gelf-big", 3)
+            ),
+            output("gelf", "fbcase-oversize-gelf-*", plain_gelf, Tls::Off, gelf_extra),
+        ),
     ];
 
     let mut inputs = String::new();
@@ -428,6 +451,18 @@ async fn fluent_bit_ships_to_every_listener_over_tls() {
             || record.clone(),
         );
     }
+
+    results.check(
+        "fbcase-oversize-gelf-big: records over the limit are dropped",
+        sink.count("fbcase-oversize-gelf-big") == 0,
+        || sink.find("fbcase-oversize-gelf-big").unwrap_or_default(),
+    );
+    let plain_log = plain_receiver.log_text();
+    results.check(
+        "fbcase-oversize-gelf-big: an oversize record costs no GELF connection",
+        !plain_log.contains("GELF TCP read error") && !plain_log.contains("GELF message too large"),
+        || plain_log.clone(),
+    );
 
     results.check(
         "the TLS receiver is still running",

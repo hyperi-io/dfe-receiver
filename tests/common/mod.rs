@@ -147,6 +147,33 @@ pub async fn grpc_destination() -> (String, scalo::transport::grpc::GrpcTranspor
     (format!("http://{addr}"), transport)
 }
 
+/// Every record `loader` receives within `within`, until `count` have arrived.
+///
+/// # Panics
+///
+/// When a received record is not JSON.
+pub async fn receive_records(
+    loader: &scalo::transport::grpc::GrpcTransport,
+    count: usize,
+    within: std::time::Duration,
+) -> Vec<serde_json::Value> {
+    use scalo::transport::TransportReceiver;
+
+    let mut records = Vec::new();
+    let deadline = tokio::time::Instant::now() + within;
+    while records.len() < count && tokio::time::Instant::now() < deadline {
+        if let Ok(batch) = loader.recv(count).await {
+            for record in batch.records {
+                match serde_json::from_slice(&record.payload) {
+                    Ok(value) => records.push(value),
+                    Err(e) => panic!("the loader received a record that is not JSON: {e}"),
+                }
+            }
+        }
+    }
+    records
+}
+
 /// A loopback TCP port held bound but never listening.
 ///
 /// A connection to it is refused, and no other socket can bind it while this

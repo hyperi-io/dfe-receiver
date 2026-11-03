@@ -247,7 +247,10 @@ mod tests {
     use tokio_stream::StreamExt;
     use tokio_util::codec::FramedRead;
 
+    use bytes::Bytes;
+
     use super::*;
+    use crate::server::gelf::GelfFrameDecoder;
     use crate::server::syslog::framing::SyslogFrameDecoder;
 
     const LIMIT: Duration = Duration::from_millis(500);
@@ -265,12 +268,15 @@ mod tests {
         timed_out: bool,
     }
 
-    /// Run `steps` against a syslog-framed listener that holds each frame for
-    /// `hold` before it reads on, until a frame times out or the client closes.
-    async fn run(steps: Vec<Step>, hold: Duration) -> Read {
+    /// Run `steps` against a listener framed by `codec` that holds each frame
+    /// for `hold` before it reads on, until a frame times out or the client closes.
+    async fn run<D>(codec: D, steps: Vec<Step>, hold: Duration) -> Read
+    where
+        D: Framing<Item = Bytes, Error = io::Error>,
+    {
         let (mut client, server) = tokio::io::duplex(1024);
         let socket = Clocked::new(server, LIMIT, Arc::new(Metrics::default()), "test");
-        let decoder = socket.decoder(SyslogFrameDecoder::default());
+        let decoder = socket.decoder(codec);
         let mut framed = FramedRead::new(socket, decoder);
         let mut read = Read {
             frames: Vec::new(),
@@ -378,7 +384,44 @@ mod tests {
         ];
         let mut failed = Vec::new();
         for (name, steps, hold, want) in cases {
-            let got = run(steps, hold).await;
+            let got = run(SyslogFrameDecoder::default(), steps, hold).await;
+            if got != want {
+                failed.push(format!("{name}: got {got:?}, want {want:?}"));
+            }
+        }
+        assert!(failed.is_empty(), "{}", failed.join("\n"));
+    }
+
+    /// A GELF message over the limit trickled in while it is discarded times
+    /// out. One whose delimiter arrives in time costs itself and nothing after it.
+    #[tokio::test]
+    async fn a_gelf_message_being_discarded_runs_the_clock() {
+        let oversize: &'static [u8] = Box::leak(vec![b'x'; 2_000].into_boxed_slice());
+        let trickle = std::iter::once(Step::Send(oversize))
+            .chain((0..12).flat_map(|_| [Step::Send(b"x"), Step::Wait(LIMIT / 4)]))
+            .collect();
+        let whole = vec![Step::Send(oversize), Step::Send(b"\0ok\0")];
+        let cases: [(&str, Vec<Step>, Read); 2] = [
+            (
+                "trickled in while it is discarded",
+                trickle,
+                Read {
+                    frames: Vec::new(),
+                    timed_out: true,
+                },
+            ),
+            (
+                "its delimiter arrives in time",
+                whole,
+                Read {
+                    frames: vec!["ok".to_string()],
+                    timed_out: false,
+                },
+            ),
+        ];
+        let mut failed = Vec::new();
+        for (name, steps, want) in cases {
+            let got = run(GelfFrameDecoder::new(1_024), steps, Duration::ZERO).await;
             if got != want {
                 failed.push(format!("{name}: got {got:?}, want {want:?}"));
             }
