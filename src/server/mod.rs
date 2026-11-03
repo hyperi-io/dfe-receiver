@@ -24,6 +24,7 @@ pub mod grpc;
 mod hold;
 pub mod http;
 pub mod ip_filter;
+pub mod kernel_drops;
 pub mod lumberjack;
 mod metric_record;
 pub mod netflow;

@@ -20,9 +20,11 @@
 
 pub mod raw_capture;
 mod shared;
+pub mod utc_offset;
 
 pub use raw_capture::{OversizePolicy, RawCapture, RawCaptureConfig};
 pub use shared::SharedConfig;
+pub use utc_offset::UtcOffset;
 
 use std::collections::HashMap;
 
@@ -1684,8 +1686,36 @@ pub struct SyslogConfig {
     /// Bind address for TLS/TCP listener (standard port 6514, RFC 5425).
     pub tls_bind_address: String,
 
-    /// Maximum syslog message size in bytes.
+    /// Maximum syslog message size in bytes. A larger message is counted as
+    /// dropped and skipped, and the connection carries on.
     pub max_message_size: usize,
+
+    /// Largest octet count read as one on TCP and TLS (RFC 6587), in bytes.
+    /// A message over `max_message_size` with a count up to this is skipped
+    /// by its count. A count above it is not trusted, and that frame is read
+    /// as an LF-terminated line. Never below `max_message_size`.
+    pub max_frame_size: usize,
+
+    /// The UTC offset for an RFC 3164 stamp that carries none: `UTC`, or an
+    /// offset like `+10:00`. RFC 5424 and RFC 3339 stamps keep their own.
+    pub timezone: UtcOffset,
+
+    /// UDP socket receive buffer (`SO_RCVBUF`), in bytes. The kernel may grant
+    /// less, capped by `net.core.rmem_max`, and the listener logs what it got.
+    /// Datagrams the full buffer cannot take count as dropped, reason `kernel`.
+    pub udp_recv_buffer_size: usize,
+
+    /// Most datagrams read in one go and handed to the pipeline as one batch.
+    pub udp_batch_size: usize,
+
+    /// Seconds a TCP or TLS connection may be quiet before keepalive probes
+    /// start, one probe per this interval. 0 turns keepalive off.
+    pub tcp_keepalive_secs: u64,
+
+    /// How long a TCP or TLS connection may go with no frame before it is
+    /// closed, in milliseconds. A frame part way in is the frame timeout's
+    /// (`server.connections.frame_timeout_ms`). 0 keeps idle connections.
+    pub idle_timeout_ms: u64,
 
     /// TLS configuration (for secure syslog on port 6514).
     pub tls: TlsConfig,
@@ -1712,7 +1742,13 @@ impl Default for SyslogConfig {
             udp_bind_address: "0.0.0.0:514".to_string(),
             tcp_bind_address: "0.0.0.0:514".to_string(),
             tls_bind_address: "0.0.0.0:6514".to_string(),
-            max_message_size: 64 * 1024,
+            max_message_size: crate::server::syslog::framing::DEFAULT_MAX_LENGTH,
+            max_frame_size: crate::server::syslog::framing::DEFAULT_MAX_FRAME,
+            timezone: UtcOffset::default(),
+            udp_recv_buffer_size: 8 * 1024 * 1024,
+            udp_batch_size: 64,
+            tcp_keepalive_secs: 60,
+            idle_timeout_ms: 600_000,
             raw_capture: RawCaptureConfig::default(),
             tls: TlsConfig::default(),
             auth: AuthConfig {

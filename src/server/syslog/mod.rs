@@ -9,40 +9,34 @@
 //! Syslog protocol handler.
 //!
 //! Accepts syslog messages over UDP, TCP, and TLS/TCP.
-//! Auto-detects RFC 5424 vs RFC 3164 format per message.
+//! Auto-detects RFC 5424 vs RFC 3164 format per message. The listeners live in
+//! `udp` and `tcp`, the parse in [`convert`] and the TCP framing in [`framing`].
 //!
 //! Standard ports: 514 (UDP/TCP), 6514 (TLS/TCP per RFC 5425)
 
 pub mod convert;
 pub mod framing;
+mod tcp;
+mod udp;
 
 use std::borrow::Cow;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::time::Duration;
 
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::{TcpListener, UdpSocket};
-use tokio::time::timeout;
-use tokio_util::codec::FramedRead;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
-
-/// Debounced timestamp for syslog UDP recv error warnings (1 per 5s).
-static SYSLOG_UDP_WARN: AtomicU64 = AtomicU64::new(0);
+use tracing::info;
 
 use crate::config::{RawCapture, SyslogConfig};
 use crate::error::{Error, Result};
-use crate::metrics::{DropReason, Metrics};
-use crate::pipeline::{Acks, PipelineState};
-use crate::server::frame_clock::Clocked;
-use crate::server::hold::hold_until_settled;
-use crate::server::http::{Accept, ConnectionLimits};
+use crate::metrics::Metrics;
+use crate::pipeline::PipelineState;
 use crate::server::ip_filter::IpFilter;
 use crate::server::traits::{BoundAddr, Listeners, ProtocolHandler};
 use crate::tenancy::{Ingest, Principal};
-use convert::syslog_to_json;
-use framing::SyslogFrameDecoder;
+use convert::Converter;
+use tcp::{Connection, TcpListenerTask};
+use udp::UdpListener;
 
 /// The transport label every syslog listener counts under.
 const TRANSPORT: &str = "syslog";
@@ -62,259 +56,6 @@ fn decode_lossy<'a>(bytes: &'a [u8], metrics: &Metrics) -> Cow<'a, str> {
         metrics.inc_lossy_decode(TRANSPORT);
     }
     text
-}
-
-/// Maximum UDP datagram buffer size.
-const UDP_BUF_SIZE: usize = 65536;
-
-// ---------------------------------------------------------------------------
-// UDP handler
-// ---------------------------------------------------------------------------
-
-/// Run the UDP syslog listener.
-async fn run_udp(
-    bind_addr: SocketAddr,
-    pipeline: Arc<PipelineState>,
-    metrics: Arc<Metrics>,
-    shutdown: CancellationToken,
-    raw_capture: RawCapture,
-    ip_filter: IpFilter,
-    bound: BoundAddr,
-) -> Result<()> {
-    let socket = UdpSocket::bind(bind_addr)
-        .await
-        .map_err(|e| Error::Server(format!("failed to bind syslog UDP socket: {e}")))?;
-    let _serving = bound.publish(&socket.local_addr());
-
-    info!(addr = %bind_addr, protocol = "udp", "Syslog UDP listener started");
-
-    let mut buf = vec![0u8; UDP_BUF_SIZE];
-
-    loop {
-        tokio::select! {
-            _ = shutdown.cancelled() => {
-                info!("Syslog UDP listener stopping");
-                break;
-            }
-            result = socket.recv_from(&mut buf) => {
-                let (len, peer_addr) = match result {
-                    Ok(r) => r,
-                    Err(e) => {
-                        if scalo::logger::log_debounced(&SYSLOG_UDP_WARN, 5000) {
-                            warn!(error = %e, "Syslog UDP recv error (throttled to 1/5s)");
-                        }
-                        continue;
-                    }
-                };
-
-                // UDP has no connection to reject, so the filter runs per
-                // datagram -- before the payload is read.
-                if !ip_filter.admits(peer_addr, TRANSPORT, &metrics) {
-                    continue;
-                }
-
-                metrics.inc_requests_total("syslog");
-                metrics.add_bytes_received("syslog", len as u64);
-
-                let raw = decode_lossy(&buf[..len], &metrics);
-
-                match syslog_to_json(&raw, raw_capture) {
-                    Ok(payload) => {
-                        if let Err(e) = pipeline.process(payload, &listener_ingest()).await {
-                            debug!(peer = %peer_addr, error = %e, "Failed to process syslog UDP event");
-                            metrics.inc_requests_error("syslog");
-                            // A datagram has no answer to carry a retry, so the record is gone.
-                            let reason = if e.is_retryable() {
-                                DropReason::Unavailable
-                            } else {
-                                DropReason::Rejected
-                            };
-                            metrics.add_records_dropped("syslog", reason, 1);
-                        } else {
-                            metrics.inc_requests_success("syslog");
-                        }
-                    }
-                    Err(e) => {
-                        debug!(peer = %peer_addr, error = %e, "Syslog UDP parse error");
-                        metrics.inc_parse_failure("syslog");
-                        metrics.inc_requests_error("syslog");
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// TCP per-connection handler
-// ---------------------------------------------------------------------------
-
-/// Handle a single TCP syslog connection using the framing codec.
-///
-/// A frame the pipeline cannot take is held, and the socket is not read,
-/// until it can: RFC 6587 has no acknowledgement to ask the sender to retry.
-async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
-    stream: Clocked<S>,
-    pipeline: Arc<PipelineState>,
-    metrics: Arc<Metrics>,
-    shutdown: CancellationToken,
-    peer_addr: SocketAddr,
-    max_message_size: usize,
-    raw_capture: RawCapture,
-) {
-    use tokio_stream::StreamExt;
-
-    let decoder = stream.decoder(SyslogFrameDecoder::new(max_message_size));
-    let mut framed = FramedRead::new(stream, decoder);
-
-    loop {
-        tokio::select! {
-            _ = shutdown.cancelled() => {
-                debug!(peer = %peer_addr, "Syslog TCP connection closing (shutdown)");
-                break;
-            }
-            result = StreamExt::next(&mut framed) => {
-                match result {
-                    Some(Ok(frame)) => {
-                        metrics.inc_requests_total("syslog");
-                        metrics.add_bytes_received("syslog", frame.len() as u64);
-
-                        let raw = decode_lossy(&frame, &metrics);
-                        match syslog_to_json(&raw, raw_capture) {
-                            Ok(payload) => {
-                                let held = [payload];
-                                if !hold_until_settled(&pipeline, &held, &metrics, "syslog", &shutdown, &Acks::at_enqueue(), &listener_ingest()).await {
-                                    debug!(peer = %peer_addr, "Syslog TCP connection closing (shutdown during a hold)");
-                                    break;
-                                }
-                            }
-                            Err(e) => {
-                                debug!(peer = %peer_addr, error = %e, "Syslog TCP parse error");
-                                metrics.inc_parse_failure("syslog");
-                                metrics.inc_requests_error("syslog");
-                            }
-                        }
-                    }
-                    Some(Err(e)) => {
-                        warn!(peer = %peer_addr, error = %e, "Syslog TCP framing error");
-                        break;
-                    }
-                    None => {
-                        debug!(peer = %peer_addr, "Syslog TCP client disconnected");
-                        break;
-                    }
-                }
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// TCP listener
-// ---------------------------------------------------------------------------
-
-/// Run the TCP syslog listener (plain or TLS).
-#[allow(clippy::too_many_arguments)]
-async fn run_tcp(
-    bind_addr: SocketAddr,
-    pipeline: Arc<PipelineState>,
-    metrics: Arc<Metrics>,
-    shutdown: CancellationToken,
-    tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
-    max_message_size: usize,
-    raw_capture: RawCapture,
-    label: &str,
-    ip_filter: IpFilter,
-    bound: BoundAddr,
-) -> Result<()> {
-    let listener = TcpListener::bind(bind_addr)
-        .await
-        .map_err(|e| Error::Server(format!("failed to bind syslog {label} listener: {e}")))?;
-    let _serving = bound.publish(&listener.local_addr());
-
-    let tls_enabled = tls_acceptor.is_some();
-    info!(addr = %bind_addr, tls = tls_enabled, "Syslog {label} listener started");
-
-    let accept = Accept {
-        ip_filter,
-        metrics: metrics.clone(),
-        transport: TRANSPORT,
-        limits: ConnectionLimits::new(&pipeline.config().server.connections),
-    };
-
-    loop {
-        tokio::select! {
-            _ = shutdown.cancelled() => {
-                info!("Syslog {label} listener stopping");
-                break;
-            }
-            result = listener.accept() => {
-                let (stream, peer_addr) = match result {
-                    Ok(conn) => conn,
-                    Err(e) => {
-                        error!(error = %e, "Failed to accept syslog {label} connection");
-                        continue;
-                    }
-                };
-
-                // Reject before the TLS handshake and before any framing.
-                let Some(open) = accept.admit(peer_addr) else {
-                    drop(stream);
-                    continue;
-                };
-
-                let pipeline = pipeline.clone();
-                let metrics = metrics.clone();
-                let conn_shutdown = shutdown.clone();
-                let accept = accept.clone();
-
-                if let Some(ref acceptor) = tls_acceptor {
-                    let acceptor = acceptor.clone();
-                    tokio::spawn(async move {
-                        let _open = open;
-                        if !accept.first_byte(&stream).await {
-                            return;
-                        }
-                        let tls_result = timeout(accept.limits.tls_handshake, acceptor.accept(stream)).await;
-                        let tls_stream = match tls_result {
-                            Ok(Ok(s)) => s,
-                            Ok(Err(e)) => {
-                                metrics.inc_tls_handshake_failure();
-                                debug!(peer = %peer_addr, error = %e, "Syslog TLS handshake failed");
-                                return;
-                            }
-                            Err(_) => {
-                                metrics.inc_tls_handshake_failure();
-                                warn!(peer = %peer_addr, "Syslog TLS handshake timeout");
-                                return;
-                            }
-                        };
-
-                        debug!(peer = %peer_addr, "Syslog TLS connection established");
-                        handle_tcp_connection(
-                            accept.clock(tls_stream), pipeline, metrics, conn_shutdown, peer_addr,
-                            max_message_size, raw_capture,
-                        ).await;
-                    });
-                } else {
-                    tokio::spawn(async move {
-                        let _open = open;
-                        if !accept.first_byte(&stream).await {
-                            return;
-                        }
-                        handle_tcp_connection(
-                            accept.clock(stream), pipeline, metrics, conn_shutdown, peer_addr,
-                            max_message_size, raw_capture,
-                        ).await;
-                    });
-                }
-            }
-        }
-    }
-
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -419,58 +160,50 @@ impl ProtocolHandler for SyslogHandler {
             None
         };
 
-        let max_msg = self.config.max_message_size;
-        let raw_capture = self.raw_capture;
+        let cfg = &self.config;
+        let converter = Converter::new(cfg.timezone.fixed(), self.raw_capture);
+        let seconds = |s: u64| (s > 0).then(|| Duration::from_secs(s));
+        let millis = |ms: u64| (ms > 0).then(|| Duration::from_millis(ms));
+        let connection = Connection {
+            converter,
+            max_message_size: cfg.max_message_size,
+            max_frame_size: cfg.max_frame_size,
+            keepalive: seconds(cfg.tcp_keepalive_secs),
+            idle: millis(cfg.idle_timeout_ms),
+        };
 
         // A syslog line carries no credential, and UDP and plain TCP have no
         // handshake either, so the IP filter is the only admission control on
         // two of these three listeners.
         let ip_filter = IpFilter::from_config(&self.pipeline.config().server.ip_filter);
+        let tcp_listener = |bind_addr, tls, label, bound| TcpListenerTask {
+            bind_addr,
+            pipeline: self.pipeline.clone(),
+            metrics: self.metrics.clone(),
+            tls,
+            connection,
+            label,
+            ip_filter: ip_filter.clone(),
+            bound,
+        };
 
         let mut listeners = Listeners::default();
-        listeners.spawn(
-            "syslog UDP",
-            run_udp(
-                udp_addr,
-                self.pipeline.clone(),
-                self.metrics.clone(),
-                shutdown.clone(),
-                raw_capture,
-                ip_filter.clone(),
-                self.udp_bound.clone(),
-            ),
-        );
-        listeners.spawn(
-            "syslog TCP",
-            run_tcp(
-                tcp_addr,
-                self.pipeline.clone(),
-                self.metrics.clone(),
-                shutdown.clone(),
-                None,
-                max_msg,
-                raw_capture,
-                "TCP",
-                ip_filter.clone(),
-                self.tcp_bound.clone(),
-            ),
-        );
+        let udp = UdpListener {
+            bind_addr: udp_addr,
+            pipeline: self.pipeline.clone(),
+            metrics: self.metrics.clone(),
+            converter,
+            ip_filter: ip_filter.clone(),
+            bound: self.udp_bound.clone(),
+            recv_buffer_size: cfg.udp_recv_buffer_size,
+            batch_size: cfg.udp_batch_size,
+        };
+        listeners.spawn("syslog UDP", udp.run(shutdown.clone()));
+        let plain = tcp_listener(tcp_addr, None, "TCP", self.tcp_bound.clone());
+        listeners.spawn("syslog TCP", plain.run(shutdown.clone()));
         if let Some((tls_addr, acceptor)) = tls {
-            listeners.spawn(
-                "syslog TLS",
-                run_tcp(
-                    tls_addr,
-                    self.pipeline.clone(),
-                    self.metrics.clone(),
-                    shutdown.clone(),
-                    Some(acceptor),
-                    max_msg,
-                    raw_capture,
-                    "TLS",
-                    ip_filter,
-                    self.tls_bound.clone(),
-                ),
-            );
+            let secure = tcp_listener(tls_addr, Some(acceptor), "TLS", self.tls_bound.clone());
+            listeners.spawn("syslog TLS", secure.run(shutdown.clone()));
         }
 
         listeners.run(&shutdown).await?;
@@ -487,7 +220,7 @@ impl ProtocolHandler for SyslogHandler {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use std::time::Duration;
+    use chrono::Offset;
 
     use super::*;
 
@@ -559,16 +292,20 @@ mod tests {
         let metrics = Arc::new(Metrics::default());
         let bound = BoundAddr::default();
         let shutdown = CancellationToken::new();
-        let listener = tokio::spawn(run_udp(
-            "127.0.0.1:0".parse().unwrap(),
+        let udp = UdpListener {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
             pipeline,
-            Arc::clone(&metrics),
-            shutdown.clone(),
-            RawCapture::OFF,
-            IpFilter::from_config(&config.server.ip_filter),
-            bound.clone(),
-        ));
-        let addr = timeout(Duration::from_secs(5), bound.wait()).await.unwrap();
+            metrics: Arc::clone(&metrics),
+            converter: Converter::new(chrono::Utc.fix(), RawCapture::OFF),
+            ip_filter: IpFilter::from_config(&config.server.ip_filter),
+            bound: bound.clone(),
+            recv_buffer_size: 256 * 1024,
+            batch_size: 64,
+        };
+        let listener = tokio::spawn(udp.run(shutdown.clone()));
+        let addr = tokio::time::timeout(Duration::from_secs(5), bound.wait())
+            .await
+            .unwrap();
 
         let sender = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         sender

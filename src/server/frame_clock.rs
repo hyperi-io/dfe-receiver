@@ -199,7 +199,28 @@ pub(crate) struct ClockedDecoder<D> {
     clock: FrameClock,
 }
 
-impl<D: Decoder> Decoder for ClockedDecoder<D> {
+impl<D> ClockedDecoder<D> {
+    /// The codec inside.
+    pub(crate) fn get_ref(&self) -> &D {
+        &self.inner
+    }
+
+    /// The codec inside, to read what it counted.
+    pub(crate) fn get_mut(&mut self) -> &mut D {
+        &mut self.inner
+    }
+}
+
+/// A codec that may be inside a frame whose bytes it has already consumed,
+/// such as one it is discarding, so an empty buffer does not stop the clock.
+pub(crate) trait Framing: Decoder {
+    /// Inside a frame whose bytes are no longer in the buffer.
+    fn mid_frame(&self) -> bool {
+        false
+    }
+}
+
+impl<D: Framing> Decoder for ClockedDecoder<D> {
     type Item = D::Item;
     type Error = D::Error;
 
@@ -208,7 +229,8 @@ impl<D: Decoder> Decoder for ClockedDecoder<D> {
         if frame.is_some() {
             self.clock.frame_ended();
         } else {
-            self.clock.holding(!src.is_empty());
+            self.clock
+                .holding(!src.is_empty() || self.inner.mid_frame());
         }
         Ok(frame)
     }
@@ -293,7 +315,26 @@ mod tests {
             frames: frames.iter().map(ToString::to_string).collect(),
             timed_out,
         };
-        let cases: [(&str, Vec<Step>, Duration, Read); 5] = [
+        let oversize_trickle = std::iter::once(Step::Send(b"70000 <"))
+            .chain((0..12).flat_map(|_| [Step::Send(b"x"), Step::Wait(LIMIT / 4)]))
+            .collect();
+        let long_line: &'static [u8] = Box::leak(vec![b'b'; 70_000].into_boxed_slice());
+        let long_line_trickle = std::iter::once(Step::Send(long_line))
+            .chain((0..12).flat_map(|_| [Step::Send(b"b"), Step::Wait(LIMIT / 4)]))
+            .collect();
+        let cases: [(&str, Vec<Step>, Duration, Read); 7] = [
+            (
+                "an oversize octet frame trickled in while it is skipped",
+                oversize_trickle,
+                Duration::ZERO,
+                read(&[], true),
+            ),
+            (
+                "an oversize line trickled in while it is discarded",
+                long_line_trickle,
+                Duration::ZERO,
+                read(&[], true),
+            ),
             (
                 "a frame that stops part way",
                 vec![Step::Send(b"a\npar"), Step::Wait(quiet)],

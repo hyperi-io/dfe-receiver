@@ -78,7 +78,9 @@ pub fn strip_original(payload: Bytes) -> Bytes {
         let Some(Value::Object(fields)) = record.get_mut(parent) else {
             continue;
         };
-        if !matches!(fields.get(KEY), Some(Value::String(_))) {
+        // Logstash sends the copy as a string or, from some pipelines, an
+        // array of them. Only an object is a field of the sender's own.
+        if matches!(fields.get(KEY), None | Some(Value::Object(_))) {
             continue;
         }
         fields.remove(KEY);
@@ -174,7 +176,19 @@ mod tests {
                 0,
             ),
             (
-                "an original that is not text belongs to the sender",
+                "an array of copies goes, as Logstash sends it",
+                r#"{"message":"a","event":{"original":["a","a"],"dataset":"x"}}"#,
+                r#"{"message":"a","event":{"dataset":"x"}}"#,
+                1,
+            ),
+            (
+                "a scalar copy goes",
+                r#"{"message":"a","log":{"original":7}}"#,
+                r#"{"message":"a"}"#,
+                1,
+            ),
+            (
+                "an original that is an object belongs to the sender",
                 r#"{"message":"a","event":{"original":{"x":1}}}"#,
                 r#"{"message":"a","event":{"original":{"x":1}}}"#,
                 0,

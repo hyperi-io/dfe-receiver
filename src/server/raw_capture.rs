@@ -8,15 +8,16 @@
 
 //! `_raw` field writer, shared by every capturing transport.
 //!
-//! Two entry points, matching the two shapes the transports already build:
+//! Three entry points, matching the shapes the transports build:
 //!
 //! - [`attach_to_map`] for the handlers that assemble a `serde_json::Map`
-//!   (syslog, the Splunk HEC raw endpoint).
+//!   (the Splunk HEC raw endpoint).
 //! - [`append_to_json_buf`] for the byte-buffer writers (flow), which append
 //!   `,"_raw":"..."` just before the closing brace.
+//! - [`borrow_str`] for a writer that serialises a payload already held as a
+//!   `str` (syslog), with no copy.
 //!
-//! Both go through [`prepare`], so truncation, invalid UTF-8 and the omit
-//! policy behave identically everywhere.
+//! All three apply the same truncation and omit policy.
 //!
 //! Two markers travel with the value, and both exist so a reader can never
 //! mistake a mangled capture for a faithful one:
@@ -108,30 +109,19 @@ pub fn prepare(raw: &[u8], cfg: RawCapture) -> Option<PreparedRaw> {
     })
 }
 
-/// Same as [`prepare`] for a payload that is already a `str`.
-pub fn prepare_str(raw: &str, cfg: RawCapture) -> Option<PreparedRaw> {
+/// The capture of a payload that is already a `str`, borrowed from it, and
+/// whether its tail was dropped.
+pub fn borrow_str(raw: &str, cfg: RawCapture) -> Option<(&str, bool)> {
     if !cfg.enabled || raw.is_empty() {
         return None;
     }
-
-    let mut truncated = false;
-    let text = if cfg.max_bytes > 0 && raw.len() > cfg.max_bytes {
-        match cfg.on_oversize {
-            OversizePolicy::Omit => return None,
-            OversizePolicy::Truncate => {
-                truncated = true;
-                raw[..floor_char_boundary(raw, cfg.max_bytes)].to_string()
-            }
-        }
-    } else {
-        raw.to_string()
-    };
-
-    Some(PreparedRaw {
-        text,
-        truncated,
-        lossy: false,
-    })
+    if cfg.max_bytes == 0 || raw.len() <= cfg.max_bytes {
+        return Some((raw, false));
+    }
+    match cfg.on_oversize {
+        OversizePolicy::Omit => None,
+        OversizePolicy::Truncate => Some((&raw[..floor_char_boundary(raw, cfg.max_bytes)], true)),
+    }
 }
 
 /// Write `_raw` (and its markers) into a JSON object under construction.
@@ -145,17 +135,6 @@ pub fn attach_to_map(
     cfg: RawCapture,
 ) {
     if let Some(prepared) = prepare(raw, cfg) {
-        attach_prepared_to_map(obj, prepared);
-    }
-}
-
-/// [`attach_to_map`] for a payload that is already a `str`.
-pub fn attach_str_to_map(
-    obj: &mut serde_json::Map<String, serde_json::Value>,
-    raw: &str,
-    cfg: RawCapture,
-) {
-    if let Some(prepared) = prepare_str(raw, cfg) {
         attach_prepared_to_map(obj, prepared);
     }
 }
@@ -240,7 +219,7 @@ mod tests {
     #[test]
     fn empty_payload_captures_nothing() {
         assert!(prepare(b"", RawCapture::on()).is_none());
-        assert!(prepare_str("", RawCapture::on()).is_none());
+        assert!(borrow_str("", RawCapture::on()).is_none());
     }
 
     #[test]
@@ -334,12 +313,20 @@ mod tests {
     }
 
     #[test]
-    fn prepare_str_truncates_on_a_char_boundary_too() {
-        let prepared =
-            prepare_str("\u{4f60}\u{597d}", capped(4, OversizePolicy::Truncate)).unwrap();
-        assert_eq!(prepared.text, "\u{4f60}");
-        assert!(prepared.truncated);
-        assert!(!prepared.lossy);
+    fn borrow_str_truncates_on_a_char_boundary_or_omits() {
+        let text = "\u{4f60}\u{597d}";
+        for (cfg, want) in [
+            (
+                capped(4, OversizePolicy::Truncate),
+                Some(("\u{4f60}", true)),
+            ),
+            (capped(4, OversizePolicy::Omit), None),
+            (capped(0, OversizePolicy::Omit), Some((text, false))),
+            (capped(6, OversizePolicy::Omit), Some((text, false))),
+            (RawCapture::OFF, None),
+        ] {
+            assert_eq!(borrow_str(text, cfg), want, "{cfg:?}");
+        }
     }
 
     #[test]

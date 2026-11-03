@@ -55,6 +55,8 @@ impl GelfFrameDecoder {
     }
 }
 
+impl crate::server::frame_clock::Framing for GelfFrameDecoder {}
+
 impl Decoder for GelfFrameDecoder {
     type Item = Vec<u8>;
     type Error = io::Error;

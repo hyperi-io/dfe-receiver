@@ -691,3 +691,128 @@ async fn a_message_that_is_not_utf8_lands_parsed_over_udp_and_tcp() {
     assert_eq!(syslog.metrics.get_lossy_decodes_total(), 4);
     assert_eq!(syslog.metrics.get_requests_error(), 0);
 }
+
+/// Every record the loader receives within `within`, until `count` have arrived.
+async fn receive_records(
+    loader: &scalo::transport::grpc::GrpcTransport,
+    count: usize,
+    within: Duration,
+) -> Vec<serde_json::Value> {
+    use scalo::transport::TransportReceiver;
+
+    let mut records = Vec::new();
+    let deadline = tokio::time::Instant::now() + within;
+    while records.len() < count && tokio::time::Instant::now() < deadline {
+        if let Ok(batch) = loader.recv(count).await {
+            records.extend(
+                batch
+                    .records
+                    .into_iter()
+                    .map(|r| serde_json::from_slice::<serde_json::Value>(&r.payload).unwrap()),
+            );
+        }
+    }
+    records
+}
+
+/// Over TCP an oversize message costs itself and nothing after it, a line
+/// opening with digits is a line, and a stamp with no zone takes
+/// `syslog.timezone`. Over UDP a burst larger than a batch arrives whole.
+#[tokio::test]
+async fn syslog_carries_on_past_oversize_messages_and_reads_bursts_whole() {
+    use tokio::io::AsyncWriteExt;
+
+    let (loader_endpoint, loader) = crate::common::grpc_destination().await;
+    let mut config = test_config();
+    config.loader.transport = "grpc".to_string();
+    config.loader.grpc_endpoint = Some(loader_endpoint);
+    config.routing.dlq.enabled = false;
+    config.syslog.timezone = "+10:00".parse().unwrap();
+    config.syslog.udp_batch_size = 16;
+    let syslog = start_syslog_handler(config).await;
+
+    let second = "<14>Oct 31 10:00:00 h app: second";
+    let mut wire = String::from("<14>Oct 31 10:00:00 h app: first\n");
+    wire.push_str(&format!("70000 <14>{}", "a".repeat(70_000 - 4)));
+    wire.push_str(&format!("{} {second}", second.len()));
+    wire.push_str("2026 Oct 31 10:00:00 h app: third\n");
+    wire.push_str(&format!("<14>{}\n", "b".repeat(70_000)));
+    wire.push_str("<14>Oct 31 10:00:00 h app: fourth\n");
+    let mut tcp = tokio::net::TcpStream::connect(syslog.tcp).await.unwrap();
+    tcp.write_all(wire.as_bytes()).await.unwrap();
+    tcp.flush().await.unwrap();
+
+    let records = receive_records(&loader, 4, Duration::from_secs(10)).await;
+    let messages: Vec<&str> = records
+        .iter()
+        .map(|r| r["message"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        messages,
+        [
+            "first",
+            "second",
+            "2026 Oct 31 10:00:00 h app: third",
+            "fourth"
+        ],
+        "the TCP connection carries on past both oversize messages"
+    );
+    let stamp = records[0]["timestamp"].as_str().unwrap_or_default();
+    assert!(
+        stamp.ends_with("-10-31T10:00:00+10:00"),
+        "timestamp {stamp}"
+    );
+    assert_eq!(
+        syslog.metrics.get_records_dropped(),
+        2,
+        "both oversize messages counted"
+    );
+
+    // The connection is still open: another line still lands.
+    tcp.write_all(b"<14>Oct 31 10:00:00 h app: fifth\n")
+        .await
+        .unwrap();
+    let after = receive_records(&loader, 1, Duration::from_secs(10)).await;
+    assert_eq!(after.len(), 1, "a line after the oversize ones arrives");
+
+    let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let burst = 200;
+    for i in 0..burst {
+        udp.send_to(
+            format!("<14>Oct 31 10:00:00 h app: udp {i}").as_bytes(),
+            syslog.udp,
+        )
+        .unwrap();
+    }
+    let datagrams = receive_records(&loader, burst, Duration::from_secs(10)).await;
+    assert_eq!(
+        datagrams.len(),
+        burst,
+        "every datagram of the burst arrives"
+    );
+
+    drop(tcp);
+    syslog.shutdown.cancel();
+}
+
+/// A connection that sends nothing for `syslog.idle_timeout_ms` is closed.
+#[tokio::test]
+async fn an_idle_syslog_tcp_connection_is_closed() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut config = test_config();
+    config.syslog.idle_timeout_ms = 300;
+    let syslog = start_syslog_handler(config).await;
+
+    let mut tcp = tokio::net::TcpStream::connect(syslog.tcp).await.unwrap();
+    tcp.write_all(b"<14>Oct 31 10:00:00 h app: one\n")
+        .await
+        .unwrap();
+    let mut buf = [0u8; 1];
+    let read = tokio::time::timeout(Duration::from_secs(5), tcp.read(&mut buf)).await;
+    assert!(
+        matches!(read, Ok(Ok(0))),
+        "the receiver closes an idle connection, got {read:?}"
+    );
+    syslog.shutdown.cancel();
+}

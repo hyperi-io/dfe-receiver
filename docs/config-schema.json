@@ -216,6 +216,12 @@
         "tcp_bind_address": "0.0.0.0:514",
         "tls_bind_address": "0.0.0.0:6514",
         "max_message_size": 65536,
+        "max_frame_size": 262144,
+        "timezone": "UTC",
+        "udp_recv_buffer_size": 8388608,
+        "udp_batch_size": 64,
+        "tcp_keepalive_secs": 60,
+        "idle_timeout_ms": 600000,
         "tls": {
           "enabled": false,
           "cert_file": null,
@@ -1270,11 +1276,51 @@
           "default": "0.0.0.0:6514"
         },
         "max_message_size": {
-          "description": "Maximum syslog message size in bytes.",
+          "description": "Maximum syslog message size in bytes. A larger message is counted as\ndropped and skipped, and the connection carries on.",
           "type": "integer",
           "format": "uint",
           "minimum": 0,
           "default": 65536
+        },
+        "max_frame_size": {
+          "description": "Largest octet count read as one on TCP and TLS (RFC 6587), in bytes.\nA message over `max_message_size` with a count up to this is skipped\nby its count. A count above it is not trusted, and that frame is read\nas an LF-terminated line. Never below `max_message_size`.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "default": 262144
+        },
+        "timezone": {
+          "description": "The UTC offset for an RFC 3164 stamp that carries none: `UTC`, or an\noffset like `+10:00`. RFC 5424 and RFC 3339 stamps keep their own.",
+          "$ref": "#/$defs/UtcOffset",
+          "default": "UTC"
+        },
+        "udp_recv_buffer_size": {
+          "description": "UDP socket receive buffer (`SO_RCVBUF`), in bytes. The kernel may grant\nless, capped by `net.core.rmem_max`, and the listener logs what it got.\nDatagrams the full buffer cannot take count as dropped, reason `kernel`.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "default": 8388608
+        },
+        "udp_batch_size": {
+          "description": "Most datagrams read in one go and handed to the pipeline as one batch.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0,
+          "default": 64
+        },
+        "tcp_keepalive_secs": {
+          "description": "Seconds a TCP or TLS connection may be quiet before keepalive probes\nstart, one probe per this interval. 0 turns keepalive off.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 60
+        },
+        "idle_timeout_ms": {
+          "description": "How long a TCP or TLS connection may go with no frame before it is\nclosed, in milliseconds. A frame part way in is the frame timeout's\n(`server.connections.frame_timeout_ms`). 0 keeps idle connections.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "default": 600000
         },
         "tls": {
           "description": "TLS configuration (for secure syslog on port 6514).",
@@ -1321,6 +1367,10 @@
           }
         }
       }
+    },
+    "UtcOffset": {
+      "type": "string",
+      "pattern": "^([Uu][Tt][Cc]|[Zz]|[+-][0-9]{2}:?[0-9]{2})$"
     },
     "PrometheusRwConfig": {
       "description": "Prometheus Remote Write receiver configuration.",

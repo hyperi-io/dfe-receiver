@@ -163,6 +163,24 @@ decoders + Kafka batch assembly + async task allocation).
 noise elsewhere. mimalloc is near-neutral. Conclusion: **jemalloc is
 the production default for Tier 1** (matches dfe-loader's choice).
 
+### Syslog framing and conversion
+
+`benches/syslog.rs` times framing and conversion over eight lines: four RFC 3164 device shapes, two RFC 5424 and one CEF over syslog. `benches/syslog_allocs.rs` counts heap allocations per message. Measured on desktop-derek, system allocator, 2026-11-03, before and after the RFC 3164 header reader and the single-pass record writer.
+
+| Benchmark | Before | After |
+|---|---|---|
+| convert, mean of the eight lines | 2.29 us | 1.05 us |
+| convert, allocations per message | 24.75 | 2.50 |
+| convert, RFC 5424 with structured data | 3.35 us, 47 allocations | 1.99 us, 6 allocations |
+| LF framing, per frame | 94 ns | 39 ns |
+| octet-counted framing, per frame | 46 ns | 38 ns |
+
+```bash
+cargo bench --bench syslog -- --save-baseline before   # on the old code
+cargo bench --bench syslog -- --baseline before        # on the new code
+cargo bench --bench syslog_allocs
+```
+
 ### Reproducing the baselines
 
 ```bash
