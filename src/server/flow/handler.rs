@@ -33,11 +33,11 @@ use crate::config::RawCapture;
 use crate::error::{Error, Result};
 use crate::pipeline::PipelineState;
 use crate::server::flow::config::{FlowConfig, FlowListenerConfig};
-use crate::server::flow::kernel_drops;
 use crate::server::flow::listener::UdpFlowListener;
 use crate::server::flow::metrics::FlowMetrics;
 use crate::server::flow::rate_limit::PerSourceRateLimiter;
 use crate::server::ip_filter::IpFilter;
+use crate::server::kernel_drops;
 use crate::server::netflow::decoder::NetflowDecoder;
 use crate::server::sflow::decoder::SflowDecoder;
 use crate::server::traits::{BoundAddr, Listeners, ProtocolHandler};
@@ -344,11 +344,16 @@ impl ProtocolHandler for FlowHandler {
         let helpers = shutdown.child_token();
 
         // Spawn the /proc/net/udp poller on Linux for the union of bind ports.
-        let kd_metrics = Arc::new(self.metrics.clone());
+        let kd_metrics = self.metrics.clone();
         let kd_shutdown = helpers.clone();
         let ports = self.union_ports();
         let kd_handle = tokio::spawn(async move {
-            kernel_drops::poll_kernel_drops(ports, kd_metrics, kd_shutdown).await;
+            kernel_drops::poll_kernel_drops(
+                ports,
+                move |drops| kd_metrics.kernel_drops_total.add(drops),
+                kd_shutdown,
+            )
+            .await;
         });
 
         let outcome = listeners.run(&shutdown).await;

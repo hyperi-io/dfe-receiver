@@ -114,6 +114,12 @@ impl SyslogFrameDecoder {
     }
 }
 
+impl crate::server::frame_clock::Framing for SyslogFrameDecoder {
+    fn mid_frame(&self) -> bool {
+        self.state != State::Start
+    }
+}
+
 impl Default for SyslogFrameDecoder {
     fn default() -> Self {
         Self::new(DEFAULT_MAX_LENGTH)

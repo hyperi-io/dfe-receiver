@@ -185,6 +185,10 @@ properties:
       max_message_size: 65536
       max_frame_size: 262144
       timezone: UTC
+      udp_recv_buffer_size: 8388608
+      udp_batch_size: 64
+      tcp_keepalive_secs: 60
+      idle_timeout_ms: 600000
       tls:
         enabled: false
         cert_file: null
@@ -1213,6 +1217,38 @@ $defs:
           offset like `+10:00`. RFC 5424 and RFC 3339 stamps keep their own.
         $ref: "#/$defs/UtcOffset"
         default: UTC
+      udp_recv_buffer_size:
+        description: |-
+          UDP socket receive buffer (`SO_RCVBUF`), in bytes. The kernel may grant
+          less, capped by `net.core.rmem_max`, and the listener logs what it got.
+          Datagrams the full buffer cannot take count as dropped, reason `kernel`.
+        type: integer
+        format: uint
+        minimum: 0
+        default: 8388608
+      udp_batch_size:
+        description: Most datagrams read in one go and handed to the pipeline as one batch.
+        type: integer
+        format: uint
+        minimum: 0
+        default: 64
+      tcp_keepalive_secs:
+        description: |-
+          Seconds a TCP or TLS connection may be quiet before keepalive probes
+          start, one probe per this interval. 0 turns keepalive off.
+        type: integer
+        format: uint64
+        minimum: 0
+        default: 60
+      idle_timeout_ms:
+        description: |-
+          How long a TCP or TLS connection may go with no frame before it is
+          closed, in milliseconds. A frame part way in is the frame timeout's
+          (`server.connections.frame_timeout_ms`). 0 keeps idle connections.
+        type: integer
+        format: uint64
+        minimum: 0
+        default: 600000
       tls:
         description: TLS configuration (for secure syslog on port 6514).
         $ref: "#/$defs/TlsConfig"

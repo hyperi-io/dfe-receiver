@@ -240,6 +240,10 @@ syslog:
   max_message_size: 65536  # 64KB; a larger message is skipped and counted as dropped
   max_frame_size: 262144  # 256KB; an octet count above this is read as an LF line
   timezone: "UTC"  # offset for an RFC 3164 stamp with none, e.g. "+10:00"
+  udp_recv_buffer_size: 8388608  # 8MB SO_RCVBUF, capped by net.core.rmem_max
+  udp_batch_size: 64  # datagrams read per wake and handed over as one batch
+  tcp_keepalive_secs: 60  # 0 turns keepalive off
+  idle_timeout_ms: 600000  # close a TCP/TLS connection with no frame for 10 min, 0 keeps it
 
   # TLS for secure syslog (RFC 5425, port 6514)
   tls:

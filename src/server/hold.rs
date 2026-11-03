@@ -32,15 +32,23 @@ const FIRST_RETRY: Duration = Duration::from_millis(100);
 /// Longest wait between re-offers, so a pipeline that recovers is found within it.
 const LAST_RETRY: Duration = Duration::from_secs(2);
 
+/// How a hold ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Held {
+    /// Every record was settled, and this many were refused for good.
+    Settled { rejected: usize },
+    /// Shutdown came first, and the records not yet taken were dropped.
+    Shutdown,
+}
+
 /// Offer `payloads` from `ingest` to the pipeline until every one is settled
 /// -- taken, or refused for good -- holding the caller, and the socket it
 /// reads, until then.
 ///
-/// Counts the request once, and every record dropped; the pipeline counts
-/// each record as received on the first offer alone. Returns false when
-/// shutdown came first: the records not yet taken are dropped, and the caller
-/// must stop reading.
-pub(crate) async fn hold_until_settled(
+/// Counts every record dropped. The pipeline counts each record as received on
+/// the first offer alone. The caller counts the request, and on
+/// [`Held::Shutdown`] must stop reading.
+pub(crate) async fn hold(
     pipeline: &PipelineState,
     payloads: &[Bytes],
     metrics: &Metrics,
@@ -48,7 +56,7 @@ pub(crate) async fn hold_until_settled(
     shutdown: &CancellationToken,
     acks: &Acks,
     ingest: &Ingest,
-) -> bool {
+) -> Held {
     let mut pending = payloads;
     let mut rejected = 0;
     let mut wait = FIRST_RETRY;
@@ -74,10 +82,9 @@ pub(crate) async fn hold_until_settled(
         tokio::select! {
             biased;
             () = shutdown.cancelled() => {
-                metrics.inc_requests_error(transport);
                 metrics.add_records_dropped(transport, DropReason::Rejected, rejected as u64);
                 metrics.add_records_dropped(transport, DropReason::Shutdown, pending.len() as u64);
-                return false;
+                return Held::Shutdown;
             }
             () = tokio::time::sleep(wait) => {}
         }
@@ -86,12 +93,38 @@ pub(crate) async fn hold_until_settled(
 
     // Nothing in these protocols can carry a refusal back to the sender.
     metrics.add_records_dropped(transport, DropReason::Rejected, rejected as u64);
-    if rejected == 0 {
-        metrics.inc_requests_success(transport);
-    } else {
-        metrics.inc_requests_error(transport);
+    Held::Settled { rejected }
+}
+
+/// [`hold`], counting the whole batch as one request. Returns false when
+/// shutdown came first, and the caller must stop reading.
+pub(crate) async fn hold_until_settled(
+    pipeline: &PipelineState,
+    payloads: &[Bytes],
+    metrics: &Metrics,
+    transport: &str,
+    shutdown: &CancellationToken,
+    acks: &Acks,
+    ingest: &Ingest,
+) -> bool {
+    match hold(
+        pipeline, payloads, metrics, transport, shutdown, acks, ingest,
+    )
+    .await
+    {
+        Held::Settled { rejected: 0 } => {
+            metrics.inc_requests_success(transport);
+            true
+        }
+        Held::Settled { .. } => {
+            metrics.inc_requests_error(transport);
+            true
+        }
+        Held::Shutdown => {
+            metrics.inc_requests_error(transport);
+            false
+        }
     }
-    true
 }
 
 #[cfg(test)]

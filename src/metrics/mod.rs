@@ -164,6 +164,10 @@ pub enum DropReason {
     Rejected,
     /// Shutdown came while the record was held for a retry.
     Shutdown,
+    /// Over the listener's message size limit, skipped by its framing.
+    Oversize,
+    /// Lost by the kernel before the listener read it: a full UDP receive buffer.
+    Kernel,
 }
 
 impl DropReason {
@@ -172,6 +176,8 @@ impl DropReason {
             Self::Unavailable => "unavailable",
             Self::Rejected => "rejected",
             Self::Shutdown => "shutdown",
+            Self::Oversize => "oversize",
+            Self::Kernel => "kernel",
         }
     }
 }
@@ -1096,7 +1102,7 @@ const RECEIVER_SERIES: &[SeriesSpec] = &[
         "receiver_records_dropped_total",
         MetricType::Counter,
         &["transport", "reason"],
-        "Records dropped with no way to tell the sender, by transport and reason",
+        "Records dropped with no way to tell the sender, by transport and reason: unavailable, rejected, shutdown, oversize, kernel",
     ),
     (
         "receiver_prometheus_rw_unrecorded_total",

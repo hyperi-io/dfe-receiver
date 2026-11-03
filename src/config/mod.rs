@@ -1700,6 +1700,23 @@ pub struct SyslogConfig {
     /// offset like `+10:00`. RFC 5424 and RFC 3339 stamps keep their own.
     pub timezone: UtcOffset,
 
+    /// UDP socket receive buffer (`SO_RCVBUF`), in bytes. The kernel may grant
+    /// less, capped by `net.core.rmem_max`, and the listener logs what it got.
+    /// Datagrams the full buffer cannot take count as dropped, reason `kernel`.
+    pub udp_recv_buffer_size: usize,
+
+    /// Most datagrams read in one go and handed to the pipeline as one batch.
+    pub udp_batch_size: usize,
+
+    /// Seconds a TCP or TLS connection may be quiet before keepalive probes
+    /// start, one probe per this interval. 0 turns keepalive off.
+    pub tcp_keepalive_secs: u64,
+
+    /// How long a TCP or TLS connection may go with no frame before it is
+    /// closed, in milliseconds. A frame part way in is the frame timeout's
+    /// (`server.connections.frame_timeout_ms`). 0 keeps idle connections.
+    pub idle_timeout_ms: u64,
+
     /// TLS configuration (for secure syslog on port 6514).
     pub tls: TlsConfig,
 
@@ -1728,6 +1745,10 @@ impl Default for SyslogConfig {
             max_message_size: crate::server::syslog::framing::DEFAULT_MAX_LENGTH,
             max_frame_size: crate::server::syslog::framing::DEFAULT_MAX_FRAME,
             timezone: UtcOffset::default(),
+            udp_recv_buffer_size: 8 * 1024 * 1024,
+            udp_batch_size: 64,
+            tcp_keepalive_secs: 60,
+            idle_timeout_ms: 600_000,
             raw_capture: RawCaptureConfig::default(),
             tls: TlsConfig::default(),
             auth: AuthConfig {
