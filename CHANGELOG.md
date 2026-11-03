@@ -3,6 +3,12 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.15.64](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.63...v1.15.64) (2026-11-03)
+
+### Bug Fixes
+
+* **gelf:** skip oversize TCP messages, keep the connection ([#242](https://github.com/hyperi-io/dfe-receiver/issues/242)) ([fc2edd7](https://github.com/hyperi-io/dfe-receiver/commit/fc2edd77305b6d6b2c22fdc1f0f045d7a8780e62))
+
 ## [1.15.63](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.62...v1.15.63) (2026-11-03)
 
 ### Bug Fixes
