@@ -204,6 +204,15 @@ async fn logstash_ships_over_tls_with_http_and_lumberjack_outputs() {
             arrived,
             || format!("only {} arrived", sink.count(case.id)),
         );
+        // Logstash with ECS compatibility on, its default, puts the line in `message`
+        // and in `event.original`. The receiver keeps the first.
+        let landed: serde_json::Value =
+            serde_json::from_str(&sink.find(case.id).unwrap_or_default()).unwrap_or_default();
+        results.check(
+            &format!("{}: the line lands once, in message", case.id),
+            landed["message"].is_string() && landed["event"].get("original").is_none(),
+            || landed.to_string(),
+        );
     }
     tokio::time::sleep(Duration::from_secs(5)).await;
     let logs = peer.logs().await;

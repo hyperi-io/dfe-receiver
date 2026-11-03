@@ -36,6 +36,8 @@ mod fluent;
 #[cfg(feature = "otlp")]
 #[path = "integration/fluent_bit.rs"]
 mod fluent_bit;
+#[path = "integration/fluentd.rs"]
+mod fluentd;
 #[path = "integration/grpc_outage.rs"]
 mod grpc_outage;
 #[path = "integration/grpc_sink.rs"]
@@ -62,6 +64,8 @@ mod logstash;
 mod lumberjack;
 #[path = "integration/named_destinations.rs"]
 mod named_destinations;
+#[path = "integration/original_event.rs"]
+mod original_event;
 #[cfg(feature = "otlp")]
 #[path = "integration/otel_collector.rs"]
 mod otel_collector;

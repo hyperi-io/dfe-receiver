@@ -9,8 +9,8 @@
 //! Fluent Forward protocol handler.
 //!
 //! Accepts data from Fluentd and Fluent Bit agents over the Forward
-//! protocol (msgpack over TCP). Supports Message, Forward, and
-//! PackedForward modes.
+//! protocol (msgpack over TCP). Supports Message, Forward, PackedForward and
+//! gzip CompressedPackedForward modes.
 //!
 //! Standard port: 24224
 
@@ -36,7 +36,7 @@ use crate::server::http::{Accept, ConnectionLimits};
 use crate::server::ip_filter::IpFilter;
 use crate::server::traits::{BoundAddr, ProtocolHandler};
 use crate::tenancy::{Ingest, Principal};
-use convert::{extract_chunk_id, fluent_to_json};
+use convert::{Refused, extract_chunk_id, fluent_to_json, unsupported_compression};
 use scan::{Scan, Scanner};
 
 /// The transport label the Fluent Forward listener counts under.
@@ -150,10 +150,19 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
                     };
                     metrics.inc_requests_total("fluent");
 
+                    // A chunk compressed with a codec the receiver cannot read is not
+                    // acknowledged, so the sender keeps it and resends.
+                    if let Some(codec) = unsupported_compression(&msg) {
+                        warn!(peer = %peer_addr, codec = ?codec, "Fluent Forward chunk uses an unsupported compression codec (gzip only), closing the connection without an ack");
+                        metrics.inc_parse_failure("fluent");
+                        metrics.inc_requests_error("fluent");
+                        return;
+                    }
+
                     // Check for chunk ACK before processing
                     let chunk_id = extract_chunk_id(&msg);
 
-                    match (fluent_to_json(&msg), chunk_id.as_deref()) {
+                    match (fluent_to_json(&msg, max_buffer_size), chunk_id.as_deref()) {
                         (Ok(payloads), Some(chunk)) => {
                             let outcome = pipeline.process_batch_acked(&payloads, &acks, None, &ingest).await;
                             if let Some(e) = outcome.unavailable {
@@ -180,7 +189,13 @@ async fn handle_tcp_connection<S: AsyncRead + AsyncWrite + Unpin>(
                                 return;
                             }
                         }
-                        (Err(e), chunk) => {
+                        (Err(Refused::TooBig(reason)), _) => {
+                            warn!(peer = %peer_addr, reason = %reason, "Fluent Forward message past a limit, closing the connection without an ack");
+                            metrics.inc_body_size_rejected("fluent");
+                            metrics.inc_requests_error("fluent");
+                            return;
+                        }
+                        (Err(Refused::Malformed(e)), chunk) => {
                             debug!(peer = %peer_addr, error = %e, "Fluent Forward parse error");
                             metrics.inc_parse_failure("fluent");
                             metrics.inc_requests_error("fluent");

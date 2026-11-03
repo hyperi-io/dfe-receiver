@@ -23,6 +23,7 @@
 //! other `_source` a record carries is the sender's, replaced and parked.
 
 mod header;
+mod original;
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -36,6 +37,7 @@ use scalo::rules::{
 use sonic_rs::get_from_slice;
 
 pub use self::header::{Header, RECEIVED_ORIGINAL, Received, Write};
+pub use self::original::{PRESERVE_TAG, strip_original};
 use crate::config::{Config, DestinationRef, DestinationsConfig, SourceOrgId};
 use crate::error::{Error, Result};
 use crate::tenancy::{Binding, Bindings, Ingest};

@@ -520,6 +520,7 @@ readinessProbe:
 | `receiver_requests_success_total` | Counter | Total successful requests |
 | `receiver_requests_error_total` | Counter | Total failed requests |
 | `receiver_bytes_received_total` | Counter | Total bytes ingested |
+| `receiver_lossy_decodes_total` | Counter | Syslog messages and Fluent Forward records that were not valid UTF-8 and were kept with each invalid byte sequence replaced by U+FFFD, by `transport` |
 | `receiver_records_dropped_total` | Counter | Records dropped with no way to tell the sender, by `transport` and `reason` (`unavailable`, `rejected`, `shutdown`) |
 | `records_received_total` | Counter | Records, counted once when a listener first offers each to the pipeline |
 | `records_processed_total` / `records_delivered_total` | Counter | Records the pipeline took |
@@ -545,6 +546,7 @@ holds it.
 | `records_dlq_total` | Counter | Messages sent to DLQ (scalo emits this one) |
 | `dlq_backend_start_failures_total` | Counter | DLQ backends that failed to start, by `backend` (scalo emits this one); the receiver runs on with the others, and with none a held dead letter is not taken |
 | `receiver_source_org_id_stripped_total` | Counter | Records whose sender-supplied `_org_id` was removed because `routing.source_org_id` is `disallow` (the default) |
+| `receiver_original_stripped_total` | Counter | Records whose `event.original` and `log.original` copy of the raw line was removed because `message` carries it. A record tagged `preserve_original_event`, or with no `message`, keeps it |
 | `receiver_records_rejected_total` | Counter | Records a destination can never take (over its size ceiling), on any sink, by `outcome`: `dead_lettered`, `dropped` when no DLQ is configured or no DLQ backend can hold the entry (also counted in `pipeline_dead_letters_dropped_total{reason}`), or `dlq_refused` when the DLQ did not confirm the write, so the record stays buffered or its sender is told to retry |
 
 ### gRPC Destination Metrics
