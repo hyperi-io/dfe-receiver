@@ -3,6 +3,13 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.15.65](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.64...v1.15.65) (2026-11-09)
+
+### Bug Fixes
+
+* **deps:** update rust-dependencies ([#244](https://github.com/hyperi-io/dfe-receiver/issues/244)) ([aa8295f](https://github.com/hyperi-io/dfe-receiver/commit/aa8295fce3cda9b4753b33db2457e2df5af9a19f))
+* **scalo:** rebuild on scalo 2.14.27 ([2c41549](https://github.com/hyperi-io/dfe-receiver/commit/2c41549c8f143612f3fa9164f48e226072a0f776))
+
 ## [1.15.64](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.63...v1.15.64) (2026-11-03)
 
 ### Bug Fixes
