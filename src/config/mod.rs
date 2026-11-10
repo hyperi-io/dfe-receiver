@@ -1518,7 +1518,7 @@ pub struct OtlpConfig {
     /// Conversion mode: "hyperdx" (default) or "generic".
     ///
     /// - `hyperdx`: JSON matching the OTel ClickHouse exporter schema
-    ///   for direct HyperDX compatibility.
+    ///   for direct dfe-hyperdx compatibility.
     /// - `generic`: Normalised JSON envelope with routing fields.
     pub mode: String,
 
@@ -1773,7 +1773,7 @@ pub struct PrometheusRwConfig {
     /// Output mode: "native" (default), "otel", or "hyperdx".
     /// - `native`: Flat JSON with labels as top-level fields.
     /// - `otel`: Generic OTel JSON envelope (snake_case, RFC 3339).
-    /// - `hyperdx`: HyperDX ClickHouse-compatible JSON (PascalCase, DateTime64).
+    /// - `hyperdx`: dfe-hyperdx ClickHouse-compatible JSON (PascalCase, DateTime64).
     pub mode: String,
 
     /// Maximum request body size in bytes.

@@ -1009,7 +1009,7 @@
           "default": "0.0.0.0:4318"
         },
         "mode": {
-          "description": "Conversion mode: \"hyperdx\" (default) or \"generic\".\n\n- `hyperdx`: JSON matching the OTel ClickHouse exporter schema\n  for direct HyperDX compatibility.\n- `generic`: Normalised JSON envelope with routing fields.",
+          "description": "Conversion mode: \"hyperdx\" (default) or \"generic\".\n\n- `hyperdx`: JSON matching the OTel ClickHouse exporter schema\n  for direct dfe-hyperdx compatibility.\n- `generic`: Normalised JSON envelope with routing fields.",
           "type": "string",
           "default": "hyperdx"
         },
@@ -1387,7 +1387,7 @@
           "default": "0.0.0.0:9091"
         },
         "mode": {
-          "description": "Output mode: \"native\" (default), \"otel\", or \"hyperdx\".\n- `native`: Flat JSON with labels as top-level fields.\n- `otel`: Generic OTel JSON envelope (snake_case, RFC 3339).\n- `hyperdx`: HyperDX ClickHouse-compatible JSON (PascalCase, DateTime64).",
+          "description": "Output mode: \"native\" (default), \"otel\", or \"hyperdx\".\n- `native`: Flat JSON with labels as top-level fields.\n- `otel`: Generic OTel JSON envelope (snake_case, RFC 3339).\n- `hyperdx`: dfe-hyperdx ClickHouse-compatible JSON (PascalCase, DateTime64).",
           "type": "string",
           "default": "native"
         },

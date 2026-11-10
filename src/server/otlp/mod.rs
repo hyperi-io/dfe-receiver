@@ -16,7 +16,7 @@
 //! processing pipeline. Supports two conversion modes:
 //!
 //! - **`hyperdx`**: JSON matching the OTel ClickHouse exporter schema
-//!   for direct HyperDX compatibility
+//!   for direct dfe-hyperdx compatibility
 //! - **`generic`**: Normalised JSON envelope for custom routing
 
 pub mod budget;
