@@ -3,6 +3,14 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.15.66](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.65...v1.15.66) (2026-11-10)
+
+### Bug Fixes
+
+* **ci:** drop Namespace runners, add test-tier ([a6e7ff2](https://github.com/hyperi-io/dfe-receiver/commit/a6e7ff2733947a7cf5e9758536c3a4007083b896))
+* **docs:** call the search component dfe-hyperdx ([fb32d9b](https://github.com/hyperi-io/dfe-receiver/commit/fb32d9b6eabbceeabb1188347974dbe46fa0203f))
+* **receiver:** use scalo 2.14.28 DLQ events ([#250](https://github.com/hyperi-io/dfe-receiver/issues/250)) ([d77d835](https://github.com/hyperi-io/dfe-receiver/commit/d77d83512627774af688e55f0333000ef273fc56))
+
 ## [1.15.65](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.64...v1.15.65) (2026-11-09)
 
 ### Bug Fixes
