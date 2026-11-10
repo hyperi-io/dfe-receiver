@@ -122,14 +122,30 @@ fn all_tls_config(pki: &Pki, client_auth: &str, secret: &str) -> (Config, Vec<Li
     (config, listeners)
 }
 
+/// How long `s_client` holds the connection once the client side of the handshake is done.
+#[derive(Clone, Copy)]
+enum Hold {
+    /// Send a newline after a second, then close.
+    Briefly,
+    /// Read until the server closes the connection or the timeout ends it.
+    ///
+    /// Under TLS 1.3 the server refuses a client certificate after the client has
+    /// finished its handshake, so a client that closes first never sees the alert.
+    UntilClosed,
+}
+
 /// `openssl s_client` to `addr`, verifying with `ca` and presenting `client` if named.
-fn s_client(addr: SocketAddr, ca: &str, client: Option<&str>) -> String {
+fn s_client(addr: SocketAddr, ca: &str, client: Option<&str>, hold: Hold) -> String {
     let identity = client.map_or_else(String::new, |name| {
         format!("-cert /dfe-test/{name}.crt -key /dfe-test/{name}.key")
     });
+    let (input, ending) = match hold {
+        Hold::Briefly => ("(sleep 1; echo) |", ""),
+        Hold::UntilClosed => ("", "-ign_eof </dev/null"),
+    };
     format!(
-        "(sleep 1; echo) | timeout 10 openssl s_client -connect {addr} -CAfile /dfe-test/{ca}.crt \
-         -verify_ip 127.0.0.1 -verify_return_error {identity}"
+        "{input} timeout 10 openssl s_client -connect {addr} -CAfile /dfe-test/{ca}.crt \
+         -verify_ip 127.0.0.1 -verify_return_error {identity} {ending}"
     )
 }
 
@@ -191,10 +207,13 @@ async fn every_tls_listener_serves_openssl() {
     let mut jobs: Vec<(String, String)> = Vec::new();
     for listener in &listeners {
         let name = listener.name;
-        jobs.push((format!("{name}/ok"), s_client(listener.addr, "ca", None)));
+        jobs.push((
+            format!("{name}/ok"),
+            s_client(listener.addr, "ca", None, Hold::Briefly),
+        ));
         jobs.push((
             format!("{name}/wrong"),
-            s_client(listener.addr, "rogue-ca", None),
+            s_client(listener.addr, "rogue-ca", None, Hold::Briefly),
         ));
         jobs.push((
             format!("{name}/plain"),
@@ -299,12 +318,15 @@ async fn client_certificates_are_required_on_every_mtls_listener() {
         let name = listener.name;
         jobs.push((
             format!("{name}/cert"),
-            s_client(listener.addr, "ca", Some("client")),
+            s_client(listener.addr, "ca", Some("client"), Hold::Briefly),
         ));
-        jobs.push((format!("{name}/none"), s_client(listener.addr, "ca", None)));
+        jobs.push((
+            format!("{name}/none"),
+            s_client(listener.addr, "ca", None, Hold::UntilClosed),
+        ));
         jobs.push((
             format!("{name}/rogue"),
-            s_client(listener.addr, "ca", Some("rogue-client")),
+            s_client(listener.addr, "ca", Some("rogue-client"), Hold::UntilClosed),
         ));
     }
     let done = sh_all(&peer, jobs).await;
