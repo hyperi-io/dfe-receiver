@@ -24,7 +24,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use base64::Engine;
 use bytes::Bytes;
 use dfe_receiver::config::{
     Config, DestinationSpec, DlqConfig, GrpcDestination, SharedConfig, SpilloverConfig,
@@ -253,7 +252,8 @@ fn file_dlq(dir: &Path) -> DlqConfig {
     }
 }
 
-/// The payload of each entry in the file DLQ under `dir`.
+/// The record of each entry in the file DLQ under `dir`, every one a JSON
+/// object the DLQ writes under `_json`.
 fn dead_letters(dir: &Path) -> Vec<Bytes> {
     let Ok(written) = std::fs::read_to_string(dir.join("receiver").join("dlq.ndjson")) else {
         return Vec::new();
@@ -262,12 +262,9 @@ fn dead_letters(dir: &Path) -> Vec<Bytes> {
         .lines()
         .map(|line| {
             let entry: serde_json::Value = serde_json::from_str(line).expect("a DLQ entry");
-            let payload = entry["payload"].as_str().expect("a base64 payload");
-            Bytes::from(
-                base64::engine::general_purpose::STANDARD
-                    .decode(payload)
-                    .expect("base64"),
-            )
+            let record = &entry["_json"];
+            assert!(record.is_object(), "a JSON record under _json: {line}");
+            Bytes::from(serde_json::to_vec(record).expect("a JSON record"))
         })
         .collect()
 }

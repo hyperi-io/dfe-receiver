@@ -313,8 +313,7 @@ pub(crate) mod test_dlq {
         Arc::new(Dlq::spawn(&config, "receiver", Some(&kafka), CancellationToken::new()).unwrap())
     }
 
-    /// A record whose DLQ entry, base64 payload included, is over any Kafka
-    /// ceiling.
+    /// A record whose DLQ entry is over any Kafka ceiling.
     pub(crate) fn oversize_record() -> bytes::Bytes {
         bytes::Bytes::from(vec![
             b'x';
@@ -407,7 +406,6 @@ impl metrics::Recorder for CountedKeys {
 mod tests {
     use super::test_dlq::{self, file_dlq, refusing_dlq};
     use super::*;
-    use base64::Engine;
     use scalo::transport::ack::{TicketOutcome, Tickets};
 
     fn held_ticket(tickets: &Tickets) -> scalo::transport::ack::Ticket {
@@ -446,10 +444,7 @@ mod tests {
         let entry: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(entry["reason"], "destination refused the record");
         assert_eq!(entry["destination"], "events");
-        assert_eq!(
-            entry["payload"],
-            base64::engine::general_purpose::STANDARD.encode(&payload)
-        );
+        assert_eq!(entry["_json"], serde_json::json!({"x": 1}));
     }
 
     /// Run `future` on a runtime of this thread, counted by `recorder`.
