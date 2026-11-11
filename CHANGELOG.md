@@ -3,6 +3,13 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.15.67](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.66...v1.15.67) (2026-11-11)
+
+### Bug Fixes
+
+* **scalo:** rebuild on 2.14.29 ([faff75c](https://github.com/hyperi-io/dfe-receiver/commit/faff75c2259e892b401ece4fd1252f403f4b77b4))
+* **tests:** read until the server closes in the mTLS refusal checks ([a6415aa](https://github.com/hyperi-io/dfe-receiver/commit/a6415aa4b795edbe6dc52caf9f477b4a354c2725))
+
 ## [1.15.66](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.65...v1.15.66) (2026-11-10)
 
 ### Bug Fixes
