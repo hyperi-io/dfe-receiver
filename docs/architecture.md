@@ -166,7 +166,7 @@ wrong does.
    parsed fields downstream is still in `_raw`, indexed for full-text search.
    Capture is off by default for that reason as much as for the doubled bytes.
 
-6. **`Config::validate()` only runs on the cascade path.** A test that builds a
+6. **`Config::validate()` runs in `load_config` (`src/main.rs`) on every start, `--config` path included.** A test that builds a
    `Config` struct directly never reaches it, which is how the brokerless test
    configurations work. Do not read a passing test as proof that a YAML file
    would be accepted.
