@@ -2,7 +2,7 @@
 
 March 2026
 
-**dfe-receiver is the internet-facing ingest component in the DFE stack. dfe-ui, dfe-hyperdx and, where it is deployed, culvert also take untrusted input (dfe-infra `docs/threat-model.md`).**
+**dfe-receiver is the internet-facing ingest component in the DFE stack. dfe-ui, dfe-hyperdx and, where it is deployed, culvert also take untrusted input (`dfe-infra/docs/threat-model.md`).**
 
 This document covers application-level hardening (80/20 effort) and cost-effective infrastructure fronting for K8s and AWS deployments. It answers the questions cloud architects and security reviews ask most often.
 
@@ -480,7 +480,7 @@ and not recommended.
 
 ### 3.7 NLB Configuration Notes
 
-**In a DFE deployment, do not write this Service by hand.** dfe-infra renders the receiver's public door from `exposure.groups.ingest` (dfe-infra `docs/ingest-edge.md`). With door `loadbalancer` it renders one load balancer for the TCP ports and one for UDP, plus an ingest NetworkPolicy, and only while the allow list names someone. The allow list becomes each load balancer's `loadBalancerSourceRanges`, a `/0` in it marks the Service `dfe.hyperi.io/ingest-fence: allow-all`, and on AWS `exposure.public.eipAllocations` pins Elastic IPs per subnet. The Service below is for running the receiver without dfe-infra.
+**In a DFE deployment, do not write this Service by hand.** dfe-infra renders the receiver's public door from `exposure.groups.ingest` (`dfe-infra/docs/ingest-edge.md`). With door `loadbalancer` it renders one load balancer for the TCP ports and one for UDP, plus an ingest NetworkPolicy, and only while the allow list names someone. The allow list becomes each load balancer's `loadBalancerSourceRanges`, a `/0` in it marks the Service `dfe.hyperi.io/ingest-fence: allow-all`, and on AWS `exposure.public.eipAllocations` pins Elastic IPs per subnet. The Service below is for running the receiver without dfe-infra.
 
 **Same-AZ targeting:** To avoid the per-GB cross-zone data charge, configure
 the NLB target group to use same-AZ routing. This requires your receiver
