@@ -1,8 +1,8 @@
 # dfe-receiver architecture
 
 Why the service is shaped the way it is, and the rules you cannot read off the
-code. The configuration reference is [config.example.yaml](../config.example.yaml);
-the component-by-component detail is in [internals.md](internals.md).
+code. The configuration reference is [config.example.yaml](../config.example.yaml).
+The component-by-component detail is in [internals.md](internals.md).
 
 ## The problem
 
