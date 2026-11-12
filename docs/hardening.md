@@ -116,7 +116,7 @@ naming the listener at most every 5 seconds. Before upgrading, widen
 When running in Kubernetes, the gateway/ingress layer handles most of what
 Part 1 describes. This section covers how to configure it properly.
 
-### 2.1 Ingress Controller Landscape (March 2026)
+### 2.1 Ingress Controllers (March 2026)
 
 **The community `kubernetes/ingress-nginx` is EOL as of March 2026.**
 It was announced at KubeCon NA 2025. No further CVE patches, no K8s
