@@ -3404,7 +3404,7 @@ mod tests {
     async fn pressure_fails_both_the_probe_and_admission() {
         // Sink health is deliberately absent from probe_ready, which this does
         // NOT cover: the test state's memory loader is always healthy and the
-        // sinks are concrete types with no seam to fail one. The divergence is
+        // sinks are concrete types with no hook to fail one. The divergence is
         // held by construction and by the callers in main.rs and server/.
         let mut config = test_config();
         config.buffer.memory_limit = 1000;
