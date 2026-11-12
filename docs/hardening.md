@@ -2,7 +2,7 @@
 
 March 2026
 
-**dfe-receiver is the internet-facing ingest component in the DFE stack. dfe-ui is the other component that takes untrusted input.**
+**dfe-receiver is the internet-facing ingest component in the DFE stack. dfe-ui, dfe-hyperdx and, where it is deployed, culvert also take untrusted input (dfe-infra `docs/threat-model.md`).**
 
 This document covers application-level hardening (80/20 effort) and cost-effective infrastructure fronting for K8s and AWS deployments. It answers the questions cloud architects and security reviews ask most often.
 
@@ -136,7 +136,6 @@ The two NGINX ingress controllers are often confused:
 
 [Envoy Gateway](https://gateway.envoyproxy.io/) is the CNCF reference
 implementation of the Kubernetes Gateway API, built on Envoy Proxy.
-Reached v1.2 (stable) -- production-ready for all use cases described here.
 Open source, Apache 2.0.
 
 **Future path:** If service mesh features are ever needed (mTLS between
@@ -481,6 +480,8 @@ and not recommended.
 
 ### 3.7 NLB Configuration Notes
 
+**In a DFE deployment, do not write this Service by hand.** dfe-infra renders the receiver's public door from `exposure.groups.ingest` (dfe-infra `docs/ingest-edge.md`). With door `loadbalancer` it renders one load balancer for the TCP ports and one for UDP, plus an ingest NetworkPolicy, and only while the allow list names someone. The allow list becomes each load balancer's `loadBalancerSourceRanges`, a `/0` in it marks the Service `dfe.hyperi.io/ingest-fence: allow-all`, and on AWS `exposure.public.eipAllocations` pins Elastic IPs per subnet. The Service below is for running the receiver without dfe-infra.
+
 **Same-AZ targeting:** To avoid the per-GB cross-zone data charge, configure
 the NLB target group to use same-AZ routing. This requires your receiver
 pods to be spread across AZs (which they should be for HA anyway).
@@ -559,36 +560,6 @@ See Parts 2 and 3 above for configuration details and cost drivers.
 
 ---
 
-## Fact-Check Log
-
-Claims checked against the linked sources in March 2026:
-
-| Claim | Verified | Source |
-|---|---|---|
-| `kubernetes/ingress-nginx` EOL March 2026 | Yes | [K8s blog Nov 2025](https://kubernetes.io/blog/2025/11/11/ingress-nginx-retirement/) |
-| F5 NGINX Ingress Controller is Apache 2.0 | Yes | [NGINX blog](https://blog.nginx.org/blog/the-ingress-nginx-alternative-open-source-nginx-ingress-controller-for-the-long-term) |
-| NGINX Plus requires JWT license (2024+) | Yes | [NGINX docs](https://docs.nginx.com/nginx-ingress-controller/) |
-| freenginx fork (Feb 2024, Maxim Dounin) | Yes | [InfoQ](https://www.infoq.com/news/2024/03/freenginx-ngnix-web-server/) |
-| Chainguard EmeritOSS fork (security-only) | Yes | [Fastly blog](https://www.fastly.com/blog/ingress-nginx-controller-kubernetes-retires-where-to-go-from-here) |
-| Envoy Gateway ClientTrafficPolicy conn limit | Yes | [EG docs](https://gateway.envoyproxy.io/docs/tasks/traffic/connection-limit/) |
-| `request_headers_timeout` not in ClientTrafficPolicy | Yes | [GH issue #2598](https://github.com/envoyproxy/gateway/issues/2598) |
-| `requestReceivedTimeout` available | Yes | [EG docs](https://gateway.envoyproxy.io/latest/tasks/traffic/client-traffic-policy/) |
-| tower-governor 0.6.0 supports axum 0.8 | Yes | [crates.io deps](https://crates.io/crates/tower_governor/0.6.0/dependencies) |
-| CrowdSec Envoy bouncer exists | Yes | [GitHub](https://github.com/kdwils/envoy-proxy-crowdsec-bouncer) (updated Feb 2026) |
-| CrowdSec Envoy bouncer is not production-tested | Yes | Author's own README |
-| NLB is billed per hour plus data processed | Yes | [AWS ELB pricing](https://aws.amazon.com/elasticloadbalancing/pricing/) |
-| NLB cross-zone traffic is billed per GB | Yes | [AWS blog](https://aws.amazon.com/blogs/networking-and-content-delivery/exploring-data-transfer-costs-for-aws-network-load-balancers/) |
-| AWS WAF is billed per ACL, per rule and per request | Yes | [AWS WAF pricing](https://aws.amazon.com/waf/pricing/) |
-| Shield Advanced is a flat monthly fee | Yes | [AWS WAF pricing](https://aws.amazon.com/waf/pricing/) |
-| Cloudflare Free: unlimited DDoS + 5 WAF rules | Yes | [Cloudflare plans](https://www.cloudflare.com/plans/) |
-| Cloudflare Pro includes a managed WAF | Yes | [Cloudflare Pro](https://www.cloudflare.com/plans/pro/) |
-| Cloudflare Spectrum is billed per GB after a free allowance | Yes | [Cloudflare billing](https://support.cloudflare.com/hc/en-us/articles/360041721872-Billing-for-Spectrum) |
-| CloudFront pay-as-you-go is billed per GB in volume tiers | Yes | [CloudFront pricing](https://aws.amazon.com/cloudfront/pricing/) |
-| axum slowloris vulnerability | Yes | [GH issue #2741](https://github.com/tokio-rs/axum/issues/2741) |
-| Envoy `request_headers_timeout` for slowloris | Yes | [Envoy docs](https://www.envoyproxy.io/docs/envoy/latest/faq/configuration/timeouts) |
-
----
-
 ## References
 
 ### Axum/Tower Security
@@ -596,7 +567,7 @@ Claims checked against the linked sources in March 2026:
 - [axum Slowloris issue #2741](https://github.com/tokio-rs/axum/issues/2741)
 - [axum idle connection timeout discussion #2938](https://github.com/tokio-rs/axum/discussions/2938)
 - [axum connection limit discussion #2561](https://github.com/tokio-rs/axum/discussions/2561)
-- [tower-governor 0.6 (rate limiting)](https://github.com/benwis/tower-governor)
+- [tower-governor 0.8 (rate limiting)](https://github.com/benwis/tower-governor)
 - [axum-server-timeout example](https://github.com/josecelano/axum-server-timeout)
 
 ### K8s Ingress/Gateway Lifecycle

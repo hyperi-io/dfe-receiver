@@ -6,7 +6,6 @@ How dfe-receiver is built, hardened and tuned, and how to point a caller at it.
 - [Internet-Facing Hardening & Fronting Architecture](hardening.md)
 - [dfe-receiver Design Document](internals.md)
 - [DFE Platform Log Spamming Protection](log-spamming.md)
-- [DFE Platform Metrics Standard](metrics.md)
 - [Performance Optimisation Guide](performance.md)
 - [Sidecar Transport Pattern](sidecar-transports.md)
 - [Setting up an inbound webhook caller](webhook-setup.md)
