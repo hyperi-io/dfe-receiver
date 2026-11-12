@@ -21,9 +21,10 @@ dfe-receiver is the third option. Everything below follows from it.
 
 ## What that makes it
 
-The one external door. dfe-receiver and dfe-ui are the only two components in
-the stack that read untrusted input -- the loader, archiver and transforms have
-no listener an outsider reaches, and dfe-fetcher dials out rather than being
+The one external door for data. dfe-receiver, dfe-ui, dfe-hyperdx (user facing,
+behind the engine's token) and, where it is deployed, culvert are the components
+that take untrusted input -- the loader, archiver and transforms have no
+listener an outsider reaches, and dfe-fetcher dials out rather than being
 dialled. So a dependency advisory here is not the same finding as the identical
 advisory in dfe-loader. Grade reachability first, severity second, per
 `dfe-infra/docs/threat-model.md`. The ingest edge is
@@ -44,7 +45,7 @@ flowchart TB
     AG["Agents and collectors<br/>Beats, OTel, Splunk, syslog, Fluent, GELF, Prometheus, NetFlow"]
     PR["Products<br/>alert rules, SaaS hooks"]
 
-    AG --> H["11 protocol handlers<br/>own listener, framing and decode<br/>each normalises to JSON"]
+    AG --> H["10 protocol handlers<br/>own listener, framing and decode<br/>each normalises to JSON"]
     PR --> W["Webhook intake<br/>per-caller auth, topic and filter"]
 
     H --> CORE
@@ -68,12 +69,18 @@ decode, and nothing else. The moment it holds JSON bytes it calls the same
 pipeline every other handler calls, so validation, routing, backpressure and
 metrics exist once rather than eleven times.
 
-`ProtocolHandler` (`src/server/traits.rs`) is where the two halves meet: `name()`, `bind_address()`, `listeners()`, `start(shutdown)`. `Server::build_handlers` (`src/server/mod.rs:125`) collects the enabled handlers, and `Server::run` spawns each one. Adding a protocol is a directory under `src/server/` plus a block in `build_handlers` -- it does not touch the core path.
+`ProtocolHandler` (`src/server/traits.rs`) is where the two halves meet: `name()`, `bind_address()`, `listeners()`, `start(shutdown)`. `Server::build_handlers` (`src/server/mod.rs`) collects the enabled handlers, and `Server::run` spawns each one. Adding a protocol is a directory under `src/server/` plus a block in `build_handlers` -- it does not touch the core path.
 
 `listeners()` returns one `BoundAddr` per socket the handler binds, and `/readyz` waits on all of them: it answers 503 until every enabled listener is serving, and again once any of them stops. A listener that cannot bind, or stops before shutdown, fails its handler's `start()`, the handler's other listeners stop with it, and the process logs `Protocol handler failed` and stays up. The ingest port's `/readyz` 503 body names each failed handler, and the error stays in the log. An enabled handler that cannot be built fails the same way.
 
 HTTP is the exception to opt-in. It always runs, because `/livez` and `/readyz`
 ride its listener, so exposing ingest exposes both probe paths.
+
+`grpc.enabled` defaults to `false`, but a DFE deployment always turns it on:
+dfe-infra's values set the gRPC PushEvents listener on `0.0.0.0:6000`, which
+dfe-fetcher sends to on the direct transport. The slim and mesh profiles also
+send to the loader over gRPC (`loader.transport: grpc`, `destinations.default:
+loader`) with no broker in the path.
 
 The webhook intake is its own handler rather than a route on `/ingest`, for
 reasons worth keeping. `/ingest` checks one server-wide credential in middleware
@@ -111,11 +118,10 @@ With `acknowledgements.enabled: false` a listener answers once the record is que
 
 The sink builds its own `ThreadedProducer` instead of using scalo's
 `KafkaProducer`, because scalo hard-codes a `ProducerContext` with no injection
-point and a delivery report needs one. The cost is `producer_client_config()`
-(`src/sink/kafka/mod.rs:141`), a hand copy of scalo's config assembly and its
-precedence -- profile defaults, then `librdkafka_overrides`, then the sizing
-surface, which wins. It goes wrong quietly if scalo reorders or adds a key.
-scalo-rs#26 is the long-term fix.
+point and a delivery report needs one. Its librdkafka config still comes from
+scalo's own `producer_client_config`, over the `PRODUCER_HIGH_THROUGHPUT`
+profile, so the precedence is scalo's -- profile defaults, then the sizing
+surface, then `librdkafka_overrides`, which wins.
 
 No listener answers success for a record the pipeline did not take: a sender that reads a false success discards the record, and nothing downstream can recover it. A failure is final only when the record itself is at fault -- malformed, over a destination's size ceiling, or sent without valid credentials. Anything else tells the sender to retry, in its own protocol's terms, and a batch stops at the first record not taken. The sender resends the whole request, so the records taken before it arrive twice: duplicates, never loss. Each listener's answer, and the protocol rule behind it, is in [internals.md](internals.md#what-a-sender-is-told).
 
@@ -133,9 +139,9 @@ A buffered record a destination refuses for good leaves once the DLQ confirms th
 
 ## Configuration
 
-A cascade, scalo's: compiled defaults, then `/etc/dfe-receiver/config.yaml`, then `./config.yaml`, then `~/.config/dfe-receiver/config.yaml`, then `DFE_RECEIVER_*` environment variables, then CLI arguments, then runtime overrides. Routing, validation and enrichment reload on SIGHUP, and so do the gRPC destinations: a reload builds the sender of a destination it adds and retires one it removes, whose buffered records go to it or else the DLQ. With disk spillover on, a destination whose address changes moves to the new address on the same spool once no request uses its old sender, and replays what that sender spooled. The Kafka producer and the DLQ change only with a restart.
+Two paths in. Without `--config` it is scalo's cascade: compiled defaults, then `defaults.yaml`, `settings.yaml` and `settings.{env}.yaml`, each searched in `./`, `./config/`, `/config/` and `~/.config/dfe-receiver/`, then `./.env`, then `DFE_RECEIVER_*` environment variables, then CLI arguments. The container passes `--config /etc/dfe-receiver/config.yaml`, which reads that mounted file over the compiled defaults, then the flat `DFE_RECEIVER_*` variables. Routing, validation and enrichment reload on SIGHUP, and so do the gRPC destinations: a reload builds the sender of a destination it adds and retires one it removes, whose buffered records go to it or else the DLQ. With disk spillover on, a destination whose address changes moves to the new address on the same spool once no request uses its old sender, and replays what that sender spooled. The Kafka producer and the DLQ change only with a restart.
 
-Secrets are never literals in the config file. Every credential is a `provider:path[:key]` reference -- `file:`, `vault:`, `aws:`, `env:` -- resolved through `scalo::secrets::resolve`. The receiver has no resolver of its own, and builds scalo's `secrets-vault` and `secrets-aws` features so the OpenBao and AWS Secrets Manager providers are in the binary.
+Secrets are never literals in the config file. Bearer tokens, TLS material and webhook caller secrets are `provider:path[:key]` references -- `file:`, `vault:`, `aws:`, `env:` -- resolved through `scalo::secrets::resolve`. The Kafka SASL credential is a plain value, set by `DFE_RECEIVER_KAFKA_SASL_PASSWORD` from the Kafka Secret. The receiver has no resolver of its own, and builds scalo's `secrets-vault` and `secrets-aws` features so the OpenBao and AWS Secrets Manager providers are in the binary.
 
 ## Invariants
 
@@ -152,21 +158,15 @@ wrong does.
 
 3. **No chart is committed.** At release, hyperi-ci emits the contract with `generate-artefacts` and assembles a thin chart from it on the scalo-service library chart at `release.helm.library`, which moves with the scalo version in `Cargo.toml`. A deployment wires the receiver's listeners by port name, so a renamed port breaks it.
 
-4. **dfe-engine hand-mirrors `Config::validate()`.** The copy lives at
-   `dfe-engine/src/dfe_engine/services/plugins_builtin/receiver.py` and no script
-   compares the two. They have already drifted both ways: the engine refuses a
-   config where gRPC and HTTP share a `bind_address`, which this repo does not
-   check anywhere, and this repo has since grown destination, webhook,
-   rate-limit and spillover rules the engine copy has never heard of. A
-   validation change here is only half the change.
+4. **`auth.mode` defaults to `none`.** A deployment that has not configured auth accepts unauthenticated posts, limited only by body size, request timeout, the IP filter and the rate limiter. The receiver is built to sit behind edge protection, never directly on the internet.
 
-5. **`auth.mode` defaults to `none`.** A deployment that has not configured auth accepts unauthenticated posts, limited only by body size, request timeout, the IP filter and the rate limiter. The chart's default is an in-cluster Service only: a load balancer exists once a deployment sets `publicService.enabled`, and an empty `publicService.loadBalancerSourceRanges` leaves it open to every address. The receiver is built to sit behind edge protection, never directly on the internet.
+   In a DFE deployment the public door is `exposure.groups.ingest` (`dfe-infra/docs/ingest-edge.md`). Load balancers render only while its allow list names someone, so an empty list is no public door at all, and `publicService` stays off and is refused if switched on. The standalone thin chart's default is an in-cluster Service only: there a load balancer exists once a deployment sets `publicService.enabled`, and an empty `publicService.loadBalancerSourceRanges` leaves it open to every address.
 
-6. **`_raw` holds the payload before redaction.** Anything stripped from the
+5. **`_raw` holds the payload before redaction.** Anything stripped from the
    parsed fields downstream is still in `_raw`, indexed for full-text search.
    Capture is off by default for that reason as much as for the doubled bytes.
 
-7. **`Config::validate()` only runs on the cascade path.** A test that builds a
+6. **`Config::validate()` only runs on the cascade path.** A test that builds a
    `Config` struct directly never reaches it, which is how the brokerless test
    configurations work. Do not read a passing test as proof that a YAML file
    would be accepted.

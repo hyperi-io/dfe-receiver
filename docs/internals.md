@@ -206,13 +206,7 @@ variance between platforms — avoid for cross-platform workloads.
 
 ### Kafka Batching
 
-Per-topic batching with configurable thresholds:
-
-- **Size**: 8 MiB default
-- **Count**: 10,000 messages default
-- **Time**: 20ms linger
-
-Uses rdkafka `FutureProducer` with zstd compression.
+librdkafka batches per scalo's `Throughput` sizing profile: `batch.size` 128 KiB, `linger.ms` 20, zstd level 3 and a 64 MiB producer queue. The producer is an rdkafka `ThreadedProducer`. Tune it through `kafka.librdkafka_overrides`.
 
 ### TieredSink
 
@@ -258,7 +252,7 @@ pub struct BearerTokenProvider {
 }
 ```
 
-Static tokens, `accepted_headers[].values` and `header_values` are `SensitiveString`: redacted when the config is serialised, and marked `x-dfe-secret` in the config schema. A presented credential is compared by its SHA-256 hash.
+Static tokens, `accepted_headers[].values` and `header_values` are `SensitiveString`: redacted when the config is serialised, and marked `x-scalo-secret` in the config schema. A presented credential is compared by its SHA-256 hash.
 
 A bearer entry is `<credential-id>:<token>` or a bare `<token>`. The id is not secret: `ingest_bindings.credentials` binds it to orgs, so no token or hash ever sits in the binding config. An entry that does not parse refuses the config, and a secret refresh that does not parse keeps the tokens in place. A webhook caller's header secret is read whole, colons included.
 
@@ -282,15 +276,7 @@ AWS Secrets Manager is served by scalo's `secrets-aws` provider, which the recei
 
 ## Configuration
 
-7-layer cascade (scalo pattern):
-
-1. Compiled defaults
-2. `/etc/dfe-receiver/config.yaml`
-3. `./config.yaml`
-4. `~/.config/dfe-receiver/config.yaml`
-5. Environment variables (`DFE_RECEIVER_*`)
-6. CLI arguments
-7. Runtime overrides
+Without `--config`, scalo's cascade, lowest first: compiled defaults, `defaults.yaml`, `settings.yaml`, `settings.{env}.yaml` (each from `./`, `./config/`, `/config/` or `~/.config/dfe-receiver/`), `./.env`, `DFE_RECEIVER_*`, CLI arguments. The container passes `--config /etc/dfe-receiver/config.yaml`: that file over the compiled defaults, then flat `DFE_RECEIVER_*`.
 
 ### Example Configuration
 
@@ -338,7 +324,7 @@ kafka:
     enabled: true
     mechanism: scram_sha_512   # Works for Apache Kafka, AutoMQ, MSK, Confluent Cloud
     username: dfe-receiver
-    password: "${KAFKA_PASSWORD}"
+    # password stays out of the file: set DFE_RECEIVER_KAFKA_SASL_PASSWORD
   tls:
     enabled: true              # SASL_SSL for external listeners; omit for internal K8s
   librdkafka_overrides:        # producer tuning over scalo's high-throughput profile
@@ -360,10 +346,11 @@ Opt-in retention of the original wire payload in the dfe-schemas common-header
 `_raw` holds raw data the source provided: a syslog line, a HEC `/raw` line, a
 flow record. A JSON payload lives in `_json` alone, so the JSON transports
 never write `_raw`. dfe-loader never overwrites a `_raw` the record carries, so
-a receiver-populated value is stored as it is. Without one, the legacy flatten
-path renames the first of `raw_source_fields` (default `["logoriginal"]`) and
-the `json_primary` path reads a field named `_raw`, or whatever the column's
-`@renamed` / `@source` names. The reason to populate it here is fidelity the
+a receiver-populated value is stored as it is. Without one, and while the
+loader's `metadata.capture_raw` is on (the default), a payload field named
+`raw` lands in `_raw` with no mapping, then any field
+`metadata.raw_source_fields` (default empty) names. An `@renamed` / `@source`
+on the `_raw` column names others. The reason to populate it here is fidelity the
 loader cannot recover: for syslog its fallback lands `message`, the parsed body, after the
 PRI, the header and the exact wire spacing are gone. `syslog_loose` never
 errors either, so a malformed line silently becomes `message = <whole line>`
@@ -469,7 +456,7 @@ credential id, so `_org_id` is held to `ingest_bindings.credentials.<caller>`,
 or the default org when it has none. In `body: array` mode every element is checked, filtered and stamped
 before any is delivered, so one element that is not an object refuses the
 whole request as a 400 with nothing on the topic and the sender's retry
-duplicates nothing. An oversize body is a 413 plus `body_size_rejected_total`,
+duplicates nothing. An oversize body is a 413 plus `receiver_body_size_rejected_total`,
 never a DLQ entry: unauthenticated bytes do not enter Kafka.
 
 `webhook.bind_address` unset merges the routes into the ingest listener after
@@ -489,6 +476,8 @@ examples and the statuses a sender sees -- is in
 ### Kubernetes with KEDA
 
 The chart a release assembles from the deployment contract scales on CPU alone: 80% utilisation, 1 to 10 replicas, from the contract's `keda` block. A deployment adds the ScalingPressure trigger with the library's `keda.extraTriggers` value. The receiver never scales on raw Kafka consumer lag.
+
+In a DFE deployment, dfe-infra's values set the CPU target to 70% and add the ScalingPressure trigger (target 70, read through dfe-keda-shim) by default. The slim profile clears the trigger, so slim scales on CPU alone. The engine's [KEDA scaling page](https://github.com/hyperi-io/dfe-engine/blob/main/docs/deployment/keda-scaling.md) covers the triggers for every app.
 
 ```yaml
 triggers:
@@ -572,36 +561,6 @@ holds it.
 | `scaling_circuit_open` | Gauge | 1 while the Kafka sink's circuit is open, else 0 |
 
 The score is scalo's `ScalingPressure`, refreshed once a second. Each `scaling.*` component adds its weight in proportion to value over saturation, capped at its full weight. An open Kafka circuit forces 0, since more replicas cannot help. Otherwise memory at or past `scaling.memory_gate_threshold` forces 100. `config.example.yaml` lists the components and what feeds each.
-
-## Testing Strategy
-
-### Unit Tests
-
-- JSON validation (valid, invalid, edge cases)
-- Router field extraction and topic mapping
-- Batcher flush triggers (size, count, time)
-- Auth validation (header, bearer, mTLS)
-
-### Integration Tests
-
-- HTTP endpoint with test payloads
-- gRPC endpoint with Vector protocol
-- Kafka producer (testcontainers)
-- TLS/mTLS validation
-- Backpressure scenarios
-
-### Performance Tests
-
-```bash
-# Benchmark hot path
-cargo bench
-
-# Load test
-k6 run --vus 100 --duration 60s load-test.js
-
-# Memory profiling
-cargo run --release --features dhat-heap
-```
 
 ## Security Architecture
 
@@ -814,6 +773,7 @@ volumetric and reputation-based defence.
 | IP allowlist/denylist | Every accept loop the receiver owns, before TLS or any protocol work; syslog UDP per datagram | `server.ip_filter` |
 | Per-client rate limit | A GCRA limiter per HTTP listener (ingest, webhook, HEC, remote write, OTLP HTTP), keyed on the TCP peer or the client a trusted proxy names, answering 429 | `server.rate_limit`, `server.trusted_proxies` |
 | In-flight request cap | Per HTTP listener | `server.max_concurrent_requests` |
+| Connection cap | 10,000 open connections per listener by default | `server.connections.max_per_listener` |
 | Body size and request timeout | Every HTTP listener, answering 413 and 408 | `server.*`, `splunk_hec.*`, `prometheus_rw.*`, `webhook.*` |
 | Request `Content-Encoding` | `/ingest`, Splunk HEC and OTLP HTTP undo gzip within the body size limit once decompressed (413 over it) and answer 415 for any other encoding. Remote write answers 415 for a 2.0 request. Each 415 counts on `receiver_unsupported_encoding_total` | `server.max_body_size`, `splunk_hec.max_body_size` |
 
@@ -825,7 +785,6 @@ These stay with the edge layer:
 
 | Feature | Reason |
 |---------|--------|
-| Connection limits | Kubernetes or load balancer handles this |
 | Access logging | Edge provides this; duplicating wastes resources |
 | Bot detection | WAF/CDN provides sophisticated detection |
 | Geographic blocking | Edge layer handles with IP geolocation |
@@ -938,8 +897,6 @@ See `config.example.yaml` for the full `flow:` block.
   adopted; current Cisco gear emits v9 or IPFIX. A v7 packet hitting our
   listener returns a parse error visible in
   `transport_decode_err_total{transport="netflow", reason="parse_err"}`.
-  If a customer ever reports v7 exporters, support can be added reactively
-  (~1 day of hand-rolled wire decode like our v5 implementation).
 - Template-miss errors currently conflated with parse errors in metrics
   (`transport_decode_err_total{reason="template_miss"}` will be 0)
 - `t_flow_start`/`t_flow_end` carry relative `sysup:<ms>` strings rather than
@@ -948,20 +905,8 @@ See `config.example.yaml` for the full `flow:` block.
   \+ per-packet `recv_from` drain loop (capped at 256 packets per readiness
   event). Functionally equivalent below ~100K pps.
 
-## Completed Milestones
-
-- [x] gRPC Vector sink protocol
-- [x] Sidecar transport pattern (see `docs/sidecar-transports.md`)
-- [x] Config hot-reload via SIGHUP (routing, validation, enrichment)
-- [x] Rule-set routing with credential-bound tenancy (`rules`, `ingest_bindings`)
-- [x] `_timestamp_received` enrichment
-- [x] 9-protocol multi-protocol ingestion (HTTP, gRPC, OTLP, Lumberjack, Splunk HEC, Syslog, Fluent, GELF, Prometheus RW)
-- [x] Flow handler (NetFlow v5/v9/IPFIX + sFlow v5 + NSEL + NAT44, autosense UDP, EXPERIMENTAL)
-- [x] Webhook intake (`POST /webhook/{caller}`, per-caller HMAC or static-header auth, per-caller topic)
-
 ## References
 
-- [dfe-loader](https://github.com/hyperi-io/dfe-loader) - Reference implementation patterns
 - [scalo](https://github.com/hyperi-io/scalo-rs) - Shared data-plane runtime (crate: `scalo`)
 - [Vector HTTP sink](https://vector.dev/docs/reference/configuration/sinks/http/)
 - [Vector sink (gRPC)](https://vector.dev/docs/reference/configuration/sinks/vector/)
