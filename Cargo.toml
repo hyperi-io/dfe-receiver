@@ -10,7 +10,7 @@
 name = "dfe-receiver"
 version = "1.15.10"
 edition = "2024"
-description = "Ingest endpoint for OTLP, Splunk HEC and Prometheus remote-write, writing straight to Kafka. Runs standalone or as part of the HyperI Data Fusion Engine."
+description = "The front door of a DFE deployment: takes events in the protocols agents already speak and hands them on as JSON."
 license-file = "LICENSE"
 repository = "https://github.com/hyperi-io/dfe-receiver"
 exclude = [".github/", "docs/", "reference/", "scripts/", "benches/"]
