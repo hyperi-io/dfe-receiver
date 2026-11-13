@@ -12,7 +12,7 @@ memory allocators, runtime tuning, and profiling workflows.
 > See:
 >
 > - hyperi-ci docs (`RUST-RELEASE-TRACK-OPTIMISATION.md`,
->   `PGO-WORKLOAD-GUIDE.md`) -- once hyperi-ci v1.8+ is shipped
+>   `PGO-WORKLOAD-GUIDE.md`)
 
 ## Quick status
 

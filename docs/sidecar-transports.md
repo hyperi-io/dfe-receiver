@@ -269,7 +269,7 @@ Deploy the sidecar in the same pod as receiver:
 # values.yaml (Helm)
 extraContainers:
   - name: vector-sidecar
-    image: timberio/vector:0.57.0-alpine
+    image: timberio/vector:<version>-alpine  # the tests run VECTOR_IMAGE in tests/common/peers.rs
     args: ["--config", "/etc/vector/vector.yaml"]
     volumeMounts:
       - name: vector-config
@@ -395,7 +395,7 @@ containers:
         port: 8080
 
   - name: vector-sidecar
-    image: timberio/vector:0.57.0-alpine
+    image: timberio/vector:<version>-alpine  # the tests run VECTOR_IMAGE in tests/common/peers.rs
     command:
       - sh
       - -c
@@ -425,7 +425,7 @@ services:
       start_period: 10s
 
   vector-sidecar:
-    image: timberio/vector:0.57.0-alpine
+    image: timberio/vector:<version>-alpine  # the tests run VECTOR_IMAGE in tests/common/peers.rs
     depends_on:
       dfe-receiver:
         condition: service_healthy
