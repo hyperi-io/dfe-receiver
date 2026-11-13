@@ -232,7 +232,7 @@ not the shipped one.
 | Rename a port in `src/deployment.rs` | Keep the name | Deployments name the receiver's ports to wire its listeners, and a rename breaks every one that names the old port |
 | Change `Config::validate()` alone | Update dfe-engine's mirror | It hand-copies this validation, nothing compares them, and they have drifted |
 | Read 202 as delivered on a listener with acknowledgements off | Compare `receiver_kafka_sends_total` with `receiver_kafka_delivered_total` | That 202 is answered at enqueue |
-| Read a 503 as "not written" | Expect the retry to duplicate | The hold can expire while a broker is writing the record |
+| Read a 503 as "not written" | Allow for the retry to duplicate the record | The hold can expire while a broker is writing it |
 | Set `VAULT_*` on the test OpenBao | Set `BAO_*` | `VAULT_` is ignored, a random root token is minted, everything 403s silently |
 
 ### Where this sits
