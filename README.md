@@ -1,20 +1,18 @@
 # dfe-receiver
 
+The front door of a DFE deployment: takes events in the protocols agents already speak and hands them on as JSON.
+
 [![Build Status](https://github.com/hyperi-io/dfe-receiver/actions/workflows/ci.yml/badge.svg)](https://github.com/hyperi-io/dfe-receiver/actions)
 [![License](https://img.shields.io/badge/license-BUSL--1.1-blue)](https://github.com/hyperi-io/dfe-receiver/blob/main/LICENSE)
 
-The front door of a DFE deployment. It takes events from agents in the protocols they already speak, normalises them to JSON, and hands them to Kafka or straight to dfe-loader over gRPC.
+## What it does
 
-## What it gives you
-
-- One service for HTTP(S) JSON, Vector's gRPC sink, OTLP, Beats, Splunk HEC, syslog, Fluent Forward, GELF, Prometheus Remote Write and webhooks, so an agent keeps the protocol it already speaks and needs only the receiver's address and any credentials.
+- One service for HTTP(S) JSON, Vector's gRPC sink, OTLP, Beats, Splunk HEC, syslog, Fluent Forward, GELF, Prometheus Remote Write and webhooks, so an agent keeps the protocol it already speaks. Every handler normalises to JSON and hands the record to Kafka or straight to dfe-loader over gRPC.
 - Ordered routing rules that set each record's source and org from fields it already carries, such as `data_stream.dataset`, and pick its Kafka topic from the source.
-- A sender answered only once every destination has confirmed its records, on by default for each listener that can hold its answer.
+- A sender answered only once every destination has confirmed its records, on by default for each listener that can hold its answer. `POST /ingest` answers 202 when the batch is accepted, 503 with `Retry-After` when it cannot take it, and 413 over the body limit, 10,485,760 bytes by default.
 - Each record's org held to what its sender may use. A credential or listener bound in `ingest_bindings` lands only in its own orgs, and an unbound sender only in the deployment's default org.
 - Header, bearer token and mTLS authentication.
 - Built on [scalo](https://github.com/hyperi-io/scalo-rs), so config, logs, metrics, health probes and memory backpressure work the way they do in every DFE Rust service.
-
-## Protocols
 
 | Protocol | Port | Source |
 |---|---|---|
@@ -29,48 +27,22 @@ The front door of a DFE deployment. It takes events from agents in the protocols
 | Fluent Forward | 24224 | Fluentd, Fluent Bit |
 | GELF TCP | 12201 | Graylog GELF output, Fluent Bit |
 | Prometheus Remote Write | 9091 | Prometheus, VictoriaMetrics |
-| Flow (NetFlow + sFlow) -- **EXPERIMENTAL** | 2055 / 4739 / 6343 UDP | NetFlow v5/v9, IPFIX, sFlow v5 exporters (v7 not supported) |
+| Flow (NetFlow + sFlow), experimental | 2055 / 4739 / 6343 UDP | NetFlow v5/v9, IPFIX, sFlow v5 exporters (v7 not supported) |
 
-Flow (NetFlow and sFlow) is experimental. A listener that answers at enqueue (acknowledgements off, or syslog, GELF and flow) buffers in memory behind a circuit breaker, and disk spillover is opt-in (`buffer.spillover.enabled`).
+HTTP always runs, because the probes ride its listener, and the other listeners are opt-in. A listener that answers at enqueue (acknowledgements off, or syslog, GELF and flow) buffers in memory behind a circuit breaker, and disk spillover is opt-in.
 
-## Quick Start
+## Quick start
 
-### Build prerequisites
-
-`protoc` must be on `PATH`. The gRPC, OTLP and Prometheus Remote Write
-protocols compile vendored `.proto` files at build time, and so does `scalo` --
-without it the build fails inside a dependency's build script rather than
-anywhere that names the missing package.
+The build needs `protoc`, `cmake` and a C toolchain on `PATH`: the gRPC, OTLP and Prometheus Remote Write protocols compile vendored `.proto` files, and `aws-lc-sys` and `rdkafka-sys` build native code.
 
 ```bash
-# Debian / Ubuntu
-sudo apt-get install -y protobuf-compiler
-
-# macOS
-brew install protobuf
-
-protoc --version
-```
-
-`cmake` and a C toolchain are also needed: `aws-lc-sys` (rustls' crypto
-backend) and `rdkafka-sys` both build native code from source.
-
-```bash
-# Build
+sudo apt-get install -y protobuf-compiler cmake build-essential   # Debian or Ubuntu
+brew install protobuf cmake                                        # macOS
 cargo build --release
-
-# Run with config file
 ./target/release/dfe-receiver --config config.yaml
-
-# Run with environment override
-DFE_RECEIVER_SERVER__BIND_ADDRESS=0.0.0.0:8080 ./target/release/dfe-receiver
 ```
 
-## Configuration
-
-See [config.example.yaml](https://github.com/hyperi-io/dfe-receiver/blob/main/config.example.yaml) for full configuration reference.
-
-### Minimal Configuration
+The smallest config that moves data names the bind address, an auth mode, the brokers and the default source:
 
 ```yaml
 server:
@@ -87,397 +59,26 @@ routing:
   topic_suffix: "_land"
 ```
 
-### Authentication Modes
+## Configuration
 
-#### Header Authentication
+Every setting is in [config.example.yaml](config.example.yaml), and `DFE_RECEIVER_SERVER__BIND_ADDRESS` is the shape of an environment override: the `DFE_RECEIVER_` prefix, then the key path with double underscores. `server.auth.mode` is `none`, `header`, `bearer` or `mtls`. The routing rules, the webhook intake, the metrics and the hot-path design are in [docs/internals.md](docs/internals.md).
 
-```yaml
-server:
-  auth:
-    mode: header
-    accepted_headers:
-      - name: x-api-key
-        values: ["secret-key-1", "secret-key-2"]
-```
+## Documentation
 
-#### Bearer Token Authentication
+- [docs/internals.md](docs/internals.md): how it works, configuration, the webhook intake, metrics and the security model.
+- [docs/hardening.md](docs/hardening.md): running it where it is reachable from outside.
+- [docs/sidecar-transports.md](docs/sidecar-transports.md) and [docs/webhook-setup.md](docs/webhook-setup.md): the transport options and the webhook callers.
+- [docs/metrics.md](docs/metrics.md) and [docs/performance.md](docs/performance.md): what it reports and what it costs.
+- [docs/architecture.md](docs/architecture.md): where it sits in the suite and why it is shaped this way.
 
-Static tokens (development):
+The suite's published docs are at https://dfe.docs.hyperi.io.
 
-```yaml
-server:
-  auth:
-    mode: bearer
-    bearer:
-      tokens:
-        - "dev-token-1"
-        - "dev-token-2"
-```
+## Help and contributing
 
-Dynamic tokens from secret manager (production):
-
-```yaml
-server:
-  auth:
-    mode: bearer
-    bearer:
-      secret_source: "vault:secret/data/auth:bearer_tokens"
-      refresh_interval_secs: 300
-```
-
-Supported secret sources, read through scalo's credential resolver:
-
-- `file:/path/to/tokens` - Local file (K8s secrets)
-- `vault:secret/path:key` - OpenBao/Vault, also spelled `bao:` or `openbao:`
-- `aws:secret-name[:key]` - AWS Secrets Manager, with one key picked out of a JSON secret when `:key` is given
-- `env:VAR_NAME` - Environment variable
-
-A `vault:` reference names the field to read, so the `:key` is not optional there. An `aws:` reference takes the secret's name, never its ARN (an ARN carries colons of its own), and reads its region and credentials from the standard AWS credential chain.
-
-#### mTLS Authentication
-
-```yaml
-server:
-  tls:
-    enabled: true
-    cert_file: /etc/ssl/server.crt
-    key_file: /etc/ssl/server.key
-    ca_file: /etc/ssl/ca.crt
-    client_auth: required
-  auth:
-    mode: mtls
-```
-
-## API Endpoints
-
-### POST /ingest
-
-Accepts JSON payloads for ingestion.
-
-JSON is the only payload format. MessagePack, supported in DFE/XDR 2.0 and 2.1, is deprecated in DFE 2.2 and no longer accepted: the JSON path (SIMD parsing with sonic-rs, zstd on the wire) is fast enough that MessagePack gave no CPU saving.
-
-Fluent Forward input (fluentd) is still accepted: it is converted to JSON at the receiver.
-
-```bash
-curl -X POST http://localhost:8080/ingest \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <YOUR_TOKEN>" \
-  -d '{"event_type": "login", "user_id": "123"}'
-```
-
-**Response Codes:**
-
-- `202 Accepted` - Every destination confirmed the request's records. With
-  `server.acknowledgements.enabled: false` it means queued, and the receiver
-  holds the record in memory until an unreachable destination returns
-- `400 Bad Request` - Invalid JSON or validation failure
-- `401 Unauthorized` - Authentication failed
-- `503 Service Unavailable` with `Retry-After: 5` - The records were not
-  confirmed within the hold (25 s), or the receiver is under memory pressure,
-  or it cannot take the record for any other reason that is not the record's
-  own fault. Not confirmed does not mean not written: re-send the request, and
-  a record a broker took late arrives twice, never zero times
-
-Every listener follows the same rule in its own protocol: a record the
-receiver could not take is never answered as accepted. The per-listener
-answers are in [docs/internals.md](docs/internals.md#what-a-sender-is-told).
-
-### POST /webhook/{caller}
-
-A generic authenticated intake for products that push events: one route per
-caller declared under `webhook.callers`, each with its own secret, topic and
-body shape. Every accepted record lands on the caller's topic stamped with
-`_source: <caller>`, `_timestamp_received` and the `_org_id` the caller's name
-is bound to in `ingest_bindings.credentials`.
-
-```yaml
-webhook:
-  enabled: true
-  callers:
-    - name: runzero                  # POST /webhook/runzero
-      topic: runzero_alerts_land
-      auth:
-        mode: header                 # the product can only set static headers
-        secret_source: "file:/run/secrets/runzero-webhook"
-        header: x-webhook-secret
-    - name: pager
-      topic: pager_land
-      auth:
-        mode: hmac                   # HMAC-SHA256 over "{timestamp}.{body}"
-        secret_source: "vault:kv/data/dfe/webhooks:pager"
-        header: x-signature
-        timestamp_header: x-timestamp
-        tolerance_secs: 300
-      body: array
-      filter: 'severity == "high"'
-```
-
-`hmac` gives integrity and a replay window; `header` is for products that can
-only attach fixed headers and is opt-in per caller. With `webhook.bind_address`
-unset the routes share the HTTP listener without its `server.auth` middleware;
-set it for an own listener. Secrets come from a `provider:path:key` reference,
-never from the config file.
-
-**Response Codes:**
-
-- `202 Accepted` - Every record confirmed, or queued with
-  `webhook.acknowledgements.enabled: false` (a filtered-out record still answers 202)
-- `400 Bad Request` - Body shape does not match the caller's `body` setting,
-  or an array element is not an object (the whole request is refused and
-  nothing is delivered), or validation refused a record for good
-- `401 Unauthorized` - `{"error": "<reason>"}`: `missing_signature`,
-  `invalid_signature`, `stale_signature`, `missing_auth_header`,
-  `invalid_header_value`, ...
-- `404 Not Found` - No caller by that name
-- `413 Payload Too Large` - Over `webhook.max_body_size`
-- `503 Service Unavailable` - A record was not confirmed or could not be taken
-  (pressure, a full hold, a destination down), with `retry-after`. Records of
-  the same request already written arrive again on the retry
-
-### GET /livez
-
-Kubernetes liveness probe.
-
-```bash
-curl http://localhost:8080/livez
-# OK
-```
-
-### GET /readyz
-
-Kubernetes readiness probe. Returns 503 until every enabled listener has bound, again once any of them stops or fails (draining included), and under memory pressure. A listener that cannot bind holds it at 503 while the process stays up and logs `Protocol handler failed`. The ingest port's 503 body names each failed handler, for example `{"status":"not_ready","listeners":[{"handler":"syslog"}]}`, and the error is in the log only. A destination outage does not fail it: every replica shares the outage, so failing the probe would empty the Service, and ingest refuses per request with 503 instead. The metrics port's `/readyz`, which the chart probes, gives the same answer.
-
-```bash
-curl http://localhost:8080/readyz
-```
-
-## Routing
-
-The `rules` section is an ordered rule set that sets each record's `_source`,
-then its `_org_id`. The first matching row per field wins. The source picks
-the topic, and `destinations.sources` can send it elsewhere.
-
-```yaml
-rules:
-  rules:
-    - id: auth-events
-      match: { field: event.category, op: equals, value: auth }
-      set: { _source: { value: logs_auth } }
-    - id: acme-firewall
-      match: { field: data_stream.dataset, op: equals, value: cisco_asa.log }
-      set: { _org_id: { value: acme } }
-ingest_bindings:
-  credentials:
-    acme-ingest:                 # bearer entry "acme-ingest:<token>"
-      orgs: [acme]
-routing:
-  default_source: "main"
-  default_org_id: "default"
-  topic_suffix: "_land"
-```
-
-Given `{"event": {"category": "auth"}}`, the record routes to `logs_auth_land`.
-Unmatched records route to `main_land` (default_source + topic_suffix).
-
-A record lands only in an org its sender is bound to. A row that picks
-another org is replaced by the binding's default org and counted on
-`rules_clamped_total`, never refused. A credential or listener with no binding
-lands its records in `routing.default_org_id`. A sender's own `_org_id` is
-removed unless `routing.source_org_id: allow`, and a sender's `_source` that a
-row replaces is kept as `_source_original`. Rule edits apply on the next config
-reload, with no restart.
-
-Records land on Kafka by default. `transport: grpc` (or `DFE_RECEIVER_TRANSPORT=grpc`), the key dfe-loader and dfe-archiver also read, sends them to dfe-loader's Push listener with no broker in the path. Under it an unset `destinations.default` becomes `loader` and an unset `loader.transport` becomes `grpc`. A config that sets either against it fails to start.
-
-## Metrics
-
-Prometheus metrics available at the configured metrics endpoint:
-
-```yaml
-metrics:
-  address: "0.0.0.0:9090"
-```
-
-Key metrics:
-
-- `receiver_requests_total` - Total requests received
-- `receiver_bytes_received_total` - Total bytes ingested
-- `receiver_kafka_sends_total` - Messages librdkafka queued
-- `receiver_kafka_delivered_total` - Messages a broker acknowledged
-- `receiver_kafka_delivery_failures_total` - Messages no broker confirmed, by
-  reason; a timed-out message may still have been written
-- `pipeline_delivery_guarantee` - What each listener's answer promises, and why, by `listener`
-- `receiver_records_dropped_total` - Records dropped with no way to tell the
-  sender (UDP syslog, a record refused on an acknowledgement-only protocol, a
-  held record at shutdown), by transport and reason
-- `scaling_pressure` - Scaling pressure for autoscaling (0-100)
-
-## Architecture
-
-Every protocol handler normalises to JSON, then all share one core pipeline.
-The handlers run in parallel; HTTP always runs because the probes ride its
-listener, and the other ten are opt-in. The table above lists the full set.
-
-```mermaid
-flowchart TB
-    SRC["Agents / collectors<br/>Vector, Beats, OTel, Splunk, syslog, ..."]
-    SRC --> H["11 protocol handlers<br/>HTTP always on, ten opt-in<br/>spawned in parallel, normalise to JSON"]
-    H -->|"bytes::Bytes (normalised JSON)"| AUTH["Auth middleware<br/>header / bearer / mTLS"]
-    AUTH --> VAL["JSON validation<br/>sonic-rs SIMD, optional field checks"]
-    VAL --> RT["Router<br/>zero-copy field extract -> topic name"]
-    RT --> TS["Sink<br/>held answers: sent direct, answered on confirmation<br/>answers at enqueue: in-memory buffer + CircuitBreaker<br/>or scalo TieredSink + disk spool (opt-in)"]
-    TS --> KAFKA[("Kafka topics<br/>librdkafka, batched / LZ4")]
-    TS --> GRPC["Push listeners<br/>dfe-loader, transforms, archiver"]
-    RT -. unmatched .-> DEF["main_land topic"]
-```
-
-Design rationale and the invariants are in
-[docs/architecture.md](docs/architecture.md).
-
-## Development
-
-```bash
-# Run tests
-cargo nextest run
-
-# Run with debug logging
-RUST_LOG=debug cargo run -- --config config.yaml
-
-# Run the Kafka e2e tests (requires Docker; they are #[ignore] by default)
-docker compose -f docker-compose.test.yaml up -d
-cargo nextest run --test e2e --run-ignored all
-docker compose -f docker-compose.test.yaml down -v
-```
-
-### Helm chart
-
-No chart is committed here. At release, hyperi-ci runs the binary's `generate-artefacts` for the deployment contract and assembles a thin chart from it on the scalo-service library chart, at the version `release.helm.library` names in `.hyperi-ci.yaml`. Keep that version at the scalo version in `Cargo.toml`: a library renders only the contract version its scalo release writes.
-
-To see the chart a release would ship, build the binary and run `hyperi-ci chart assemble --binary target/debug/dfe-receiver --image ghcr.io/hyperi-io/dfe-receiver:<tag>@sha256:<digest> --version <version>`. It prints the chart directory it wrote.
-
-The contract marks every ingest port public and the gRPC hop internal. The library exposes the public ports only when a deployment sets `publicService.enabled`, as `<fullname>-public` for TCP and `<fullname>-public-udp` for UDP.
-
-### Working with Kafka
-
-[kcat](https://github.com/edenhill/kcat) (formerly kafkacat) is the essential
-CLI tool for inspecting Kafka topics during development.
-
-```bash
-# Start local Kafka (KRaft, no Zookeeper)
-docker compose -f docker-compose.test.yaml up -d
-
-# List all topics and broker info
-kcat -b localhost:9092 -L
-
-# Consume all messages from a topic (Ctrl+C to stop)
-kcat -b localhost:9092 -t events -C
-
-# Consume with metadata (partition, offset, timestamp)
-kcat -b localhost:9092 -t events -C -f 'P:%p O:%o T:%T\n%s\n'
-
-# Tail a topic - watch live as dfe-receiver routes messages
-kcat -b localhost:9092 -t events -C -o end
-
-# Send a test event through dfe-receiver and verify it arrives
-curl -s -X POST http://localhost:8080/ingest \
-  -H 'Content-Type: application/json' \
-  -d '{"level":"info","message":"kcat test event"}'
-
-kcat -b localhost:9092 -t events -C -c 1  # consume exactly 1 message
-
-# Produce directly to Kafka (bypass dfe-receiver, useful for consumer testing)
-echo '{"level":"warn","message":"direct kafka test"}' | \
-  kcat -b localhost:9092 -t events -P
-
-# Count messages in a topic
-kcat -b localhost:9092 -t events -C -e -q | wc -l
-
-# Optional: open Kafbat UI in browser (start with --profile ui)
-docker compose -f docker-compose.test.yaml --profile ui up -d
-open http://localhost:8080
-```
-
-> **Install kcat:** `apt install kcat` / `brew install kcat`
-> On older systems it may be packaged as `kafkacat`.
-
-## Issues
+How to work in this repo, the commands that prove a change and what tends to bite are in [CONTRIBUTING.md](CONTRIBUTING.md). A question that is not a bug goes in a new issue.
 
 Open bugs: [this repo](https://github.com/hyperi-io/dfe-receiver/issues?q=is%3Aopen+is%3Aissue+type%3ABug+-label%3Abacklog+-label%3Anext-minor) | [whole DFE suite](https://github.com/search?type=issues&q=is%3Aopen+is%3Aissue+type%3ABug+-label%3Abacklog+-label%3Anext-minor+repo%3Ahyperi-io%2Fdfe-infra+repo%3Ahyperi-io%2Fdfe-docker+repo%3Ahyperi-io%2Fdfe-deploy+repo%3Ahyperi-io%2Fdfe-engine+repo%3Ahyperi-io%2Fdfe-loader+repo%3Ahyperi-io%2Fdfe-receiver+repo%3Ahyperi-io%2Fdfe-fetcher+repo%3Ahyperi-io%2Fdfe-archiver+repo%3Ahyperi-io%2Fdfe-transform-vrl+repo%3Ahyperi-io%2Fdfe-transform-vector+repo%3Ahyperi-io%2Fdfe-transform-elastic+repo%3Ahyperi-io%2Fdfe-ui+repo%3Ahyperi-io%2Fdfe-hyperdx+repo%3Ahyperi-io%2Fscalo-rs+repo%3Ahyperi-io%2Fscalo-py+repo%3Ahyperi-io%2Flogreducer+repo%3Ahyperi-io%2Fdfe-schemas+repo%3Ahyperi-io%2Fvector-vrl+repo%3Ahyperi-io%2Fculvert+repo%3Ahyperi-io%2Fdfe-clickhouse-rs+repo%3Ahyperi-io%2Ffactbook-rs)
 
 ## License
 
-This project is licensed under the Business Source License 1.1 (BUSL-1.1). See [LICENSE](https://github.com/hyperi-io/dfe-receiver/blob/main/LICENSE) for details.
-
-Copyright (c) 2026 HYPERI PTY LIMITED
-
-For commercial licensing options, see [COMMERCIAL.md](https://github.com/hyperi-io/dfe-receiver/blob/main/COMMERCIAL.md).
-
-## Context
-
-### What this is
-
-The suite's one external door: eleven wire protocols terminated, every payload
-normalised to JSON, stamped, routed to Kafka or straight to dfe-loader over
-gRPC. It and dfe-ui are the only components reading untrusted input, so an
-advisory here outranks the same one in dfe-loader -- reachability first, per
-`dfe-infra/docs/threat-model.md`. It is NOT a transform stage (that is
-dfe-loader).
-
-### Where things live
-
-| Path | What is in it |
-|---|---|
-| `src/main.rs` | CLI, config load, the `--emit-*` generators, the startup order |
-| `src/server/` | One directory per handler, plus `traits.rs` (the `ProtocolHandler` boundary), auth, TLS, IP filter. `mod.rs:125` registers them |
-| `src/pipeline/`, `routing/`, `validation/` | The shared core path every handler feeds |
-| `src/pipeline/acks.rs` | The held answer: admission, hold budget, next-hop deadline |
-| `src/buffer/` | `SinkBackend` for answers at enqueue: in-memory, or scalo `TieredSink` with a disk spool |
-| `src/sink/` | `kafka/`, `grpc/`, `file/`. Kafka owns its producer so delivery reports are visible |
-| `src/config/mod.rs`, `src/deployment.rs` | `Config::validate()`, and the contract the Dockerfile and the released chart are generated from |
-| `Dockerfile`, `proto/` | Generated or vendored. Do not hand-edit |
-| `tests/` | Targets `smoke`, `integration`, `e2e`. `common/mod.rs` is the container harness |
-| `docs/architecture.md` | Why it is shaped this way, and the invariants |
-
-### Commands that prove a change
-
-```bash
-hyperi-ci check                                 # the gate
-cargo nextest run                               # unit + integration, incl. the drift guards
-cargo nextest run --test e2e --run-ignored all  # adds the 8 Kafka e2e tests (needs Docker)
-```
-
-`protoc`, `cmake` and a C toolchain must be present or the build dies inside a
-dependency's build script, naming nothing useful. Three ways green lies: the
-default run skips eight `#[ignore]` Kafka tests; container tests skip silently
-when Docker is down locally and only panic under `$CI`; and `features: default`
-is `otlp` alone, with hyperi-ci adding `--features jemalloc`, so a local build is
-not the shipped one.
-
-### What tends to bite
-
-| Don't | Do | Why |
-|---|---|---|
-| Read `Cargo.toml` for the version | Read `VERSION` | semantic-release writes only `CHANGELOG.md` and `VERSION`. `Cargo.toml` sits at `1.15.10` while `VERSION` is `1.15.36` |
-| `cargo test --test integration_kafka` | `--test e2e --run-ignored all` | No such target. This README and `tests/e2e/kafka.rs` both carried it |
-| Trust green after Docker was down | Check the skip count, or set `CI=1` | A bad third-party URL shipped this way -- skipped locally, never re-checked |
-| Hand-edit `Dockerfile`, or commit a chart | Fix `src/deployment.rs`, then `--emit-dockerfile Dockerfile` | The Dockerfile is generator output with a test asserting it matches, and the release assembles the chart from the contract, so a hand edit is reverted or never ships |
-| Bump scalo and stop | Bump, regenerate, move `release.helm.library` in `.hyperi-ci.yaml` to the same version, commit the diff | The generator is in scalo, so the drift guard fails by design, and a scalo-service release renders only the contract version its scalo release writes |
-| Rename a port in `src/deployment.rs` | Keep the name | Deployments name the receiver's ports to wire its listeners, and a rename breaks every one that names the old port |
-| Change `Config::validate()` alone | Update dfe-engine's mirror | It hand-copies this validation, nothing compares them, and they have drifted |
-| Read 202 as delivered on a listener with acknowledgements off | Compare `receiver_kafka_sends_total` with `receiver_kafka_delivered_total` | That 202 is answered at enqueue |
-| Read a 503 as "not written" | Expect the retry to duplicate | The hold can expire while a broker is writing the record |
-| Set `VAULT_*` on the test OpenBao | Set `BAO_*` | `VAULT_` is ignored, a random root token is minted, everything 403s silently |
-
-### Where this sits
-
-Inbound: **scalo-rs** (crate `scalo`) by `cargo-dep` -- a runtime range plus a dev-dependency range for test support, which move together, and a `generated-file` lockstep edge through the `Dockerfile`, at contract schema version 4. The released chart is assembled on the scalo-service library chart at `release.helm.library`, which moves with the scalo version in `Cargo.toml`.
-
-Outbound: **dfe-infra** by `image-pin` lockstep -- its `versions.yaml` pins
-the image and the thin chart released here, and Argo deploys that published
-chart. **dfe-engine** by `mirrored-logic` -- it
-reimplements `Config::validate()` by hand, so only a human closes that edge.
-
-```bash
-python3 ../dfe-infra/scripts/dfe-stack suite --consumer dfe-receiver
-python3 ../dfe-infra/scripts/dfe-stack suite --producer dfe-receiver
-```
+BUSL-1.1, see [LICENSE](LICENSE).

@@ -160,7 +160,7 @@ hyperi-ci check
 it once with `uv tool install hyperi-ci` (or `pipx install hyperi-ci`), or run it
 ad hoc with `uvx hyperi-ci check`. It runs the project's full local validation --
 the same suite CI runs -- and reports what to fix. Run it before every push and before opening a
-pull request; it is the single best way to give your change the best chance of
+pull request. It is the single best way to give your change the best chance of
 surviving CI.
 
 ## CI/CD Workflow
@@ -178,3 +178,73 @@ This happens automatically - no manual intervention required.
 ## Questions
 
 If you have questions about contributing, please open an issue or contact us.
+
+## Context
+
+### What this is
+
+The suite's one external door: eleven wire protocols terminated, every payload
+normalised to JSON, stamped, routed to Kafka or straight to dfe-loader over
+gRPC. It and dfe-ui are the only components reading untrusted input, so an
+advisory here outranks the same one in dfe-loader -- reachability first, per
+`dfe-infra/docs/threat-model.md`. It is NOT a transform stage (that is
+dfe-loader).
+
+### Where things live
+
+| Path | What is in it |
+|---|---|
+| `src/main.rs` | CLI, config load, the `--emit-*` generators, the startup order |
+| `src/server/` | One directory per handler, plus `traits.rs` (the `ProtocolHandler` boundary), auth, TLS, IP filter. `mod.rs:125` registers them |
+| `src/pipeline/`, `routing/`, `validation/` | The shared core path every handler feeds |
+| `src/pipeline/acks.rs` | The held answer: admission, hold budget, next-hop deadline |
+| `src/buffer/` | `SinkBackend` for answers at enqueue: in-memory, or scalo `TieredSink` with a disk spool |
+| `src/sink/` | `kafka/`, `grpc/`, `file/`. Kafka owns its producer so delivery reports are visible |
+| `src/config/mod.rs`, `src/deployment.rs` | `Config::validate()`, and the contract the Dockerfile and the released chart are generated from |
+| `Dockerfile`, `proto/` | Generated or vendored. Do not hand-edit |
+| `tests/` | Targets `smoke`, `integration`, `e2e`. `common/mod.rs` is the container harness |
+| `docs/architecture.md` | Why it is shaped this way, and the invariants |
+
+### Commands that prove a change
+
+```bash
+hyperi-ci check                                 # the gate
+cargo nextest run                               # unit + integration, incl. the drift guards
+cargo nextest run --test e2e --run-ignored all  # adds the 8 Kafka e2e tests (needs Docker)
+```
+
+`protoc`, `cmake` and a C toolchain must be present or the build dies inside a
+dependency's build script, naming nothing useful. Three ways green lies. The
+default run skips eight `#[ignore]` Kafka tests. Container tests skip silently
+when Docker is down locally and only panic under `$CI`. And `features: default`
+is `otlp` alone, with hyperi-ci adding `--features jemalloc`, so a local build is
+not the shipped one.
+
+### What tends to bite
+
+| Don't | Do | Why |
+|---|---|---|
+| Read `Cargo.toml` for the version | Read `VERSION` | semantic-release writes only `CHANGELOG.md` and `VERSION`. `Cargo.toml` sits at `1.15.10` while `VERSION` is `1.15.36` |
+| `cargo test --test integration_kafka` | `--test e2e --run-ignored all` | No such target. This README and `tests/e2e/kafka.rs` both carried it |
+| Trust green after Docker was down | Check the skip count, or set `CI=1` | A container test passes without running when Docker is down locally |
+| Hand-edit `Dockerfile`, or commit a chart | Fix `src/deployment.rs`, then `--emit-dockerfile Dockerfile` | The Dockerfile is generator output with a test asserting it matches, and the release assembles the chart from the contract, so a hand edit is reverted or never ships |
+| Bump scalo and stop | Bump, regenerate, move `release.helm.library` in `.hyperi-ci.yaml` to the same version, commit the diff | The generator is in scalo, so the drift guard fails by design, and a scalo-service release renders only the contract version its scalo release writes |
+| Rename a port in `src/deployment.rs` | Keep the name | Deployments name the receiver's ports to wire its listeners, and a rename breaks every one that names the old port |
+| Change `Config::validate()` alone | Update dfe-engine's mirror | It hand-copies this validation, nothing compares them, and they have drifted |
+| Read 202 as delivered on a listener with acknowledgements off | Compare `receiver_kafka_sends_total` with `receiver_kafka_delivered_total` | That 202 is answered at enqueue |
+| Read a 503 as "not written" | Allow for the retry to duplicate the record | The hold can expire while a broker is writing it |
+| Set `VAULT_*` on the test OpenBao | Set `BAO_*` | `VAULT_` is ignored, a random root token is minted, everything 403s silently |
+
+### Where this sits
+
+Inbound: **scalo-rs** (crate `scalo`) by `cargo-dep` -- a runtime range plus a dev-dependency range for test support, which move together, and a `generated-file` lockstep edge through the `Dockerfile`, at contract schema version 4. The released chart is assembled on the scalo-service library chart at `release.helm.library`, which moves with the scalo version in `Cargo.toml`.
+
+Outbound: **dfe-infra** by `image-pin` lockstep -- its `versions.yaml` pins
+the image and the thin chart released here, and Argo deploys that published
+chart. **dfe-engine** by `mirrored-logic` -- it
+reimplements `Config::validate()` by hand, so only a human closes that edge.
+
+```bash
+python3 ../dfe-infra/scripts/dfe-stack suite --consumer dfe-receiver
+python3 ../dfe-infra/scripts/dfe-stack suite --producer dfe-receiver
+```
