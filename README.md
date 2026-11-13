@@ -71,7 +71,7 @@ Every setting is in [config.example.yaml](config.example.yaml), and `DFE_RECEIVE
 - [docs/metrics.md](docs/metrics.md) and [docs/performance.md](docs/performance.md): what it reports and what it costs.
 - [docs/architecture.md](docs/architecture.md): where it sits in the suite and why it is shaped this way.
 
-The suite's published docs are at <https://dfe.docs.hyperi.io>.
+The suite's published docs are at <https://dfe.docs.hyperi.io>, and this repository's pages at <https://dfe.docs.hyperi.io/dfe-receiver/>.
 
 ## Help and contributing
 
