@@ -15,8 +15,8 @@ A test that needs Docker skips without a daemon on a developer's machine and fai
 
 | Service | Image | Port |
 |---|---|---|
-| Kafka | `apache/kafka:4.3.1@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837` | 9092 PLAINTEXT |
-| OpenBao | `openbao/openbao:2.6.1@sha256:5b2486ab0fb90bbc788cc345b0a08616dfb375873ee8be5df3a2fd4d378a67e0` | 8200, dev server |
+| Kafka | `apache/kafka` | 9092 PLAINTEXT |
+| OpenBao | `openbao/openbao` | 8200, dev server |
 
 The Kafka pin is scalo's `transport::kafka::test_support::KAFKA_IMAGE`. The OpenBao pin is `OPENBAO_IMAGE` in `tests/common/mod.rs`.
 
