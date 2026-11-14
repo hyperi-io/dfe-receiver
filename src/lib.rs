@@ -34,8 +34,7 @@
 #![warn(clippy::pedantic)]
 #![allow(clippy::module_name_repetitions)]
 #![allow(clippy::must_use_candidate)]
-// Suppress pedantic lints that require extensive refactoring — previously warnings, not errors.
-// These are suppressed for CI compatibility; fix incrementally over time.
+// Pedantic lints that would need a large refactor.
 #![allow(clippy::doc_markdown)]
 #![allow(clippy::missing_errors_doc)]
 #![allow(clippy::format_push_string)]

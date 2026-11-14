@@ -15,7 +15,7 @@ use crate::test_name;
 /// `test_name!()` must report the test it expands in, not the helper it is passed
 /// to and not the module.
 ///
-/// This is what makes the 16 call sites distinct without 16 hand-written literals
+/// This is what makes the call sites distinct without hand-written literals
 /// that drift as tests get renamed. If the macro ever resolved to something
 /// constant, every container would collide again -- so the property is asserted
 /// rather than assumed.

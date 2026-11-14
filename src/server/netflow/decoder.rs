@@ -8,7 +8,7 @@
 
 //! `NetflowDecoder` implements `FlowDecoder` for NetFlow v5, v9, and IPFIX.
 //!
-//! v5 is hand-rolled because `netgauze-flow-pkt` 0.12 does not implement
+//! v5 is hand-rolled because `netgauze-flow-pkt` does not implement
 //! NetFlow v5 -- its `FlowInfoCodec` returns `UnsupportedVersion(5)` for v5
 //! datagrams. v5 has a fixed wire layout (24-byte header + N x 48-byte
 //! records) per the original Cisco specification, so a small dedicated parser
@@ -408,8 +408,8 @@ impl FlowDecoder for NetflowDecoder {
 
     /// TODO: template_miss differentiation deferred.
     ///
-    /// netgauze-flow-pkt 0.12 does not expose a "template not yet received"
-    /// error variant distinct from generic parse errors. Currently this method
+    /// netgauze-flow-pkt does not expose a "template not yet received"
+    /// error variant distinct from generic parse errors. This method
     /// returns true ONLY for our explicit `NetflowError::TemplateMiss` variant,
     /// which we never produce from the netgauze decode path -- all netgauze
     /// errors map to `Parse`. The `dfe_transport_decode_err_total{reason=

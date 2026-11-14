@@ -95,17 +95,16 @@ The decoded-size budget does not count values inside packed scalar repeated fiel
 
 The frame timeout runs above TLS, so a client that finishes the handshake and then sends part of a TLS record is not timed. Requiring client certificates (`*.tls.client_auth: required`) closes that path.
 
-### Upgrade note: one IP filter, every listener
+### One IP filter, every listener
 
-`server.ip_filter` used to reach `/ingest` and the webhook intake and nothing
-else. It now runs in every accept loop the receiver owns, so a single allowlist
-governs all of them.
+`server.ip_filter` runs in every accept loop the receiver owns, so a single
+allowlist governs all of them.
 
-A deployment that set an allowlist for its `/ingest` senders and receives syslog,
-Beats, Fluent Forward, GELF, HEC, remote write or OTLP HTTP from a different
-range starts DROPPING those events in the accept loop. Each drop counts on
+An allowlist written for the `/ingest` senders DROPS syslog, Beats, Fluent
+Forward, GELF, HEC, remote write or OTLP HTTP sent from a different range, in
+the accept loop. Each drop counts on
 `receiver_ip_filter_rejected_total{transport}`, and the filter logs one line
-naming the listener at most every 5 seconds. Before upgrading, widen
+naming the listener at most every 5 seconds. Widen
 `server.ip_filter.cidrs` to cover every sender on every enabled listener, or set
 `mode: disabled` and restrict at the network edge.
 

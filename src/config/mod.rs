@@ -1254,8 +1254,7 @@ impl Default for RateLimitConfig {
 /// `mtls` with `tls.client_auth: required`. Flow has its own optional
 /// `flow.ip_filter` per listener.
 ///
-/// UPGRADE: this list used to be `/ingest` and the webhook intake alone. One
-/// filter now governs every listener, so an allowlist written for the `/ingest`
+/// One filter governs every listener, so an allowlist written for the `/ingest`
 /// senders also decides which sources syslog, Lumberjack, Fluent Forward, GELF,
 /// Splunk HEC, Prometheus remote write and OTLP HTTP are accepted from. Widen
 /// `cidrs` to cover every sender, or those events are dropped in the accept
@@ -5270,9 +5269,8 @@ kafka:
     // ---------------------------------------------------------------------
     // The receiver's `scaling:` YAML reaches the scalo ScalingPressure model.
     //
-    // scalo 2.9 dropped the old transport/params horizontal-engine config
-    // (`ScalingEngineConfig`) for a weighted-component `ScalingPressure`. The
-    // receiver feeds those components onto the runtime's shared engine (served
+    // scalo's `ScalingPressure` takes weighted components. The receiver feeds
+    // those components onto the runtime's shared engine (served
     // at `/scaling/pressure` to KEDA) via `ServiceApp::scaling_components`.
     // This loads a real `--config` file -- the deployed k8s path -- and asserts
     // the section yields the expected weighted components. No mocks.

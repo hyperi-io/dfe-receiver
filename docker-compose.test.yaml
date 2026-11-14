@@ -11,9 +11,7 @@
 #   env TEST_MODE=docker cargo nextest run --test integration
 #   docker compose -f docker-compose.test.yaml down -v
 #
-# The broker is the JVM apache/kafka image the testcontainers fixture runs, set up
-# for single-node KRaft through its environment. Tests in docker mode connect to
-# the host listener on localhost:19092, the same port the dfe-docker stack uses.
+# Same broker image as the testcontainers fixture, on the dfe-docker stack's localhost:19092.
 
 services:
   kafka:

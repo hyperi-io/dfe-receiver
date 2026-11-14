@@ -8,7 +8,7 @@
 
 //! sFlow v5 decoder.
 //!
-//! Hand-rolled on nom 8.0; there is no maintained Rust sFlow crate. The
+//! Hand-rolled on nom, because there is no maintained Rust sFlow crate. The
 //! `parser` submodule parses datagrams into typed `Sample` enums; the
 //! `decoder` submodule wraps that parser into the project's generic
 //! `FlowDecoder` trait so the listener can dispatch sFlow alongside NetFlow
