@@ -165,7 +165,7 @@ the production default for Tier 1** (matches dfe-loader's choice).
 
 ### Syslog framing and conversion
 
-`benches/syslog.rs` times framing and conversion over eight lines: four RFC 3164 device shapes, two RFC 5424 and one CEF over syslog. `benches/syslog_allocs.rs` counts heap allocations per message. Measured on desktop-derek, system allocator, 2026-11-03, before and after the RFC 3164 header reader and the single-pass record writer.
+`benches/syslog.rs` times framing and conversion over eight lines: four RFC 3164 device formats, two RFC 5424 and one CEF over syslog. `benches/syslog_allocs.rs` counts heap allocations per message. Measured on desktop-derek, system allocator, 2026-11-03, before and after the RFC 3164 header reader and the single-pass record writer.
 
 | Benchmark | Before | After |
 |---|---|---|

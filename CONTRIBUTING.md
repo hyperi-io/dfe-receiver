@@ -203,7 +203,7 @@ dfe-loader).
 | `src/config/mod.rs`, `src/deployment.rs` | `Config::validate()`, and the contract the Dockerfile and the released chart are generated from |
 | `Dockerfile`, `proto/` | Generated or vendored. Do not hand-edit |
 | `tests/` | Targets `smoke`, `integration`, `e2e`. `common/mod.rs` is the container harness |
-| `docs/architecture.md` | Why it is shaped this way, and the invariants |
+| `docs/architecture.md` | Why it is built this way, and the invariants |
 
 ### Commands that prove a change
 
