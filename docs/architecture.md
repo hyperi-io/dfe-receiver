@@ -1,6 +1,6 @@
 # dfe-receiver architecture
 
-Why the service is shaped the way it is, and the rules you cannot read off the
+Why the service is built the way it is, and the rules you cannot read off the
 code. The configuration reference is [config.example.yaml](../config.example.yaml).
 The component-by-component detail is in [internals.md](internals.md).
 
@@ -38,7 +38,7 @@ enrichment and schema work are dfe-loader's. The one deliberate exception is
 `_raw`: the receiver can retain the original wire bytes because for syslog and
 friends that fidelity is gone by the time the loader sees the record.
 
-## Shape
+## Components
 
 ```mermaid
 flowchart TB
@@ -85,7 +85,7 @@ loader`) with no broker in the path.
 The webhook intake is its own handler rather than a route on `/ingest`, for
 reasons worth keeping. `/ingest` checks one server-wide credential in middleware
 before the body is read, where a product is identified per caller and a signed
-request needs the body to verify. A product's payload shape is its own, so
+request needs the body to verify. A product's payload format is its own, so
 the `rules` rows cannot pick its topic. And an own listener lets a
 deployment expose only that port to the product's egress.
 
@@ -98,8 +98,8 @@ rather than building a DOM. Topic lookups use `FxHashMap`. No `format!()` on the
 path.
 
 The consequence a reader should know: validation proves the payload IS JSON and
-that any required fields are present. It does not prove the payload is
-well-shaped for downstream. That is deliberate -- a full parse at the door would
+that any required fields are present. It does not prove the payload
+carries what downstream expects. That is deliberate -- a full parse at the door would
 cost the throughput the design exists for.
 
 ## Delivery: the answer waits for the destination

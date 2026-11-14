@@ -7,7 +7,7 @@ request flow are in [internals.md](internals.md); the field-by-field grammar is 
 `config.example.yaml` and the generated `docs/config-schema.yaml`.
 
 Every caller is declared separately and carries its own secret, topic and body
-shape, so two callers never share a credential and a wrong secret is only ever
+format, so two callers never share a credential and a wrong secret is only ever
 tried against the caller the URL path names.
 
 ## The six decisions
@@ -48,7 +48,7 @@ a missing secret is a configuration error, not a runtime degradation.
 
 ## Worked example: an asset context source
 
-The value of this shape is not the feed on its own. It is that asset and
+The value of this source is not the feed on its own. It is that asset and
 identity records join to observability facts, so a noisy signal gains the
 context needed to judge it -- which host, owned by whom, running what, exposed
 where. Alert rules from an asset-inventory product are the shipped precedent.
@@ -126,7 +126,7 @@ On the shared listener the caller's secret is the only credential needed --
 | Status | Meaning | `error` field |
 |---|---|---|
 | 202 | Every record accepted, including a record the filter dropped | -- |
-| 400 | The body shape is wrong for the declared `body`, or validation refused a record for good | `body_not_an_array`, `record_not_an_object`, or the validation reason |
+| 400 | The body format is wrong for the declared `body`, or validation refused a record for good | `body_not_an_array`, `record_not_an_object`, or the validation reason |
 | 401 | Authentication failed | `missing_signature`, `invalid_signature`, `stale_signature`, `missing_auth_header`, `invalid_header_value` |
 | 404 | No caller of that name is declared | `unknown_caller` |
 | 413 | Over `webhook.max_body_size`; counted, never sent to the DLQ | -- |
@@ -173,6 +173,6 @@ no public address or inbound rule is needed on the receiver's network.
 
 Some cloud notification services cannot attach custom headers at all and sign
 with their own certificate over an envelope that wraps the payload as a string.
-Neither shipped auth mode authenticates that shape, so put a small function
+Neither shipped auth mode authenticates that envelope, so put a small function
 between the service and the intake to unwrap the payload and attach the caller's
 header. Do not weaken the intake to accommodate a sender.

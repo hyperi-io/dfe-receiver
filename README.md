@@ -61,7 +61,7 @@ routing:
 
 ## Configuration
 
-Every setting is in [config.example.yaml](config.example.yaml), and `DFE_RECEIVER_SERVER__BIND_ADDRESS` is the shape of an environment override: the `DFE_RECEIVER_` prefix, then the key path with double underscores. `server.auth.mode` is `none`, `header`, `bearer` or `mtls`. The routing rules, the webhook intake, the metrics and the hot-path design are in [docs/internals.md](docs/internals.md).
+Every setting is in [config.example.yaml](config.example.yaml), and `DFE_RECEIVER_SERVER__BIND_ADDRESS` is how an environment override is written: the `DFE_RECEIVER_` prefix, then the key path with double underscores. `server.auth.mode` is `none`, `header`, `bearer` or `mtls`. The routing rules, the webhook intake, the metrics and the hot-path design are in [docs/internals.md](docs/internals.md).
 
 ## Documentation
 
@@ -69,7 +69,7 @@ Every setting is in [config.example.yaml](config.example.yaml), and `DFE_RECEIVE
 - [docs/hardening.md](docs/hardening.md): running it where it is reachable from outside.
 - [docs/sidecar-transports.md](docs/sidecar-transports.md) and [docs/webhook-setup.md](docs/webhook-setup.md): the transport options and the webhook callers.
 - [docs/metrics.md](docs/metrics.md) and [docs/performance.md](docs/performance.md): what it reports and what it costs.
-- [docs/architecture.md](docs/architecture.md): where it sits in the suite and why it is shaped this way.
+- [docs/architecture.md](docs/architecture.md): where it sits in the suite and why it is built this way.
 
 The suite's published docs are at <https://dfe.docs.hyperi.io>, and this repository's pages at <https://dfe.docs.hyperi.io/dfe-receiver/>.
 

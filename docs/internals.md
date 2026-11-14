@@ -164,13 +164,13 @@ async fn ingest_handler(body: Bytes) -> StatusCode {
 
 ### OTLP metrics
 
-- Each data point is one record. An exponential histogram carries its buckets either side of zero as `positive_offset` and `positive_bucket_counts` and the `negative_` pair (`PositiveOffset`, `PositiveBucketCounts` and so on in `hyperdx` mode), with `zero_threshold` in `generic`. A data point's exemplars ride on its record: `exemplars` in `generic`, the `Exemplars.*` arrays in `hyperdx`, trace and span ids as hex. Remote write shapes its records the same way, and both modes hold every OTLP exemplar and bucket, so nothing goes uncounted.
+- Each data point is one record. An exponential histogram carries its buckets either side of zero as `positive_offset` and `positive_bucket_counts` and the `negative_` pair (`PositiveOffset`, `PositiveBucketCounts` and so on in `hyperdx` mode), with `zero_threshold` in `generic`. A data point's exemplars ride on its record: `exemplars` in `generic`, the `Exemplars.*` arrays in `hyperdx`, trace and span ids as hex. Remote write builds its records the same way, and both modes hold every OTLP exemplar and bucket, so nothing goes uncounted.
 
 ### Prometheus Remote Write
 
 - `prometheus_rw.mode: native` (default) writes each sample, each exemplar (`_type: "exemplar"`) and each native histogram (`_type: "histogram"`) as its own record, with the series labels as top-level fields. A histogram record carries `count`, `sum`, `schema`, `zero_threshold`, `zero_count`, `reset_hint`, its buckets as `positive_offset` and `positive_bucket_counts` (and the `negative_` pair), the Prometheus index of the first bucket and every count from there with gaps filled, and `custom_values` for a custom-bucket histogram.
-- `otel` and `hyperdx` write the OTLP converter's metric shapes: an exponential schema as `exponential_histogram` (the OTel offset is the Prometheus index less one), a custom-bucket histogram as `histogram` with its bounds as `explicit_bounds`. A series' exemplars ride on its last record: `exemplars` in `otel`, the `Exemplars.*` arrays in `hyperdx`, with the `trace_id` and `span_id` labels lifted out.
-- What those shapes cannot hold is counted on `receiver_prometheus_rw_unrecorded_total{kind}`, never dropped silently: `exemplar` for exemplars sent with no sample of their series (Prometheus sends them in a series of their own), `float_histogram`, whose counts OTel keeps as integers, and `unknown_schema`. `mode: native` records all three.
+- `otel` and `hyperdx` write the OTLP converter's metric types: an exponential schema as `exponential_histogram` (the OTel offset is the Prometheus index less one), a custom-bucket histogram as `histogram` with its bounds as `explicit_bounds`. A series' exemplars ride on its last record: `exemplars` in `otel`, the `Exemplars.*` arrays in `hyperdx`, with the `trace_id` and `span_id` labels lifted out.
+- What those types cannot hold is counted on `receiver_prometheus_rw_unrecorded_total{kind}`, never dropped silently: `exemplar` for exemplars sent with no sample of their series (Prometheus sends them in a series of their own), `float_histogram`, whose counts OTel keeps as integers, and `unknown_schema`. `mode: native` records all three.
 - A histogram whose spans name more than 4096 buckets, a negative gap, or more buckets than it has counts is refused as malformed with a 400.
 
 ### JSON Validation (sonic_rs)
@@ -409,7 +409,7 @@ rule, a SaaS notification hook -- rather than agents that stream them. It is
 its own protocol handler (`src/server/webhook/`), not a bolt-on to `/ingest`:
 `/ingest` checks one server-wide credential in middleware before the body is
 read, a product is identified per caller and a signed request needs the body.
-A product's payload shape is its own, so the `rules` rows cannot pick its
+A product's payload format is its own, so the `rules` rows cannot pick its
 topic. And an own listener lets a deployment expose only this port to the
 product's egress.
 
@@ -467,7 +467,7 @@ Set, the intake runs on its own port through the same hardened accept loops
 and the same rate limit and concurrency cap, under `webhook.tls`.
 
 Configuring a caller end to end -- the authentication choice, the secret
-reference, the replay window, the body shape and the filter, with worked
+reference, the replay window, the body format and the filter, with worked
 examples and the statuses a sender sees -- is in
 [webhook-setup.md](webhook-setup.md).
 
