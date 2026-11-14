@@ -897,7 +897,7 @@ See `config.example.yaml` for the full `flow:` block.
   adopted; current Cisco gear emits v9 or IPFIX. A v7 packet hitting our
   listener returns a parse error visible in
   `transport_decode_err_total{transport="netflow", reason="parse_err"}`.
-- Template-miss errors currently conflated with parse errors in metrics
+- Template-miss errors count as parse errors in metrics
   (`transport_decode_err_total{reason="template_miss"}` will be 0)
 - `t_flow_start`/`t_flow_end` carry relative `sysup:<ms>` strings rather than
   absolute RFC 3339 timestamps (sysUpTime anchor resolution deferred)

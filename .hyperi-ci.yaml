@@ -4,25 +4,12 @@
 #
 # License:   BUSL-1.1
 # Copyright: (c) 2026 HYPERI PTY LIMITED
-#
-# Override defaults with HYPERCI_* env vars.
-# Reference: config/defaults.yaml in hyperi-ci.
-# Binary artifacts published to GitHub Releases and Cloudflare R2.
 classification: product
 
 language: rust
 quality:
   enabled: true
-  # GHSA-w9wp-h8wv-79jx / CVE-2026-48504: opentelemetry_sdk 0.31.0 is in the
-  # lock through scalo, in the affected range (<= 0.32.0, fixed in 0.32.1). The
-  # flaw is in BaggagePropagator::extract_with_context, which parses an inbound
-  # W3C Baggage header before enforcing its size limits. It is unreachable: no
-  # Baggage propagator is registered in the receiver or in scalo, and OTLP ingest
-  # reads only content-type and authorization from a request. Accepted as not
-  # reachable in dfe-infra docs/THREAT-MODEL.md, accepted risks. scalo cannot move
-  # to 0.32 while metrics-exporter-opentelemetry 0.2.1 requires opentelemetry
-  # ^0.31; hyperi-io/scalo-rs#281 tracks the move. A GitHub advisory with no
-  # RustSec entry, so only osv-scanner sees it.
+  # Unreachable, accepted in dfe-infra docs/THREAT-MODEL.md. No RustSec entry, so only osv-scanner sees it.
   ignore:
     - tool: osv-scanner
       id: GHSA-w9wp-h8wv-79jx

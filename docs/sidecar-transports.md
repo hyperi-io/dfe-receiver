@@ -317,7 +317,7 @@ The sidecar communicates with receiver via `localhost:6000` (gRPC) or
 
 ### Payload too large
 
-Receiver's default `max_body_size` is 16 MiB per request. Large batches from Vector's `batch.max_bytes` can exceed this.
+Receiver refuses a request larger than `server.max_body_size`. Large batches from Vector's `batch.max_bytes` can exceed it.
 
 Options:
 

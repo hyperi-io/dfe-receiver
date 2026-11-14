@@ -1,6 +1,6 @@
 //  Project:      dfe-receiver
 //  File:         src/server/sflow/parser.rs
-//  Purpose:      sFlow v5 datagram parser (nom 8.0 based)
+//  Purpose:      sFlow v5 datagram parser (nom based)
 //  Language:     Rust
 //
 //  License:      BUSL-1.1

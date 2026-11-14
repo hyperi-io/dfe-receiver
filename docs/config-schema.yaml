@@ -622,8 +622,7 @@ $defs:
       `mtls` with `tls.client_auth: required`. Flow has its own optional
       `flow.ip_filter` per listener.
 
-      UPGRADE: this list used to be `/ingest` and the webhook intake alone. One
-      filter now governs every listener, so an allowlist written for the `/ingest`
+      One filter governs every listener, so an allowlist written for the `/ingest`
       senders also decides which sources syslog, Lumberjack, Fluent Forward, GELF,
       Splunk HEC, Prometheus remote write and OTLP HTTP are accepted from. Widen
       `cidrs` to cover every sender, or those events are dropped in the accept

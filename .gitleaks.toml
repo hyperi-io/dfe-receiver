@@ -1,10 +1,4 @@
-# Project-specific gitleaks allowlist
-# Extends the CI base configuration (ci/.gitleaks.toml)
-#
-# The CI runs gitleaks to detect secrets in your code. This file lets you
-# exclude false positives specific to your project.
-#
-# Documentation: https://github.com/gitleaks/gitleaks#configuration
+# Project gitleaks allowlist: https://github.com/gitleaks/gitleaks#configuration
 
 [extend]
 useDefault = true
@@ -12,18 +6,8 @@ useDefault = true
 [allowlist]
 description = "Project-specific false positive allowlist"
 
-# Paths to exclude from scanning (regex patterns)
-# Uncomment and customise as needed
-paths = [
-    # Test files often contain fake tokens/secrets
-    # '''tests/.*\.py''',
-    # '''tests/fixtures/.*''',
-    # Example configuration files
-    # '''.env.example''',
-    # '''.env.sample''',
-]
+paths = []
 
-# Regex patterns for known false positives
 regexes = [
     '''YOUR_.*_TOKEN''',
     '''your-.*-token''',
@@ -33,5 +17,4 @@ regexes = [
     '''<[A-Z_]+>''',  # Angle bracket placeholders like <YOUR_TOKEN>
 ]
 
-# Stopwords - findings containing these are likely false positives
 stopwords = ["example", "sample", "test", "mock", "fake", "dummy", "placeholder"]

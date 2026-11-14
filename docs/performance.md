@@ -295,8 +295,7 @@ jeprof --svg ./target/release/dfe-receiver jeprof.out.*.heap > heap.svg
 
 ### Heap profiling (dhat)
 
-Feature-gate `dhat-heap` in `Cargo.toml` (not currently enabled — add if
-allocation profiling becomes ongoing need).
+Add a `dhat-heap` feature gate in `Cargo.toml` to profile allocations.
 
 ## Recommended production build
 

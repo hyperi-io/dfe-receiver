@@ -9,10 +9,9 @@
 //! NetFlow / IPFIX decoder.
 //!
 //! NetFlow v5 is hand-rolled here (fixed 24-byte header + N x 48-byte records;
-//! `netgauze-flow-pkt` 0.12 does not implement v5). NetFlow v9 and IPFIX are
+//! `netgauze-flow-pkt` does not implement v5). NetFlow v9 and IPFIX are
 //! delegated to `netgauze_flow_pkt::codec::FlowInfoCodec` with per-exporter
-//! template state. Canonical mapping for v9/IPFIX is intentionally sparse in
-//! this task -- it's expanded in a follow-up task.
+//! template state.
 
 pub mod decoder;
 

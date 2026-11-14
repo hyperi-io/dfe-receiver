@@ -72,8 +72,7 @@ fn reservation_guard(config: &Config) -> Arc<MemoryGuard> {
 /// Start a test server, also handing back the pipeline behind it.
 ///
 /// Only `test_503_when_pipeline_not_ready` needs the handle, to drive the memory
-/// guard the readiness check reads; it used to re-implement this whole function
-/// for that one extra value. It passes `guard` too, so the readiness check reads
+/// guard the readiness check reads. It passes `guard` too, so the readiness check reads
 /// a guard whose usage the test controls.
 async fn start_test_server_with_pipeline(
     config: Config,
