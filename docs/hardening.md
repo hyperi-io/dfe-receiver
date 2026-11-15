@@ -143,8 +143,8 @@ default) makes every client behind one node share its budget: set
 | Splunk HEC (TLS and plaintext) | yes | yes | `splunk_hec.auth` |
 | Prometheus remote write | yes | yes | `prometheus_rw.auth` |
 | OTLP HTTP (4318) | yes | yes | `otlp.auth` |
-| OTLP gRPC (4317) | no -- tonic runs the accept loop | no -- no HTTP layer there | `otlp.auth.mode: bearer`, or certificates with `mode: none` and `otlp.tls.client_auth: required` (`mtls` here refuses every RPC) |
-| gRPC / Vector | no -- tonic runs the accept loop | no -- no HTTP layer there | `grpc.auth.mode: bearer`, or certificates with `mode: none` and `grpc.tls.client_auth: required` (`mtls` here refuses every RPC) |
+| OTLP gRPC (4317) | no -- tonic runs the accept loop | no -- no HTTP layer there | `otlp.auth.mode: bearer`, or `mtls` with `otlp.tls.client_auth: required` |
+| gRPC / Vector | no -- tonic runs the accept loop | no -- no HTTP layer there | `grpc.auth.mode: bearer`, or `mtls` with `grpc.tls.client_auth: required` |
 | Syslog UDP / TCP / TLS | yes (per datagram on UDP) | no -- no HTTP request to count | TLS listener only, `client_auth: required`, and starts only with `syslog.accept_unauthenticated: true` |
 | Lumberjack / Beats | yes | no -- no HTTP request to count | `lumberjack.tls.client_auth: required`, or `lumberjack.accept_unauthenticated: true` |
 | Fluent Forward | yes | no -- no HTTP request to count | `fluent.tls.client_auth: required`, or `fluent.accept_unauthenticated: true` |
