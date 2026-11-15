@@ -3,6 +3,12 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.15.69](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.68...v1.15.69) (2026-11-15)
+
+### Bug Fixes
+
+* **security:** refuse auth reloads the running TLS cannot enforce ([#269](https://github.com/hyperi-io/dfe-receiver/issues/269)) ([7397a88](https://github.com/hyperi-io/dfe-receiver/commit/7397a8817cf86b058f1c100a9da43ddb89ef723e))
+
 ## [1.15.68](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.67...v1.15.68) (2026-11-15)
 
 ### Bug Fixes
