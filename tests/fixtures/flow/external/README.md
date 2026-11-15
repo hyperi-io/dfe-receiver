@@ -3,7 +3,7 @@
 Real captures and raw UDP-payload fixtures from reference flow collectors,
 used by the flow handler integration tests to validate decoder correctness
 against real-world emitter output (not just our hand-crafted unit-test
-packets). Hand-crafted unit tests overfit to the spec; real captures catch
+packets). Hand-crafted unit tests overfit to the spec, and real captures catch
 quirks like count=0 keep-alives, padded packets, jumbo templates, and
 vendor-specific PEN information elements.
 

@@ -1,8 +1,8 @@
 # PGO workload events
 
-`beats-events.ndjson` is what `pgo-driver` sends over HTTP and lumberjack: one Elastic-shipped event per line, the `event` object of each dfe-transform-elastic envelope fixture, compacted and otherwise unchanged. Those fixtures record where each shape was read from.
+`beats-events.ndjson` is what `pgo-driver` sends over HTTP and lumberjack: one Elastic-shipped event per line, the `event` object of each dfe-transform-elastic envelope fixture, compacted and otherwise unchanged. Those fixtures record where each event was read from.
 
-| line | dfe-transform-elastic fixture | shape |
+| line | dfe-transform-elastic fixture | what it is |
 |---|---|---|
 | 1 | `tests/envelopes/beats/agent_cisco_ios.json` | Elastic Agent 8.0.0, `data_stream.dataset: cisco_ios.log` |
 | 2 | `tests/envelopes/beats/agent.json` | Elastic Agent 8.1.3, `data_stream.dataset: cylance.protect` |

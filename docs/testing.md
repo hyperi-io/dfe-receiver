@@ -1,11 +1,11 @@
 # Testing
 
-The general rules are hyperi-ai's testing standard (`standards/universal/testing.md` in hyperi-ai). This page covers what dfe-receiver does on top of them.
+How dfe-receiver's tests split into tiers, and the containers a run shares.
 
 | Level | Runs | Command |
 |---|---|---|
-| core | locally, every push and PR | `cargo nextest run --all-features` |
-| full | nightly (`schedule` in `.github/workflows/ci.yml`) and before every release (`test.full.required_for_release: true`) | `hyperi-ci check --tier full`, or `cargo nextest run --all-features --run-ignored all` |
+| core | locally, every push and PR | `cargo nextest run` |
+| full | nightly (`schedule` in `.github/workflows/ci.yml`) and before every release (`test.full.required_for_release: true`) | `hyperi-ci check --tier full`, or `cargo nextest run --run-ignored all` |
 
 Core is everything nextest runs by default: the unit tests in `src/`, the smoke and orchestrator tests, and `tests/integration/`, the Kafka, OpenBao, TLS and peer-tool tests included. Full adds the `#[ignore]` tests in `tests/e2e/kafka.rs`, which drive a whole HTTP to Kafka pipeline against the broker `kafka_backend` picks.
 

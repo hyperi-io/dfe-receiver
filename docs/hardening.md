@@ -1,18 +1,16 @@
 # Internet-Facing Hardening & Fronting Architecture
 
-March 2026
-
 **dfe-receiver is the internet-facing ingest component in the DFE stack. dfe-ui, dfe-hyperdx and, where it is deployed, culvert also take untrusted input (`dfe-infra/docs/threat-model.md`).**
 
 This document covers application-level hardening (80/20 effort) and cost-effective infrastructure fronting for K8s and AWS deployments. It answers the questions cloud architects and security reviews ask most often.
 
 ---
 
-## Current State (What We Already Have)
+## What the Receiver Enforces
 
 | Protection | Status | Config |
 |---|---|---|
-| Request body size limit (413) | 10 MiB (HTTP, OTLP HTTP, HEC, RW), 1 MiB (webhook); the body extractors read to the same limit | `server.max_body_size` (HTTP, OTLP HTTP), `splunk_hec.max_body_size`, `prometheus_rw.max_body_size`, `webhook.max_body_size` |
+| Request body size limit (413) | 10 MiB (HTTP, OTLP HTTP, HEC, RW), 1 MiB (webhook). The body extractors read to the same limit | `server.max_body_size` (HTTP, OTLP HTTP), `splunk_hec.max_body_size`, `prometheus_rw.max_body_size`, `webhook.max_body_size` |
 | Request timeout (408) | 30s, every HTTP listener | `server.request_timeout_ms` (HTTP, OTLP HTTP), `splunk_hec.request_timeout_ms`, `prometheus_rw.request_timeout_ms`, `webhook.request_timeout_ms` |
 | Slowloris protection | 5s header_read_timeout, every HTTP listener (hyper) | `HEADER_READ_TIMEOUT` |
 | Connections closed for a limit | Counted by transport and reason (`over_limit`, `no_first_byte`, `frame_timeout`, `idle`) | `receiver_connections_closed_total` |
@@ -21,37 +19,106 @@ This document covers application-level hardening (80/20 effort) and cost-effecti
 | Connection idle timeout | 300s with no request in flight, every HTTP listener, HTTP/1 keep-alive and HTTP/2 alike (an idle HTTP/1 connection can close sooner, on the header read timeout). A peer that does not finish the graceful close is dropped. Lumberjack, Fluent Forward and GELF keep an idle connection, under the cap, since closing one under a sender loses its next line | `server.connections.idle_timeout_ms` |
 | Syslog TCP idle timeout and keepalive | Syslog TCP and TLS close a connection with no frame for 600s, a frame part way in being the frame timeout's. Keepalive probes start after 60s quiet and repeat every 60s, so a peer that has gone frees its place | `syslog.idle_timeout_ms` (0 = keep), `syslog.tcp_keepalive_secs` (0 = off) |
 | HTTP/2 keep-alive | Ping every 60s, close after 20s unanswered, every HTTP listener and both gRPC listeners | `server.connections.http2_keep_alive_interval_ms` |
-| Connection cap | 10,000 open connections per listener, every TCP listener and both gRPC listeners; one past it is closed as it is accepted | `server.connections.max_per_listener` (0 = no cap) |
+| Connection cap | 10,000 open connections per listener, every TCP listener and both gRPC listeners. One past it is closed as it is accepted | `server.connections.max_per_listener` (0 = no cap) |
 | Concurrency limit | 10,000 in-flight requests default, per HTTP listener | `server.max_concurrent_requests` |
-| Per-IP rate limiting | GCRA via tower-governor, opt-in, per HTTP listener, keyed on the TCP peer (forwarding headers only from `server.trusted_proxies`); clients whose budget has refilled are dropped from its key map every 5s | `server.rate_limit.*`, `server.trusted_proxies` |
+| Per-IP rate limiting | GCRA via tower-governor, opt-in, per HTTP listener, keyed on the TCP peer (forwarding headers only from `server.trusted_proxies`). Clients whose budget has refilled are dropped from its key map every 5s | `server.rate_limit.*`, `server.trusted_proxies` |
 | Flow per-source rate limiting | Token bucket per UDP source, opt-in. The bucket map never holds more than `cache_size` (default 4096) sources: a new source past it evicts an idle bucket where one is among the first 32 looked at, else the first, counted on `flow_rate_limit_evicted_total`, so spoofed sources cannot grow it | `flow.rate_limit.*` |
-| IP filter (allowlist/denylist) | CIDR trie, connection-level reject, every accept loop; an unknown mode, a bad CIDR or an empty allowlist refuses to start | `server.ip_filter.*` |
+| IP filter (allowlist/denylist) | CIDR trie, connection-level reject, every accept loop. An unknown mode, a bad CIDR or an empty allowlist refuses to start | `server.ip_filter.*` |
 | 503 backpressure | HTTP + gRPC ingest shed load when pipeline not ready | `Retry-After: 5` |
-| TLS termination | Per-protocol, hot-reloadable | `*.tls.enabled` |
+| TLS termination | Per-protocol. The ingest, webhook, HEC, remote write and OTLP HTTP listeners reload certificate material given as a secret reference every `refresh_interval_secs`. A certificate file, every other listener and every other `tls.*` setting load once at start, so a change to them is a restart | `*.tls.enabled`, `*.tls.cert_secret` |
 | TLS handshake timeout | 10s, every TLS listener the receiver accepts on | `server.connections.tls_handshake_timeout_ms` |
 | mTLS client auth | Per-protocol | `*.tls.client_auth: required` |
 | Bearer token auth | Per-protocol, hot-reloadable | `*.auth.mode: bearer` |
-| Header auth | HTTP, against `accepted_headers` only; an unknown `*.auth.mode` refuses to start | `server.auth.mode: header` |
+| Header auth | HTTP ingest, HEC and remote write, against `accepted_headers` (or the legacy `header_name`). An unknown `*.auth.mode` refuses to start | `server.auth.mode: header` |
 | Credential-less listeners | Refuse to start without client certificates required or the opt-out | `*.accept_unauthenticated` |
 | JSON validation | Global, always on: a body that is not JSON is refused with a 400 | Not configurable |
 | Required field check | Global | `validation.required_fields` |
 | Dead-letter queue | Global | `routing.dlq` |
 | Memory pressure backpressure | 503 / `UNAVAILABLE` on HTTP and gRPC ingest | `DFE_RECEIVER_MEMORY_PRESSURE_THRESHOLD`, `self_regulation.*` (`buffer.*` bounds only the destination queues) |
-| Middleware ordering | Concurrency -> Timeout -> BodyLimit -> Auth -> Handler | Correct for DoS |
+| Middleware ordering | RateLimit -> Concurrency -> Timeout -> BodyLimit -> Auth -> Handler, behind the accept loop's IP filter | Cheapest refusal first |
 | Frame size validation | GELF 1MB, Syslog 64KB, Fluent 32MB. An oversize syslog or GELF message is skipped to its delimiter and counted (`receiver_records_dropped_total`, reason `oversize`), and its connection carries on. Fluent Forward has no delimiter to resume at, so an oversize frame closes its connection | Per-protocol limits, `syslog.max_message_size`, `gelf.max_message_size` |
 | Decoded-size budget | An OTLP export, remote-write request or Vector push past 100,000 records, 1,000,000 messages or 64 MiB of resource, scope, metric or series-label bytes copied into its records, or holding a protobuf group, is refused before it decodes: 400 on HTTP, `INVALID_ARGUMENT` on gRPC. A Fluent Forward message past 1,000,000 values, 100,000 entries or 64 MiB of tag copies closes its connection, found by a scan that reads each byte once. A Splunk HEC request past 100,000 events or raw lines, or 64 MiB of `host`, `source`, `sourcetype` and `index` copied into its raw lines, is refused with a 400 | Hard-coded |
-| Zip-bomb rejection | Lumberjack nested compression rejected; a compressed frame is decompressed one inner frame at a time and refused past 64 MiB | Hard-coded |
+| Zip-bomb rejection | Lumberjack nested compression rejected. A compressed frame is decompressed one inner frame at a time and refused past 64 MiB | Hard-coded |
 | Unsettled bytes per connection | Lumberjack settles and ACKs a window in parts past 16 MiB of events | Hard-coded |
 | Health/readiness (K8s) | `/livez`, `/readyz`: 503 until every enabled listener serves, once one stops (drain included), and under memory pressure | Metrics port and the HTTP ingest port |
 | Graceful shutdown | CancellationToken + in-flight drain | All handlers |
-| Log spam prevention | Sampled (1/100) + debounced (5s) logging; a refused credential logs once per 5s per reason, an IP-filter refusal once per 5s per listener, and a counter carries every one | Per-protocol |
+| Log spam prevention | Sampled (1/100) + debounced (5s) logging. A refused credential logs once per 5s per reason, an IP-filter refusal once per 5s per listener, and a counter carries every one | Per-protocol |
 | `#![forbid(unsafe_code)]` | Entire crate | Cargo.toml lints |
 
 ---
 
-## Part 1: Application-Level Hardening (Complete)
+## Part 1: Application-Level Hardening
 
-All planned application-level hardening is implemented. No remaining items.
+### Request order
+
+Each HTTP request meets the cheapest refusal first, so a bot scan or an unauthenticated probe costs the least it can:
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Timeout as TimeoutLayer
+    participant BodyLimit as RequestBodyLimitLayer
+    participant Auth as Auth Middleware
+    participant Handler as Ingest Handler
+    participant Kafka
+
+    Client->>Timeout: HTTP Request
+    alt Request too slow
+        Timeout-->>Client: 408 Request Timeout
+    else Within timeout
+        Timeout->>BodyLimit: Forward request
+    end
+    alt Body too large
+        BodyLimit-->>Client: 413 Payload Too Large
+    else Body within limit
+        BodyLimit->>Auth: Forward request
+    end
+    alt Auth failed
+        Auth-->>Client: 401 Unauthorized
+    else Auth passed
+        Auth->>Handler: Forward request
+    end
+    Handler->>Handler: Validate JSON
+    alt Invalid JSON
+        Handler-->>Client: 400 Bad Request
+    else Valid JSON
+        Handler->>Kafka: Route to topic
+        alt Delivery report within the hold
+            Kafka-->>Handler: Delivered
+            Handler-->>Client: 202 Accepted
+        else Refused for good, DLQ holds it
+            Kafka-->>Handler: Refused
+            Handler-->>Client: 202 Accepted
+        else Refused for good, no DLQ
+            Kafka-->>Handler: Refused
+            Handler-->>Client: 400 Bad Request
+        else Not confirmed
+            Handler-->>Client: 503 Service Unavailable, Retry-After
+        end
+    end
+```
+
+The IP filter, the per-IP rate limit and the concurrency cap run before the timeout. A listener with client certificates and tokens both required:
+
+```yaml
+server:
+  max_body_size: 10485760        # 10 MiB, refused before auth
+  request_timeout_ms: 30000
+  tls:
+    enabled: true
+    cert_file: "/etc/ssl/receiver.crt"
+    key_file: "/etc/ssl/receiver.key"
+    ca_file: "/etc/ssl/ca.crt"
+    client_auth: required        # none, optional, required
+  auth:
+    mode: both                   # none, header, bearer, mtls, both
+    accepted_headers:
+      - name: "x-api-key"
+        values: ["production-key-1", "production-key-2"]
+    bearer:
+      secret_source: "vault:secret/data/auth:tokens"
+      refresh_interval_secs: 300
+```
 
 ### Which listener gets which control
 
@@ -64,7 +131,7 @@ rate is per source IP PER LISTENER, not a receiver-wide total.
 request of the quota every `1/requests_per_second` of a second, with
 `server.rate_limit.burst` on top of it.
 
-The limiter keys on the TCP peer; forwarding headers count only from
+The limiter keys on the TCP peer, and forwarding headers count only from
 `server.trusted_proxies`. On Kubernetes, `externalTrafficPolicy: Cluster` (the
 default) makes every client behind one node share its budget: set
 `externalTrafficPolicy: Local`, or list the fronting proxy as trusted.
@@ -76,9 +143,9 @@ default) makes every client behind one node share its budget: set
 | Splunk HEC (TLS and plaintext) | yes | yes | `splunk_hec.auth` |
 | Prometheus remote write | yes | yes | `prometheus_rw.auth` |
 | OTLP HTTP (4318) | yes | yes | `otlp.auth` |
-| OTLP gRPC (4317) | no -- tonic runs the accept loop | no -- no HTTP layer there | `otlp.auth`, bearer or mTLS |
-| gRPC / Vector | no -- tonic runs the accept loop | no -- no HTTP layer there | `grpc.auth`, bearer or mTLS |
-| Syslog UDP / TCP / TLS | yes (per datagram on UDP) | no -- no HTTP request to count | TLS listener only, `client_auth: required`; starts only with `syslog.accept_unauthenticated: true` |
+| OTLP gRPC (4317) | no -- tonic runs the accept loop | no -- no HTTP layer there | `otlp.auth.mode: bearer`, or certificates with `mode: none` and `otlp.tls.client_auth: required` (`mtls` here refuses every RPC) |
+| gRPC / Vector | no -- tonic runs the accept loop | no -- no HTTP layer there | `grpc.auth.mode: bearer`, or certificates with `mode: none` and `grpc.tls.client_auth: required` (`mtls` here refuses every RPC) |
+| Syslog UDP / TCP / TLS | yes (per datagram on UDP) | no -- no HTTP request to count | TLS listener only, `client_auth: required`, and starts only with `syslog.accept_unauthenticated: true` |
 | Lumberjack / Beats | yes | no -- no HTTP request to count | `lumberjack.tls.client_auth: required`, or `lumberjack.accept_unauthenticated: true` |
 | Fluent Forward | yes | no -- no HTTP request to count | `fluent.tls.client_auth: required`, or `fluent.accept_unauthenticated: true` |
 | GELF | yes | no -- no HTTP request to count | `gelf.tls.client_auth: required`, or `gelf.accept_unauthenticated: true` |
@@ -115,15 +182,15 @@ naming the listener at most every 5 seconds. Widen
 When running in Kubernetes, the gateway/ingress layer handles most of what
 Part 1 describes. This section covers how to configure it properly.
 
-### 2.1 Ingress Controllers (March 2026)
+### 2.1 Ingress Controllers
 
-**The community `kubernetes/ingress-nginx` is EOL as of March 2026.**
+**The community `kubernetes/ingress-nginx` reached EOL in March 2026.**
 It was announced at KubeCon NA 2025. No further CVE patches, no K8s
 compatibility updates. Do not deploy it for new workloads.
 
 The two NGINX ingress controllers are often confused:
 
-| Project | Status (March 2026) |
+| Project | Status |
 |---|---|
 | `kubernetes/ingress-nginx` (K8s SIG community) | **EOL. No CVE patches.** Chainguard maintains a security-only fork (EmeritOSS) as a stopgap. |
 | `nginxinc/kubernetes-ingress` (F5) | Active. Apache 2.0. NGINX Plus features require JWT license. |
@@ -133,13 +200,13 @@ The two NGINX ingress controllers are often confused:
 
 ### 2.2 Recommended: Envoy Gateway
 
-[Envoy Gateway](https://gateway.envoyproxy.io/) is the CNCF reference
-implementation of the Kubernetes Gateway API, built on Envoy Proxy.
+[Envoy Gateway](https://gateway.envoyproxy.io/) is an implementation
+of the Kubernetes Gateway API, built on Envoy Proxy.
 Open source, Apache 2.0.
 
 **Future path:** If service mesh features are ever needed (mTLS between
 services, traffic shifting, canary deployments), Istio ambient mesh
-(sidecar-less, GA since Istio 1.22) uses Envoy as its data plane. The
+(sidecar-less, GA since Istio 1.24) uses Envoy as its data plane. The
 Envoy Gateway investment carries over -- same proxy, same config patterns,
 same operational knowledge.
 
@@ -165,16 +232,15 @@ spec:
     bufferLimit: 16384
   timeout:
     http:
-      # Slowloris protection -- reject if full request not received in 10s
+      # Slowloris protection -- reject if the headers are not in by 5s
+      requestHeadersReceivedTimeout: 5s
+      # and if the full request is not in by 10s
       requestReceivedTimeout: 10s
 ```
 
-**Note:** Envoy's native `request_headers_timeout` (the most precise
-slowloris defence) is [not yet exposed](https://github.com/envoyproxy/gateway/issues/2598)
-as a named field in ClientTrafficPolicy. `requestReceivedTimeout` covers
-the full request (headers + body) which is the next best thing. For exact
-header-only timeout, use `EnvoyPatchPolicy` to inject the raw Envoy HCM
-`request_headers_timeout` setting.
+`requestHeadersReceivedTimeout` sets Envoy's `request_headers_timeout`, which
+bounds the header read, and `requestReceivedTimeout` bounds the whole request,
+headers and body.
 
 **Rate limiting via BackendTrafficPolicy:**
 
@@ -227,13 +293,11 @@ spec:
 ### 2.3 CrowdSec (Free Community IP Reputation)
 
 [CrowdSec](https://github.com/crowdsecurity/crowdsec) is an open-source,
-community-driven IP reputation engine. MIT-licensed, Go-based (60x faster
-than fail2ban), with a community blocklist updated by thousands of nodes.
-
-The free tier includes the community blocklist.
+community-driven IP reputation engine, MIT-licensed and written in Go, with a
+community blocklist in its free tier.
 
 **Envoy Gateway integration:** A community [envoy-proxy-crowdsec-bouncer](https://github.com/kdwils/envoy-proxy-crowdsec-bouncer)
-exists (Go, updated Feb 2026). It works as an Envoy `ext_authz` filter via
+exists, written in Go. It works as an Envoy `ext_authz` filter via
 a SecurityPolicy:
 
 ```yaml
@@ -257,10 +321,6 @@ spec:
 marked "not tested in production." For production, evaluate carefully.
 CrowdSec also has mature bouncers for Traefik and nginx (if using F5's
 NGINX Ingress Controller as a transitional option).
-
-**Effectiveness:** The community blocklist blocks a significant portion of
-known scanners, botnets, and credential stuffing sources before they reach
-the application.
 
 ### 2.4 Separate Gateway Instances (Isolation)
 
@@ -307,7 +367,7 @@ traffic must be evaluated on its cost per GB.
 
 This table names the billing unit, not a price. Prices differ by region and
 change often: check the pricing pages linked under References before sizing a
-deployment. The billing models below are as of March 2026.
+deployment.
 
 | Service | Billed on | Notes |
 |---|---|---|
@@ -402,49 +462,18 @@ agents (Vector, Beats, etc.), not browser traffic. The attack surface is
 narrower than a typical web app. Cloudflare + Envoy Gateway rate limiting +
 application auth covers the 80/20.
 
-### 3.5 Architecture Variants
+## Part 4: AWS Variants, Non-HTTP Protocols and the NLB
 
-#### Variant A: Minimum Viable (Dev/Staging)
+### 4.1 Architecture Variants
 
-```text
-Internet -> NLB -> K8s Service -> dfe-receiver
-```
+| Variant | Path | Cost driver | Protection | Suitable for |
+|---|---|---|---|---|
+| A: minimum viable | Internet -> NLB -> K8s Service -> dfe-receiver | the NLB base charge only | application-level only (auth, body limits, timeouts) | dev, staging, internal networks |
+| B: production standard | Internet -> Cloudflare -> NLB -> Envoy Gateway -> dfe-receiver | NLB data processing, plus a flat Cloudflare plan | DDoS, WAF, rate limiting, IP reputation, auth | most production deployments |
+| C: high security, compliance | Internet -> CloudFront + AWS WAF -> ALB -> Envoy Gateway -> dfe-receiver | CloudFront data transfer dominates | the AWS-native stack | regulated industries, AWS-mandated controls |
+| D: maximum protection | Internet -> Cloudflare Enterprise -> NLB -> Envoy Gateway + CrowdSec -> dfe-receiver | a Cloudflare Enterprise contract | a dedicated DDoS team, custom WAF rules, an SLA | SLA-bound production |
 
-- Cost driver: the NLB base charge only
-- Protection: Application-level only (auth, body limits, timeouts)
-- Suitable for: Dev, staging, internal networks
-
-#### Variant B: Production Standard
-
-```text
-Internet -> Cloudflare -> NLB -> Envoy Gateway -> dfe-receiver
-```
-
-- Cost driver: NLB data processing, plus a flat Cloudflare plan
-- Protection: DDoS, WAF, rate limiting, IP reputation, auth
-- Suitable for: Most production deployments
-
-#### Variant C: High-Security / Compliance
-
-```text
-Internet -> CloudFront + AWS WAF -> ALB -> Envoy Gateway -> dfe-receiver
-```
-
-- Cost driver: CloudFront data transfer dominates
-- Protection: Full AWS-native stack, compliance-ready
-- Suitable for: Regulated industries, AWS-mandated security controls
-
-#### Variant D: Maximum Protection
-
-```text
-Internet -> Cloudflare Enterprise -> NLB -> Envoy Gateway + CrowdSec -> dfe-receiver
-```
-
-- Cost driver: a Cloudflare Enterprise contract (custom pricing)
-- Protection: Dedicated DDoS team, custom WAF rules, SLA
-- Suitable for: Tier-1 production, SLA-bound deployments
-
-### 3.6 Non-HTTP Protocols (Syslog, Beats, Fluent, GELF)
+### 4.2 Non-HTTP Protocols (Syslog, Beats, Fluent, GELF, Flow)
 
 **Most cloud WAF/CDN services only handle HTTP/HTTPS traffic.** dfe-receiver's
 TCP protocols need different treatment.
@@ -457,12 +486,14 @@ TCP protocols need different treatment.
 | OTLP HTTP | 4318 | HTTP | Cloudflare + NLB/ALB |
 | Splunk HEC | 8088 | HTTP | Cloudflare + NLB/ALB |
 | Prometheus RW | 9091 | HTTP | Cloudflare + NLB/ALB |
+| Webhook (own listener) | 8090 | HTTP | Cloudflare + NLB/ALB |
 | Lumberjack | 5044 | TCP | NLB only (no L7 proxy) |
 | Syslog UDP | 514 | UDP | NLB only |
 | Syslog TCP | 514 | TCP | NLB only |
 | Syslog TLS | 6514 | TCP+TLS | NLB only |
 | Fluent | 24224 | TCP | NLB only |
 | GELF | 12201 | TCP | NLB only |
+| Flow (NetFlow, IPFIX, sFlow) | 2055 / 4739 / 6343 | UDP | NLB only |
 
 **For TCP protocols:**
 
@@ -477,7 +508,7 @@ TCP protocols need different treatment.
 tiny free allowance. At ingestion volume, this is prohibitively expensive
 and not recommended.
 
-### 3.7 NLB Configuration Notes
+### 4.3 NLB Configuration Notes
 
 **In a DFE deployment, do not write this Service by hand.** dfe-infra renders the receiver's public door from `exposure.groups.ingest` (`dfe-infra/docs/ingest-edge.md`). With door `loadbalancer` it renders one load balancer for the TCP ports and one for UDP, plus an ingest NetworkPolicy, and only while the allow list names someone. The allow list becomes each load balancer's `loadBalancerSourceRanges`, a `/0` in it marks the Service `dfe.hyperi.io/ingest-fence: allow-all`, and on AWS `exposure.public.eipAllocations` pins Elastic IPs per subnet. The Service below is for running the receiver without dfe-infra.
 
@@ -496,7 +527,7 @@ metadata:
     service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: "ip"
     service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
     # Disable cross-zone to avoid the per-GB cross-zone data charge
-    service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled: "false"
+    service.beta.kubernetes.io/aws-load-balancer-attributes: "load_balancing.cross_zone.enabled=false"
 spec:
   type: LoadBalancer
   ports:
@@ -517,7 +548,7 @@ spec:
 
 ---
 
-## Part 4: Defence-in-Depth Summary
+## Part 5: Defence-in-Depth Summary
 
 The complete protection stack, from outer to inner:
 
@@ -530,8 +561,6 @@ Layer 4: Application  dfe-receiver -- auth, body limit, timeout, concurrency lim
 Layer 5: Transport    TLS/mTLS -- encryption, client verification
 Layer 6: Kafka        Circuit breaker, backpressure -- downstream protection
 ```
-
-**Each layer catches what the previous layer missed.**
 
 No single layer is perfect. The value is in the combination:
 
@@ -555,7 +584,7 @@ These are configured during deployment, not in application code:
 | Cloudflare DNS proxy | DNS config change | Internet-facing deployments |
 | CrowdSec + Envoy ext_authz bouncer | Helm + SecurityPolicy CRDs | High-security deployments |
 
-See Parts 2 and 3 above for configuration details and cost drivers.
+See Parts 2 to 4 above for configuration details and cost drivers.
 
 ---
 
@@ -566,7 +595,7 @@ See Parts 2 and 3 above for configuration details and cost drivers.
 - [axum Slowloris issue #2741](https://github.com/tokio-rs/axum/issues/2741)
 - [axum idle connection timeout discussion #2938](https://github.com/tokio-rs/axum/discussions/2938)
 - [axum connection limit discussion #2561](https://github.com/tokio-rs/axum/discussions/2561)
-- [tower-governor 0.8 (rate limiting)](https://github.com/benwis/tower-governor)
+- [tower-governor (rate limiting)](https://github.com/benwis/tower-governor)
 - [axum-server-timeout example](https://github.com/josecelano/axum-server-timeout)
 
 ### K8s Ingress/Gateway Lifecycle
@@ -583,7 +612,7 @@ See Parts 2 and 3 above for configuration details and cost drivers.
 - [Connection Limit](https://gateway.envoyproxy.io/docs/tasks/traffic/connection-limit/)
 - [Rate Limiting concepts](https://gateway.envoyproxy.io/latest/concepts/rate-limiting/)
 - [Global Rate Limit task](https://gateway.envoyproxy.io/docs/tasks/traffic/global-rate-limit/)
-- [GH #2598 -- requestHeadersTimeout support](https://github.com/envoyproxy/gateway/issues/2598)
+- [GH #2598 -- timeouts in ClientTrafficPolicy](https://github.com/envoyproxy/gateway/issues/2598)
 - [Envoy timeout configuration](https://www.envoyproxy.io/docs/envoy/latest/faq/configuration/timeouts)
 
 ### AWS Pricing (Verify Before Use)
@@ -592,7 +621,7 @@ See Parts 2 and 3 above for configuration details and cost drivers.
 - [AWS WAF pricing](https://aws.amazon.com/waf/pricing/)
 - [AWS CloudFront pricing](https://aws.amazon.com/cloudfront/pricing/)
 - [NLB cross-zone data transfer costs](https://aws.amazon.com/blogs/networking-and-content-delivery/exploring-data-transfer-costs-for-aws-network-load-balancers/)
-- [ALB vs NLB cost analysis](https://www.oreateai.com/blog/aws-alb-vs-nlb-navigating-the-pricing-maze-for-your-eks-workloads/dec6782f4606b47df064a6c245e1cd97)
+- [AWS Load Balancer Controller Service annotations](https://kubernetes-sigs.github.io/aws-load-balancer-controller/latest/guide/service/annotations/)
 
 ### Cloudflare
 

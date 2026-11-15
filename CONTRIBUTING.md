@@ -31,7 +31,7 @@ versioning and changelog generation. All commits must follow this format:
 | `build` | Changes to build system or dependencies | None |
 | `ci` | Changes to CI configuration | None |
 | `chore` | Other changes that don't modify src or test files | None |
-| `revert` | Reverts a previous commit | Varies |
+| `revert` | Reverts a previous commit | Patch (0.0.X) |
 
 ### Breaking Changes
 
@@ -67,17 +67,17 @@ affected (e.g., `api`, `auth`, `core`, `cli`, `docs`).
 
 This project follows [Semantic Versioning 2.0.0](https://semver.org/):
 
-- **MAJOR** (X.0.0): Breaking changes that require users to modify their code
-- **MINOR** (0.X.0): New features that are backwards-compatible
-- **PATCH** (0.0.X): Bug fixes and minor improvements
+- MAJOR (X.0.0): breaking changes that require users to modify their code
+- MINOR (0.X.0): new features that are backwards-compatible
+- PATCH (0.0.X): bug fixes and minor improvements
 
 Versions are automatically determined by semantic-release based on commit
 messages. Do not manually update version numbers.
 
 ## Developer Certificate of Origin
 
-This project uses the Developer Certificate of Origin (DCO) to ensure that
-contributors have the right to submit their contributions.
+This project uses the Developer Certificate of Origin (DCO): each contributor
+certifies they have the right to submit what they contribute.
 
 By making a contribution to this project, you certify that:
 
@@ -98,7 +98,7 @@ By making a contribution to this project, you certify that:
    and may be redistributed consistent with this project or the license(s)
    involved.
 
-## How to Sign Off Your Commits
+### How to Sign Off Your Commits
 
 You must sign off each commit to indicate your acceptance of the DCO. Combine
 the signoff with your conventional commit message:
@@ -133,11 +133,13 @@ anniversary of its release.
 
 ## How to Contribute
 
-1. **Fork the repository** and create your branch from `main`
-2. **Make your changes** following the commit message format above
-3. **Sign off your commits** with the DCO
-4. **Test your changes** to ensure they work as expected
-5. **Submit a pull request** with a clear description of what you've done
+1. Fork the repository and create your branch from `main`
+2. Make your changes, following the commit message format above
+3. Sign off your commits with the DCO
+4. Test your changes
+5. Open a pull request saying what it changes and why
+
+Questions about contributing go in a new issue.
 
 ### Pull Request Checklist
 
@@ -165,44 +167,27 @@ surviving CI.
 
 ## CI/CD Workflow
 
-When your pull request is merged to `main`:
-
-1. **semantic-release** analyses commit messages since the last release
-2. Determines the next version number based on commit types
-3. Generates/updates the CHANGELOG
-4. Creates a new GitHub release with release notes
-5. Publishes the package (if applicable)
-
-This happens automatically - no manual intervention required.
-
-## Questions
-
-If you have questions about contributing, please open an issue or contact us.
+A merge to `main` runs CI and releases nothing by itself. A release is cut when the squash-merge commit ends with a `Release: true` trailer, or when a maintainer dispatches the CI workflow with `from-head: true`. semantic-release then reads the commit messages since the last release and picks the next version, the release commit updates `CHANGELOG.md` and `VERSION`, and hyperi-ci builds and publishes the release.
 
 ## Context
 
 ### What this is
 
-The suite's one external door: eleven wire protocols terminated, every payload
-normalised to JSON, stamped, routed to Kafka or straight to dfe-loader over
-gRPC. It and dfe-ui are the only components reading untrusted input, so an
-advisory here outranks the same one in dfe-loader -- reachability first, per
-`dfe-infra/docs/threat-model.md`. It is NOT a transform stage (that is
-dfe-loader).
+The suite's ingest edge: every wire protocol in the README's table terminated, every payload normalised to JSON, stamped, and routed to Kafka or straight to dfe-loader over gRPC. With dfe-ui, dfe-hyperdx and, where it is deployed, culvert, it is one of the few components reading untrusted input, so an advisory here outranks the same one in dfe-loader -- reachability first, per `dfe-infra/docs/threat-model.md`. It parses the transport framing only. Parsing a message body is the dfe-transform-* apps' job, and fitting a record to its table is dfe-loader's.
 
 ### Where things live
 
 | Path | What is in it |
 |---|---|
-| `src/main.rs` | CLI, config load, the `--emit-*` generators, the startup order |
-| `src/server/` | One directory per handler, plus `traits.rs` (the `ProtocolHandler` boundary), auth, TLS, IP filter. `mod.rs:125` registers them |
+| `src/main.rs` | CLI, config load, the `--emit-dockerfile` flag, the startup order |
+| `src/server/` | One directory per handler, plus `traits.rs` (the `ProtocolHandler` boundary), auth, TLS, IP filter. `Server::build_handlers` in `mod.rs` registers them |
 | `src/pipeline/`, `routing/`, `validation/` | The shared core path every handler feeds |
 | `src/pipeline/acks.rs` | The held answer: admission, hold budget, next-hop deadline |
 | `src/buffer/` | `SinkBackend` for answers at enqueue: in-memory, or scalo `TieredSink` with a disk spool |
 | `src/sink/` | `kafka/`, `grpc/`, `file/`. Kafka owns its producer so delivery reports are visible |
 | `src/config/mod.rs`, `src/deployment.rs` | `Config::validate()`, and the contract the Dockerfile and the released chart are generated from |
 | `Dockerfile`, `proto/` | Generated or vendored. Do not hand-edit |
-| `tests/` | Targets `smoke`, `integration`, `e2e`. `common/mod.rs` is the container harness |
+| `tests/` | Targets `smoke`, `integration`, `e2e`, `orchestrator_lifecycle`. `common/mod.rs` is the container harness |
 | `docs/architecture.md` | Why it is built this way, and the invariants |
 
 ### Commands that prove a change
@@ -210,12 +195,11 @@ dfe-loader).
 ```bash
 hyperi-ci check                                 # the gate
 cargo nextest run                               # unit + integration, incl. the drift guards
-cargo nextest run --test e2e --run-ignored all  # adds the 8 Kafka e2e tests (needs Docker)
+cargo nextest run --test e2e --run-ignored all  # adds the ignored Kafka e2e tests (needs Docker)
 ```
 
-`protoc`, `cmake` and a C toolchain must be present or the build dies inside a
-dependency's build script, naming nothing useful. Three ways green lies. The
-default run skips eight `#[ignore]` Kafka tests. Container tests skip silently
+The build needs `protoc`, a C toolchain, `pkg-config` and librdkafka, as the README's quick start says. Three ways green lies. The
+default run skips the `#[ignore]` Kafka tests. Container tests skip silently
 when Docker is down locally and only panic under `$CI`. And `features: default`
 is `otlp` alone, with hyperi-ci adding `--features jemalloc`, so a local build is
 not the shipped one.
@@ -230,7 +214,7 @@ not the shipped one.
 | Hand-edit `Dockerfile`, or commit a chart | Fix `src/deployment.rs`, then `--emit-dockerfile Dockerfile` | The Dockerfile is generator output with a test asserting it matches, and the release assembles the chart from the contract, so a hand edit is reverted or never ships |
 | Bump scalo and stop | Bump, regenerate, move `release.helm.library` in `.hyperi-ci.yaml` to the same version, commit the diff | The generator is in scalo, so the drift guard fails by design, and a scalo-service release renders only the contract version its scalo release writes |
 | Rename a port in `src/deployment.rs` | Keep the name | Deployments name the receiver's ports to wire its listeners, and a rename breaks every one that names the old port |
-| Change `Config::validate()` alone | Update dfe-engine's mirror | It hand-copies this validation, nothing compares them, and they have drifted |
+| Change the credential id rule or the bearer listeners alone | Change dfe-engine's copies with them | The engine refuses an ingest credential by its own copy of both (`src/dfe_engine/orgs/ingest_credentials.py` and `src/dfe_engine/api/v1/ingest_credentials.py` in dfe-engine), and nothing compares the two |
 | Read 202 as delivered on a listener with acknowledgements off | Compare `receiver_kafka_sends_total` with `receiver_kafka_delivered_total` | That 202 is answered at enqueue |
 | Read a 503 as "not written" | Allow for the retry to duplicate the record | The hold can expire while a broker is writing it |
 | Set `VAULT_*` on the test OpenBao | Set `BAO_*` | `VAULT_` is ignored, a random root token is minted, everything 403s silently |
@@ -241,8 +225,7 @@ Inbound: **scalo-rs** (crate `scalo`) by `cargo-dep` -- a runtime range plus a d
 
 Outbound: **dfe-infra** by `image-pin` lockstep -- its `versions.yaml` pins
 the image and the thin chart released here, and Argo deploys that published
-chart. **dfe-engine** by `mirrored-logic` -- it
-reimplements `Config::validate()` by hand, so only a human closes that edge.
+chart. **dfe-engine** by `mirrored-logic` -- it keeps its own copy of the credential id rule and the bearer listeners, so only a human closes that edge.
 
 ```bash
 python3 ../dfe-infra/scripts/dfe-stack suite --consumer dfe-receiver
