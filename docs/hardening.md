@@ -23,7 +23,7 @@ This document covers application-level hardening (80/20 effort) and cost-effecti
 | Concurrency limit | 10,000 in-flight requests default, per HTTP listener | `server.max_concurrent_requests` |
 | Per-IP rate limiting | GCRA via tower-governor, opt-in, per HTTP listener, keyed on the TCP peer (forwarding headers only from `server.trusted_proxies`). Clients whose budget has refilled are dropped from its key map every 5s | `server.rate_limit.*`, `server.trusted_proxies` |
 | Flow per-source rate limiting | Token bucket per UDP source, opt-in. The bucket map never holds more than `cache_size` (default 4096) sources: a new source past it evicts an idle bucket where one is among the first 32 looked at, else the first, counted on `flow_rate_limit_evicted_total`, so spoofed sources cannot grow it | `flow.rate_limit.*` |
-| IP filter (allowlist/denylist) | CIDR trie, connection-level reject, every accept loop. An unknown mode, a bad CIDR or an empty allowlist refuses to start | `server.ip_filter.*` |
+| IP filter (allowlist/denylist) | CIDR trie, connection-level reject, in every accept loop the receiver runs. The gRPC and OTLP gRPC ports have none: tonic runs their accept loops. An unknown mode, a bad CIDR or an empty allowlist refuses to start | `server.ip_filter.*` |
 | 503 backpressure | HTTP + gRPC ingest shed load when pipeline not ready | `Retry-After: 5` |
 | TLS termination | Per-protocol. The ingest, webhook, HEC, remote write and OTLP HTTP listeners reload certificate material given as a secret reference every `refresh_interval_secs`. A certificate file, every other listener and every other `tls.*` setting load once at start, so a change to them is a restart | `*.tls.enabled`, `*.tls.cert_secret` |
 | TLS handshake timeout | 10s, every TLS listener the receiver accepts on | `server.connections.tls_handshake_timeout_ms` |
@@ -480,13 +480,13 @@ TCP protocols need different treatment.
 
 | Protocol | Port | Transport | Fronting Option |
 |---|---|---|---|
-| HTTP/HTTPS | 8080 | HTTP | Cloudflare + NLB/ALB (standard) |
-| gRPC | 6000 | HTTP/2 | Cloudflare + NLB (gRPC passthrough) |
-| OTLP gRPC | 4317 | HTTP/2 | Cloudflare + NLB |
-| OTLP HTTP | 4318 | HTTP | Cloudflare + NLB/ALB |
-| Splunk HEC | 8088 | HTTP | Cloudflare + NLB/ALB |
-| Prometheus RW | 9091 | HTTP | Cloudflare + NLB/ALB |
-| Webhook (own listener) | 8090 | HTTP | Cloudflare + NLB/ALB |
+| HTTP/HTTPS | 8080 | HTTP | Cloudflare + NLB/ALB, with an Origin Rule to 8080 |
+| gRPC | 6000 | HTTP/2 | NLB. Cloudflare only to a TLS, HTTP/2 endpoint on 443 |
+| OTLP gRPC | 4317 | HTTP/2 | NLB. Cloudflare only to a TLS, HTTP/2 endpoint on 443 |
+| OTLP HTTP | 4318 | HTTP | Cloudflare + NLB/ALB, with an Origin Rule to 4318 |
+| Splunk HEC | 8088 | HTTP | Cloudflare + NLB/ALB, with an Origin Rule to 8088 |
+| Prometheus RW | 9091 | HTTP | Cloudflare + NLB/ALB, with an Origin Rule to 9091 |
+| Webhook (own listener) | 8090 | HTTP | Cloudflare + NLB/ALB, with an Origin Rule to 8090 |
 | Lumberjack | 5044 | TCP | NLB only (no L7 proxy) |
 | Syslog UDP | 514 | UDP | NLB only |
 | Syslog TCP | 514 | TCP | NLB only |
@@ -494,6 +494,8 @@ TCP protocols need different treatment.
 | Fluent | 24224 | TCP | NLB only |
 | GELF | 12201 | TCP | NLB only |
 | Flow (NetFlow, IPFIX, sFlow) | 2055 / 4739 / 6343 | UDP | NLB only |
+
+Cloudflare proxies HTTP and HTTPS only on its listed ports, HTTPS on 443, 2053, 2083, 2087, 2096 and 8443, and none of the receiver's own ports is one of those. A sender reaches Cloudflare on a listed port, and an Origin Rule's destination port override, which every plan has, forwards to the receiver's port. gRPC through Cloudflare needs gRPC turned on for the zone and an endpoint on 443 with TLS and HTTP/2 advertised over ALPN.
 
 **For TCP protocols:**
 
@@ -625,6 +627,9 @@ See Parts 2 to 4 above for configuration details and cost drivers.
 
 ### Cloudflare
 
+- [Cloudflare network ports](https://developers.cloudflare.com/fundamentals/reference/network-ports/)
+- [Cloudflare gRPC connections](https://developers.cloudflare.com/network/grpc-connections/)
+- [Cloudflare Origin Rules](https://developers.cloudflare.com/rules/origin-rules/)
 - [Cloudflare plans](https://www.cloudflare.com/plans/)
 - [Cloudflare Pro features](https://www.cloudflare.com/plans/pro/)
 - [Cloudflare Spectrum pricing](https://support.cloudflare.com/hc/en-us/articles/360041721872-Billing-for-Spectrum)

@@ -302,7 +302,7 @@ The sidecar communicates with receiver via `localhost:6000` (gRPC) or
 
 - Bearer token mismatch: the token in the sidecar sink config must exactly match one of the listener's tokens: `grpc.auth.bearer.tokens`, or its `grpc.auth.bearer.secret_source` (`server.auth.*` for HTTP).
 - TLS certificate issues: if receiver has TLS enabled, the sidecar must trust receiver's CA. Mount the CA cert and set `tls.ca_file` in the Vector sink.
-- mTLS: `auth.mode: mtls` with `tls.client_auth: required` on the receiver's listener requires a client certificate. Set `tls.crt_file` and `tls.key_file` in the sidecar sink config.
+- Client certificates: the `vector` sink is gRPC, and on the gRPC listener `auth.mode: mtls` refuses every RPC. Require the certificate at the handshake instead, with `grpc.auth.mode: none`, `grpc.tls.client_auth: required` and the CA in `grpc.tls.ca_file`. Set `tls.crt_file` and `tls.key_file` in the sidecar sink config.
 
 ### Payload too large
 

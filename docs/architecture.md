@@ -85,12 +85,12 @@ values set the listener on `0.0.0.0:6000`, where it takes Vector's gRPC sink
 profiles send onward to the loader over gRPC (`loader.transport: grpc`,
 `destinations.default: loader`) with no broker in the path.
 
-The webhook intake is its own handler rather than a route on `/ingest`, for
-reasons worth keeping. `/ingest` checks one server-wide credential in middleware
+The webhook intake has its own routes and per-caller auth rather than a route on
+`/ingest`, for reasons worth keeping. `/ingest` checks one server-wide credential in middleware
 before the body is read, where a product is identified per caller and a signed
 request needs the body to verify. A product's payload format is its own, so
-the `rules` rows cannot pick its topic. And an own listener lets a
-deployment expose only that port to the product's egress.
+the `rules` rows cannot pick its topic. And with `webhook.bind_address` set it takes a
+listener of its own, so a deployment can expose only that port to the product's egress.
 
 ## The hot path, and what it costs
 
@@ -130,7 +130,7 @@ wrong does.
 
 3. No chart is committed. At release, hyperi-ci emits the contract with `generate-artefacts` and assembles a thin chart from it on the scalo-service library chart at `release.helm.library`, which moves with the scalo version in `Cargo.toml`. A deployment wires the receiver's listeners by port name, so a renamed port breaks it.
 
-4. `auth.mode` defaults to `none`. A deployment that has not configured auth accepts unauthenticated posts, limited only by body size, request timeout, the concurrency and connection caps, the IP filter and the rate limiter. The receiver is built to sit behind edge protection, never directly on the internet.
+4. `auth.mode` defaults to `none`. A deployment that has not configured auth accepts unauthenticated posts, limited only by body size, request timeout, the concurrency and connection caps, the IP filter and the rate limiter. Whatever faces the internet in front of it has to limit who reaches the ports: edge protection, or an allow list on the load balancer.
 
    In a DFE deployment the public door is `exposure.groups.ingest` (`dfe-infra/docs/ingest-edge.md`). Load balancers render only while its allow list names someone, so an empty list is no public door at all, and `publicService` stays off and is refused if switched on. The standalone thin chart's default is an in-cluster Service only: there a load balancer exists once a deployment sets `publicService.enabled`, and an empty `publicService.loadBalancerSourceRanges` leaves it open to every address.
 
