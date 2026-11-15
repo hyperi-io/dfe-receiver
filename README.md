@@ -16,8 +16,8 @@ The front door of a DFE deployment: takes events in the protocols agents already
 
 | Protocol | Port | Source |
 |---|---|---|
-| HTTP(S) JSON | configurable | Vector, custom agents |
-| gRPC Vector sink | configurable | Vector |
+| HTTP(S) JSON | 8080 | Vector, custom agents |
+| gRPC Vector sink | 6000 | Vector |
 | Webhook (`POST /webhook/{caller}`) | shares HTTP, or 8090 | Product alert rules and notification hooks (runZero, ...) |
 | OTLP gRPC | 4317 | OpenTelemetry collectors |
 | OTLP HTTP | 4318 | OpenTelemetry collectors |
@@ -29,20 +29,20 @@ The front door of a DFE deployment: takes events in the protocols agents already
 | Prometheus Remote Write | 9091 | Prometheus, VictoriaMetrics |
 | Flow (NetFlow + sFlow), experimental | 2055 / 4739 / 6343 UDP | NetFlow v5/v9, IPFIX, sFlow v5 exporters (v7 not supported) |
 
-HTTP always runs, because the probes ride its listener, and the other listeners are opt-in. A listener that answers at enqueue (acknowledgements off, or syslog, GELF and flow) buffers in memory behind a circuit breaker, and disk spillover is opt-in.
+HTTP always runs, and the other listeners are opt-in. A listener that answers at enqueue (acknowledgements off, or syslog, GELF and flow) buffers in memory behind a circuit breaker, and disk spillover is opt-in.
 
 ## Quick start
 
-The build needs `protoc`, `cmake` and a C toolchain on `PATH`: the gRPC, OTLP and Prometheus Remote Write protocols compile vendored `.proto` files, and `aws-lc-sys` and `rdkafka-sys` build native code.
+The build needs `protoc`, a C toolchain, `pkg-config` and an installed librdkafka. The gRPC, OTLP and Prometheus Remote Write protocols compile vendored `.proto` files, `aws-lc-sys` compiles C, and `rdkafka-sys` links librdkafka through pkg-config. It refuses a librdkafka older than the version after the `+` in its `Cargo.lock` entry, and a Debian or Ubuntu package can be older than that, so there [build librdkafka from source](https://github.com/confluentinc/librdkafka#build-from-source) first.
 
 ```bash
-sudo apt-get install -y protobuf-compiler cmake build-essential   # Debian or Ubuntu
-brew install protobuf cmake                                        # macOS
+sudo apt-get install -y protobuf-compiler build-essential pkg-config   # Debian or Ubuntu
+brew install protobuf pkg-config librdkafka                              # macOS
 cargo build --release
 ./target/release/dfe-receiver --config config.yaml
 ```
 
-The smallest config that moves data names the bind address, an auth mode, the brokers and the default source:
+Only the brokers have no default, so this is the smallest config that moves data. The other keys are written out at their defaults:
 
 ```yaml
 server:
@@ -61,15 +61,16 @@ routing:
 
 ## Configuration
 
-Every setting is in [config.example.yaml](config.example.yaml), and `DFE_RECEIVER_SERVER__BIND_ADDRESS` is how an environment override is written: the `DFE_RECEIVER_` prefix, then the key path with double underscores. `server.auth.mode` is `none`, `header`, `bearer` or `mtls`. The routing rules, the webhook intake, the metrics and the hot-path design are in [docs/internals.md](docs/internals.md).
+[docs/config-schema.yaml](docs/config-schema.yaml) lists every setting with its default, generated from the code, and [config.example.yaml](config.example.yaml) is an annotated starting point. Started with `--config`, as the image is, the receiver reads a fixed set of flat environment variables over the file, such as `DFE_RECEIVER_BIND_ADDRESS` and `DFE_RECEIVER_KAFKA_BROKERS`. Started without it, scalo's cascade also reads any key as its path with double underscores, `DFE_RECEIVER_SERVER__BIND_ADDRESS`. `server.auth.mode` is `none`, `header`, `bearer`, `mtls` or `both`. The routing rules, the webhook intake, the metrics and the hot-path design are in [docs/internals.md](docs/internals.md).
 
 ## Documentation
 
-- [docs/internals.md](docs/internals.md): how it works, configuration, the webhook intake, metrics and the security model.
+- [docs/architecture.md](docs/architecture.md): where it sits in the suite and why it is built this way.
+- [docs/delivery.md](docs/delivery.md): when a sender is answered, and what the receiver buffers.
+- [docs/internals.md](docs/internals.md): how each part works -- parsing, routing, what a sender is told, auth, configuration, the webhook intake and flow.
 - [docs/hardening.md](docs/hardening.md): running it where it is reachable from outside.
 - [docs/sidecar-transports.md](docs/sidecar-transports.md) and [docs/webhook-setup.md](docs/webhook-setup.md): the transport options and the webhook callers.
 - [docs/metrics.md](docs/metrics.md) and [docs/performance.md](docs/performance.md): what it reports and what it costs.
-- [docs/architecture.md](docs/architecture.md): where it sits in the suite and why it is built this way.
 
 The suite's published docs are at <https://dfe.docs.hyperi.io>, and this repository's pages at <https://dfe.docs.hyperi.io/dfe-receiver/>.
 

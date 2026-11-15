@@ -1,27 +1,15 @@
 # Sidecar Transport Pattern
 
-dfe-receiver natively supports these ingest protocols:
+dfe-receiver takes the protocols in the README's [protocol table](../README.md#what-it-does).
 
-| Protocol | Port | Format |
-|----------|------|--------|
-| HTTP JSON | 8080 | POST JSON body |
-| gRPC (Vector-compat) | 6000 | Vector native protocol |
-| Syslog (RFC 3164/5424) | 514 / 6514 | UDP/TCP / TLS syslog |
-| GELF | 12201 | Graylog Extended Log Format |
-| Splunk HEC | 8088 | Splunk HTTP Event Collector |
-| OTLP | 4317 | OpenTelemetry Protocol |
-| Fluent Forward | 24224 | Fluentd/Fluent Bit forward protocol |
-| Lumberjack/Beats | 5044 | Elastic Beats protocol |
-| Prometheus Remote Write | 9091 | Prometheus remote write |
-
-For protocols not natively supported, use a **sidecar** — a lightweight
+For protocols not natively supported, use a **sidecar** -- a lightweight
 process deployed alongside receiver that collects data from the source
 protocol and pushes it to receiver's ingest endpoint.
 
 ## Recommended: Vector Sidecar
 
-[Vector](https://vector.dev/) is a high-performance observability data
-pipeline with 50+ source types. It speaks receiver's native gRPC protocol
+[Vector](https://vector.dev/) is an observability data pipeline with
+many source types. It speaks receiver's native gRPC protocol
 via the `vector` sink, making it the ideal sidecar for unsupported protocols.
 
 Deploy Vector in the same Kubernetes pod or Docker Compose service.
@@ -144,7 +132,7 @@ address = "localhost:6000"
 
 ### Example: Windows Event Log
 
-> **Reference only — requires a Windows Vector agent.** Run Vector on the
+> **Reference only -- requires a Windows Vector agent.** Run Vector on the
 > Windows host and push to receiver over the network.
 
 ```toml
@@ -197,7 +185,9 @@ address = "localhost:6000"
 ## Alternative: Fluent Bit Sidecar
 
 [Fluent Bit](https://fluentbit.io/) is a lightweight log processor that
-can push to receiver's Fluent Forward endpoint (`:24224`).
+can push to receiver's Fluent Forward endpoint (`:24224`). Forward carries no
+credential, so the receiver starts its Fluent listener only with
+`fluent.tls.client_auth: required` or `fluent.accept_unauthenticated: true`.
 
 ```text
 [Source Protocol] --> Fluent Bit (sidecar) --> Forward :24224 --> dfe-receiver --> Kafka
@@ -221,7 +211,7 @@ can push to receiver's Fluent Forward endpoint (`:24224`).
 
 Fluent Bit is a good choice when:
 
-- You need a very small memory footprint (<1 MB)
+- You need a small memory footprint
 - You're already in a Fluent ecosystem (Fluentd/Fluent Bit)
 - The source is file-based (tail, systemd) rather than network protocol
 
@@ -254,7 +244,7 @@ func forward(data []byte) error {
         return err
     }
     defer resp.Body.Close()
-    if resp.StatusCode != http.StatusOK {
+    if resp.StatusCode != http.StatusAccepted {
         return fmt.Errorf("receiver returned %d", resp.StatusCode)
     }
     return nil
@@ -267,7 +257,7 @@ Deploy the sidecar in the same pod as receiver:
 
 ```yaml
 # values.yaml (Helm)
-extraContainers:
+sidecars:
   - name: vector-sidecar
     image: timberio/vector:<version>-alpine  # the tests run VECTOR_IMAGE in tests/common/peers.rs
     args: ["--config", "/etc/vector/vector.yaml"]
@@ -289,14 +279,13 @@ extraVolumes:
 ```
 
 The sidecar communicates with receiver via `localhost:6000` (gRPC) or
-`localhost:8080` (HTTP) — no network hop, minimal latency.
+`localhost:8080` (HTTP), with no network hop.
 
 ## Choosing a Sidecar
 
 | Criteria | Vector | Fluent Bit | Custom |
 |----------|--------|------------|--------|
-| Protocol coverage | 50+ sources | 30+ inputs | Unlimited |
-| Memory footprint | ~30 MB | ~1 MB | Varies |
+| Memory footprint | small | smallest | varies |
 | Best transport to receiver | gRPC (Vector native) | Fluent Forward | HTTP JSON |
 | Language | Rust | C | Any |
 | When to use | Most cases | Minimal footprint, file tailing | Novel/proprietary protocols |
@@ -305,29 +294,29 @@ The sidecar communicates with receiver via `localhost:6000` (gRPC) or
 
 ### Connection refused
 
-- Receiver may not be ready yet — add a startup delay or use an `initContainer` (see below).
-- Wrong port — gRPC ingest is `:6000`, HTTP is `:8080`. Confirm the sidecar config matches.
-- Firewall or Kubernetes NetworkPolicy blocking loopback or pod-to-pod traffic. Within a pod, `localhost` is always reachable — check NetworkPolicy only for cross-pod setups.
+- Receiver may not be ready yet -- Vector retries the sink, or wait in the sidecar's command (see below).
+- Wrong port -- gRPC ingest is `:6000`, HTTP is `:8080`. Confirm the sidecar config matches.
+- Firewall or Kubernetes NetworkPolicy blocking loopback or pod-to-pod traffic. Within a pod, `localhost` is always reachable -- check NetworkPolicy only for cross-pod setups.
 
 ### Auth failures
 
-- **Bearer token mismatch** — the token in the sidecar sink config must exactly match one of the tokens in receiver's `auth.bearer_tokens` list (or the secret source).
-- **TLS certificate issues** — if receiver has TLS enabled, the sidecar must trust receiver's CA. Mount the CA cert and set `tls.ca_file` in the Vector sink.
-- **mTLS** — receiver's `auth.mtls` requires a client certificate. Set `tls.crt_file` and `tls.key_file` in the sidecar sink config.
+- Bearer token mismatch: the token in the sidecar sink config must exactly match one of the listener's tokens: `grpc.auth.bearer.tokens`, or its `grpc.auth.bearer.secret_source` (`server.auth.*` for HTTP).
+- TLS certificate issues: if receiver has TLS enabled, the sidecar must trust receiver's CA. Mount the CA cert and set `tls.ca_file` in the Vector sink.
+- Client certificates: the `vector` sink is gRPC, and on the gRPC listener `auth.mode: mtls` refuses every RPC. Require the certificate at the handshake instead, with `grpc.auth.mode: none`, `grpc.tls.client_auth: required` and the CA in `grpc.tls.ca_file`. Set `tls.crt_file` and `tls.key_file` in the sidecar sink config.
 
 ### Payload too large
 
-Receiver refuses a request larger than `server.max_body_size`. Large batches from Vector's `batch.max_bytes` can exceed it.
+Receiver refuses a gRPC message larger than `grpc.max_message_size` (16 MiB by default) and an HTTP body larger than `server.max_body_size` (10 MiB by default). Large batches from Vector's `batch.max_bytes` can exceed them.
 
 Options:
 
-- Increase receiver's limit: set `server.max_body_size: "64MiB"` in receiver config.
+- Increase receiver's limit, in bytes: `grpc.max_message_size: 67108864` for the `vector` sink, `server.max_body_size: 67108864` for HTTP.
 - Reduce Vector's batch size: set `batch.max_bytes = 8388608` (8 MiB) in the sink.
 
 ### TLS between sidecar and receiver
 
 ```toml
-# vector.toml — TLS sink config
+# vector.toml -- TLS sink config
 [sinks.receiver]
 type = "vector"
 inputs = ["my_source"]
@@ -336,7 +325,7 @@ address = "localhost:6000"
 [sinks.receiver.tls]
 enabled = true
 ca_file = "/etc/ssl/certs/receiver-ca.pem"   # Trust receiver's CA
-# mTLS — only required if receiver has mtls enabled:
+# mTLS -- only when the receiver requires client certificates:
 crt_file = "/etc/ssl/certs/sidecar-client.pem"
 key_file = "/etc/ssl/private/sidecar-client.key"
 ```
@@ -345,12 +334,7 @@ key_file = "/etc/ssl/private/sidecar-client.key"
 
 ### When one sidecar is enough
 
-A single Vector sidecar handles most workloads up to roughly:
-
-- ~50,000 events/sec on a modern CPU core
-- ~100 MB/s of log throughput
-
-Beyond that, consider deploying Vector as a separate Deployment (DaemonSet for node-level collection, Deployment for protocol aggregation) rather than a per-pod sidecar.
+When one sidecar's CPU limit becomes the bottleneck, consider deploying Vector as a separate Deployment (DaemonSet for node-level collection, Deployment for protocol aggregation) rather than a per-pod sidecar.
 
 ### Sidecar container resource starting point
 
@@ -368,13 +352,13 @@ Increase `cpu` limit if you see throttling under load. Increase `memory` limit i
 
 ### Backpressure behaviour
 
-When receiver is overloaded it returns `503 Service Unavailable`. Vector responds by:
+When receiver is overloaded it answers `UNAVAILABLE` on gRPC and `503 Service Unavailable` on HTTP. Vector responds by:
 
 1. Pausing event ingestion from the source.
-2. Buffering events to its disk buffer (configure `data_dir` and `buffer.max_size`).
+2. Buffering events, in memory by default, or on disk with a disk buffer (`data_dir` and `buffer.max_size`).
 3. Retrying delivery with exponential backoff.
 
-This means the sidecar is self-regulating — set an appropriate disk buffer size to absorb short bursts, and rely on KEDA / HPA to scale receiver for sustained high load.
+This means the sidecar is self-regulating -- set an appropriate disk buffer size to absorb short bursts, and rely on KEDA / HPA to scale receiver for sustained high load.
 
 ## Health Check Integration
 
@@ -408,7 +392,7 @@ containers:
     readinessProbe:
       httpGet:
         path: /health
-        port: 8686        # Vector's internal API port
+        port: 8686        # Vector's API, with api.enabled: true in its config
       initialDelaySeconds: 5
       periodSeconds: 10
 ```
@@ -418,7 +402,7 @@ containers:
 ```yaml
 services:
   dfe-receiver:
-    image: ghcr.io/hyperi-io/dfe-receiver:latest
+    image: ghcr.io/hyperi-io/dfe-receiver:<version>
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8080/livez"]
       interval: 5s

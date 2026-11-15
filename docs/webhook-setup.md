@@ -2,9 +2,9 @@
 
 `POST /webhook/{caller}` accepts events pushed by a product -- an alert rule, a
 SaaS notification hook -- rather than streamed by an agent. This page is how to
-configure one end to end without reading the Rust. The design rationale and the
-request flow are in [internals.md](internals.md); the field-by-field grammar is in
-`config.example.yaml` and the generated `docs/config-schema.yaml`.
+configure one, from the auth choice to proving delivery, without reading the Rust.
+The design rationale and the request flow are in [internals.md](internals.md), and
+every field is in `config.example.yaml` and the generated `docs/config-schema.yaml`.
 
 Every caller is declared separately and carries its own secret, topic and body
 format, so two callers never share a credential and a wrong secret is only ever
@@ -14,7 +14,7 @@ tried against the caller the URL path names.
 
 | Decision | Key | What hangs on it |
 |---|---|---|
-| Which listener | `webhook.bind_address` | Unset shares the ingest port; set gives the intake its own port so only that port is reachable from the product's egress |
+| Which listener | `webhook.bind_address` | Unset shares the ingest port. Set, the intake gets its own port, so only that port need be reachable from the product's egress |
 | How the sender proves itself | `callers[].auth.mode` | `hmac` if the product can sign, `header` if it can only attach a fixed header |
 | Where the secret comes from | `callers[].auth.secret_source` | A `provider:path[:key]` reference, never a literal in the file |
 | How stale is too stale | `callers[].auth.tolerance_secs` | The replay window, `hmac` only |
@@ -51,7 +51,7 @@ a missing secret is a configuration error, not a runtime degradation.
 The value of this source is not the feed on its own. It is that asset and
 identity records join to observability facts, so a noisy signal gains the
 context needed to judge it -- which host, owned by whom, running what, exposed
-where. Alert rules from an asset-inventory product are the shipped precedent.
+where. Alert rules from an asset-inventory product, runZero's say, are one such source.
 
 ```yaml
 webhook:
@@ -115,7 +115,7 @@ The CEL filter is compiled at load, so a malformed expression is a startup
 error rather than a per-request surprise. A record the filter drops still
 answers 202: the sender did nothing wrong and must not retry.
 
-`contains` matches a substring of a string only. Test list membership with `"pii" in tags` and a map key with `"region" in meta`; `tags.contains("pii")` on a list is an evaluation error. A filter that errors on a record, or answers with something other than a boolean or a number, refuses the whole request with a 500 `filter_error`, and nothing is delivered. Only a filter that answers false drops a record.
+`contains` matches a substring of a string only. Test list membership with `"pii" in tags` and a map key with `"region" in meta`. `tags.contains("pii")` on a list is an evaluation error. A filter that errors on a record, or answers with something other than a boolean or a number, refuses the whole request with a 500 `filter_error`, and nothing is delivered. Only a filter that answers false drops a record.
 
 On the shared listener the caller's secret is the only credential needed --
 `server.auth` does not apply to the webhook routes -- while `server.tls`,
@@ -127,11 +127,12 @@ On the shared listener the caller's secret is the only credential needed --
 |---|---|---|
 | 202 | Every record accepted, including a record the filter dropped | -- |
 | 400 | The body format is wrong for the declared `body`, or validation refused a record for good | `body_not_an_array`, `record_not_an_object`, or the validation reason |
-| 401 | Authentication failed | `missing_signature`, `invalid_signature`, `stale_signature`, `missing_auth_header`, `invalid_header_value` |
+| 401 | Authentication failed | `missing_signature`, `invalid_signature`, `missing_timestamp`, `invalid_timestamp`, `stale_signature`, `missing_auth_header`, `invalid_header_value` |
 | 404 | No caller of that name is declared | `unknown_caller` |
-| 413 | Over `webhook.max_body_size`; counted, never sent to the DLQ | -- |
-| 429 | `server.rate_limit` exhausted; carries `retry-after` | -- |
-| 503 | A record could not be taken -- memory pressure, a full hold, the bus down; carries `retry-after` | -- |
+| 413 | Over `webhook.max_body_size`, counted and never sent to the DLQ | -- |
+| 429 | `server.rate_limit` exhausted, with `retry-after` | -- |
+| 500 | The filter could not judge a record, and nothing was delivered | `filter_error` |
+| 503 | A record could not be taken -- memory pressure, a full hold, the bus down -- with `retry-after` | -- |
 
 A 401 is the sender's problem and a 503 is ours, so treat them differently when
 configuring the product's retry behaviour: 503 and 429 should be retried, and a

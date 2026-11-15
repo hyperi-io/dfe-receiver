@@ -1,262 +1,122 @@
-# DFE Platform Metrics Standard
+# dfe-receiver metrics
 
-> **STATUS - HISTORICAL (out of date).** Platform-era planning doc that predates
-> the scalo rename. The consolidation it proposes happened: the DFE apps now
-> emit through scalo's `MetricsManager` (bare metric names, optional namespace
-> prefix), so the "Current State (Problems)" table and migration plan below are
-> largely resolved. Kept for context; not current guidance.
->
-> The `dfe_` prefix this plan proposed was not adopted. Every metric name below is the one the runtime emits, except in the "Current State (Problems)" table, which records the names of its time.
+The receiver serves Prometheus metrics on its metrics listener (`metrics.address`, default `0.0.0.0:9090`) at `/metrics`. Names are bare unless scalo's `metrics.namespace` sets a prefix, and it is empty by default, so a scrape tells services apart by its `job` label. `dfe-receiver metrics-manifest` prints every registered series with its type, labels and description. scalo also serves process and container gauges and a few DLQ counters that the manifest does not list yet ([scalo-rs#137](https://github.com/hyperi-io/scalo-rs/issues/137)).
 
-Common metrics naming, structure, and implementation patterns for all DFE Rust
-services. Designed for Prometheus scraping, Grafana dashboards, KEDA autoscaling,
-and PagerDuty/OpsGenie alerting.
-
-> **Scope:** This standard applies to dfe-receiver, dfe-loader, dfe-fetcher,
-> dfe-archiver, and dfe-transform-vector.
-
----
-
-## Current State (Problems)
-
-| Issue | Impact |
-|-------|--------|
-| 3 different metric implementations across 5 projects | No shared dashboards, inconsistent naming |
-| Prefix collision: `dfe_pipeline_ready` emitted by both dfe-fetcher and dfe-transform-vector | Prometheus conflation when scraped from same cluster |
-| dfe-receiver and dfe-fetcher hand-roll Prometheus text; dfe-loader uses `prometheus` crate; dfe-archiver uses scalo `MetricsManager` | Maintenance burden, no code reuse |
-| No histograms in dfe-receiver or dfe-fetcher | SLO tracking impossible without external APM |
-| dfe-loader appends `scaling_pressure` as raw text after `Registry::gather()` | Invisible to registry-based tooling |
-| No transport labels — separate metrics for Kafka vs gRPC vs loader | Can't build unified transport dashboards |
-
----
-
-## Naming Convention
-
-### Prefix
-
-Metric names carry no prefix unless `metrics.namespace` sets one, and it is empty by default. Service differentiation comes from the Prometheus `job` label (set by scrape config), NOT from the metric name.
-
-```text
-{domain}_{metric_name}_{unit}
-```
-
-| Component | Rule | Examples |
-|-----------|------|---------|
-| Prefix | None unless `metrics.namespace` sets one | |
-| Domain | `transport`, `pipeline`, `records`, `scaling` | `transport_sent_total` |
-| Unit suffix | `_total` (counters), `_bytes`, `_seconds` (histograms/gauges) | `pipeline_stall_seconds_total` |
-
-### Labels
-
-| Label | Values | When |
-|-------|--------|------|
-| `transport` | `kafka`, `grpc`, `loader`, `file` | All `transport_*` metrics |
-| `reason` | `missing_header`, `invalid_token`, `invalid_json`, etc. | Failure counters |
-| `table` | ClickHouse table name | dfe-loader insert metrics |
-| `protocol` | `http`, `grpc`, `otlp`, `syslog`, `splunk_hec`, etc. | dfe-receiver ingest metrics |
-
-**Cardinality rules:**
-
-- Labels MUST have bounded cardinality (< 100 unique values per label)
-- NEVER use request IDs, IP addresses, or user-supplied strings as label values
-- Topic names are acceptable (bounded by Kafka topic count, typically < 50)
-
----
-
-## Standard Metric Set
-
-Every DFE service MUST emit the applicable metrics from each category.
-
-### Transport Metrics (`transport_*`)
-
-Metrics for downstream delivery (Kafka, gRPC, loader, file sinks).
+## Requests and records
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `transport_sent_total` | counter | `transport` | Messages sent successfully |
-| `transport_send_errors_total` | counter | `transport` | Messages that failed to send (fatal) |
-| `transport_backpressured_total` | counter | `transport` | Send attempts rejected due to backpressure |
-| `transport_refused_total` | counter | `transport` | Messages refused (queue full, no capacity) |
-| `transport_healthy` | gauge | `transport` | Transport health: 1=healthy, 0=unhealthy |
-| `transport_queue_size` | gauge | `transport` | Current messages in send queue |
-| `transport_queue_capacity` | gauge | `transport` | Maximum send queue capacity |
-| `transport_inflight` | gauge | `transport` | Messages in-flight (sent, awaiting ack) |
-| `transport_send_duration_seconds` | histogram | `transport` | Per-send latency |
+| `receiver_requests_total` | Counter | `transport` | Requests received |
+| `receiver_requests_success_total` / `receiver_requests_error_total` | Counter | `transport` | Requests answered as taken, and as not |
+| `receiver_request_duration_seconds` | Histogram | `transport` | Time from receipt to the answer |
+| `receiver_bytes_received_total` | Counter | `transport` | Bytes ingested |
+| `receiver_active_connections` | Gauge | `transport` | Open inbound connections |
+| `receiver_connections_closed_total` | Counter | `transport`, `reason` | Connections closed for a limit: `over_limit`, `no_first_byte`, `frame_timeout`, `idle` |
+| `receiver_parse_failures_total` | Counter | `transport` | Bodies a protocol decoder could not read |
+| `receiver_empty_decodes_total` | Counter | `transport` | Non-empty bodies that decoded to no records, answered as accepted |
+| `receiver_lossy_decodes_total` | Counter | `transport` | Syslog messages and Fluent Forward records kept with invalid UTF-8 replaced by U+FFFD |
+| `receiver_validation_failures_total` | Counter | `reason` | Records refused by validation: `invalid_json`, `missing_field`, `nesting_too_deep`, `not_an_object` |
+| `receiver_auth_failures_total` | Counter | `reason` | Refused credentials |
+| `receiver_request_timeouts_total`, `receiver_body_size_rejected_total` | Counter | `transport` | 408s and 413s |
+| `receiver_rate_limited_total` | Counter | `transport` | 429s from `server.rate_limit` |
+| `receiver_ip_filter_rejected_total` | Counter | `transport` | Connections and datagrams the IP filter refused |
+| `receiver_unsupported_encoding_total` | Counter | `transport` | 415s for a `Content-Encoding` or media type the receiver does not read |
+| `receiver_tls_handshake_failures_total` | Counter | | Handshakes that failed or timed out |
+| `receiver_records_dropped_total` | Counter | `transport`, `reason` | Records dropped with no way to tell the sender: `unavailable`, `rejected`, `shutdown`, `oversize`, `kernel` |
+| `records_received_total` | Counter | | Records, counted once when a listener first offers each to the pipeline |
+| `records_processed_total` / `records_delivered_total` | Counter | | Records the pipeline took |
+| `records_error_total` | Counter | | Records refused for good |
+| `usage_ingested_bytes_total` | Counter | `org_id` | Payload bytes accepted, by the org each record was stamped with |
+| `rules_hits_total`, `rules_clamped_total` | Counter | `rule_set`, `rule` | Rows that set a target, and clamped values the binding's default replaced |
+| `receiver_source_org_id_stripped_total` | Counter | | Records whose sender-supplied `_org_id` was removed under `routing.source_org_id: disallow` (the default) |
+| `receiver_original_stripped_total` | Counter | | Records whose `event.original` and `log.original` copy of the raw line was removed because `message` carries it. A record tagged `preserve_original_event`, or with no `message`, keeps it |
 
-### Pipeline Metrics (`pipeline_*`)
+## Kafka
 
-Metrics for the processing pipeline itself.
-
-| Metric | Type | Description |
-|--------|------|-------------|
-| `pipeline_ready` | gauge | Pipeline readiness: 1=ready, 0=backpressured/stalled |
-| `pipeline_stall_seconds_total` | counter | Total seconds spent stalled due to backpressure |
-
-### Record Metrics (`records_*`)
-
-Metrics for data records flowing through the pipeline.
+Enqueue and delivery are separate counts. librdkafka takes a record into its own queue first and a broker answers for it later, so a record can be enqueued and never delivered -- the delivery counters are the ones that say a broker holds it.
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `records_received_total` | counter | `protocol` (receiver only) | Records received before filtering |
-| `records_delivered_total` | counter | | Records delivered to output |
-| `records_filtered_total` | counter | | Records dropped by filter expressions |
-| `records_dlq_total` | counter | | Records routed to dead letter queue |
+| `receiver_kafka_sends_total` | Counter | | Messages librdkafka queued |
+| `receiver_kafka_send_duration_seconds` | Histogram | | Time to queue one send |
+| `receiver_kafka_bytes_sent_total` | Counter | | Bytes queued to Kafka |
+| `receiver_kafka_send_errors_total` | Counter | | Messages librdkafka refused to queue |
+| `receiver_kafka_delivered_total` | Counter | | Messages a broker acknowledged |
+| `receiver_kafka_delivery_failures_total` | Counter | `reason` | Messages no broker confirmed, by librdkafka error code. A timed-out message may still have been written |
+| `receiver_kafka_resends_total` | Counter | | Messages answered at enqueue that librdkafka gave up on with a message timeout, a topic the cluster does not serve or an authorisation failure, queued again |
+| `records_dlq_total` | Counter | | Messages sent to the DLQ (scalo emits this one) |
+| `dlq_backend_start_failures_total` | Counter | `backend` | DLQ backends that failed to start (scalo emits this one). The receiver runs on with the others, and with none a held dead letter is not taken |
+| `receiver_records_rejected_total` | Counter | `outcome` | Records a destination can never take (over its size ceiling), on any sink: `dead_lettered`, `dropped` when no DLQ is configured or no DLQ backend can hold the entry (also counted in `pipeline_dead_letters_dropped_total{reason}`), or `dlq_refused` when the DLQ did not confirm the write, so the record stays buffered or its sender is told to retry |
+| `receiver_messages_spilled_total` / `receiver_messages_drained_total` | Counter | | Records a destination's buffer held back, in memory or on disk, and those since sent on |
 
-### Scaling Metrics (`scaling_*`)
+## gRPC destinations
 
-Metrics for KEDA autoscaling. All services that run in K8s SHOULD emit these.
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `receiver_destination_send_failures_total` | Counter | `reason` | Records a gRPC destination did not take: `unavailable` (down, refusing connections, busy or past its deadline) or `failed` (it answered with an error). Both are retried, and each class logs at most once per 10 s per destination |
+| `receiver_destination_build_failures_total` | Counter | | Destinations a config reload asked for whose sender failed to build, logged at ERROR with the reason. Their records are answered unavailable until a reload builds the sender |
+| `receiver_retired_records_total` | Counter | `outcome` | Records held by a destination a config reload retired: `sent` to it, `dead_lettered`, `spooled` (left in its disk spool), or `dropped` (no DLQ backend could hold the entry, or shutdown came first) |
+
+## Delivery and scaling
+
+`pipeline_delivery_guarantee{listener,guarantee,reason}` is 1 for what each listener gives, its weakest reachable leg ([delivery.md](delivery.md)). The `transport_ack_*` series are scalo's held answers by `transport`: `transport_ack_held` and `transport_ack_held_bytes` (gauges), `transport_ack_released_total{outcome}`, `transport_ack_refused_total{reason}` and `transport_ack_latency_seconds{outcome}`.
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `scaling_pressure` | gauge | Composite pressure score 0-100 (from scalo `ScalingPressure`) |
-| `scaling_circuit_open` | gauge | 1 if circuit breaker is open, 0 otherwise |
-| `scaling_memory_pressure` | gauge | Memory usage as fraction of limit (0.0-1.0) |
+| `scaling_pressure` | Gauge | Weighted scaling score (0-100), also served at `/scaling/pressure` on the metrics port (scalo emits this one) |
+| `scaling_memory_pressure` | Gauge | Memory the runtime guard counts, over its limit (0.0-1.0) |
+| `scaling_circuit_open` | Gauge | 1 while the Kafka sink's circuit is open, else 0 |
 
-In dfe-receiver the pressure's `queue_depth` term is the outbound backlog: the records each Kafka producer holds that no broker has confirmed yet, held answers' included, plus what every buffer and spool in front of a destination holds.
+The score is scalo's `ScalingPressure`, refreshed once a second. Each `scaling.*` component adds its weight in proportion to value over saturation, capped at its full weight. An open Kafka circuit forces 0, since more replicas cannot help. Otherwise memory at or past `scaling.memory_gate_threshold` forces 100. The `queue_depth` component is the outbound backlog: the records each Kafka producer holds that no broker has confirmed yet, held answers' included, plus what every buffer and spool in front of a destination holds. `config.example.yaml` lists the components and what feeds each.
 
-### Spool/Buffer Metrics (`spool_*`)
+A DFE deployment scales on that score through dfe-keda-shim: dfe-infra adds a `metrics-api` trigger on it, target 70, beside the chart's CPU trigger.
 
-For services with disk spillover.
+## Series scalo serves for every service
 
-| Metric | Type | Description |
-|--------|------|-------------|
-| `spool_bytes` | gauge | Current bytes in disk spool |
-| `spool_messages` | gauge | Current messages in disk spool |
-| `spool_disk_available` | gauge | 1 if disk has capacity, 0 if full |
+| Family | What it covers |
+|---|---|
+| `transport_*` | Delivery by `transport`: `transport_sent_total`, `transport_send_errors_total`, `transport_backpressured_total`, `transport_refused_total`, `transport_healthy`, `transport_queue_size`, `transport_queue_capacity`, `transport_inflight`, `transport_send_duration_seconds` |
+| `pipeline_*` | `pipeline_ready` (1 ready, 0 not), `pipeline_stall_seconds_total`, `pipeline_retries_total{stage}`, `pipeline_idle` |
+| `spool_*` | The disk spool, while spillover is on: `spool_bytes`, `spool_messages`, `spool_disk_available` and the rest |
+| `worker_pool_*` | scalo's worker pool |
+| flow | `flow_records_emitted_total{transport,mode}`, `flow_rate_limited_total{transport}`, `flow_template_evicted_total`, `flow_kernel_drops_total`, `transport_decode_err_total{transport,reason}`, `transport_drops_total{transport,reason}`, `handler_experimental{handler}` |
+| `process_*`, `container_*` | Resident and virtual memory, open file descriptors, start time, and the cgroup memory and CPU limits, not in the manifest |
 
-### Process Metrics (automatic via scalo)
-
-These are auto-registered by `MetricsManager` when `enable_process_metrics: true`, and are not yet in the manifest (scalo-rs#137):
-
-| Metric | Type | Source |
-|--------|------|--------|
-| `process_cpu_seconds_total` | gauge | sysinfo |
-| `process_resident_memory_bytes` | gauge | sysinfo |
-| `process_virtual_memory_bytes` | gauge | sysinfo |
-| `process_open_fds` | gauge | /proc/{pid}/fd |
-| `process_start_time_seconds` | gauge | startup epoch |
-| `container_memory_limit_bytes` | gauge | cgroup |
-| `container_memory_usage_bytes` | gauge | cgroup |
-| `container_cpu_limit_cores` | gauge | cgroup |
-
----
-
-## Key Alerting Ratios
-
-These PromQL expressions should be standardised across all DFE Grafana dashboards.
-
-| Alert | Query | Threshold |
-|-------|-------|-----------|
-| Error rate | `rate(transport_send_errors_total[5m]) / rate(transport_sent_total[5m])` | > 0.01 (1%) |
-| Backpressure rate | `rate(transport_backpressured_total[5m])` | > 0 sustained |
-| Queue saturation | `transport_queue_size / transport_queue_capacity` | > 0.8 |
-| Pipeline stall | `pipeline_ready == 0` | > 60s |
-| Scaling pressure | `scaling_pressure` | > 70 (KEDA trigger) |
-| Spool disk full | `spool_disk_available == 0` | > 0s |
-
----
-
-## Implementation Standard
-
-### Use scalo `MetricsManager`
-
-All projects MUST use `scalo::metrics::MetricsManager`. No hand-rolled
-Prometheus text output. No direct `prometheus` crate usage.
-
-```rust
-use scalo::metrics::MetricsManager;
-
-let metrics = MetricsManager::new("");
-
-// Register metrics
-let sent = metrics.counter("transport_sent_total", "Messages sent successfully");
-let queue = metrics.gauge("transport_queue_size", "Current queue depth");
-let latency = metrics.histogram("transport_send_duration_seconds", "Send latency");
-
-// Record
-sent.increment(1);
-queue.set(42.0);
-latency.record(elapsed.as_secs_f64());
-```
-
-An empty namespace records bare names, and it is the `metrics.namespace` default the service runtime reads from the config cascade. Service differentiation comes from the Prometheus `job` label in scrape config.
-
-### Transport Label Pattern
-
-```rust
-// Use metrics! macros with labels for transport discrimination
-counter!("transport_sent_total", "transport" => "kafka").increment(1);
-counter!("transport_sent_total", "transport" => "grpc").increment(1);
-```
-
-### Histogram Buckets
-
-Use scalo's standard bucket helpers:
-
-| Domain | Buckets | Helper |
-|--------|---------|--------|
-| Latency | 1ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s, 5s, 10s | `MetricsManager::latency_buckets()` |
-| Size | 100B, 1KB, 10KB, 100KB, 1MB, 10MB | `MetricsManager::size_buckets()` |
-
-### KEDA ScaledObject
+## Alerts
 
 ```yaml
-triggers:
-  - type: prometheus
-    metadata:
-      query: "avg(scaling_pressure{job='dfe-receiver'})"
-      threshold: "70"
+groups:
+  - name: dfe-receiver-security
+    rules:
+      - alert: HighAuthFailureRate
+        expr: sum(rate(receiver_auth_failures_total[5m])) > 100
+        labels:
+          severity: warning
+      - alert: HighValidationFailureRate
+        expr: sum(rate(receiver_validation_failures_total[5m])) > 50
+        labels:
+          severity: warning
+      - alert: RequestTimeoutSpike
+        expr: sum by (transport) (rate(receiver_request_timeouts_total[5m])) > 10
+        labels:
+          severity: info
+      - alert: OversizeBodyProbe
+        expr: sum by (transport) (rate(receiver_body_size_rejected_total[5m])) > 10
+        labels:
+          severity: info
+      - alert: IpFilterRejecting
+        expr: sum by (transport) (rate(receiver_ip_filter_rejected_total[5m])) > 0
+        for: 15m
+        labels:
+          severity: info
 ```
 
----
+A refused credential is also written as a `security` target event, at most one line per failure reason every 5 seconds, and the counter carries every one.
 
-## Migration Path
-
-### Phase 1: Add `dfe_` metrics alongside existing names
-
-Emit both old names (`receiver_*`, `loader_*`) and new names (`dfe_*`).
-Update dashboards to use new names. No breaking changes.
-
-### Phase 2: Remove old names
-
-After all dashboards and alerts are migrated, remove the old metric names.
-Coordinate across teams — one release cycle warning.
-
-### Phase 3: Consolidate implementation
-
-Migrate all projects to scalo `MetricsManager`. Remove hand-rolled
-`render()` functions and direct `prometheus` crate usage.
-
----
-
-## Per-Service Metric Map
-
-Which standard metrics apply to which service:
-
-| Metric | receiver | loader | fetcher | archiver | transform-vector |
-|--------|----------|--------|---------|----------|-----------------|
-| `transport_sent_total` | Yes | Yes | Yes | Yes | Via Vector |
-| `transport_send_errors_total` | Yes | Yes | Yes | Yes | Via Vector |
-| `transport_backpressured_total` | Yes | Yes | Yes | Yes | - |
-| `transport_healthy` | Yes | Yes | Yes | Yes | Yes |
-| `transport_queue_size` | Yes | Yes | - | Yes | Via Vector |
-| `pipeline_ready` | Yes | Yes | Yes | Yes | Yes |
-| `records_received_total` | Yes | Yes | Yes | Yes | Via Vector |
-| `records_delivered_total` | Yes | Yes | Yes | Yes | Via Vector |
-| `records_dlq_total` | Yes | Yes | - | Yes | - |
-| `scaling_pressure` | Yes | Yes | Yes | Yes | - |
-| `spool_bytes` | Yes | - | - | Yes | - |
-
----
-
-## References
-
-- [Prometheus Metric and Label Naming](https://prometheus.io/docs/practices/naming/)
-- [OTel Collector Internal Telemetry](https://opentelemetry.io/docs/collector/internal-telemetry/)
-- [KEDA Prometheus Scaler](https://keda.sh/docs/latest/scalers/prometheus/)
-- [Monitor Collector Queue Depth and Backpressure](https://oneuptime.com/blog/post/2026-02-06-monitor-collector-queue-depth-backpressure/view)
-- [OTel Collector Backpressure (Axoflow)](https://axoflow.com/blog/opentelemetry-controller-outages-pipelines-backpressure)
-- [Prometheus Labels Best Practices (CNCF)](https://www.cncf.io/blog/2025/07/22/prometheus-labels-understanding-and-best-practices/)
-- [Prometheus Best Practices (Better Stack)](https://betterstack.com/community/guides/monitoring/prometheus-best-practices/)
-- [KEDA + Prometheus Autoscaling (Devtron)](https://devtron.ai/blog/keda-autoscaling-prometheus/)
+| Condition | Query | Threshold |
+|-------|-------|-----------|
+| Error rate | `rate(transport_send_errors_total[5m]) / rate(transport_sent_total[5m])` | > 0.01 |
+| Backpressure | `rate(transport_backpressured_total[5m])` | > 0 sustained |
+| Queue saturation | `transport_queue_size / transport_queue_capacity` | > 0.8 |
+| Not ready | `pipeline_ready == 0` | > 60s |
+| Unconfirmed deliveries | `rate(receiver_kafka_delivery_failures_total[5m])` | > 0 sustained |
