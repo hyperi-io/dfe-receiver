@@ -40,6 +40,7 @@ use crate::metrics::{ConnectionGuard, Metrics};
 use crate::pipeline::{Acks, BatchOutcome, PipelineState};
 use crate::server::auth::{AuthMode, AuthState, grpc_auth_interceptor, principal_or_listener};
 use crate::server::http::{ConnectionLimits, Slot, create_auth_state};
+use crate::server::tls::Handshake;
 use crate::server::traits::{BoundAddr, ProtocolHandler};
 use crate::tenancy::Ingest;
 
@@ -388,8 +389,9 @@ impl ProtocolHandler for GrpcVectorHandler {
         // `auth_state: None` as "register the service with no interceptor", so
         // degrading would serve a wide-open gRPC port and report a successful
         // start.
+        let handshake = Handshake::of(&self.config.grpc.tls);
         let auth_state = if AuthMode::parse(&self.config.grpc.auth.mode) != Some(AuthMode::None) {
-            Some(create_auth_state(&self.config.grpc.auth).await?)
+            Some(create_auth_state(&self.config.grpc.auth, handshake).await?)
         } else {
             None
         };
@@ -400,6 +402,7 @@ impl ProtocolHandler for GrpcVectorHandler {
                 self.pipeline.shared_config(),
                 auth_state.clone(),
                 |config| &config.grpc.auth,
+                handshake,
                 TRANSPORT,
                 shutdown.clone(),
             );

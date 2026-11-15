@@ -45,7 +45,7 @@ use crate::server::content_encoding;
 use crate::server::grpc::{count_connections, count_oversize, count_unsupported_encoding};
 use crate::server::http::ConnectionLimits;
 use crate::server::http::{Accept, create_auth_state};
-use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
+use crate::server::tls::{Handshake, TlsCertProvider, build_tls_acceptor, uses_secrets};
 use crate::server::traits::{BoundAddr, Listeners, ProtocolHandler};
 use crate::tenancy::{Ingest, Principal};
 use convert::OtlpMode;
@@ -365,8 +365,9 @@ async fn run_grpc_server(
     // A failure here is fatal, not a downgrade: `auth_state: None` registers
     // the logs/traces/metrics services with no interceptor, so degrading would
     // serve three wide-open OTLP endpoints and report a successful start.
+    let handshake = Handshake::of(&config.tls);
     let auth_state = if AuthMode::parse(&config.auth.mode) != Some(AuthMode::None) {
-        Some(create_auth_state(&config.auth).await?)
+        Some(create_auth_state(&config.auth, handshake).await?)
     } else {
         None
     };
@@ -377,6 +378,7 @@ async fn run_grpc_server(
             shared_config,
             auth_state.clone(),
             |config| &config.otlp.auth,
+            handshake,
             TRANSPORT,
             shutdown.clone(),
         );
@@ -582,11 +584,13 @@ async fn run_http_server(
     // server alone leaves 4318 as an unauthenticated plaintext door beside a
     // closed 4317 -- with the config, and the startup log, reading as though
     // both were shut.
-    let auth_state = create_auth_state(&config.auth).await?;
+    let handshake = Handshake::of(&config.tls);
+    let auth_state = create_auth_state(&config.auth, handshake).await?;
     crate::server::http::spawn_auth_reload_watcher(
         state.pipeline.shared_config(),
         auth_state.clone(),
         |config| &config.otlp.auth,
+        handshake,
         TRANSPORT,
         shutdown.clone(),
     );

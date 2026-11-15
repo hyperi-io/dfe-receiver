@@ -306,7 +306,12 @@ async fn client_certificates_are_required_on_every_mtls_listener() {
     std::fs::write(&secret, "probe-secret").unwrap();
 
     let (mut receiver, listeners) = Receiver::start(&sink, || {
-        let (config, listeners) = all_tls_config(&pki, "required", &secret);
+        let (mut config, listeners) = all_tls_config(&pki, "required", &secret);
+        config.grpc.auth.mode = "mtls".to_string();
+        #[cfg(feature = "otlp")]
+        {
+            config.otlp.auth.mode = "mtls".to_string();
+        }
         let ready = listeners.iter().map(|l| l.addr).collect();
         (config, ready, listeners)
     })
@@ -354,8 +359,73 @@ async fn client_certificates_are_required_on_every_mtls_listener() {
             || rogue.output.clone(),
         );
     }
+    for listener in &listeners {
+        let answer = match listener.name {
+            "grpc" => grpc_rpc(&pki, listener.addr).await,
+            #[cfg(feature = "otlp")]
+            "otlp-grpc" => otlp_grpc_rpc(&pki, listener.addr).await,
+            _ => continue,
+        };
+        cases.check(
+            &format!(
+                "{}: an RPC under auth.mode mtls with a client certificate is answered",
+                listener.name
+            ),
+            answer.is_ok(),
+            || format!("{answer:?}"),
+        );
+    }
     cases.check("the receiver is still running", receiver.alive(), || {
         receiver.log_text()
     });
     cases.finish(|| format!("receiver log:\n{}", receiver.log_text()));
+}
+
+/// A gRPC channel to `addr` presenting the client certificate from `pki`.
+async fn client_cert_channel(pki: &Pki, addr: SocketAddr) -> tonic::transport::Channel {
+    let read = |name: &str| std::fs::read(pki.file(name)).unwrap();
+    let tls = tonic::transport::ClientTlsConfig::new()
+        .ca_certificate(tonic::transport::Certificate::from_pem(read("ca.crt")))
+        .identity(tonic::transport::Identity::from_pem(
+            read("client.crt"),
+            read("client.key"),
+        ))
+        .domain_name("localhost");
+    tonic::transport::Channel::from_shared(format!("https://{addr}"))
+        .unwrap()
+        .tls_config(tls)
+        .unwrap()
+        .connect()
+        .await
+        .unwrap()
+}
+
+/// One empty Vector `PushEvents` over a client-certificate channel.
+async fn grpc_rpc(pki: &Pki, addr: SocketAddr) -> Result<(), tonic::Status> {
+    use dfe_receiver::server::grpc::pb::vector::{PushEventsRequest, PushEventsResponse};
+
+    let mut client = tonic::client::Grpc::new(client_cert_channel(pki, addr).await);
+    client.ready().await.unwrap();
+    let codec = tonic_prost::ProstCodec::<PushEventsRequest, PushEventsResponse>::default();
+    let path = http::uri::PathAndQuery::from_static("/vector.Vector/PushEvents");
+    client
+        .unary(
+            tonic::Request::new(PushEventsRequest { events: vec![] }),
+            path,
+            codec,
+        )
+        .await
+        .map(drop)
+}
+
+/// One empty OTLP logs export over a client-certificate channel.
+#[cfg(feature = "otlp")]
+async fn otlp_grpc_rpc(pki: &Pki, addr: SocketAddr) -> Result<(), tonic::Status> {
+    use dfe_receiver::server::otlp::pb::collector::logs::v1::ExportLogsServiceRequest;
+    use dfe_receiver::server::otlp::pb::collector::logs::v1::logs_service_client::LogsServiceClient;
+
+    LogsServiceClient::new(client_cert_channel(pki, addr).await)
+        .export(ExportLogsServiceRequest::default())
+        .await
+        .map(drop)
 }
