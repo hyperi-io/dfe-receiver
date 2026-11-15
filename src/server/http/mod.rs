@@ -49,13 +49,14 @@ use crate::error::{Error, Result, unavailable_response};
 use crate::metrics::{ConnectionGuard, Metrics};
 use crate::pipeline::{Acks, PipelineState};
 use crate::server::auth::{
-    AuthState, BearerTokenProvider, TokenAuth, principal_or_listener, token_auth_middleware,
+    AuthMode, AuthState, BearerTokenProvider, TokenAuth, principal_or_listener,
+    token_auth_middleware,
 };
 use crate::server::client_ip::{ClientIpKey, TrustedProxies, attribute_client};
 use crate::server::content_encoding;
 use crate::server::frame_clock::Clocked;
 use crate::server::ip_filter::IpFilter;
-use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
+use crate::server::tls::{Handshake, TlsCertProvider, build_tls_acceptor, uses_secrets};
 use crate::server::traits::{BoundAddr, ProtocolHandler};
 use crate::tenancy::{Ingest, Principal};
 use crate::validation::depth::{MAX_BATCH_DEPTH, MAX_PARSE_DEPTH, json_depth_within};
@@ -163,8 +164,26 @@ impl ProtocolHandler for HttpHandler {
     }
 }
 
-/// Create auth state with optional bearer token provider.
-pub async fn create_auth_state(config: &AuthConfig) -> Result<AuthState> {
+/// Create auth state with optional bearer token provider, for a listener whose
+/// TLS runs `handshake`.
+///
+/// # Errors
+///
+/// A mode with a certificate half (`mtls`, `both`) over a handshake that admits
+/// any client is refused: nothing else would check the certificate.
+pub async fn create_auth_state(config: &AuthConfig, handshake: Handshake) -> Result<AuthState> {
+    if AuthMode::parse(&config.mode).is_some_and(AuthMode::requires_client_certificate)
+        && handshake == Handshake::AdmitsAnyClient
+    {
+        return Err(Error::Config(format!(
+            "auth.mode '{}' checks a client certificate, which only the TLS handshake \
+             does, and this listener's TLS does not require one (tls.enabled, \
+             tls.client_auth: required, and tls.ca_file or tls.ca_secret). A tls change \
+             takes effect on a restart, not a reload",
+            config.mode
+        )));
+    }
+
     // Check if bearer auth is configured
     let has_bearer_tokens =
         !config.bearer.tokens.is_empty() || config.bearer.secret_source.is_some();
@@ -198,11 +217,13 @@ pub async fn create_auth_state(config: &AuthConfig) -> Result<AuthState> {
 /// The replacement is built as at startup, secret source and refresh task
 /// included, so a revoked token, header value or secret source stops working
 /// on the reload that drops it. A replacement that does not build leaves the
-/// current one in place.
+/// current one in place, and so does one needing a client certificate that
+/// the listener's running `handshake` does not require.
 pub fn spawn_auth_reload_watcher(
     shared_config: SharedConfig,
     auth_state: AuthState,
     section: fn(&crate::config::Config) -> &AuthConfig,
+    handshake: Handshake,
     listener: &'static str,
     shutdown: CancellationToken,
 ) {
@@ -222,7 +243,7 @@ pub fn spawn_auth_reload_watcher(
                     if *new_auth == current_auth {
                         continue;
                     }
-                    match create_auth_state(new_auth).await {
+                    match create_auth_state(new_auth, handshake).await {
                         Ok(fresh) => {
                             auth_state.replace(&fresh);
                             info!(listener, "Auth configuration reloaded");
@@ -283,13 +304,15 @@ async fn serve(
     let config = pipeline.config();
 
     // Create auth state with optional bearer token provider
-    let auth_state = create_auth_state(&config.server.auth).await?;
+    let handshake = Handshake::of(&config.server.tls);
+    let auth_state = create_auth_state(&config.server.auth, handshake).await?;
 
     // Watch for config changes and update auth state (bearer tokens)
     spawn_auth_reload_watcher(
         pipeline.shared_config(),
         auth_state.clone(),
         |config| &config.server.auth,
+        handshake,
         TRANSPORT,
         shutdown.clone(),
     );
@@ -1732,6 +1755,34 @@ mod tests {
         );
         assert_eq!(metrics.get_rate_limited_total(), 3);
         assert_eq!(totals.total("receiver_rate_limited_total"), 3);
+    }
+
+    /// A mode with a certificate half builds only over a handshake that
+    /// requires a client certificate. Every other mode builds over either.
+    #[tokio::test]
+    async fn a_certificate_mode_needs_a_handshake_that_requires_one() {
+        use Handshake::{AdmitsAnyClient, RequiresClientCertificate};
+        let cases = [
+            ("mtls", AdmitsAnyClient, false),
+            ("both", AdmitsAnyClient, false),
+            ("MTLS", AdmitsAnyClient, false),
+            ("mtls", RequiresClientCertificate, true),
+            ("both", RequiresClientCertificate, true),
+            ("bearer", AdmitsAnyClient, true),
+            ("none", AdmitsAnyClient, true),
+        ];
+        for (mode, handshake, builds) in cases {
+            let config = AuthConfig {
+                mode: mode.to_string(),
+                bearer: BearerConfig {
+                    tokens: vec!["tok".into()],
+                    ..BearerConfig::default()
+                },
+                ..AuthConfig::default()
+            };
+            let built = create_auth_state(&config, handshake).await;
+            assert_eq!(built.is_ok(), builds, "{mode} over {handshake:?}");
+        }
     }
 
     #[test]

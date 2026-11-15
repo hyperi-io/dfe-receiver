@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 use scalo::scaling::{ScalingComponent, ScalingPressure, ScalingPressureConfig};
 
 use crate::error::{Error, Result};
-use crate::server::tls::ClientAuth;
+use crate::server::tls::{ClientAuth, Handshake};
 
 /// Environment variable prefix for configuration.
 pub const ENV_PREFIX: &str = "DFE_RECEIVER";
@@ -758,13 +758,6 @@ fn known_client_auth(scope: &str, tls: &TlsConfig) -> Result<()> {
     )))
 }
 
-/// Whether the TLS handshake on a listener refuses a client with no certificate.
-fn handshake_requires_a_client_certificate(tls: &TlsConfig) -> bool {
-    tls.enabled
-        && ClientAuth::parse(&tls.client_auth) == Some(ClientAuth::Required)
-        && (tls.ca_file.is_some() || tls.ca_secret.is_some())
-}
-
 /// Refuse a listener whose wire protocol carries no credential unless its
 /// clients are authenticated at the handshake or `accept_unauthenticated` is set.
 fn unauthenticated_is_accepted(
@@ -773,7 +766,7 @@ fn unauthenticated_is_accepted(
     tls: &TlsConfig,
     accept_unauthenticated: bool,
 ) -> Result<()> {
-    if accept_unauthenticated || handshake_requires_a_client_certificate(tls) {
+    if accept_unauthenticated || Handshake::of(tls) == Handshake::RequiresClientCertificate {
         return Ok(());
     }
     Err(Error::Config(format!(

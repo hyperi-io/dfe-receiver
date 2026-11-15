@@ -153,6 +153,33 @@ impl ClientAuth {
     }
 }
 
+/// Whether a listener's TLS handshake turns away a client with no certificate.
+///
+/// Fixed when the listener starts: a reload changes neither `tls.client_auth`
+/// nor `tls.enabled` on a running listener.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Handshake {
+    /// Every client presents a certificate that chains to the configured CA.
+    RequiresClientCertificate,
+    /// A client may connect with no certificate, or with no TLS at all.
+    AdmitsAnyClient,
+}
+
+impl Handshake {
+    /// The handshake a listener built from `tls` runs.
+    #[must_use]
+    pub fn of(tls: &TlsConfig) -> Self {
+        if tls.enabled
+            && ClientAuth::parse(&tls.client_auth) == Some(ClientAuth::Required)
+            && (tls.ca_file.is_some() || tls.ca_secret.is_some())
+        {
+            Self::RequiresClientCertificate
+        } else {
+            Self::AdmitsAnyClient
+        }
+    }
+}
+
 /// Build a TLS acceptor from configuration (sync version for backwards compatibility).
 ///
 /// Use `build_tls_acceptor_async` if loading from secrets.

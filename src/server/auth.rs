@@ -93,6 +93,13 @@ impl AuthMode {
     pub fn requires_token_auth(self) -> bool {
         matches!(self, Self::Header | Self::Bearer | Self::Both)
     }
+
+    /// Whether this mode's certificate half is checked, which only the TLS
+    /// handshake does.
+    #[must_use]
+    pub fn requires_client_certificate(self) -> bool {
+        matches!(self, Self::Mtls | Self::Both)
+    }
 }
 
 /// One listener's authentication as one config version describes it.
@@ -587,7 +594,8 @@ impl TokenAuth {
 /// An accepted request carries its [`Principal`] in its extensions.
 ///
 /// Header auth never runs here: a gRPC request carries metadata, not the HTTP
-/// headers `accepted_headers` names.
+/// headers `accepted_headers` names. Under `mtls` it checks nothing, as the
+/// HTTP middleware does: the handshake has verified the client certificate.
 pub fn grpc_auth_interceptor(
     auth: AuthState,
     metrics: Arc<Metrics>,
@@ -602,7 +610,13 @@ pub fn grpc_auth_interceptor(
             headers.insert("authorization", hv);
         }
 
-        match validate_bearer_auth(&auth.current(), &headers) {
+        let current = auth.current();
+        let verdict = if AuthMode::parse(&current.config.mode) == Some(AuthMode::Mtls) {
+            Ok(Principal::Listener(transport))
+        } else {
+            validate_bearer_auth(&current, &headers)
+        };
+        match verdict {
             Ok(principal) => {
                 req.extensions_mut().insert(principal);
                 Ok(req)
@@ -1640,6 +1654,53 @@ mod tests {
             principal_seen(AuthConfig::default(), None).await,
             r#"Some(Listener("http"))"#
         );
+    }
+
+    /// The gRPC interceptor asks `bearer` for a token and `mtls` for nothing,
+    /// the handshake having checked the certificate.
+    #[test]
+    fn the_grpc_interceptor_checks_what_the_mode_names() {
+        let mtls = AuthConfig {
+            mode: "mtls".to_string(),
+            ..AuthConfig::default()
+        };
+        let bearer = bearer_config();
+        let provider = || BearerTokenProvider::new(&bearer.bearer.tokens);
+        let cases = [
+            ("mtls, no token", AuthState::new(mtls), None, true),
+            (
+                "bearer, no token",
+                AuthState::with_bearer_provider(bearer.clone(), provider()),
+                None,
+                false,
+            ),
+            (
+                "bearer, its token",
+                AuthState::with_bearer_provider(bearer.clone(), provider()),
+                Some("Bearer secret-token-1"),
+                true,
+            ),
+        ];
+        for (case, auth, token, admitted) in cases {
+            let check = grpc_auth_interceptor(auth, Arc::new(Metrics::default()), "grpc");
+            let mut request = tonic::Request::new(());
+            if let Some(token) = token {
+                request
+                    .metadata_mut()
+                    .insert("authorization", token.parse().unwrap());
+            }
+            match check(request) {
+                Ok(request) => {
+                    assert!(admitted, "{case}: admitted");
+                    let principal = request.extensions().get::<Principal>().cloned();
+                    assert!(principal.is_some(), "{case}: no principal");
+                }
+                Err(status) => {
+                    assert!(!admitted, "{case}: refused with {status:?}");
+                    assert_eq!(status.code(), tonic::Code::Unauthenticated, "{case}");
+                }
+            }
+        }
     }
 
     /// A configuration that cannot check credentials is the operator's fault:

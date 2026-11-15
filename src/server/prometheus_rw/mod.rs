@@ -45,7 +45,7 @@ use crate::pipeline::{Acks, PipelineState};
 use crate::server::auth::{TokenAuth, principal_or_listener};
 use crate::server::budget::Shape;
 use crate::server::http::{Accept, create_auth_state};
-use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
+use crate::server::tls::{Handshake, TlsCertProvider, build_tls_acceptor, uses_secrets};
 use crate::server::traits::{BoundAddr, ProtocolHandler};
 use crate::tenancy::{Ingest, Principal};
 
@@ -154,11 +154,13 @@ async fn run_prometheus_rw_server(
     shutdown: CancellationToken,
     bound: &BoundAddr,
 ) -> Result<()> {
-    let auth_state = create_auth_state(&config.auth).await?;
+    let handshake = Handshake::of(&config.tls);
+    let auth_state = create_auth_state(&config.auth, handshake).await?;
     crate::server::http::spawn_auth_reload_watcher(
         pipeline.shared_config(),
         auth_state.clone(),
         |config| &config.prometheus_rw.auth,
+        handshake,
         TRANSPORT,
         shutdown.clone(),
     );

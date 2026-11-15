@@ -287,6 +287,64 @@ async fn revocation(listener: Listener, credentials: &Credentials) {
     assert!(added, "{listener:?}: the added credential does not work");
 }
 
+/// How long a refused reload is watched for any change in what a listener admits.
+const REFUSED_RELOAD_WINDOW: Duration = Duration::from_secs(1);
+
+/// A reload switching every plaintext listener from bearer to `mtls` is
+/// refused: the token still works and a request with no credential is still
+/// turned away, because the running handshake checks no certificate.
+#[tokio::test]
+async fn a_reload_into_mtls_over_plaintext_keeps_the_current_auth() {
+    let mut listeners = vec![
+        Listener::Http,
+        Listener::SplunkHec,
+        Listener::PrometheusRw,
+        Listener::Grpc,
+    ];
+    #[cfg(feature = "otlp")]
+    listeners.extend([Listener::OtlpHttp, Listener::OtlpGrpc]);
+
+    let mut failures: Vec<String> = Vec::new();
+    for listener in listeners {
+        let mut config = Config::default();
+        listener.enable(&mut config);
+        let auth = listener.auth(&mut config);
+        auth.mode = BEARER.mode.to_string();
+        (BEARER.set)(auth, BEARER.old);
+        let pipeline = Arc::new(
+            PipelineState::new(SharedConfig::new(config.clone()), CancellationToken::new())
+                .await
+                .expect("pipeline init"),
+        );
+        let (addr, shutdown) = listener.start(&config, Arc::clone(&pipeline)).await;
+
+        // A running listener ignores a reloaded tls block, so it is left as started.
+        let mut reloaded = config.clone();
+        listener.auth(&mut reloaded).mode = "mtls".to_string();
+        pipeline.shared_config().update(reloaded);
+
+        let deadline = tokio::time::Instant::now() + REFUSED_RELOAD_WINDOW;
+        while tokio::time::Instant::now() < deadline {
+            if listener.admits(addr, "x-no-credential", "1").await {
+                failures.push(format!(
+                    "{listener:?}: a request with no credential is admitted"
+                ));
+                break;
+            }
+            if !listener.admits(addr, BEARER.header, BEARER.old).await {
+                failures.push(format!("{listener:?}: the current token stopped working"));
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        shutdown.cancel();
+    }
+    assert!(
+        failures.is_empty(),
+        "after a reload into mtls: {failures:#?}"
+    );
+}
+
 #[tokio::test]
 async fn a_reloaded_bearer_token_reaches_http() {
     revocation(Listener::Http, &BEARER).await;
