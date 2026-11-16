@@ -24,9 +24,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use scalo::tls::ServerTls;
 use scalo::transport::grpc::sender_deadline;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
+use tokio::sync::mpsc;
+use tokio_rustls::server::TlsStream;
 use tokio_stream::Stream;
 use tokio_util::sync::CancellationToken;
 use tonic::service::interceptor::InterceptedService;
@@ -40,7 +43,7 @@ use crate::metrics::{ConnectionGuard, Metrics};
 use crate::pipeline::{Acks, BatchOutcome, PipelineState};
 use crate::server::auth::{AuthMode, AuthState, grpc_auth_interceptor, principal_or_listener};
 use crate::server::http::{ConnectionLimits, Slot, create_auth_state};
-use crate::server::tls::Handshake;
+use crate::server::tls::{Handshake, grpc_options, handshake, load_server_tls};
 use crate::server::traits::{BoundAddr, ProtocolHandler};
 use crate::tenancy::Ingest;
 
@@ -206,21 +209,24 @@ fn push_answer(
 }
 
 /// An accepted gRPC connection, counted open until it drops.
-pub(crate) struct CountedConnection {
-    stream: TcpStream,
+///
+/// `S` is the TCP stream, or the TLS stream once its handshake is done.
+pub(crate) struct CountedConnection<S> {
+    stream: S,
+    info: TcpConnectInfo,
     _open: ConnectionGuard,
     _slot: Slot,
 }
 
-impl Connected for CountedConnection {
+impl<S> Connected for CountedConnection<S> {
     type ConnectInfo = TcpConnectInfo;
 
     fn connect_info(&self) -> Self::ConnectInfo {
-        self.stream.connect_info()
+        self.info.clone()
     }
 }
 
-impl AsyncRead for CountedConnection {
+impl<S: AsyncRead + Unpin> AsyncRead for CountedConnection<S> {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -230,7 +236,7 @@ impl AsyncRead for CountedConnection {
     }
 }
 
-impl AsyncWrite for CountedConnection {
+impl<S: AsyncWrite + Unpin> AsyncWrite for CountedConnection<S> {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -267,7 +273,7 @@ pub(crate) fn count_connections(
     metrics: Arc<Metrics>,
     transport: &'static str,
     limits: ConnectionLimits,
-) -> impl Stream<Item = io::Result<CountedConnection>> {
+) -> impl Stream<Item = io::Result<CountedConnection<TcpStream>>> {
     tokio_stream::StreamExt::filter_map(incoming, move |conn| match conn {
         Ok(stream) => {
             let Some(slot) = limits.slot() else {
@@ -275,6 +281,7 @@ pub(crate) fn count_connections(
                 return None;
             };
             Some(Ok(CountedConnection {
+                info: stream.connect_info(),
                 stream,
                 _open: metrics.open_connection(transport),
                 _slot: slot,
@@ -282,6 +289,76 @@ pub(crate) fn count_connections(
         }
         Err(e) => Some(Err(e)),
     })
+}
+
+/// How many handshaken connections wait for tonic to take them.
+const HANDSHAKED_BACKLOG: usize = 1024;
+
+/// `connections` after their TLS handshake on `tls`.
+///
+/// Each handshake runs in its own task, bounded by the handshake timeout, so a
+/// slow client holds up nobody else. A connection is counted open and holds its
+/// place under the listener's cap from before its handshake, and one whose
+/// handshake fails is dropped and counted. Accepting stops once tonic drops
+/// the stream.
+pub(crate) fn handshake_connections(
+    connections: impl Stream<Item = io::Result<CountedConnection<TcpStream>>> + Send + 'static,
+    tls: ServerTls,
+    metrics: Arc<Metrics>,
+) -> impl Stream<Item = io::Result<CountedConnection<TlsStream<TcpStream>>>> {
+    let (sender, receiver) = mpsc::channel(HANDSHAKED_BACKLOG);
+    tokio::spawn(async move {
+        let mut connections = std::pin::pin!(connections);
+        loop {
+            let next = tokio::select! {
+                () = sender.closed() => break,
+                next = tokio_stream::StreamExt::next(&mut connections) => next,
+            };
+            match next {
+                None => break,
+                Some(Err(e)) => {
+                    if sender.send(Err(e)).await.is_err() {
+                        break;
+                    }
+                }
+                Some(Ok(connection)) => {
+                    let (tls, metrics, sender) = (tls.clone(), metrics.clone(), sender.clone());
+                    tokio::spawn(async move {
+                        let secured = connection.handshake(&tls, &metrics).await;
+                        if let Some(secured) = secured {
+                            let _ = sender.send(Ok(secured)).await;
+                        }
+                    });
+                }
+            }
+        }
+    });
+    tokio_stream::wrappers::ReceiverStream::new(receiver)
+}
+
+impl CountedConnection<TcpStream> {
+    /// This connection once its TLS handshake on `tls` is done, `None` when
+    /// the handshake failed.
+    async fn handshake(
+        self,
+        tls: &ServerTls,
+        metrics: &Metrics,
+    ) -> Option<CountedConnection<TlsStream<TcpStream>>> {
+        let Self {
+            stream,
+            info,
+            _open: open,
+            _slot: slot,
+        } = self;
+        let peer = info.remote_addr()?;
+        let stream = handshake(tls, stream, peer, metrics).await?;
+        Some(CountedConnection {
+            stream,
+            info,
+            _open: open,
+            _slot: slot,
+        })
+    }
 }
 
 /// The HTTP/2 keep-alive a tonic listener pings with, from `server.connections`.
@@ -457,24 +534,11 @@ async fn serve(
     let acks = pipeline.acks(TRANSPORT, config.grpc.acknowledgements, None);
     let service = VectorService::new(pipeline, metrics.clone(), acks);
 
-    // Build TLS config if enabled
-    let tls_config = if config.grpc.tls.enabled {
-        let identity = super::tls::build_grpc_tls_config(&config.grpc.tls).await?;
-        Some(identity)
-    } else {
-        None
-    };
+    let tls = load_server_tls(&config.grpc.tls, &config.server.connections, grpc_options()).await?;
 
     let limits = ConnectionLimits::new(&config.server.connections);
-    let mut builder = keep_alive(tonic::transport::Server::builder(), &limits);
-
-    // Apply TLS
-    if let Some(tls) = tls_config {
-        builder = builder
-            .tls_config(tls)
-            .map_err(|e| Error::Tls(format!("gRPC TLS config error: {e}")))?;
-    }
-    let mut builder = builder.layer(count_oversize(metrics.clone(), TRANSPORT));
+    let mut builder = keep_alive(tonic::transport::Server::builder(), &limits)
+        .layer(count_oversize(metrics.clone(), TRANSPORT));
 
     // Gzip on both directions: scalo's VectorCompatClient compresses
     // unconditionally, and a server without the encoding enabled rejects the RPC.
@@ -497,15 +561,25 @@ async fn serve(
         .with_nodelay(Some(true));
     let _serving = bound.publish(&incoming.local_addr());
 
-    info!(addr = %addr, "gRPC server listening");
+    info!(addr = %addr, tls = tls.is_some(), "gRPC server listening");
 
-    router
-        .serve_with_incoming_shutdown(
-            count_connections(incoming, metrics, TRANSPORT, limits),
-            shutdown.cancelled_owned(),
-        )
-        .await
-        .map_err(|e| Error::Server(format!("gRPC server error: {e}")))?;
+    let connections = count_connections(incoming, metrics.clone(), TRANSPORT, limits);
+    let served = match tls {
+        Some(tls) => {
+            router
+                .serve_with_incoming_shutdown(
+                    handshake_connections(connections, tls, metrics),
+                    shutdown.cancelled_owned(),
+                )
+                .await
+        }
+        None => {
+            router
+                .serve_with_incoming_shutdown(connections, shutdown.cancelled_owned())
+                .await
+        }
+    };
+    served.map_err(|e| Error::Server(format!("gRPC server error: {e}")))?;
 
     info!("gRPC server stopped");
     Ok(())

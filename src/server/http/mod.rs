@@ -33,16 +33,16 @@ use axum::routing::{get, post};
 use axum::{Extension, Router};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{MissedTickBehavior, timeout};
-use tokio_rustls::TlsAcceptor;
 use tokio_util::sync::CancellationToken;
 use tower::limit::GlobalConcurrencyLimitLayer;
 use tower_governor::governor::GovernorConfigBuilder;
 use tower_governor::{GovernorError, GovernorLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
-use scalo::logger::security::{self, SecurityOutcome};
+use scalo::logger::security;
+use scalo::tls::{ServerTls, ServerTlsOptions};
 
 use crate::config::{AuthConfig, SharedConfig};
 use crate::error::{Error, Result, unavailable_response};
@@ -56,7 +56,7 @@ use crate::server::client_ip::{ClientIpKey, TrustedProxies, attribute_client};
 use crate::server::content_encoding;
 use crate::server::frame_clock::Clocked;
 use crate::server::ip_filter::IpFilter;
-use crate::server::tls::{Handshake, TlsCertProvider, build_tls_acceptor, uses_secrets};
+use crate::server::tls::{Handshake, handshake, load_server_tls};
 use crate::server::traits::{BoundAddr, ProtocolHandler};
 use crate::tenancy::{Ingest, Principal};
 use crate::validation::depth::{MAX_BATCH_DEPTH, MAX_PARSE_DEPTH, json_depth_within};
@@ -333,21 +333,12 @@ async fn serve(
         max_body_size: config.server.max_body_size,
     };
 
-    // Build TLS: use TlsCertProvider with hot-reload if secrets configured,
-    // otherwise one-shot load
-    let tls_provider = if config.server.tls.enabled && uses_secrets(&config.server.tls) {
-        let provider = TlsCertProvider::new(config.server.tls.clone()).await?;
-        provider.start_refresh_task();
-        Some(provider)
-    } else {
-        None
-    };
-
-    let tls_acceptor = if tls_provider.is_some() {
-        None // Handled by provider below
-    } else {
-        build_tls_acceptor(&config.server.tls)?
-    };
+    let tls = load_server_tls(
+        &config.server.tls,
+        &config.server.connections,
+        ServerTlsOptions::default(),
+    )
+    .await?;
 
     // Security configuration
     let max_body_size = config.server.max_body_size;
@@ -436,14 +427,9 @@ async fn serve(
         transport: TRANSPORT,
         limits: ConnectionLimits::new(&config.server.connections),
     };
-    if let Some(ref provider) = tls_provider {
-        let acceptor_handle = provider.acceptor_handle();
-        info!(addr = %addr, tls = true, hot_reload = true, "HTTP server listening");
-        run_tls_server(listener, app, acceptor_handle, accept, shutdown).await
-    } else if let Some(acceptor) = tls_acceptor {
-        let acceptor_handle = Arc::new(parking_lot::RwLock::new(acceptor));
-        info!(addr = %addr, tls = true, hot_reload = false, "HTTP server listening");
-        run_tls_server(listener, app, acceptor_handle, accept, shutdown).await
+    if let Some(tls) = tls {
+        info!(addr = %addr, tls = true, "HTTP server listening");
+        run_tls_server(listener, app, tls, accept, shutdown).await
     } else {
         info!(addr = %addr, tls = false, "HTTP server listening");
         run_plain_server(listener, app, accept, shutdown).await
@@ -575,7 +561,6 @@ pub(crate) struct ConnectionLimits {
     pub(crate) first_byte: Duration,
     pub(crate) frame: Duration,
     pub(crate) idle: Duration,
-    pub(crate) tls_handshake: Duration,
     pub(crate) http2_keep_alive: Duration,
 }
 
@@ -587,7 +572,6 @@ impl ConnectionLimits {
             first_byte: Duration::from_millis(config.first_byte_timeout_ms),
             frame: Duration::from_millis(config.frame_timeout_ms),
             idle: Duration::from_millis(config.idle_timeout_ms),
-            tls_handshake: Duration::from_millis(config.tls_handshake_timeout_ms),
             http2_keep_alive: Duration::from_millis(config.http2_keep_alive_interval_ms),
         }
     }
@@ -929,12 +913,12 @@ fn connection_service(
 
 /// Run HTTP server with TLS.
 ///
-/// Accepts an `Arc<RwLock<TlsAcceptor>>` to support hot-reload of certificates.
-/// The RwLock read is held only to clone the acceptor (cheap - wraps Arc<ServerConfig>).
+/// Each connection's handshake runs on `tls`, so a certificate it has reloaded
+/// is served from the next connection.
 pub(crate) async fn run_tls_server(
     listener: TcpListener,
     app: Router,
-    acceptor: Arc<parking_lot::RwLock<TlsAcceptor>>,
+    tls: ServerTls,
     accept: Accept,
     shutdown: CancellationToken,
 ) -> Result<()> {
@@ -959,10 +943,9 @@ pub(crate) async fn run_tls_server(
                     continue;
                 };
 
-                let acceptor = acceptor.read().clone();
+                let tls = tls.clone();
                 let app = app.clone();
                 let shutdown = shutdown.clone();
-                let metrics = accept.metrics.clone();
                 let accept = accept.clone();
 
                 tokio::spawn(async move {
@@ -970,40 +953,11 @@ pub(crate) async fn run_tls_server(
                     if !accept.first_byte(&stream).await {
                         return;
                     }
-                    // TLS handshake with timeout to prevent slow TLS attacks
-                    let tls_result =
-                        timeout(accept.limits.tls_handshake, acceptor.accept(stream)).await;
-
-                    let tls_stream = match tls_result {
-                        Ok(Ok(stream)) => stream,
-                        Ok(Err(e)) => {
-                            // Track TLS failure in metrics
-                            metrics.inc_tls_handshake_failure();
-                            debug!(peer = %peer_addr, error = %e, "tls_handshake_failed");
-                            security::tls_event(
-                                "handshake",
-                                SecurityOutcome::Failure,
-                                Some(&e.to_string()),
-                                Some(peer_addr.ip()),
-                            );
-                            return;
-                        }
-                        Err(_) => {
-                            // Track TLS timeout in metrics
-                            metrics.inc_tls_handshake_failure();
-                            warn!(peer = %peer_addr, "tls_handshake_timeout");
-                            security::tls_event(
-                                "handshake",
-                                SecurityOutcome::Failure,
-                                Some("handshake_timeout"),
-                                Some(peer_addr.ip()),
-                            );
-                            return;
-                        }
+                    let Some(tls_stream) =
+                        handshake(&tls, stream, peer_addr, &accept.metrics).await
+                    else {
+                        return;
                     };
-
-                    debug!(peer = %peer_addr, "TLS connection established");
-
                     let io = hyper_util::rt::TokioIo::new(tls_stream);
                     serve_connection(io, app, peer_addr, &accept, &shutdown).await;
                 });

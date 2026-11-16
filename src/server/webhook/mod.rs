@@ -39,6 +39,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use rustc_hash::FxHashMap;
+use scalo::tls::ServerTlsOptions;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -49,7 +50,7 @@ use crate::metrics::Metrics;
 use crate::pipeline::{Acks, PipelineState};
 use crate::server::auth::record_auth_failure;
 use crate::server::http::{Accept, apply_request_limits, split_json_array};
-use crate::server::tls::{TlsCertProvider, build_tls_acceptor, uses_secrets};
+use crate::server::tls::load_server_tls;
 use crate::server::traits::{BoundAddr, ProtocolHandler};
 use crate::tenancy::{Ingest, Principal};
 use crate::validation::depth::{self, MAX_BATCH_DEPTH, MAX_PARSE_DEPTH};
@@ -334,42 +335,19 @@ async fn run_webhook_server(
 
     let accept = Accept::new(&config.server, metrics, TRANSPORT);
 
-    let tls_provider = if webhook.tls.enabled && uses_secrets(&webhook.tls) {
-        let provider = TlsCertProvider::new(webhook.tls.clone()).await?;
-        provider.start_refresh_task();
-        Some(provider)
-    } else {
-        None
-    };
-    let tls_acceptor = if tls_provider.is_some() {
-        None
-    } else {
-        build_tls_acceptor(&webhook.tls)?
-    };
+    let tls = load_server_tls(
+        &webhook.tls,
+        &config.server.connections,
+        ServerTlsOptions::default(),
+    )
+    .await?;
 
     // Published once TLS is ready, so a failed TLS setup never reads as serving.
     let _serving = bound.publish(&listener.local_addr());
 
-    if let Some(ref provider) = tls_provider {
-        info!(addr = %addr, tls = true, hot_reload = true, "webhook server listening");
-        crate::server::http::run_tls_server(
-            listener,
-            app,
-            provider.acceptor_handle(),
-            accept,
-            shutdown,
-        )
-        .await
-    } else if let Some(acceptor) = tls_acceptor {
-        info!(addr = %addr, tls = true, hot_reload = false, "webhook server listening");
-        crate::server::http::run_tls_server(
-            listener,
-            app,
-            Arc::new(parking_lot::RwLock::new(acceptor)),
-            accept,
-            shutdown,
-        )
-        .await
+    if let Some(tls) = tls {
+        info!(addr = %addr, tls = true, "webhook server listening");
+        crate::server::http::run_tls_server(listener, app, tls, accept, shutdown).await
     } else {
         info!(addr = %addr, tls = false, "webhook server listening");
         crate::server::http::run_plain_server(listener, app, accept, shutdown).await

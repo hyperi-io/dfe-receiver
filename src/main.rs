@@ -253,7 +253,7 @@ impl ServiceApp for App {
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
 fn main() -> ExitCode {
-    dfe_receiver::server::tls::install_crypto_provider();
+    scalo::tls::install_default_provider();
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(runtime) => runtime,
         Err(e) => {

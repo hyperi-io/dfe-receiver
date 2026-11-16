@@ -1,155 +1,43 @@
 // Project:   dfe-receiver
 // File:      src/server/tls.rs
-// Purpose:   TLS configuration and utilities
+// Purpose:   Every listener's TLS: scalo ServerTls load and handshake
 // Language:  Rust
 //
 // License:   BUSL-1.1
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
-//! TLS configuration for HTTP and gRPC servers.
+//! TLS for every receiver listener.
 //!
-//! Supports TLS termination and mTLS client certificate validation.
-//! Certificates come from local files, or from any `provider:path[:key]` spec
-//! [`crate::secrets`] reads -- an OpenBao field (`vault:`) or a mounted
-//! Kubernetes Secret (`file:`).
+//! A listener's `tls:` block loads into a scalo [`ServerTls`]. It reads the
+//! certificate, key and client CA from files or from [`crate::secrets`]
+//! specs (an OpenBao field with `vault:`, a mounted Kubernetes Secret with
+//! `file:`), re-reads them every `tls.refresh_interval_secs`, and runs the
+//! handshake. A rotated certificate is served from the next handshake on every
+//! listener built from it, with no restart.
 
-use std::fs::File;
-use std::io::{BufReader, Cursor};
-use std::path::Path;
-use std::sync::Arc;
+use std::path::PathBuf;
 
-use rustls::pki_types::pem::PemObject;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use rustls::server::WebPkiClientVerifier;
-use rustls::{RootCertStore, ServerConfig};
-use tokio_rustls::TlsAcceptor;
-use tracing::{debug, info};
+use scalo::tls::{ClientAuth, ServerTls, ServerTlsConfig, ServerTlsOptions};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_rustls::server::TlsStream;
+use tracing::debug;
 
-use scalo::logger::security::{self, SecurityOutcome};
-
-use crate::config::TlsConfig;
+use crate::config::{ConnectionsConfig, TlsConfig};
 use crate::error::{Error, Result};
+use crate::metrics::Metrics;
 use crate::secrets;
 
-/// Load certificates from a PEM file.
-fn load_certs_from_file(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
-    let file = File::open(path)
-        .map_err(|e| Error::Tls(format!("failed to open cert file {}: {e}", path.display())))?;
-    let mut reader = BufReader::new(file);
-
-    CertificateDer::pem_reader_iter(&mut reader)
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|e| {
-            Error::Tls(format!(
-                "failed to parse certs from {}: {e}",
-                path.display()
-            ))
-        })
-}
-
-/// Load certificates from PEM bytes.
-fn load_certs_from_bytes(pem_data: &[u8], source: &str) -> Result<Vec<CertificateDer<'static>>> {
-    let mut reader = Cursor::new(pem_data);
-
-    CertificateDer::pem_reader_iter(&mut reader)
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|e| Error::Tls(format!("failed to parse certs from {source}: {e}")))
-}
-
-/// Load a private key from a PEM file.
-fn load_private_key_from_file(path: &Path) -> Result<PrivateKeyDer<'static>> {
-    let file = File::open(path)
-        .map_err(|e| Error::Tls(format!("failed to open key file {}: {e}", path.display())))?;
-    let mut reader = BufReader::new(file);
-
-    PrivateKeyDer::from_pem_reader(&mut reader).map_err(|e| {
-        Error::Tls(format!(
-            "failed to load private key from {}: {e}",
-            path.display()
-        ))
-    })
-}
-
-/// Load a private key from PEM bytes.
-fn load_private_key_from_bytes(pem_data: &[u8], source: &str) -> Result<PrivateKeyDer<'static>> {
-    let mut reader = Cursor::new(pem_data);
-
-    PrivateKeyDer::from_pem_reader(&mut reader)
-        .map_err(|e| Error::Tls(format!("failed to load private key from {source}: {e}")))
-}
-
-/// Load CA certificates into a root store from a file.
-fn load_ca_certs_from_file(path: &Path) -> Result<RootCertStore> {
-    let ca_certs = load_certs_from_file(path)?;
-    build_root_store(ca_certs, &path.display().to_string())
-}
-
-/// Load CA certificates into a root store from bytes.
-fn load_ca_certs_from_bytes(pem_data: &[u8], source: &str) -> Result<RootCertStore> {
-    let ca_certs = load_certs_from_bytes(pem_data, source)?;
-    build_root_store(ca_certs, source)
-}
-
-/// Build a root certificate store from certificates.
-fn build_root_store(ca_certs: Vec<CertificateDer<'static>>, source: &str) -> Result<RootCertStore> {
-    let mut root_store = RootCertStore::empty();
-
-    for cert in ca_certs {
-        root_store
-            .add(cert)
-            .map_err(|e| Error::Tls(format!("failed to add CA cert: {e}")))?;
-    }
-
-    if root_store.is_empty() {
-        return Err(Error::Tls(format!(
-            "no valid CA certificates found in {source}"
-        )));
-    }
-
-    Ok(root_store)
-}
-
-/// Make aws-lc-rs the process's rustls provider, unless one is installed already.
+/// The mode `s` names, `None` for a value that names none.
 ///
-/// rustls picks a provider for itself only when exactly one is compiled in. A
-/// dependency that adds ring alongside aws-lc-rs would otherwise panic the first
-/// `ServerConfig::builder()`, which is the one tonic calls too. `main` calls this
-/// at start, and every builder here calls it again for callers that skip `main`.
-pub fn install_crypto_provider() {
-    static INSTALL: std::sync::Once = std::sync::Once::new();
-    INSTALL.call_once(|| {
-        // Err means a provider is installed already, and rustls uses that one.
-        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    });
-}
-
-/// Client authentication mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ClientAuth {
-    /// No client certificate required.
-    None,
-    /// Client certificate optional (validated if provided).
-    Optional,
-    /// Client certificate required.
-    Required,
-}
-
-impl ClientAuth {
-    /// The mode `s` names, `None` for a value that names none.
-    pub fn parse(s: &str) -> Option<Self> {
-        match s.to_ascii_lowercase().as_str() {
-            "none" => Some(Self::None),
-            "required" | "require" => Some(Self::Required),
-            "optional" | "request" => Some(Self::Optional),
-            _ => None,
-        }
-    }
-
-    /// Parse from string. Startup refuses a value [`parse`](Self::parse) does
-    /// not know, so the fallback to no client certificate is never reached
-    /// from a validated config.
-    pub fn from_str(s: &str) -> Self {
-        Self::parse(s).unwrap_or(Self::None)
+/// Case-insensitive, and `require` and `request` read as `required` and
+/// `optional`.
+#[must_use]
+pub fn parse_client_auth(s: &str) -> Option<ClientAuth> {
+    match s.to_ascii_lowercase().as_str() {
+        "none" => Some(ClientAuth::None),
+        "required" | "require" => Some(ClientAuth::Required),
+        "optional" | "request" => Some(ClientAuth::Optional),
+        _ => None,
     }
 }
 
@@ -170,7 +58,7 @@ impl Handshake {
     #[must_use]
     pub fn of(tls: &TlsConfig) -> Self {
         if tls.enabled
-            && ClientAuth::parse(&tls.client_auth) == Some(ClientAuth::Required)
+            && parse_client_auth(&tls.client_auth) == Some(ClientAuth::Required)
             && (tls.ca_file.is_some() || tls.ca_secret.is_some())
         {
             Self::RequiresClientCertificate
@@ -180,334 +68,91 @@ impl Handshake {
     }
 }
 
-/// Build a TLS acceptor from configuration (sync version for backwards compatibility).
+/// What a gRPC listener's handshake offers: ALPN `h2`, which gRPC clients
+/// require and tonic offered itself when it ran the handshake.
+#[must_use]
+pub fn grpc_options() -> ServerTlsOptions {
+    ServerTlsOptions {
+        alpn_protocols: vec![b"h2".to_vec()],
+        ..ServerTlsOptions::default()
+    }
+}
+
+/// Load a listener's `tls:` block, `None` when `tls.enabled` is off.
 ///
-/// Use `build_tls_acceptor_async` if loading from secrets.
-pub fn build_tls_acceptor(config: &TlsConfig) -> Result<Option<TlsAcceptor>> {
-    if !config.enabled {
+/// The handshake timeout is `connections.tls_handshake_timeout_ms`. Call inside
+/// the tokio runtime: the reload task starts here and stops once the last clone
+/// of the returned `ServerTls` drops.
+///
+/// # Errors
+///
+/// A secret spec naming no provider, a certificate, key or CA set both as a
+/// file and as a secret or set neither, a client CA missing for `optional` or
+/// `required`, an unreadable or unparsable source, and a key that does not
+/// match its certificate.
+pub async fn load_server_tls(
+    tls: &TlsConfig,
+    connections: &ConnectionsConfig,
+    options: ServerTlsOptions,
+) -> Result<Option<ServerTls>> {
+    if !tls.enabled {
         return Ok(None);
     }
-    install_crypto_provider();
-
-    // If secrets are configured, fail - caller should use async version
-    if config.cert_secret.is_some() || config.key_secret.is_some() || config.ca_secret.is_some() {
-        return Err(Error::Tls(
-            "TLS secrets configured - use build_tls_acceptor_async instead".into(),
-        ));
+    for spec in [&tls.cert_secret, &tls.key_secret, &tls.ca_secret]
+        .into_iter()
+        .flatten()
+    {
+        secrets::check_spec(spec)
+            .map_err(|reason| Error::Config(format!("secret source: {reason}")))?;
     }
+    let client_auth = parse_client_auth(&tls.client_auth).ok_or_else(|| {
+        Error::Config(format!(
+            "tls.client_auth is '{}', which is not one of none, optional, required",
+            tls.client_auth
+        ))
+    })?;
+    let config = ServerTlsConfig {
+        cert_file: tls.cert_file.as_ref().map(PathBuf::from),
+        cert_secret: tls.cert_secret.clone(),
+        key_file: tls.key_file.as_ref().map(PathBuf::from),
+        key_secret: tls.key_secret.clone(),
+        ca_file: tls.ca_file.as_ref().map(PathBuf::from),
+        ca_secret: tls.ca_secret.clone(),
+        client_auth,
+        reload_interval_secs: tls.refresh_interval_secs,
+        handshake_timeout_ms: connections.tls_handshake_timeout_ms,
+    };
+    // Boxed for the reason `secrets::read` boxes: the AWS provider's future, awaited
+    // inline, overflows rustc's layout query depth in every listener's async block.
+    Box::pin(ServerTls::load_with(&config, options))
+        .await
+        .map(Some)
+        .map_err(|e| Error::Tls(e.to_string()))
+}
 
-    let cert_path = config
-        .cert_file
-        .as_ref()
-        .ok_or_else(|| Error::Tls("TLS enabled but cert_file not specified".into()))?;
-
-    let key_path = config
-        .key_file
-        .as_ref()
-        .ok_or_else(|| Error::Tls("TLS enabled but key_file not specified".into()))?;
-
-    let client_auth = ClientAuth::from_str(&config.client_auth);
-
-    // Check for ca_file early if client auth is required
-    if client_auth != ClientAuth::None && config.ca_file.is_none() {
-        return Err(Error::Tls(
-            "client_auth requires ca_file or ca_secret".into(),
-        ));
-    }
-
-    let certs = load_certs_from_file(Path::new(cert_path))?;
-    let key = load_private_key_from_file(Path::new(key_path))?;
-
-    let tls_config = match client_auth {
-        ClientAuth::None => ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(certs, key)
-            .map_err(|e| Error::Tls(format!("failed to build TLS config: {e}")))?,
-
-        ClientAuth::Optional | ClientAuth::Required => {
-            let ca_path = config
-                .ca_file
-                .as_ref()
-                .ok_or_else(|| Error::Tls("client_auth requires ca_file".into()))?;
-
-            let root_store = load_ca_certs_from_file(Path::new(ca_path))?;
-
-            let verifier = if client_auth == ClientAuth::Required {
-                WebPkiClientVerifier::builder(Arc::new(root_store))
-                    .build()
-                    .map_err(|e| Error::Tls(format!("failed to build client verifier: {e}")))?
-            } else {
-                WebPkiClientVerifier::builder(Arc::new(root_store))
-                    .allow_unauthenticated()
-                    .build()
-                    .map_err(|e| Error::Tls(format!("failed to build client verifier: {e}")))?
-            };
-
-            ServerConfig::builder()
-                .with_client_cert_verifier(verifier)
-                .with_single_cert(certs, key)
-                .map_err(|e| Error::Tls(format!("failed to build TLS config: {e}")))?
+/// Run the TLS handshake on `io` from `peer`, counting a failure on `metrics`.
+///
+/// `None` for a handshake that failed or timed out. [`ServerTls::accept`] has
+/// logged it and counted it on scalo's own metrics, and the connection is
+/// dropped.
+pub(crate) async fn handshake<IO>(
+    tls: &ServerTls,
+    io: IO,
+    peer: std::net::SocketAddr,
+    metrics: &Metrics,
+) -> Option<TlsStream<IO>>
+where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
+    match tls.accept(io, Some(peer)).await {
+        Ok(stream) => {
+            debug!(peer = %peer, "TLS connection established");
+            Some(stream)
         }
-    };
-
-    Ok(Some(TlsAcceptor::from(Arc::new(tls_config))))
-}
-
-/// Build a TLS acceptor from configuration with secret manager support.
-///
-/// Supports loading certificates from:
-/// - Local files (cert_file, key_file, ca_file)
-/// - Secret managers (cert_secret, key_secret, ca_secret)
-///
-/// Secret format: "provider:path:key" (e.g., "vault:secret/tls:cert")
-pub async fn build_tls_acceptor_async(config: &TlsConfig) -> Result<Option<TlsAcceptor>> {
-    if !config.enabled {
-        return Ok(None);
-    }
-    install_crypto_provider();
-
-    let client_auth = ClientAuth::from_str(&config.client_auth);
-
-    // Load certificate (secret takes precedence over file)
-    let certs = if let Some(ref secret) = config.cert_secret {
-        info!(source = %secret, "Loading TLS certificate from secret");
-        let pem_data = secrets::read_bytes(secret).await?;
-        load_certs_from_bytes(&pem_data, secret)?
-    } else if let Some(ref path) = config.cert_file {
-        debug!(path = %path, "Loading TLS certificate from file");
-        load_certs_from_file(Path::new(path))?
-    } else {
-        return Err(Error::Tls(
-            "TLS enabled but neither cert_file nor cert_secret specified".into(),
-        ));
-    };
-
-    // Load private key (secret takes precedence over file)
-    let key = if let Some(ref secret) = config.key_secret {
-        info!(source = %secret, "Loading TLS private key from secret");
-        let pem_data = secrets::read_bytes(secret).await?;
-        load_private_key_from_bytes(&pem_data, secret)?
-    } else if let Some(ref path) = config.key_file {
-        debug!(path = %path, "Loading TLS private key from file");
-        load_private_key_from_file(Path::new(path))?
-    } else {
-        return Err(Error::Tls(
-            "TLS enabled but neither key_file nor key_secret specified".into(),
-        ));
-    };
-
-    // Build TLS config based on client auth mode
-    let tls_config = match client_auth {
-        ClientAuth::None => ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(certs, key)
-            .map_err(|e| Error::Tls(format!("failed to build TLS config: {e}")))?,
-
-        ClientAuth::Optional | ClientAuth::Required => {
-            // Load CA certificate (secret takes precedence over file)
-            let root_store = if let Some(ref secret) = config.ca_secret {
-                info!(source = %secret, "Loading CA certificate from secret");
-                let pem_data = secrets::read_bytes(secret).await?;
-                load_ca_certs_from_bytes(&pem_data, secret)?
-            } else if let Some(ref path) = config.ca_file {
-                debug!(path = %path, "Loading CA certificate from file");
-                load_ca_certs_from_file(Path::new(path))?
-            } else {
-                return Err(Error::Tls(
-                    "client_auth requires ca_file or ca_secret".into(),
-                ));
-            };
-
-            let verifier = if client_auth == ClientAuth::Required {
-                WebPkiClientVerifier::builder(Arc::new(root_store))
-                    .build()
-                    .map_err(|e| Error::Tls(format!("failed to build client verifier: {e}")))?
-            } else {
-                WebPkiClientVerifier::builder(Arc::new(root_store))
-                    .allow_unauthenticated()
-                    .build()
-                    .map_err(|e| Error::Tls(format!("failed to build client verifier: {e}")))?
-            };
-
-            ServerConfig::builder()
-                .with_client_cert_verifier(verifier)
-                .with_single_cert(certs, key)
-                .map_err(|e| Error::Tls(format!("failed to build TLS config: {e}")))?
+        Err(_) => {
+            metrics.inc_tls_handshake_failure();
+            None
         }
-    };
-
-    info!("TLS acceptor built successfully");
-    Ok(Some(TlsAcceptor::from(Arc::new(tls_config))))
-}
-
-/// Check if TLS config uses secrets (requires async loading).
-pub fn uses_secrets(config: &TlsConfig) -> bool {
-    config.cert_secret.is_some() || config.key_secret.is_some() || config.ca_secret.is_some()
-}
-
-/// Build a tonic `ServerTlsConfig` for the gRPC server.
-///
-/// Loads certificates from files or secret managers and returns
-/// a `ServerTlsConfig` suitable for `tonic::transport::Server::builder().tls_config()`.
-pub async fn build_grpc_tls_config(
-    config: &TlsConfig,
-) -> Result<tonic::transport::ServerTlsConfig> {
-    install_crypto_provider();
-    // Load certificate (secret takes precedence over file)
-    let cert_pem = if let Some(ref secret) = config.cert_secret {
-        info!(source = %secret, "Loading gRPC TLS certificate from secret");
-        secrets::read_bytes(secret).await?
-    } else if let Some(ref path) = config.cert_file {
-        debug!(path = %path, "Loading gRPC TLS certificate from file");
-        std::fs::read(path)
-            .map_err(|e| Error::Tls(format!("failed to read cert file {path}: {e}")))?
-    } else {
-        return Err(Error::Tls(
-            "gRPC TLS enabled but neither cert_file nor cert_secret specified".into(),
-        ));
-    };
-
-    // Load private key (secret takes precedence over file)
-    let key_pem = if let Some(ref secret) = config.key_secret {
-        info!(source = %secret, "Loading gRPC TLS private key from secret");
-        secrets::read_bytes(secret).await?
-    } else if let Some(ref path) = config.key_file {
-        debug!(path = %path, "Loading gRPC TLS private key from file");
-        std::fs::read(path)
-            .map_err(|e| Error::Tls(format!("failed to read key file {path}: {e}")))?
-    } else {
-        return Err(Error::Tls(
-            "gRPC TLS enabled but neither key_file nor key_secret specified".into(),
-        ));
-    };
-
-    let identity = tonic::transport::Identity::from_pem(cert_pem, key_pem);
-    let mut tls_config = tonic::transport::ServerTlsConfig::new().identity(identity);
-
-    // Load CA for client certificate verification (mTLS)
-    let client_auth = ClientAuth::from_str(&config.client_auth);
-    if client_auth != ClientAuth::None {
-        let ca_pem = if let Some(ref secret) = config.ca_secret {
-            info!(source = %secret, "Loading gRPC CA certificate from secret");
-            secrets::read_bytes(secret).await?
-        } else if let Some(ref path) = config.ca_file {
-            debug!(path = %path, "Loading gRPC CA certificate from file");
-            std::fs::read(path)
-                .map_err(|e| Error::Tls(format!("failed to read CA file {path}: {e}")))?
-        } else {
-            return Err(Error::Tls(
-                "gRPC client_auth requires ca_file or ca_secret".into(),
-            ));
-        };
-
-        let ca_cert = tonic::transport::Certificate::from_pem(ca_pem);
-        tls_config = tls_config.client_ca_root(ca_cert);
-    }
-
-    info!("gRPC TLS config built successfully");
-    Ok(tls_config)
-}
-
-/// TLS certificate provider with background hot-reload.
-///
-/// Follows the same pattern as `BearerTokenProvider` in `auth.rs`.
-/// Wraps a `TlsAcceptor` behind a `RwLock` and periodically reloads
-/// certificates from secret managers.
-pub struct TlsCertProvider {
-    acceptor: Arc<parking_lot::RwLock<TlsAcceptor>>,
-    config: TlsConfig,
-    shutdown: tokio_util::sync::CancellationToken,
-}
-
-impl TlsCertProvider {
-    /// Create a new TLS cert provider and perform initial certificate load.
-    pub async fn new(config: TlsConfig) -> Result<Self> {
-        let acceptor = build_tls_acceptor_async(&config)
-            .await?
-            .ok_or_else(|| Error::Tls("TLS provider created but TLS is disabled".into()))?;
-
-        Ok(Self {
-            acceptor: Arc::new(parking_lot::RwLock::new(acceptor)),
-            config,
-            shutdown: tokio_util::sync::CancellationToken::new(),
-        })
-    }
-
-    /// Get the shared acceptor handle for the HTTP server accept loop.
-    ///
-    /// The server clones the `TlsAcceptor` from behind the `RwLock` per connection.
-    /// This is cheap because `TlsAcceptor` wraps `Arc<ServerConfig>`.
-    pub fn acceptor_handle(&self) -> Arc<parking_lot::RwLock<TlsAcceptor>> {
-        self.acceptor.clone()
-    }
-
-    /// Start background certificate refresh task.
-    ///
-    /// Periodically reloads certificates from secret managers and swaps
-    /// the TLS acceptor behind the `RwLock`. Existing connections are unaffected;
-    /// new connections use the updated certificates. A zero
-    /// `refresh_interval_secs` refreshes never.
-    pub fn start_refresh_task(&self) {
-        let acceptor = self.acceptor.clone();
-        let config = self.config.clone();
-        let shutdown = self.shutdown.clone();
-        let interval = std::time::Duration::from_secs(config.refresh_interval_secs);
-        // A zero-period timer panics the task it runs in.
-        if interval.is_zero() {
-            return;
-        }
-
-        tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(interval);
-            ticker.tick().await; // Skip immediate tick
-
-            loop {
-                tokio::select! {
-                    _ = shutdown.cancelled() => {
-                        info!("TLS cert refresh task stopping");
-                        break;
-                    }
-                    _ = ticker.tick() => {
-                        match build_tls_acceptor_async(&config).await {
-                            Ok(Some(new_acceptor)) => {
-                                *acceptor.write() = new_acceptor;
-                                info!("TLS certificates refreshed successfully");
-                                security::tls_event("cert_refresh", SecurityOutcome::Success, None, None);
-                            }
-                            Ok(None) => {
-                                tracing::error!("TLS refresh returned None (TLS disabled?)");
-                                security::tls_event(
-                                    "cert_refresh",
-                                    SecurityOutcome::Error,
-                                    Some("tls_disabled_after_refresh"),
-                                    None,
-                                );
-                            }
-                            Err(e) => {
-                                tracing::error!(error = %e, "Failed to refresh TLS certificates");
-                                security::tls_event(
-                                    "cert_refresh",
-                                    SecurityOutcome::Failure,
-                                    Some(&e.to_string()),
-                                    None,
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        });
-    }
-
-    /// Shutdown the refresh task.
-    pub fn shutdown(&self) {
-        self.shutdown.cancel();
-    }
-}
-
-impl Drop for TlsCertProvider {
-    fn drop(&mut self) {
-        self.shutdown();
     }
 }
 
@@ -527,97 +172,117 @@ pub struct ClientCertInfo {
 mod tests {
     use super::*;
 
-    fn base_config() -> TlsConfig {
+    fn enabled() -> TlsConfig {
         TlsConfig {
-            enabled: false,
-            cert_file: None,
-            key_file: None,
-            ca_file: None,
-            client_auth: "none".to_string(),
-            cert_secret: None,
-            key_secret: None,
-            ca_secret: None,
-            refresh_interval_secs: 3600,
+            enabled: true,
+            cert_file: Some("/etc/ssl/receiver.crt".into()),
+            key_file: Some("/etc/ssl/receiver.key".into()),
+            ..TlsConfig::default()
         }
     }
 
     #[test]
-    fn test_client_auth_parsing() {
-        assert_eq!(ClientAuth::from_str("none"), ClientAuth::None);
-        assert_eq!(ClientAuth::from_str("optional"), ClientAuth::Optional);
-        assert_eq!(ClientAuth::from_str("required"), ClientAuth::Required);
-        assert_eq!(ClientAuth::from_str("REQUIRED"), ClientAuth::Required);
-        assert_eq!(ClientAuth::from_str("unknown"), ClientAuth::None);
-        assert_eq!(ClientAuth::parse("Require"), Some(ClientAuth::Required));
-        assert_eq!(ClientAuth::parse("requried"), None);
-        assert_eq!(ClientAuth::parse(""), None);
+    fn client_auth_names_parse_case_insensitively() {
+        for (name, mode) in [
+            ("none", Some(ClientAuth::None)),
+            ("optional", Some(ClientAuth::Optional)),
+            ("request", Some(ClientAuth::Optional)),
+            ("required", Some(ClientAuth::Required)),
+            ("REQUIRED", Some(ClientAuth::Required)),
+            ("Require", Some(ClientAuth::Required)),
+            ("requried", None),
+            ("unknown", None),
+            ("", None),
+        ] {
+            assert_eq!(parse_client_auth(name), mode, "{name:?}");
+        }
     }
 
-    #[test]
-    fn test_tls_disabled() {
-        let config = base_config();
-
-        let result = build_tls_acceptor(&config);
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_none());
+    #[tokio::test]
+    async fn a_disabled_block_loads_nothing() {
+        let loaded = load_server_tls(
+            &TlsConfig::default(),
+            &ConnectionsConfig::default(),
+            ServerTlsOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert!(loaded.is_none());
     }
 
-    #[test]
-    fn test_tls_enabled_missing_cert() {
-        let mut config = base_config();
-        config.enabled = true;
-        config.key_file = Some("/path/to/key".into());
-
-        let result = build_tls_acceptor(&config);
-        assert!(result.is_err());
-        let err = result.err().unwrap();
-        assert!(err.to_string().contains("cert_file"));
-    }
-
-    #[test]
-    fn test_tls_enabled_missing_key() {
-        let mut config = base_config();
-        config.enabled = true;
-        config.cert_file = Some("/path/to/cert".into());
-
-        let result = build_tls_acceptor(&config);
-        assert!(result.is_err());
-        let err = result.err().unwrap();
-        assert!(err.to_string().contains("key_file"));
-    }
-
-    #[test]
-    fn test_mtls_missing_ca() {
-        let mut config = base_config();
-        config.enabled = true;
-        config.cert_file = Some("/path/to/cert".into());
-        config.key_file = Some("/path/to/key".into());
-        config.client_auth = "required".to_string();
-
-        let result = build_tls_acceptor(&config);
-        assert!(result.is_err());
-        let err = result.err().unwrap();
-        assert!(err.to_string().contains("ca_file"));
-    }
-
-    #[test]
-    fn test_uses_secrets() {
-        let mut config = base_config();
-        assert!(!uses_secrets(&config));
-
-        config.cert_secret = Some("vault:secret/tls:cert".into());
-        assert!(uses_secrets(&config));
-    }
-
-    #[test]
-    fn test_sync_rejects_secrets() {
-        let mut config = base_config();
-        config.enabled = true;
-        config.cert_secret = Some("vault:secret/tls:cert".into());
-        config.key_file = Some("/path/to/key".into());
-
-        let result = build_tls_acceptor(&config);
-        assert!(result.is_err());
-        assert!(result.err().unwrap().to_string().contains("async"));
+    /// Each refusal names the key the operator has to change.
+    #[tokio::test]
+    async fn a_block_that_cannot_be_served_is_refused_naming_the_key() {
+        let cases = [
+            (
+                "cert as file and secret",
+                TlsConfig {
+                    cert_secret: Some("vault:secret/tls:cert".into()),
+                    ..enabled()
+                },
+                "cert_secret",
+            ),
+            (
+                "key as file and secret",
+                TlsConfig {
+                    key_secret: Some("file:/etc/ssl/receiver.key".into()),
+                    ..enabled()
+                },
+                "key_secret",
+            ),
+            (
+                "no certificate",
+                TlsConfig {
+                    cert_file: None,
+                    ..enabled()
+                },
+                "cert_file",
+            ),
+            (
+                "no key",
+                TlsConfig {
+                    key_file: None,
+                    ..enabled()
+                },
+                "key_file",
+            ),
+            (
+                "client certificates with no CA",
+                TlsConfig {
+                    client_auth: "required".into(),
+                    ..enabled()
+                },
+                "ca_file",
+            ),
+            (
+                "a secret naming no provider",
+                TlsConfig {
+                    cert_file: None,
+                    cert_secret: Some("eyJhbGciOiJIUzI1NiJ9.pasted".into()),
+                    ..enabled()
+                },
+                "provider",
+            ),
+            (
+                "an unknown client_auth",
+                TlsConfig {
+                    client_auth: "requried".into(),
+                    ..enabled()
+                },
+                "client_auth",
+            ),
+        ];
+        for (case, tls, key) in cases {
+            let err = load_server_tls(
+                &tls,
+                &ConnectionsConfig::default(),
+                ServerTlsOptions::default(),
+            )
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{case} must be refused"))
+            .to_string();
+            assert!(err.contains(key), "{case}: {err}");
+        }
     }
 }

@@ -19,9 +19,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use scalo::tls::ServerTlsOptions;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
-use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -34,6 +34,7 @@ use crate::metrics::{DropReason, Metrics};
 use crate::pipeline::{Acks, PipelineState};
 use crate::server::frame_clock::Clocked;
 use crate::server::http::Accept;
+use crate::server::tls::handshake;
 use crate::server::traits::{BoundAddr, ProtocolHandler};
 use crate::tenancy::{Ingest, Principal};
 use codec::{CompressedFrames, Frame, encode_ack, read_frame};
@@ -362,15 +363,13 @@ impl ProtocolHandler for LumberjackHandler {
             .pipeline
             .acks("lumberjack", self.config.acknowledgements, None);
 
-        // Build TLS acceptor if enabled
-        let tls_acceptor = if self.config.tls.enabled {
-            let acceptor = super::tls::build_tls_acceptor_async(&self.config.tls).await?;
-            info!(addr = %addr, tls = true, "Lumberjack server listening");
-            acceptor
-        } else {
-            info!(addr = %addr, tls = false, "Lumberjack server listening");
-            None
-        };
+        let tls = super::tls::load_server_tls(
+            &self.config.tls,
+            &self.pipeline.config().server.connections,
+            ServerTlsOptions::default(),
+        )
+        .await?;
+        info!(addr = %addr, tls = tls.is_some(), "Lumberjack server listening");
 
         // Published once TLS is ready, so a failed TLS setup never reads as serving.
         let _serving = self.bound.publish(&listener.local_addr());
@@ -402,30 +401,18 @@ impl ProtocolHandler for LumberjackHandler {
                     let conn_shutdown = shutdown.clone();
                     let accept = accept.clone();
 
-                    if let Some(ref acceptor) = tls_acceptor {
-                        let acceptor = acceptor.clone();
+                    if let Some(ref tls) = tls {
+                        let tls = tls.clone();
                         tokio::spawn(async move {
                             let _open = open;
                             if !accept.first_byte(&stream).await {
                                 return;
                             }
-                            // TLS handshake with timeout
-                            let tls_result = timeout(accept.limits.tls_handshake, acceptor.accept(stream)).await;
-                            let tls_stream = match tls_result {
-                                Ok(Ok(s)) => s,
-                                Ok(Err(e)) => {
-                                    metrics.inc_tls_handshake_failure();
-                                    debug!(peer = %peer_addr, error = %e, "Lumberjack TLS handshake failed");
-                                    return;
-                                }
-                                Err(_) => {
-                                    metrics.inc_tls_handshake_failure();
-                                    warn!(peer = %peer_addr, "Lumberjack TLS handshake timeout");
-                                    return;
-                                }
+                            let Some(tls_stream) =
+                                handshake(&tls, stream, peer_addr, &metrics).await
+                            else {
+                                return;
                             };
-
-                            debug!(peer = %peer_addr, "Lumberjack TLS connection established");
                             let intake = Intake { pipeline: &pipeline, metrics: &metrics, acks: &acks, peer_addr };
                             handle_connection(accept.clock(BufReader::new(tls_stream)), intake, conn_shutdown).await;
                         });

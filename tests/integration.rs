@@ -97,6 +97,8 @@ mod splunk_hec;
 mod syslog;
 #[path = "integration/tls_openssl.rs"]
 mod tls_openssl;
+#[path = "integration/tls_reload.rs"]
+mod tls_reload;
 #[path = "integration/untrusted_input.rs"]
 mod untrusted_input;
 #[path = "integration/vault_auth.rs"]
