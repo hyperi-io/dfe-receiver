@@ -5,15 +5,4 @@
 # License:   BUSL-1.1
 # Copyright: (c) 2026 HYPERI PTY LIMITED
 
-exemptions:
-  - path_glob: CONTRIBUTING.md
-    rules: [punct.semicolon]
-    why: the Developer Certificate of Origin, quoted verbatim
-    text: |-
-      1. The contribution was created in whole or in part by you and you have the
-         right to submit it under the license indicated in the file; or
-
-      2. The contribution is based upon previous work that, to the best of your
-         knowledge, is covered under an appropriate open source license and you
-         have the right under that license to submit that work with modifications;
-         or
+exemptions: []
