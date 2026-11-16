@@ -6,12 +6,7 @@
 # License:   BUSL-1.1
 # Copyright: (c) 2026 HYPERI PTY LIMITED
 #
-# Usage:
-#   docker compose -f docker-compose.test.yaml up -d
-#   env TEST_MODE=docker cargo nextest run --test integration
-#   docker compose -f docker-compose.test.yaml down -v
-#
-# Same broker image as the testcontainers fixture, on the dfe-docker stack's localhost:19092.
+# The broker for TEST_MODE=docker: docs/testing.md.
 
 services:
   kafka:
@@ -48,7 +43,6 @@ services:
     networks:
       - dfe-test
 
-  # Optional: Kafbat UI for debugging
   kafbat-ui:
     image: ghcr.io/kafbat/kafka-ui:v1.5.0@sha256:7cda86a33344160309fdb65146332e4da65db81a945614f2fe32e210803f6fd1
     container_name: dfe-receiver-kafbat

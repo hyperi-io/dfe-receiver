@@ -9,7 +9,7 @@ classification: product
 language: rust
 quality:
   enabled: true
-  # Unreachable, accepted in dfe-infra docs/THREAT-MODEL.md. No RustSec entry, so only osv-scanner sees it.
+  # No RustSec entry, so only osv-scanner sees it.
   ignore:
     - tool: osv-scanner
       id: GHSA-w9wp-h8wv-79jx

@@ -11,6 +11,15 @@ Core is everything nextest runs by default: the unit tests in `src/`, the smoke 
 
 A test that needs Docker skips without a daemon on a developer's machine and fails with `CI` set, so CI never passes a test it did not run.
 
+`TEST_MODE`, from the environment or the repo's `.env`, picks the Kafka the tests use (`tests/common/mod.rs`). `live`, the default, takes the cluster in `KAFKA_BROKERS`, else the run's shared broker below. `testcontainers` always takes the shared broker. `docker` takes the broker `docker-compose.test.yaml` runs on `localhost:19092`, and a configured cluster that is unreachable or rejects the credentials fails the test rather than skipping it:
+
+```bash
+docker compose -f docker-compose.test.yaml up -d
+env TEST_MODE=docker cargo nextest run --test integration
+kcat -b localhost:19092 -t <test topic> -C -o beginning   # the topic a test names
+docker compose -f docker-compose.test.yaml down -v
+```
+
 ## Services, one instance each per run
 
 | Service | Image | Port |
@@ -22,12 +31,12 @@ The Kafka pin is scalo's `transport::kafka::test_support::KAFKA_IMAGE`. The Open
 
 Both come from scalo's `test_support::shared_service`, through `shared_kafka` and `shared_openbao` in `tests/common/mod.rs`:
 
-- The first test process to ask starts the container, named `dfe-receiver-test-integration-<service>-r<run>`, and every other process joins it by that name.
-- The starter also runs a watcher that removes the container once the nextest process exits, on a pass, a failure or Ctrl-C. Each start and removal is logged to `shared-services-<run>.log` under the target's `tmp/`.
-- A start first sweeps this suite's containers whose owner process has gone.
+- The first test process to ask starts the container, called `dfe-receiver-test-integration-<service>-r<run>`, and every other process joins it by that name.
+- The starter runs a watcher that removes the container once the nextest process exits, on a pass, a failure or Ctrl-C. Each start and removal is logged to `shared-services-<run>.log` under the target's `tmp/`.
+- A start first sweeps this suite's containers left by a process that has gone.
 - Docker is whatever the environment names: `DOCKER_HOST`, else the current docker context. Ports bind to loopback on the daemon host, and an `ssh://` daemon gets one tunnel per port. In CI it is the runner's daemon.
 
-Tests on the shared broker keep to their own topics (`test_topic`), and tests on OpenBao to their own secret paths. Three kinds of test hold a container of their own, removed when the test drops it:
+Tests on the shared broker keep to per-test topics (`test_topic`), and tests on OpenBao to per-test secret paths. Three kinds of test hold a private container, removed when the test drops it:
 
 - the two Kafka sink tests that pause their broker (`start_kafka_container`)
 - the Kafka TLS test, on scalo's `TlsBroker`: one KRaft broker with SSL, SASL_SSL and mTLS listeners and a private CA made for the run

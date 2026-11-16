@@ -5,6 +5,7 @@ How dfe-receiver is built, hardened and tuned, and how to point a caller at it.
 - [dfe-receiver architecture](architecture.md)
 - [Delivery and buffering](delivery.md)
 - [dfe-receiver internals](internals.md)
+- [Protocol parsing](protocols.md)
 - [Internet-Facing Hardening & Fronting Architecture](hardening.md)
 - [dfe-receiver metrics](metrics.md)
 - [Keeping failure logs bounded](log-spamming.md)
