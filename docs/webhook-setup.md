@@ -1,14 +1,51 @@
 # Setting up an inbound webhook caller
 
 `POST /webhook/{caller}` accepts events pushed by a product -- an alert rule, a
-SaaS notification hook -- rather than streamed by an agent. This page is how to
-configure one, from the auth choice to proving delivery, without reading the Rust.
-The design rationale and the request flow are in [internals.md](internals.md), and
-every field is in `config.example.yaml` and the generated `docs/config-schema.yaml`.
+SaaS notification hook -- rather than streamed by an agent. This page is how the
+intake handles a request and how to configure a caller, from the auth choice to
+proving delivery. Why the intake is separate from `/ingest` is in
+[architecture.md](architecture.md#listeners-and-transports), and every field is
+in the generated [config-schema.yaml](config-schema.yaml).
 
 Every caller is declared separately and carries its own secret, topic and body
 format, so two callers never share a credential and a wrong secret is only ever
 tried against the caller the URL path names.
+
+## How the intake handles a request
+
+This diagram shows the steps a webhook request goes through, in `src/server/webhook/`.
+
+```mermaid
+flowchart TB
+    accTitle: L4 Detail -- Webhook intake
+    accDescr: A webhook request is admitted in four steps, the listener limits, the caller lookup, the caller's auth and the readiness check. Its body is then split into records and filtered. Each record left is validated, stamped and written to the caller's topic.
+
+    subgraph s1["1 Admit"]
+        direction LR
+        limits["Listener limits"] --> lookup["Caller lookup"] --> auth["Caller auth"] --> ready["Readiness"]
+    end
+    subgraph s2["2 Prepare"]
+        direction LR
+        split["Split body"] --> filter["CEL filter"]
+    end
+    subgraph s3["3 Deliver"]
+        direction LR
+        validate["Validate"] --> stamp["Stamp and clamp"] --> topic[("Caller topic")]
+    end
+    s1 --> s2 --> s3
+
+    classDef default fill:#F8FAFC,stroke:#64748B,stroke-width:1px,color:#0F172A
+    classDef async fill:#F6E6EF,stroke:#A8517F,stroke-width:1px,color:#3D1529
+    classDef group fill:none,stroke:#64748B,stroke-width:1px,stroke-dasharray:2 4
+    class topic async
+    class s1,s2,s3 group
+```
+
+*Figure 1. L4 Detail -- Webhook intake. Read each stage left to right, then down.* Up: [L3 Components -- Receiver](architecture.md#components).
+
+A caller's records go to the caller's topic on Kafka, never to a gRPC destination, and the rules pick no topic for them. The rules still set `_org_id`, held to `ingest_bindings.credentials.<caller>` because the caller's name is its credential id, or the default org when it has none. With `routing.enrich` on, the default, records are stamped with `_source`, the caller name over any value the sender wrote, and `_timestamp_received`. An oversize body is never a DLQ entry, so unauthenticated bytes do not reach Kafka.
+
+With `webhook.bind_address` unset the routes join the ingest listener after its auth middleware and body limit. They keep their own per-caller auth and body limit, and share `server.tls`, `server.ip_filter`, `server.rate_limit` and the concurrency cap. Set, the intake runs on its own port through the same accept loops and limits, under `webhook.tls`.
 
 ## The six decisions
 

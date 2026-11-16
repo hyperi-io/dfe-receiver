@@ -42,38 +42,71 @@ bytes are gone by the time the loader sees the record.
 
 ## Components
 
+This diagram shows the parts inside the receiver and what each side of it talks to.
+
 ```mermaid
 flowchart TB
-    AG["Agents and collectors<br/>Beats, OTel, Splunk, syslog, Fluent, GELF, Prometheus, NetFlow"]
-    PR["Products<br/>alert rules, SaaS hooks"]
+    accTitle: L3 Components -- Receiver
+    accDescr: Agents send events to the protocol handlers and products push webhooks to the webhook intake. Both hand records to validation, then routing and stamping, then the sinks. The sinks write records to Kafka topics and gRPC destinations. Records missing a required field, and records a destination refuses for good, go to the DLQ.
 
-    AG --> H["Protocol handlers<br/>own listener, framing and decode<br/>each normalises to JSON"]
-    PR --> W["Webhook intake<br/>per-caller auth, topic and filter"]
+    agents["Agents"]
+    products["Products"]
 
-    H --> CORE
-    W --> CORE
-
-    subgraph CORE["Shared core path"]
-        direction TB
-        VAL["Validate<br/>sonic-rs, no full parse"]
-        RT["Route<br/>rule set -> _source, _org_id<br/>clamp to the orgs of the sender -> topic"]
-        BUF["Buffer<br/>in-memory + circuit breaker"]
-        VAL --> RT --> BUF
+    subgraph receiver["Receiver"]
+        direction LR
+        handlers["Protocol handlers"]
+        webhook[["Webhook intake"]]
+        validate["Validate"]
+        route["Route and stamp"]
+        sinks[["Sinks"]]
+        handlers --> validate
+        webhook --> validate
+        validate --> route --> sinks
     end
 
-    BUF --> K[(Kafka topics)]
-    BUF --> G["gRPC destinations<br/>dfe-loader, transforms, archiver"]
-    BUF -.->|invalid| D[(DLQ topic)]
+    kafka[("Kafka topics")]
+    grpc["gRPC destinations"]
+    dlq[("DLQ")]
+
+    agents -->|events| receiver
+    products -->|webhooks| receiver
+    receiver -->|records| kafka
+    receiver -->|records| grpc
+    receiver -.->|dead letters| dlq
+
+    classDef default fill:#F8FAFC,stroke:#64748B,stroke-width:1px,color:#0F172A
+    classDef async fill:#F6E6EF,stroke:#A8517F,stroke-width:1px,color:#3D1529
+    classDef error fill:#FBE3D6,stroke:#C2410C,stroke-width:1px,color:#4A1A05
+    classDef ext fill:#EEF0F2,stroke:#6B7280,stroke-width:1px,stroke-dasharray:4 3,color:#1F2937
+    classDef group fill:none,stroke:#64748B,stroke-width:1px,stroke-dasharray:2 4
+    class agents,products ext
+    class kafka async
+    class dlq error
+    class receiver group
 ```
+
+*Figure 1. L3 Components -- Receiver. Dashed boxes are external, and the dotted arrow is the dead-letter path.* Up: top of dfe-receiver. Down: [L4 Detail -- Webhook intake](webhook-setup.md#how-the-intake-handles-a-request), [L4 Detail -- When a sender is answered](delivery.md#the-answer-waits-for-the-destination).
+
+| Part | Code | What it does |
+|---|---|---|
+| Protocol handlers | `src/server/<protocol>/` | Each protocol's listeners, framing, decode and auth, handing JSON to the pipeline |
+| Webhook intake | `src/server/webhook/` | Per-caller auth, body split and CEL filter, then the caller's own topic |
+| Validate | `src/validation/` | Nesting depth, JSON object, required fields, read lazily with sonic-rs |
+| Route and stamp | `src/routing/` | The rule set, the org clamp, the topic and destinations, and the `_source`, `_org_id` and `_timestamp_received` stamps |
+| Sinks | `src/sink/`, `src/buffer/` | The Kafka producer and one gRPC sink per destination, with a buffer in front for answers given at enqueue |
+| gRPC destinations | `destinations.*`, `loader.*` | scalo Push listeners: dfe-loader, the transforms, the archiver |
+| DLQ | `routing.dlq` | scalo's dead letter queue: by default the `dfe_receiver_dlq` topic, and a local file when Kafka does not take the entry |
 
 Many handlers, one core path. A handler owns its socket, its framing and its
 decode, and nothing else. The moment it holds JSON bytes it calls the same
 pipeline every other handler calls, so validation, routing, backpressure and
 metrics exist once rather than once per handler.
 
-`ProtocolHandler` (`src/server/traits.rs`) is where the two halves meet: `name()`, `bind_address()`, `listeners()`, `start(shutdown)`. `Server::build_handlers` (`src/server/mod.rs`) collects the enabled handlers, and `Server::run` spawns each one. Adding a protocol is a directory under `src/server/` plus a block in `build_handlers` -- it does not touch the core path.
+`ProtocolHandler` (`src/server/traits.rs`) is where the two halves meet: `name()`, `bind_address()`, `listeners()`, `start(shutdown)`. `Server::build_handlers` (`src/server/mod.rs`) collects the enabled handlers, and `Server::run` spawns each one. Adding a protocol is a directory under `src/server/`, a config section, a block in `build_handlers` and a port in the deployment contract (`src/deployment.rs`). It does not touch the core path.
 
 `listeners()` returns one `BoundAddr` per socket the handler binds, and `/readyz` waits on all of them: it answers 503 until every enabled listener is serving, and again once any of them stops. A listener that cannot bind, or stops before shutdown, fails its handler's `start()`, the handler's other listeners stop with it, and the process logs `Protocol handler failed` and stays up. The ingest port's `/readyz` 503 body names each failed handler, and the error stays in the log. An enabled handler that cannot be built fails the same way.
+
+## Listeners and transports
 
 HTTP is the exception to opt-in: it always runs. It serves `/livez` and `/readyz`
 beside `/ingest`, so exposing ingest exposes both probe paths. The chart's probes
@@ -81,9 +114,9 @@ use the same paths on the metrics port.
 
 `grpc.enabled` defaults to `false`, but a DFE deployment turns it on: dfe-infra's
 values set the listener on `0.0.0.0:6000`, where it takes Vector's gRPC sink
-(`PushEvents`). It speaks Vector's protocol, not scalo's Push. The slim and mesh
-profiles send onward to the loader over gRPC (`loader.transport: grpc`,
-`destinations.default: loader`) with no broker in the path.
+(`PushEvents`). It speaks Vector's protocol, not scalo's Push.
+
+Records land on Kafka by default. `transport: grpc` (or `DFE_RECEIVER_TRANSPORT=grpc`), the same key dfe-loader and dfe-archiver read, sends them to the loader's Push listener with no broker in the path. Under it an unset `destinations.default` becomes `loader` and an unset `loader.transport` becomes `grpc`, and a config that sets either to the bus fails to start. dfe-infra's slim and mesh profiles set those two keys themselves.
 
 The webhook intake has its own routes and per-caller auth rather than a route on
 `/ingest`, for reasons worth keeping. `/ingest` checks one server-wide credential in middleware
@@ -111,14 +144,13 @@ A listener whose protocol carries an answer holds it until every destination con
 
 ## Configuration
 
-Two paths in. Without `--config` it is scalo's cascade: compiled defaults, then `defaults.yaml`, `settings.yaml` and `settings.{env}.yaml`, each searched in `./`, `./config/`, `/config/` and `~/.config/dfe-receiver/`, then `./.env`, then `DFE_RECEIVER_*` environment variables, then CLI arguments. The container passes `--config /etc/dfe-receiver/config.yaml`, which reads that mounted file over the compiled defaults, then the flat `DFE_RECEIVER_*` variables. Routing, validation and enrichment reload on SIGHUP, and so do the gRPC destinations: a reload builds the sender of a destination it adds and retires one it removes, whose buffered records go to it or else the DLQ. With disk spillover on, a destination whose address changes moves to the new address on the same spool once no request uses its old sender, and replays what that sender spooled. The Kafka producer and the DLQ change only with a restart.
+Two paths in. Without `--config` it is scalo's cascade: compiled defaults, then `defaults.yaml`, `settings.yaml` and `settings.{env}.yaml`, each searched in `./`, `./config/`, `/config/` and `~/.config/dfe-receiver/`, then `./.env`, then `DFE_RECEIVER_*` environment variables, then CLI arguments. The container passes `--config /etc/dfe-receiver/config.yaml`, which reads that mounted file over the compiled defaults, then the flat `DFE_RECEIVER_*` variables. Routing, validation and enrichment reload on SIGHUP and when the config file changes, and so do the gRPC destinations: a reload builds the sender of a destination it adds and retires one it removes, whose buffered records go to it or else the DLQ. With disk spillover on, a destination whose address changes moves to the new address on the same spool once no request uses its old sender, and replays what that sender spooled. The Kafka producer and the DLQ change only with a restart.
 
 Bearer tokens, TLS material and webhook caller secrets can be `provider:path[:key]` references -- `file:`, `vault:`, `aws:`, `env:` -- resolved through `scalo::secrets::resolve`, and a reference field refuses a value that names no provider. A webhook caller's secret is always one. Static bearer tokens and accepted header values can also sit in the file as literals. The Kafka SASL credential is a plain value, set by `DFE_RECEIVER_KAFKA_SASL_PASSWORD` from the Kafka Secret. The receiver has no resolver of its own, and builds scalo's `secrets-vault` and `secrets-aws` features so the OpenBao and AWS Secrets Manager providers are in the binary.
 
 ## Invariants
 
-The rules a reader cannot infer, in rough order of how much damage getting them
-wrong does.
+In rough order of the damage getting them wrong does.
 
 1. An answer given at enqueue is not a delivery receipt. With
    `acknowledgements.enabled: false` the client has been answered by the time a
@@ -128,7 +160,7 @@ wrong does.
 
 2. The `Dockerfile` is generated, not written. It comes from the deployment contract in `src/deployment.rs`, and a unit test fails when the committed file no longer matches. Regenerate with `dfe-receiver --emit-dockerfile Dockerfile`. A scalo bump can change the generator, so a bump without a regenerate fails this repo's own suite by design.
 
-3. No chart is committed. At release, hyperi-ci emits the contract with `generate-artefacts` and assembles a thin chart from it on the scalo-service library chart at `release.helm.library`, which moves with the scalo version in `Cargo.toml`. A deployment wires the receiver's listeners by port name, so a renamed port breaks it.
+3. No chart is committed. At release, hyperi-ci emits the contract with `generate-artefacts` and assembles a thin chart from it on the scalo-service library chart at `release.helm.library`, which moves with the scalo version in `Cargo.toml`. A deployment wires the receiver's listeners by port name, so a renamed port breaks it. The contract marks every ingest port public and the gRPC port internal. `hyperi-ci chart assemble --binary target/debug/dfe-receiver --image <image>@sha256:<digest>` builds the chart a release would ship and prints its directory.
 
 4. `auth.mode` defaults to `none`. A deployment that has not configured auth accepts unauthenticated posts, limited only by body size, request timeout, the concurrency and connection caps, the IP filter and the rate limiter. Whatever faces the internet in front of it has to limit who reaches the ports: edge protection, or an allow list on the load balancer.
 

@@ -27,13 +27,13 @@ The front door of a DFE deployment: takes events in the protocols agents already
 | Fluent Forward | 24224 | Fluentd, Fluent Bit |
 | GELF TCP | 12201 | Graylog GELF output, Fluent Bit |
 | Prometheus Remote Write | 9091 | Prometheus, VictoriaMetrics |
-| Flow (NetFlow + sFlow), experimental | 2055 / 4739 / 6343 UDP | NetFlow v5/v9, IPFIX, sFlow v5 exporters (v7 not supported) |
+| Flow (NetFlow + sFlow), experimental ([#254](https://github.com/hyperi-io/dfe-receiver/issues/254)) | 2055 / 4739 / 6343 UDP | NetFlow v5/v9, IPFIX, sFlow v5 exporters (v7 not supported) |
 
 HTTP always runs, and the other listeners are opt-in. A listener that answers at enqueue (acknowledgements off, or syslog, GELF and flow) buffers in memory behind a circuit breaker, and disk spillover is opt-in.
 
 ## Quick start
 
-The build needs `protoc`, a C toolchain, `pkg-config` and an installed librdkafka. The gRPC, OTLP and Prometheus Remote Write protocols compile vendored `.proto` files, `aws-lc-sys` compiles C, and `rdkafka-sys` links librdkafka through pkg-config. It refuses a librdkafka older than the version after the `+` in its `Cargo.lock` entry, and a Debian or Ubuntu package can be older than that, so there [build librdkafka from source](https://github.com/confluentinc/librdkafka#build-from-source) first.
+The build needs `protoc`, a C toolchain, `pkg-config` and an installed librdkafka. The gRPC, OTLP and Prometheus Remote Write protocols compile the `.proto` files copied into `proto/`, `aws-lc-sys` compiles C, and `rdkafka-sys` links librdkafka through pkg-config. It refuses a librdkafka older than the version after the `+` in its `Cargo.lock` entry, and a Debian or Ubuntu package can be older than that, so there [build librdkafka from source](https://github.com/confluentinc/librdkafka#build-from-source) first.
 
 ```bash
 sudo apt-get install -y protobuf-compiler build-essential pkg-config   # Debian or Ubuntu
@@ -67,7 +67,8 @@ routing:
 
 - [docs/architecture.md](docs/architecture.md): where it sits in the suite and why it is built this way.
 - [docs/delivery.md](docs/delivery.md): when a sender is answered, and what the receiver buffers.
-- [docs/internals.md](docs/internals.md): how each part works -- parsing, routing, what a sender is told, auth, configuration, the webhook intake and flow.
+- [docs/internals.md](docs/internals.md): the shared path -- what it refuses, routing, what a sender is told, auth, Kafka and deployment.
+- [docs/protocols.md](docs/protocols.md): what each protocol parses, raw capture, and flow.
 - [docs/hardening.md](docs/hardening.md): running it where it is reachable from outside.
 - [docs/sidecar-transports.md](docs/sidecar-transports.md) and [docs/webhook-setup.md](docs/webhook-setup.md): the transport options and the webhook callers.
 - [docs/metrics.md](docs/metrics.md) and [docs/performance.md](docs/performance.md): what it reports and what it costs.

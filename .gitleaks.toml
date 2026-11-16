@@ -14,7 +14,7 @@ regexes = [
     '''your-token''',
     '''test-token''',
     '''example\.com''',
-    '''<[A-Z_]+>''',  # Angle bracket placeholders like <YOUR_TOKEN>
+    '''<[A-Z_]+>''',
 ]
 
 stopwords = ["example", "sample", "test", "mock", "fake", "dummy", "placeholder"]

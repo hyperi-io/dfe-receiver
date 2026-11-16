@@ -186,7 +186,7 @@ The suite's ingest edge: every wire protocol in the README's table terminated, e
 | `src/buffer/` | `SinkBackend` for answers at enqueue: in-memory, or scalo `TieredSink` with a disk spool |
 | `src/sink/` | `kafka/`, `grpc/`, `file/`. Kafka owns its producer so delivery reports are visible |
 | `src/config/mod.rs`, `src/deployment.rs` | `Config::validate()`, and the contract the Dockerfile and the released chart are generated from |
-| `Dockerfile`, `proto/` | Generated or vendored. Do not hand-edit |
+| `Dockerfile`, `proto/` | Generated, or copied in from upstream. Do not hand-edit |
 | `tests/` | Targets `smoke`, `integration`, `e2e`, `orchestrator_lifecycle`. `common/mod.rs` is the container harness |
 | `docs/architecture.md` | Why it is built this way, and the invariants |
 

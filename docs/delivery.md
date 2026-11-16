@@ -6,9 +6,46 @@ When a sender is answered, and what the receiver keeps for it until then. Each l
 
 A listener whose protocol carries an answer holds it until every destination confirmed the request's records: a Kafka delivery report, a gRPC destination's answer, or a dead-letter write the DLQ confirmed. That is `acknowledgements.enabled`, default on, per listener: `server`, `grpc`, `otlp`, `splunk_hec`, `lumberjack`, `fluent`, `webhook`, `prometheus_rw`. Syslog, GELF and flow have no answer to hold.
 
+This diagram shows when a sender is told its record was taken.
+
+```mermaid
+flowchart LR
+    accTitle: L4 Detail -- When a sender is answered
+    accDescr: A routed record whose listener holds its answer goes straight to its sink. The sender is told it was accepted when the destination confirms within the hold, and told to retry when it does not. A record whose listener answers at enqueue goes into the buffer, and the sender is told it was accepted at once.
+
+    held{"Answer held?"}
+    send["Send to sink"]
+    buffer[("Buffer")]
+    confirmed{"Confirmed<br/>in the hold?"}
+    queued(["Accepted<br/>at enqueue"])
+    ok(["Accepted"])
+    retry(["Told to retry"])
+
+    held -->|yes| send
+    held -->|no| buffer
+    send --> confirmed
+    buffer --> queued
+    confirmed -->|yes| ok
+    confirmed -.->|no| retry
+
+    classDef default fill:#F8FAFC,stroke:#64748B,stroke-width:1px,color:#0F172A
+    classDef async fill:#F6E6EF,stroke:#A8517F,stroke-width:1px,color:#3D1529
+    classDef decision fill:#FCF1D6,stroke:#9A6700,stroke-width:1px,color:#3D2A00
+    classDef error fill:#FBE3D6,stroke:#C2410C,stroke-width:1px,color:#4A1A05
+    class held,confirmed decision
+    class buffer async
+    class retry error
+```
+
+*Figure 1. L4 Detail -- When a sender is answered. The dotted arrow is the retry path.* Up: [L3 Components -- Receiver](architecture.md#components).
+
+A buffered record drains to the same sink later, and the sender has no copy of it by then. A record refused for good is answered as the next section says, whichever way it went.
+
 A record not confirmed within the hold gets the protocol's retryable refusal (503 with `Retry-After`, `UNAVAILABLE`, no ack), and the sender keeps it. That means "not confirmed", not "not written": a Kafka message timeout can expire while a produce request is in flight, so a resend can deliver a record twice. Duplicates, never loss.
 
 The hold is 25 s, short of the listener's request timeout or a gRPC sender's `grpc-timeout` by a margin. OTLP HTTP exports carry no deadline, so they hold 9 s (`otlp.http_max_hold_ms`), inside the OTel exporters' 10 s default timeout. The producer for held answers runs `message.timeout.ms` 20 s unless the operator set one, and a gRPC destination's send deadline is 20 s (`loader.timeout_ms` for the loader), so both settle inside the hold. A send still running when a shorter hold ends is cut off and answered retryable. The constants are in `src/pipeline/acks.rs`.
+
+A listener holds at most a quarter of the memory limit in unanswered bytes, 256 MiB when the guard reports no limit, and refuses a request past it with the retry signal. Admission, that ceiling and the `transport_ack_*` metrics are scalo's `Tickets`, behind the pipeline's own pressure brake and memory lease.
 
 ## What is final, and what is retried
 
@@ -20,7 +57,7 @@ A delivery report that refuses the record itself for good -- the same codes that
 
 With `acknowledgements.enabled: false` a listener answers once the record is queued. `receiver_kafka_sends_total` is what librdkafka queued, `receiver_kafka_delivered_total` what a broker acknowledged, and `receiver_kafka_delivery_failures_total{reason}` what no broker confirmed. `pipeline_delivery_guarantee{listener,guarantee,reason}` reports what each listener gives: its weakest reachable leg, so a gRPC destination declared `confirms_delivery: false` (the archiver's direct listener answers on receipt) makes every held listener `best_effort`.
 
-Records answered at enqueue have no resend behind them, so beside a held listener they get a producer of their own on librdkafka's default timeout. The sink queues again every one librdkafka gives up on with a message timeout, a topic the cluster does not serve or an authorisation failure (`receiver_kafka_resends_total`), while new records wait in the buffer in front. Any other broker refusal is final, and what is still queued at exit is lost. Admission, the held-byte ceiling (a quarter of the memory limit per listener) and the `transport_ack_*` metrics are scalo's `Tickets`, behind the pipeline's own pressure brake and memory lease.
+Records answered at enqueue have no resend behind them, so beside a held listener they get a producer of their own on librdkafka's default timeout. The sink queues again every one librdkafka gives up on with a message timeout, a topic the cluster does not serve or an authorisation failure (`receiver_kafka_resends_total`), while new records wait in the buffer in front. Any other broker refusal is final, and what is still queued at exit is lost.
 
 The sink builds its own `ThreadedProducer` instead of using scalo's `KafkaProducer`, because scalo hard-codes a `ProducerContext` with no injection point and a delivery report needs one. Its librdkafka config still comes from scalo's own `producer_client_config`, over the `PRODUCER_HIGH_THROUGHPUT` profile, so the precedence is scalo's -- profile defaults, then the sizing surface, then `librdkafka_overrides`, which wins.
 

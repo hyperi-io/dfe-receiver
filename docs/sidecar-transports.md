@@ -6,6 +6,43 @@ For protocols not natively supported, use a **sidecar** -- a lightweight
 process deployed alongside receiver that collects data from the source
 protocol and pushes it to receiver's ingest endpoint.
 
+This diagram shows the three kinds of sidecar and the port each one sends to.
+
+```mermaid
+flowchart LR
+    accTitle: L4 Detail -- Sidecar transports
+    accDescr: A source the receiver does not speak is collected by a Vector sidecar, a Fluent Bit sidecar or a custom collector. Vector sends to the gRPC port, Fluent Bit to the Fluent Forward port and a custom collector to HTTP ingest. The receiver writes the records to Kafka.
+
+    source["Source protocol"]
+
+    subgraph sidecars["Sidecars"]
+        vector["Vector"]
+        fluentbit["Fluent Bit"]
+        custom["Custom collector"]
+    end
+
+    receiver["dfe-receiver"]
+    kafka[("Kafka topics")]
+
+    source --> sidecars
+    vector -->|gRPC 6000| receiver
+    fluentbit -->|Forward 24224| receiver
+    custom -->|HTTP 8080| receiver
+    receiver -->|records| kafka
+
+    classDef default fill:#F8FAFC,stroke:#64748B,stroke-width:1px,color:#0F172A
+    classDef core fill:#DCEBF7,stroke:#0072B2,stroke-width:2px,color:#0B2A3F
+    classDef async fill:#F6E6EF,stroke:#A8517F,stroke-width:1px,color:#3D1529
+    classDef ext fill:#EEF0F2,stroke:#6B7280,stroke-width:1px,stroke-dasharray:4 3,color:#1F2937
+    classDef group fill:none,stroke:#64748B,stroke-width:1px,stroke-dasharray:2 4
+    class source ext
+    class receiver core
+    class kafka async
+    class sidecars group
+```
+
+*Figure 1. L4 Detail -- Sidecar transports. The dashed box is external.* Up: [dfe-receiver documentation](README.md).
+
 ## Recommended: Vector Sidecar
 
 [Vector](https://vector.dev/) is an observability data pipeline with
@@ -15,10 +52,6 @@ via the `vector` sink, making it the ideal sidecar for unsupported protocols.
 Deploy Vector in the same Kubernetes pod or Docker Compose service.
 It collects from the source protocol and pushes to receiver's gRPC
 ingest port (`:6000`).
-
-```text
-[Source Protocol] --> Vector (sidecar) --> gRPC :6000 --> dfe-receiver --> Kafka
-```
 
 ### Example: SNMP Traps
 
@@ -189,10 +222,6 @@ can push to receiver's Fluent Forward endpoint (`:24224`). Forward carries no
 credential, so the receiver starts its Fluent listener only with
 `fluent.tls.client_auth: required` or `fluent.accept_unauthenticated: true`.
 
-```text
-[Source Protocol] --> Fluent Bit (sidecar) --> Forward :24224 --> dfe-receiver --> Kafka
-```
-
 ### Example: Tail Files + Forward
 
 ```ini
@@ -220,10 +249,6 @@ Fluent Bit is a good choice when:
 For fully custom protocols where neither Vector nor Fluent Bit has a
 source, write a small program in any language that speaks your protocol
 and POSTs JSON to receiver's HTTP ingest.
-
-```text
-[Custom Protocol] --> your-collector --> POST :8080 --> dfe-receiver --> Kafka
-```
 
 ### Example: Python Collector
 

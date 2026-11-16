@@ -11,6 +11,15 @@ Core is everything nextest runs by default: the unit tests in `src/`, the smoke 
 
 A test that needs Docker skips without a daemon on a developer's machine and fails with `CI` set, so CI never passes a test it did not run.
 
+`TEST_MODE`, from the environment or the repo's `.env`, picks the Kafka the tests use (`tests/common/mod.rs`). `live`, the default, takes the cluster `KAFKA_BROKERS` names, else the run's shared broker below. `testcontainers` always takes the shared broker. `docker` takes the broker `docker-compose.test.yaml` runs on `localhost:19092`, and a named cluster that is unreachable or refuses the credentials fails the test rather than skipping it:
+
+```bash
+docker compose -f docker-compose.test.yaml up -d
+env TEST_MODE=docker cargo nextest run --test integration
+kcat -b localhost:19092 -t <test topic> -C -o beginning   # the topic a test names
+docker compose -f docker-compose.test.yaml down -v
+```
+
 ## Services, one instance each per run
 
 | Service | Image | Port |
