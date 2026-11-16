@@ -853,3 +853,33 @@ pub async fn stored_within(
     }
     records
 }
+
+/// Point `config` at a file DLQ under `dir`, so the dead letters it takes can
+/// be read back with [`file_dead_letters`].
+pub fn file_dlq(config: &mut dfe_receiver::config::Config, dir: &std::path::Path) {
+    config.routing.dlq.enabled = true;
+    config.routing.dlq.mode = "file_only".to_string();
+    config.routing.dlq.kafka_enabled = false;
+    config.routing.dlq.file_path = dir.display().to_string();
+}
+
+/// Every dead letter written to a file DLQ under `dir`, in file order.
+pub fn file_dead_letters(dir: &std::path::Path) -> Vec<serde_json::Value> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut letters = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            letters.extend(file_dead_letters(&path));
+        } else {
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            letters.extend(
+                text.lines()
+                    .filter_map(|line| serde_json::from_str(line).ok()),
+            );
+        }
+    }
+    letters
+}

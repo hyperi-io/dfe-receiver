@@ -33,12 +33,13 @@ use super::convert::Converter;
 use super::framing::SyslogFrameDecoder;
 use super::{TRANSPORT, decode_lossy, listener_ingest};
 use crate::error::{Error, Result};
-use crate::metrics::{DropReason, Metrics};
+use crate::metrics::Metrics;
 use crate::pipeline::{Acks, PipelineState};
 use crate::server::frame_clock::{Clocked, Framing};
 use crate::server::hold::{Held, hold};
 use crate::server::http::{Accept, ConnectionLimits};
 use crate::server::ip_filter::IpFilter;
+use crate::server::oversize::{self, Frame, Oversize};
 use crate::server::traits::BoundAddr;
 
 /// The idle timer's period with idle closing off, when it is never polled.
@@ -121,6 +122,7 @@ impl TcpListenerTask {
                 shutdown: shutdown.clone(),
                 peer_addr,
                 connection: self.connection,
+                label: self.label,
             };
             let accept = accept.clone();
             let tls = self.tls.clone();
@@ -170,6 +172,8 @@ struct Reader {
     shutdown: CancellationToken,
     peer_addr: SocketAddr,
     connection: Connection,
+    /// `TCP` or `TLS`, the listener the frames arrive on.
+    label: &'static str,
 }
 
 impl Reader {
@@ -182,6 +186,7 @@ impl Reader {
         ));
         let mut framed = FramedRead::new(stream, decoder);
         let mut payloads: Vec<Bytes> = Vec::new();
+        let mut skipped: Vec<Oversize> = Vec::new();
         let idle_for = c.idle.unwrap_or(NEVER);
         let idle = tokio::time::sleep(idle_for);
         tokio::pin!(idle);
@@ -196,9 +201,6 @@ impl Reader {
                 () = &mut idle, if c.idle.is_some() => {
                     // A frame part way in is the frame timeout's to close.
                     if framed.read_buffer().is_empty() && !framed.decoder().get_ref().mid_frame() {
-                        let oversize = framed.decoder_mut().get_mut().take_discarded();
-                        self.metrics
-                            .add_records_dropped(TRANSPORT, DropReason::Oversize, oversize);
                         self.metrics.inc_connection_closed(TRANSPORT, "idle");
                         debug!(peer = %self.peer_addr, "Syslog TCP connection closing (idle)");
                         return;
@@ -211,16 +213,31 @@ impl Reader {
 
             let end = match first {
                 Some(Ok(frame)) => {
-                    self.push(&frame, &mut payloads);
-                    self.drain_buffered(&mut framed, &mut payloads)
+                    self.take(frame, &mut payloads, &mut skipped);
+                    self.drain_buffered(&mut framed, &mut payloads, &mut skipped)
                 }
                 Some(Err(e)) => Some(End::Failed(e)),
                 None => Some(End::Closed),
             };
 
-            let oversize = framed.decoder_mut().get_mut().take_discarded();
-            self.metrics
-                .add_records_dropped(TRANSPORT, DropReason::Oversize, oversize);
+            if matches!(end, Some(End::Failed(_))) {
+                skipped.extend(framed.decoder_mut().get_mut().abandon());
+            }
+            let listener = format!("syslog {}", self.label);
+            if !oversize::dead_letter(
+                &mut skipped,
+                &self.pipeline,
+                &self.metrics,
+                TRANSPORT,
+                &listener,
+                c.max_message_size,
+                &self.shutdown,
+            )
+            .await
+            {
+                debug!(peer = %self.peer_addr, "Syslog TCP connection closing (shutdown during a DLQ write)");
+                return;
+            }
             if !payloads.is_empty() {
                 let held = hold(
                     &self.pipeline,
@@ -268,22 +285,32 @@ impl Reader {
         &self,
         framed: &mut FramedRead<S, D>,
         payloads: &mut Vec<Bytes>,
+        skipped: &mut Vec<Oversize>,
     ) -> Option<End>
     where
-        D: Decoder<Item = Bytes, Error = std::io::Error>,
+        D: Decoder<Item = Frame, Error = std::io::Error>,
     {
         // FramedRead lends its buffer and its decoder one at a time, so the
         // buffer comes out for the drain and goes back after it.
         let mut buffer = std::mem::take(framed.read_buffer_mut());
         let end = loop {
             match framed.decoder_mut().decode(&mut buffer) {
-                Ok(Some(frame)) => self.push(&frame, payloads),
+                Ok(Some(frame)) => self.take(frame, payloads, skipped),
                 Ok(None) => break None,
                 Err(e) => break Some(End::Failed(e)),
             }
         };
         *framed.read_buffer_mut() = buffer;
         end
+    }
+
+    /// Add a message's record to the batch, or keep a message skipped for its
+    /// size for the DLQ.
+    fn take(&self, frame: Frame, payloads: &mut Vec<Bytes>, skipped: &mut Vec<Oversize>) {
+        match frame {
+            Frame::Message(message) => self.push(&message, payloads),
+            Frame::Oversize(frame) => skipped.push(frame),
+        }
     }
 
     /// Count one frame and add its record to the batch.

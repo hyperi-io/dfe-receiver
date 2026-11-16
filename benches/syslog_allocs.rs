@@ -16,6 +16,7 @@ mod common;
 
 use bytes::BytesMut;
 use dfe_receiver::config::RawCapture;
+use dfe_receiver::server::oversize::Frame;
 use dfe_receiver::server::syslog::convert::syslog_to_json;
 use dfe_receiver::server::syslog::framing::SyslogFrameDecoder;
 use tokio_util::codec::Decoder;
@@ -42,7 +43,7 @@ fn frames_per_stream(stream: &[u8]) -> (f64, f64) {
     let info = allocation_counter::measure(|| {
         let mut decoder = SyslogFrameDecoder::default();
         while let Ok(Some(frame)) = decoder.decode(&mut buf) {
-            frames += u64::from(!frame.is_empty());
+            frames += u64::from(matches!(&frame, Frame::Message(m) if !m.is_empty()));
         }
     });
     let frames = frames.max(1) as f64;

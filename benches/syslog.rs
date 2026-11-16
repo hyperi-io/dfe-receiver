@@ -13,6 +13,7 @@ use std::hint::black_box;
 use bytes::BytesMut;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use dfe_receiver::config::RawCapture;
+use dfe_receiver::server::oversize::Frame;
 use dfe_receiver::server::syslog::convert::syslog_to_json;
 use dfe_receiver::server::syslog::framing::SyslogFrameDecoder;
 use tokio_util::codec::Decoder;
@@ -55,7 +56,9 @@ fn framing(c: &mut Criterion) {
                 let mut buf = BytesMut::from(&stream[..]);
                 let mut n = 0usize;
                 while let Ok(Some(frame)) = decoder.decode(&mut buf) {
-                    n += frame.len();
+                    if let Frame::Message(message) = frame {
+                        n += message.len();
+                    }
                 }
                 black_box(n)
             });

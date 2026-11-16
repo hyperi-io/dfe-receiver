@@ -32,8 +32,8 @@ fn gelf(marker: &str) -> Vec<u8> {
 }
 
 /// An oversize message costs itself and nothing after it on the same
-/// connection, whether its delimiter came in the same read or after a pause,
-/// and each one is counted dropped.
+/// connection, whether its delimiter came in the same read or after a pause.
+/// Each one is counted dropped and goes to the DLQ with its length.
 #[tokio::test]
 async fn gelf_carries_on_past_oversize_messages() {
     let (loader_endpoint, loader) = grpc_destination().await;
@@ -43,7 +43,8 @@ async fn gelf_carries_on_past_oversize_messages() {
     config.destinations.default = "loader".into();
     config.loader.transport = "grpc".to_string();
     config.loader.grpc_endpoint = Some(loader_endpoint);
-    config.routing.dlq.enabled = false;
+    let dlq_dir = tempfile::tempdir().unwrap();
+    crate::common::file_dlq(&mut config, dlq_dir.path());
     config.gelf.enabled = true;
     config.gelf.bind_address = "127.0.0.1:0".to_string();
     config.gelf.accept_unauthenticated = true;
@@ -92,6 +93,14 @@ async fn gelf_carries_on_past_oversize_messages() {
         2,
         "both oversize messages counted"
     );
+    let letters = crate::common::file_dead_letters(dlq_dir.path());
+    assert_eq!(letters.len(), 2, "dead letters written");
+    for (letter, original) in letters.iter().zip([2_000, 3_003]) {
+        assert_eq!(letter["service"], "receiver");
+        assert_eq!(letter["reason"], "frame over 1024 bytes on gelf");
+        assert_eq!(letter["original_bytes"], original);
+        assert_eq!(letter["_raw"].as_str().map(str::len), Some(original));
+    }
 
     tcp.write_all(&gelf("fourth")).await.unwrap();
     let after = receive_records(&loader, 1, Duration::from_secs(10)).await;

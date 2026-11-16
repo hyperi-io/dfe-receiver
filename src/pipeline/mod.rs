@@ -1497,6 +1497,12 @@ impl PipelineState {
         Ok(())
     }
 
+    /// Where a record refused for good is dead-lettered, for a listener that
+    /// skips a frame before it is a record.
+    pub(crate) fn rejects(&self) -> &Rejects {
+        &self.rejects
+    }
+
     /// Settle a record a destination refuses for good: dead-letter it, or
     /// drop it where no DLQ is configured.
     async fn settle_refused(

@@ -15,8 +15,9 @@
 //!
 //! A message over the size limit costs that message and never the connection:
 //! an octet-counted one is skipped by its count, a line up to its LF. Each is
-//! counted for [`SyslogFrameDecoder::take_discarded`]. A count above the frame
-//! limit is not trusted as a count, and that frame is read as a line.
+//! handed over as [`Frame::Oversize`], with its first bytes and its length, for
+//! the listener to dead-letter. A count above the frame limit is not trusted as
+//! a count, and that frame is read as a line.
 //!
 //! A frame is its bytes: the encoding is the caller's to check, so a line that
 //! is not UTF-8 costs that line and not the connection.
@@ -25,6 +26,8 @@ use std::io;
 
 use bytes::{Buf, Bytes, BytesMut};
 use tokio_util::codec::Decoder;
+
+use crate::server::oversize::{self, Frame, Oversize, Skipping};
 
 /// Default maximum syslog message size (64 KiB).
 pub const DEFAULT_MAX_LENGTH: usize = 64 * 1024;
@@ -58,7 +61,8 @@ pub struct SyslogFrameDecoder {
     max_length: usize,
     max_frame: usize,
     state: State,
-    discarded: u64,
+    /// The head and length of the oversize message being skipped.
+    skipping: Skipping,
 }
 
 impl SyslogFrameDecoder {
@@ -75,13 +79,17 @@ impl SyslogFrameDecoder {
             max_length,
             max_frame: max_frame.max(max_length),
             state: State::Start,
-            discarded: 0,
+            skipping: Skipping::unmeasured(),
         }
     }
 
-    /// Messages discarded for their size since the last call.
-    pub fn take_discarded(&mut self) -> u64 {
-        std::mem::take(&mut self.discarded)
+    /// The oversize message being skipped, as far as it arrived, for a stream
+    /// that ends or fails inside it.
+    pub fn abandon(&mut self) -> Option<Oversize> {
+        (self.state != State::Start).then(|| {
+            self.state = State::Start;
+            self.skipping.finish()
+        })
     }
 
     /// How the frame at the start of `src` opens.
@@ -127,7 +135,7 @@ impl Default for SyslogFrameDecoder {
 }
 
 impl Decoder for SyslogFrameDecoder {
-    type Item = Bytes;
+    type Item = Frame;
     type Error = io::Error;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
@@ -136,20 +144,25 @@ impl Decoder for SyslogFrameDecoder {
                 State::Start => {}
                 State::Skip(left) => {
                     let take = left.min(src.len());
+                    self.skipping.keep(&src[..take]);
                     src.advance(take);
                     if take < left {
                         self.state = State::Skip(left - take);
                         return Ok(None);
                     }
                     self.state = State::Start;
+                    return Ok(Some(Frame::Oversize(self.skipping.finish())));
                 }
                 State::Discard => {
                     let Some(lf) = memchr::memchr(b'\n', src) else {
+                        self.skipping.grow(src);
                         src.clear();
                         return Ok(None);
                     };
+                    self.skipping.grow(&src[..lf]);
                     src.advance(lf + 1);
                     self.state = State::Start;
+                    return Ok(Some(Frame::Oversize(self.skipping.finish())));
                 }
             }
 
@@ -161,8 +174,8 @@ impl Decoder for SyslogFrameDecoder {
 
             match self.opening(src) {
                 Opening::Counted { header, count } if count > self.max_length => {
-                    self.discarded += 1;
                     src.advance(header);
+                    self.skipping = Skipping::counted(count);
                     self.state = State::Skip(count);
                     continue;
                 }
@@ -173,7 +186,7 @@ impl Decoder for SyslogFrameDecoder {
                         return Ok(None);
                     }
                     let frame = src.split_to(total).freeze();
-                    return Ok(Some(frame.slice(header..)));
+                    return Ok(Some(Frame::Message(frame.slice(header..))));
                 }
                 Opening::Undecided => return Ok(None),
                 Opening::Line => {}
@@ -182,14 +195,16 @@ impl Decoder for SyslogFrameDecoder {
             match memchr::memchr(b'\n', src) {
                 Some(lf) if lf <= self.max_length => {
                     let frame = src.split_to(lf + 1).freeze();
-                    return Ok(Some(frame.slice(..lf)));
+                    return Ok(Some(Frame::Message(frame.slice(..lf))));
                 }
                 Some(lf) => {
-                    self.discarded += 1;
+                    let frame = oversize::whole(&src[..lf], lf);
                     src.advance(lf + 1);
+                    return Ok(Some(Frame::Oversize(frame)));
                 }
                 None if src.len() > self.max_length => {
-                    self.discarded += 1;
+                    self.skipping = Skipping::unmeasured();
+                    self.skipping.grow(src);
                     src.clear();
                     self.state = State::Discard;
                     return Ok(None);
@@ -200,20 +215,22 @@ impl Decoder for SyslogFrameDecoder {
     }
 
     /// A sender that closes after a last line with no newline still sent that
-    /// line, so it is the final frame. A partial octet-counted frame is not.
+    /// line, so it is the final frame. A partial octet-counted frame is not, and
+    /// an oversize message the stream ended inside is handed over as far as it
+    /// arrived.
     fn decode_eof(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         if let Some(frame) = self.decode(src)? {
             return Ok(Some(frame));
         }
+        if let Some(skipped) = self.abandon() {
+            return Ok(Some(Frame::Oversize(skipped)));
+        }
         let rest = src.split();
         let rest = rest.trim_ascii();
-        if rest.is_empty()
-            || self.state != State::Start
-            || matches!(self.opening(rest), Opening::Counted { .. })
-        {
+        if rest.is_empty() || matches!(self.opening(rest), Opening::Counted { .. }) {
             return Ok(None);
         }
-        Ok(Some(Bytes::copy_from_slice(rest)))
+        Ok(Some(Frame::Message(Bytes::copy_from_slice(rest))))
     }
 }
 
@@ -225,27 +242,45 @@ impl Decoder for SyslogFrameDecoder {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::server::oversize::HEAD_BYTES;
 
-    /// Every frame `data` holds, fed `chunk` bytes at a time and read to the
-    /// end of the stream when `eof`, with the count of messages discarded.
+    /// Every message `data` holds, fed `chunk` bytes at a time and read to the
+    /// end of the stream when `eof`, with the messages skipped for their size.
+    fn decode_all(
+        decoder: &mut SyslogFrameDecoder,
+        data: &[u8],
+        chunk: usize,
+        eof: bool,
+    ) -> (Vec<Bytes>, Vec<Oversize>) {
+        let mut buf = BytesMut::new();
+        let (mut messages, mut skipped) = (Vec::new(), Vec::new());
+        let mut take = |frame: Frame| match frame {
+            Frame::Message(message) => messages.push(message),
+            Frame::Oversize(frame) => skipped.push(frame),
+        };
+        for piece in data.chunks(chunk.max(1)) {
+            buf.extend_from_slice(piece);
+            while let Some(frame) = decoder.decode(&mut buf).unwrap() {
+                take(frame);
+            }
+        }
+        if eof {
+            while let Some(frame) = decoder.decode_eof(&mut buf).unwrap() {
+                take(frame);
+            }
+        }
+        (messages, skipped)
+    }
+
+    /// [`decode_all`] with the count of messages skipped.
     fn decode_chunked(
         decoder: &mut SyslogFrameDecoder,
         data: &[u8],
         chunk: usize,
         eof: bool,
     ) -> (Vec<Bytes>, u64) {
-        let mut buf = BytesMut::new();
-        let mut frames = Vec::new();
-        for piece in data.chunks(chunk.max(1)) {
-            buf.extend_from_slice(piece);
-            while let Some(frame) = decoder.decode(&mut buf).unwrap() {
-                frames.push(frame);
-            }
-        }
-        if eof && let Some(last) = decoder.decode_eof(&mut buf).unwrap() {
-            frames.push(last);
-        }
-        (frames, decoder.take_discarded())
+        let (messages, skipped) = decode_all(decoder, data, chunk, eof);
+        (messages, skipped.len() as u64)
     }
 
     /// The bytes sent, whether the stream then ends, the frames expected and
@@ -460,6 +495,89 @@ mod tests {
         let (frames, discarded) = decode_chunked(&mut decoder, data.as_bytes(), 3, false);
         assert_eq!(frames, vec![Bytes::from(msg)]);
         assert_eq!(discarded, 0);
+    }
+
+    /// A skipped message hands over its first bytes and its whole length,
+    /// however its bytes arrive, so the DLQ holds what was sent and says how
+    /// much more there was.
+    #[test]
+    fn a_skipped_message_hands_over_its_head_and_length() {
+        let octet = format!("70000 <14>{}", "a".repeat(70_000 - 4));
+        let line = format!("<14>{}\n", "b".repeat(70_000));
+        let huge = format!("<14>{}\n", "c".repeat(HEAD_BYTES + 1_000));
+        let huge_count = HEAD_BYTES + 1_000;
+        let huge_octet = format!("{huge_count} <14>{}", "d".repeat(huge_count - 4));
+        let huge_octet_start = huge_octet.find('<').unwrap();
+        // (name, data, head, original bytes)
+        let cases: Vec<(&str, String, Vec<u8>, usize)> = vec![
+            (
+                "octet",
+                octet.clone(),
+                octet.as_bytes()[6..].to_vec(),
+                70_000,
+            ),
+            (
+                "line",
+                line.clone(),
+                line.as_bytes()[..70_004].to_vec(),
+                70_004,
+            ),
+            (
+                "huge_line",
+                huge.clone(),
+                huge.as_bytes()[..HEAD_BYTES].to_vec(),
+                HEAD_BYTES + 1_004,
+            ),
+            (
+                "huge_octet",
+                huge_octet.clone(),
+                huge_octet.as_bytes()[huge_octet_start..][..HEAD_BYTES].to_vec(),
+                huge_count,
+            ),
+        ];
+        for (name, data, head, original_bytes) in cases {
+            for chunk in [data.len(), 4_096, 1_000] {
+                let mut decoder = SyslogFrameDecoder::with_max_frame(64 * 1024, 2 * HEAD_BYTES);
+                let (messages, skipped) = decode_all(&mut decoder, data.as_bytes(), chunk, false);
+                assert_eq!(messages.len(), 0, "{name} (chunk {chunk})");
+                assert_eq!(
+                    skipped,
+                    vec![Oversize {
+                        head: Bytes::from(head.clone()),
+                        original_bytes
+                    }],
+                    "{name} (chunk {chunk})"
+                );
+            }
+        }
+    }
+
+    /// A stream that ends inside a skipped message still hands over the part
+    /// that arrived, with the length the sender declared for a counted one.
+    #[test]
+    fn a_stream_ending_inside_a_skipped_message_hands_over_what_arrived() {
+        let counted = format!("80000 <14>{}", "e".repeat(1_000));
+        let (messages, skipped) = decode_all(
+            &mut SyslogFrameDecoder::default(),
+            counted.as_bytes(),
+            4_096,
+            true,
+        );
+        assert_eq!(messages.len(), 0);
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].original_bytes, 80_000);
+        assert_eq!(skipped[0].head.len(), 1_004);
+
+        let line = format!("<14>{}", "f".repeat(70_000));
+        let (_, skipped) = decode_all(
+            &mut SyslogFrameDecoder::default(),
+            line.as_bytes(),
+            4_096,
+            true,
+        );
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].original_bytes, 70_004);
+        assert_eq!(skipped[0].head.len(), 70_004);
     }
 
     #[test]

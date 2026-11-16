@@ -30,6 +30,7 @@ mod metric_record;
 pub mod netflow;
 #[cfg(feature = "otlp")]
 pub mod otlp;
+pub mod oversize;
 pub mod prometheus_rw;
 pub mod raw_capture;
 pub mod sflow;

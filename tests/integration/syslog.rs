@@ -694,9 +694,10 @@ async fn a_message_that_is_not_utf8_lands_parsed_over_udp_and_tcp() {
     assert_eq!(syslog.metrics.get_requests_error(), 0);
 }
 
-/// Over TCP an oversize message costs itself and nothing after it, a line
-/// opening with digits is a line, and a stamp with no zone takes
-/// `syslog.timezone`. Over UDP a burst larger than a batch arrives whole.
+/// Over TCP an oversize message costs itself and nothing after it, and goes to
+/// the DLQ with its length. A line opening with digits is a line, and a stamp
+/// with no zone takes `syslog.timezone`. Over UDP a burst larger than a batch
+/// arrives whole.
 #[tokio::test]
 async fn syslog_carries_on_past_oversize_messages_and_reads_bursts_whole() {
     use tokio::io::AsyncWriteExt;
@@ -705,7 +706,9 @@ async fn syslog_carries_on_past_oversize_messages_and_reads_bursts_whole() {
     let mut config = test_config();
     config.loader.transport = "grpc".to_string();
     config.loader.grpc_endpoint = Some(loader_endpoint);
-    config.routing.dlq.enabled = false;
+    let dlq_dir = tempfile::tempdir().unwrap();
+    crate::common::file_dlq(&mut config, dlq_dir.path());
+    let limit = config.syslog.max_message_size;
     config.syslog.timezone = "+10:00".parse().unwrap();
     config.syslog.udp_batch_size = 16;
     let syslog = start_syslog_handler(config).await;
@@ -716,6 +719,7 @@ async fn syslog_carries_on_past_oversize_messages_and_reads_bursts_whole() {
     wire.push_str(&format!("{} {second}", second.len()));
     wire.push_str("2026 Oct 31 10:00:00 h app: third\n");
     wire.push_str(&format!("<14>{}\n", "b".repeat(70_000)));
+    wire.push_str(&format!("<14>{}\n", "c".repeat(600_000)));
     wire.push_str("<14>Oct 31 10:00:00 h app: fourth\n");
     let mut tcp = tokio::net::TcpStream::connect(syslog.tcp).await.unwrap();
     tcp.write_all(wire.as_bytes()).await.unwrap();
@@ -743,8 +747,27 @@ async fn syslog_carries_on_past_oversize_messages_and_reads_bursts_whole() {
     );
     assert_eq!(
         syslog.metrics.get_records_dropped(),
-        2,
-        "both oversize messages counted"
+        3,
+        "every oversize message counted"
+    );
+    let letters = crate::common::file_dead_letters(dlq_dir.path());
+    assert_eq!(letters.len(), 3, "dead letters written");
+    for (letter, original) in letters.iter().zip([70_000, 70_004, 600_004]) {
+        assert_eq!(letter["service"], "receiver");
+        assert_eq!(
+            letter["reason"],
+            format!("frame over {limit} bytes on syslog TCP")
+        );
+        assert_eq!(letter["original_bytes"], original);
+    }
+    assert_eq!(letters[0]["_raw"].as_str().map(str::len), Some(70_000));
+    assert_eq!(letters[1]["truncated"], serde_json::Value::Null);
+    // The 600,004-byte line keeps the DLQ's 512 KiB head, as base64.
+    assert_eq!(letters[2]["truncated"], true);
+    assert_eq!(letters[2]["_raw_encoding"], "base64");
+    assert_eq!(
+        letters[2]["_raw"].as_str().map(str::len),
+        Some(524_288_usize.div_ceil(3) * 4)
     );
 
     // The connection is still open: another line still lands.

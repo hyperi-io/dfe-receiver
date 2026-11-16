@@ -159,8 +159,32 @@ impl Rejects {
     /// [`Disposal::Refused`] leaves the record with the caller, to keep and
     /// offer again.
     pub async fn dispose(&self, topic: &str, payload: &Bytes, reason: &str) -> Disposal {
+        self.dispose_entry(topic, payload, reason, || entry(topic, payload, reason))
+            .await
+    }
+
+    /// [`dispose`](Self::dispose) for the first bytes of a frame a listener
+    /// skipped for its size, `original_bytes` long in all, which has no
+    /// destination yet.
+    pub async fn dispose_head(
+        &self,
+        head: &Bytes,
+        original_bytes: usize,
+        reason: &str,
+    ) -> Disposal {
+        self.dispose_entry("", head, reason, || cut_entry(head, original_bytes, reason))
+            .await
+    }
+
+    async fn dispose_entry(
+        &self,
+        topic: &str,
+        payload: &Bytes,
+        reason: &str,
+        make_entry: impl FnOnce() -> DlqEntry,
+    ) -> Disposal {
         let disposal = match &self.dlq {
-            Some(dlq) => match dead_letter_confirmed(dlq, entry(topic, payload, reason)).await {
+            Some(dlq) => match dead_letter_confirmed(dlq, make_entry()).await {
                 Ok(DeadLetter::Written) => Disposal::DeadLettered,
                 Ok(DeadLetter::Unwritable) => Disposal::Dropped,
                 Err(e) => {
@@ -263,6 +287,14 @@ fn entry(topic: &str, payload: &Bytes, reason: &str) -> DlqEntry {
     } else {
         entry.with_destination(topic)
     }
+}
+
+/// The DLQ entry for the first bytes of a frame that was `original_bytes` long.
+fn cut_entry(head: &Bytes, original_bytes: usize, reason: &str) -> DlqEntry {
+    let mut entry = DlqEntry::new("receiver", reason, head.to_vec());
+    entry.truncated = head.len() < original_bytes;
+    entry.original_bytes = Some(original_bytes);
+    entry
 }
 
 /// DLQ fixtures shared by the buffer tests.
@@ -415,6 +447,44 @@ mod tests {
                 std::time::Instant::now() + std::time::Duration::from_secs(10),
             )
             .unwrap()
+    }
+
+    /// The head of a frame a listener skipped reaches the DLQ with the frame's
+    /// full length, marked cut when the head is shorter, and with no
+    /// destination to route it by.
+    #[tokio::test]
+    async fn the_head_of_a_skipped_frame_lands_in_the_dlq_with_its_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let dlq = file_dlq(dir.path());
+        let metrics = Arc::new(Metrics::default());
+        let rejects = Rejects::new(Some(Arc::clone(&dlq)), Some(Arc::clone(&metrics)));
+
+        let cut = Bytes::from_static(b"<14>first bytes");
+        for (head, original) in [(&cut, 70_000), (&cut, cut.len())] {
+            let disposal = rejects
+                .dispose_head(head, original, "frame over 65536 bytes on syslog tcp")
+                .await;
+            assert_eq!(disposal, Disposal::DeadLettered);
+        }
+        dlq.flush().await.unwrap();
+        assert_eq!(metrics.get_messages_dlq(), 2);
+
+        let written = std::fs::read_to_string(dir.path().join("receiver/dlq.ndjson")).unwrap();
+        let entries: Vec<serde_json::Value> = written
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(entries.len(), 2, "{written}");
+        for entry in &entries {
+            assert_eq!(entry["reason"], "frame over 65536 bytes on syslog tcp");
+            assert!(entry.get("destination").is_none(), "{entry}");
+        }
+        assert_eq!(entries[0]["truncated"], true);
+        assert_eq!(entries[0]["original_bytes"], 70_000);
+        assert_eq!(entries[0]["_raw_encoding"], "base64");
+        assert!(entries[1].get("truncated").is_none(), "{}", entries[1]);
+        assert_eq!(entries[1]["original_bytes"], cut.len());
+        assert_eq!(entries[1]["_raw"], "<14>first bytes");
     }
 
     /// A refused record reaches the configured DLQ with its reason, its

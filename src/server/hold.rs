@@ -27,10 +27,10 @@ use crate::pipeline::{Acks, Offer, PipelineState};
 use crate::tenancy::Ingest;
 
 /// Wait before the first re-offer.
-const FIRST_RETRY: Duration = Duration::from_millis(100);
+pub(super) const FIRST_RETRY: Duration = Duration::from_millis(100);
 
 /// Longest wait between re-offers, so a pipeline that recovers is found within it.
-const LAST_RETRY: Duration = Duration::from_secs(2);
+pub(super) const LAST_RETRY: Duration = Duration::from_secs(2);
 
 /// How a hold ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

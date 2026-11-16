@@ -247,10 +247,9 @@ mod tests {
     use tokio_stream::StreamExt;
     use tokio_util::codec::FramedRead;
 
-    use bytes::Bytes;
-
     use super::*;
     use crate::server::gelf::GelfFrameDecoder;
+    use crate::server::oversize::Frame;
     use crate::server::syslog::framing::SyslogFrameDecoder;
 
     const LIMIT: Duration = Duration::from_millis(500);
@@ -272,7 +271,7 @@ mod tests {
     /// for `hold` before it reads on, until a frame times out or the client closes.
     async fn run<D>(codec: D, steps: Vec<Step>, hold: Duration) -> Read
     where
-        D: Framing<Item = Bytes, Error = io::Error>,
+        D: Framing<Item = Frame, Error = io::Error>,
     {
         let (mut client, server) = tokio::io::duplex(1024);
         let socket = Clocked::new(server, LIMIT, Arc::new(Metrics::default()), "test");
@@ -295,6 +294,11 @@ mod tests {
                 let Ok(frame) = frame else {
                     read.timed_out = true;
                     return;
+                };
+                // A skipped message is no frame to hold, as before the codec
+                // handed it over.
+                let Frame::Message(frame) = frame else {
+                    continue;
                 };
                 read.frames
                     .push(String::from_utf8_lossy(&frame).into_owned());
