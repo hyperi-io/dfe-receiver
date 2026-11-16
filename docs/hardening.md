@@ -49,7 +49,7 @@ Application-level hardening, and cost-conscious fronting on Kubernetes and AWS.
 
 ## Application-Level Hardening
 
-Each HTTP request meets the cheapest refusal first, so a bot scan or an unauthenticated probe costs the least it can. This diagram shows one `/ingest` request through the layers in `src/server/http/mod.rs`.
+Each HTTP request meets the cheapest refusal first, so a bot scan or an unauthenticated probe costs the least it can. A `/ingest` request passes the timeout, body limit and auth in `src/server/http/mod.rs` before the handler sees it.
 
 ```mermaid
 sequenceDiagram
@@ -78,7 +78,7 @@ sequenceDiagram
 
 *Figure 1. L4 Detail -- HTTP request order. Solid arrows are requests, dashed arrows are answers.* Up: [L3 Components -- Receiver](architecture.md#components). Down: L4 Detail -- Ingest answers, below.
 
-The handler answers malformed or non-object JSON with 400. A record missing a required field goes to the DLQ, or gets 400, per `validation.dlq_on_invalid`. This diagram shows how it answers the rest.
+The handler answers malformed or non-object JSON with 400. A record missing a required field goes to the DLQ, or gets 400, per `validation.dlq_on_invalid`. The rest get 202 once Kafka or the DLQ holds them, and 503 when neither confirms in the hold.
 
 ```mermaid
 sequenceDiagram
@@ -360,7 +360,7 @@ CloudFront is a CDN, built to **serve** content. Pay-as-you-go pricing is per GB
 
 The one exception: AWS WAF attaches to CloudFront, an ALB or API Gateway, never an NLB, so needing AWS WAF can make CloudFront the intermediary. Question whether you need AWS WAF at all (below).
 
-This diagram shows the recommended path from a sender to the receiver on AWS.
+On AWS, senders reach the receiver through Cloudflare, an NLB and Envoy Gateway.
 
 ```mermaid
 flowchart LR

@@ -6,7 +6,7 @@ For protocols not natively supported, use a **sidecar** -- a lightweight
 process deployed alongside receiver that collects data from the source
 protocol and pushes it to receiver's ingest endpoint.
 
-This diagram shows the three kinds of sidecar and the port each one sends to.
+Each sidecar kind sends to a different receiver port: Vector to gRPC, Fluent Bit to Fluent Forward, a custom collector to HTTP ingest.
 
 ```mermaid
 flowchart LR

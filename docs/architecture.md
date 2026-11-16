@@ -42,7 +42,7 @@ bytes are gone by the time the loader sees the record.
 
 ## Components
 
-This diagram shows the parts inside the receiver and what each side of it talks to.
+Events and webhooks meet at validation, then routing and stamping, then the sinks, and refused records go to the DLQ.
 
 ```mermaid
 flowchart TB

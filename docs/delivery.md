@@ -6,7 +6,7 @@ When a sender is answered, and what the receiver keeps for it until then. Each l
 
 A listener with an answer in its protocol holds it until every destination confirmed the request's records: a Kafka delivery report, a gRPC destination's answer, or a dead-letter write the DLQ confirmed. That is `acknowledgements.enabled`, default on, per listener: `server`, `grpc`, `otlp`, `splunk_hec`, `lumberjack`, `fluent`, `webhook`, `prometheus_rw`. Syslog, GELF and flow have no answer to hold.
 
-This diagram shows when a sender is told its record was taken.
+A held answer waits for the destination and bypasses the buffer, and an enqueue answer is given at once.
 
 ```mermaid
 flowchart LR
