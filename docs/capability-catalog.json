@@ -63,7 +63,7 @@
         "kind": "ingest",
         "name": "flow",
         "description": "NetFlow v5/v9 + IPFIX + sFlow v5.",
-        "maturity": "stable"
+        "maturity": "alpha"
       },
       {
         "kind": "ingest",
