@@ -43,17 +43,15 @@ flowchart LR
 
 *Figure 1. L4 Detail -- Sidecar transports. The dashed box is external.* Up: [dfe-receiver documentation](README.md).
 
-## Recommended: Vector Sidecar
+## Vector, Fluent Bit or a custom collector
 
-[Vector](https://vector.dev/) is an observability data pipeline with
+The recommended sidecar is [Vector](https://vector.dev/), an observability data pipeline with
 many source types. It speaks receiver's native gRPC protocol
-via the `vector` sink, making it the ideal sidecar for unsupported protocols.
+through the `vector` sink.
 
 Deploy Vector in the same Kubernetes pod or Docker Compose service.
 It collects from the source protocol and pushes to receiver's gRPC
 ingest port (`:6000`).
-
-### Example: SNMP Traps
 
 Collect SNMP traps and forward to receiver.
 
@@ -83,8 +81,6 @@ sinks:
     address: "localhost:6000"
 ```
 
-### Example: Docker Container Logs
-
 Collect logs from Docker containers via the Docker API.
 
 ```yaml
@@ -111,8 +107,6 @@ sinks:
     address: "dfe-receiver:6000"
 ```
 
-### Example: AWS S3 / SQS
-
 Collect logs from S3 buckets via SQS notifications.
 
 ```yaml
@@ -138,8 +132,6 @@ sinks:
     address: "localhost:6000"
 ```
 
-### Example: StatsD / DogStatsD
-
 Collect StatsD metrics on UDP :8125 and forward to receiver.
 
 ```toml
@@ -163,10 +155,7 @@ inputs = ["to_json"]
 address = "localhost:6000"
 ```
 
-### Example: Windows Event Log
-
-> **Reference only -- requires a Windows Vector agent.** Run Vector on the
-> Windows host and push to receiver over the network.
+Windows Event Log needs a Vector agent on the Windows host, pushing to the receiver over the network.
 
 ```toml
 # vector.toml (Windows host)
@@ -188,9 +177,7 @@ inputs = ["enrich"]
 address = "dfe-receiver.example.com:6000"
 ```
 
-### Example: Kafka as Source
-
-Useful for cross-cluster routing or reprocessing events from an existing
+Kafka as a source is useful for cross-cluster routing or reprocessing events from an existing
 Kafka topic into a different pipeline.
 
 ```toml
@@ -215,14 +202,12 @@ inputs = ["tag"]
 address = "localhost:6000"
 ```
 
-## Alternative: Fluent Bit Sidecar
-
-[Fluent Bit](https://fluentbit.io/) is a lightweight log processor that
-can push to receiver's Fluent Forward endpoint (`:24224`). Forward carries no
-credential, so the receiver starts its Fluent listener only with
+The first alternative is [Fluent Bit](https://fluentbit.io/), a lightweight log processor that
+can push to receiver's Fluent Forward endpoint (`:24224`). Forward has no
+credential, so the receiver starts its Fluent listener with nothing short of
 `fluent.tls.client_auth: required` or `fluent.accept_unauthenticated: true`.
 
-### Example: Tail Files + Forward
+Tailing files and forwarding them:
 
 ```ini
 # fluent-bit.conf
@@ -241,16 +226,14 @@ credential, so the receiver starts its Fluent listener only with
 Fluent Bit is a good choice when:
 
 - You need a small memory footprint
-- You're already in a Fluent ecosystem (Fluentd/Fluent Bit)
+- You run Fluentd or Fluent Bit
 - The source is file-based (tail, systemd) rather than network protocol
 
-## Alternative: Custom HTTP Sidecar
-
-For fully custom protocols where neither Vector nor Fluent Bit has a
+The second alternative is a custom HTTP sidecar. For fully custom protocols where neither Vector nor Fluent Bit has a
 source, write a small program in any language that speaks your protocol
 and POSTs JSON to receiver's HTTP ingest.
 
-### Example: Python Collector
+In Python:
 
 ```python
 import httpx
@@ -260,7 +243,7 @@ def collect_and_forward(data: dict, receiver_url: str = "http://localhost:8080/i
     response.raise_for_status()
 ```
 
-### Example: Go Collector
+In Go:
 
 ```go
 func forward(data []byte) error {
@@ -276,7 +259,16 @@ func forward(data []byte) error {
 }
 ```
 
-## Kubernetes Deployment
+Choosing between them:
+
+| Criteria | Vector | Fluent Bit | Custom |
+|----------|--------|------------|--------|
+| Memory footprint | small | smallest | varies |
+| Best transport to receiver | gRPC (Vector native) | Fluent Forward | HTTP JSON |
+| Language | Rust | C | Any |
+| When to use | Most cases | Minimal footprint, file tailing | Novel/proprietary protocols |
+
+## Running a sidecar
 
 Deploy the sidecar in the same pod as receiver:
 
@@ -306,62 +298,9 @@ extraVolumes:
 The sidecar communicates with receiver via `localhost:6000` (gRPC) or
 `localhost:8080` (HTTP), with no network hop.
 
-## Choosing a Sidecar
-
-| Criteria | Vector | Fluent Bit | Custom |
-|----------|--------|------------|--------|
-| Memory footprint | small | smallest | varies |
-| Best transport to receiver | gRPC (Vector native) | Fluent Forward | HTTP JSON |
-| Language | Rust | C | Any |
-| When to use | Most cases | Minimal footprint, file tailing | Novel/proprietary protocols |
-
-## Troubleshooting
-
-### Connection refused
-
-- Receiver may not be ready yet -- Vector retries the sink, or wait in the sidecar's command (see below).
-- Wrong port -- gRPC ingest is `:6000`, HTTP is `:8080`. Confirm the sidecar config matches.
-- Firewall or Kubernetes NetworkPolicy blocking loopback or pod-to-pod traffic. Within a pod, `localhost` is always reachable -- check NetworkPolicy only for cross-pod setups.
-
-### Auth failures
-
-- Bearer token mismatch: the token in the sidecar sink config must exactly match one of the listener's tokens: `grpc.auth.bearer.tokens`, or its `grpc.auth.bearer.secret_source` (`server.auth.*` for HTTP).
-- TLS certificate issues: if receiver has TLS enabled, the sidecar must trust receiver's CA. Mount the CA cert and set `tls.ca_file` in the Vector sink.
-- Client certificates: set `grpc.auth.mode: mtls`, `grpc.tls.client_auth: required` and the CA in `grpc.tls.ca_file`. Set `tls.crt_file` and `tls.key_file` in the sidecar sink config.
-
-### Payload too large
-
-Receiver refuses a gRPC message larger than `grpc.max_message_size` (16 MiB by default) and an HTTP body larger than `server.max_body_size` (10 MiB by default). Large batches from Vector's `batch.max_bytes` can exceed them.
-
-Options:
-
-- Increase receiver's limit, in bytes: `grpc.max_message_size: 67108864` for the `vector` sink, `server.max_body_size: 67108864` for HTTP.
-- Reduce Vector's batch size: set `batch.max_bytes = 8388608` (8 MiB) in the sink.
-
-### TLS between sidecar and receiver
-
-```toml
-# vector.toml -- TLS sink config
-[sinks.receiver]
-type = "vector"
-inputs = ["my_source"]
-address = "localhost:6000"
-
-[sinks.receiver.tls]
-enabled = true
-ca_file = "/etc/ssl/certs/receiver-ca.pem"   # Trust receiver's CA
-# mTLS -- only when the receiver requires client certificates:
-crt_file = "/etc/ssl/certs/sidecar-client.pem"
-key_file = "/etc/ssl/private/sidecar-client.key"
-```
-
-## Performance Sizing
-
-### When one sidecar is enough
-
 When one sidecar's CPU limit becomes the bottleneck, consider deploying Vector as a separate Deployment (DaemonSet for node-level collection, Deployment for protocol aggregation) rather than a per-pod sidecar.
 
-### Sidecar container resource starting point
+A starting point for the sidecar container's resources:
 
 ```yaml
 resources:
@@ -375,8 +314,6 @@ resources:
 
 Increase `cpu` limit if you see throttling under load. Increase `memory` limit if Vector buffers events to disk during backpressure spikes.
 
-### Backpressure behaviour
-
 When receiver is overloaded it answers `UNAVAILABLE` on gRPC and `503 Service Unavailable` on HTTP. Vector responds by:
 
 1. Pausing event ingestion from the source.
@@ -385,13 +322,9 @@ When receiver is overloaded it answers `UNAVAILABLE` on gRPC and `503 Service Un
 
 This means the sidecar is self-regulating -- set an appropriate disk buffer size to absorb short bursts, and rely on KEDA / HPA to scale receiver for sustained high load.
 
-## Health Check Integration
+An init container cannot wait for the receiver: every init container must exit before any container in the pod starts, the receiver included, so one waiting on the receiver holds the pod in `Init` for good. The sidecar needs no wait. Vector retries a sink that rejects connections and buffers meanwhile, and the pod is Ready once every container's readiness probe passes, so the receiver's `/readyz` keeps it out of the Service until the receiver takes traffic.
 
-### Sidecar readiness depending on receiver
-
-An init container cannot wait for the receiver: every init container must exit before any container in the pod starts, the receiver included, so one waiting on the receiver holds the pod in `Init` for good. The sidecar needs no wait. Vector retries a sink that refuses connections and buffers meanwhile, and the pod is Ready only once every container's readiness probe passes, so the receiver's `/readyz` keeps it out of the Service until the receiver takes traffic.
-
-Where the sidecar must not start sending until the receiver answers, wait in the sidecar's own command:
+Where the sidecar must not start sending until the receiver answers, wait in the sidecar's command:
 
 ```yaml
 # pod spec
@@ -422,7 +355,7 @@ containers:
       periodSeconds: 10
 ```
 
-### Docker Compose ordering
+In Docker Compose, order the sidecar after the receiver's health check:
 
 ```yaml
 services:
@@ -438,4 +371,42 @@ services:
     depends_on:
       dfe-receiver:
         condition: service_healthy
+```
+
+## Troubleshooting
+
+When the connection is refused:
+
+- Receiver may not be ready yet -- Vector retries the sink, or wait in the sidecar's command (see below).
+- Wrong port -- gRPC ingest is `:6000`, HTTP is `:8080`. Confirm the sidecar config matches.
+- Firewall or Kubernetes NetworkPolicy blocking loopback or pod-to-pod traffic. Within a pod, `localhost` is always reachable -- check NetworkPolicy for cross-pod setups.
+
+When auth fails:
+
+- Bearer token mismatch: the token in the sidecar sink config must exactly match one of the listener's tokens: `grpc.auth.bearer.tokens`, or its `grpc.auth.bearer.secret_source` (`server.auth.*` for HTTP).
+- TLS certificate issues: if receiver has TLS enabled, the sidecar must trust receiver's CA. Mount the CA cert and set `tls.ca_file` in the Vector sink.
+- Client certificates: set `grpc.auth.mode: mtls`, `grpc.tls.client_auth: required` and the CA in `grpc.tls.ca_file`. Set `tls.crt_file` and `tls.key_file` in the sidecar sink config.
+
+Receiver rejects a gRPC message larger than `grpc.max_message_size` (16 MiB by default) and an HTTP body larger than `server.max_body_size` (10 MiB by default). Large batches from Vector's `batch.max_bytes` can exceed them.
+
+Options:
+
+- Increase receiver's limit, in bytes: `grpc.max_message_size: 67108864` for the `vector` sink, `server.max_body_size: 67108864` for HTTP.
+- Reduce Vector's batch size: set `batch.max_bytes = 8388608` (8 MiB) in the sink.
+
+TLS from the sidecar to the receiver:
+
+```toml
+# vector.toml -- TLS sink config
+[sinks.receiver]
+type = "vector"
+inputs = ["my_source"]
+address = "localhost:6000"
+
+[sinks.receiver.tls]
+enabled = true
+ca_file = "/etc/ssl/certs/receiver-ca.pem"   # Trust receiver's CA
+# mTLS -- only when the receiver requires client certificates:
+crt_file = "/etc/ssl/certs/sidecar-client.pem"
+key_file = "/etc/ssl/private/sidecar-client.key"
 ```

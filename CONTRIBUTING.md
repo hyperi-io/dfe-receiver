@@ -17,7 +17,7 @@ versioning and changelog generation. All commits must follow this format:
 [optional footer(s)]
 ```
 
-### Types
+Each type sets the version bump:
 
 | Type | Description | Version Bump |
 |------|-------------|--------------|
@@ -33,8 +33,6 @@ versioning and changelog generation. All commits must follow this format:
 | `chore` | Other changes that don't modify src or test files | None |
 | `revert` | Reverts a previous commit | Patch (0.0.X) |
 
-### Breaking Changes
-
 For breaking changes that require a major version bump, add `!` after the type
 or include `BREAKING CHANGE:` in the footer:
 
@@ -44,7 +42,7 @@ feat!: remove deprecated API endpoints
 BREAKING CHANGE: The /v1/users endpoint has been removed. Use /v2/users instead.
 ```
 
-### Examples
+Examples:
 
 ```text
 feat(auth): add OAuth2 support for Google login
@@ -58,12 +56,8 @@ refactor(core)!: restructure module exports
 BREAKING CHANGE: Named exports are now used instead of default exports.
 ```
 
-### Scope
-
 Scope is optional but recommended. Use it to indicate the area of the codebase
 affected (e.g., `api`, `auth`, `core`, `cli`, `docs`).
-
-## Semantic Versioning
 
 This project follows [Semantic Versioning 2.0.0](https://semver.org/):
 
@@ -97,8 +91,6 @@ By making a contribution to this project, you certify that:
    you submit with it, including your sign-off) is maintained indefinitely
    and may be redistributed consistent with this project or the license(s)
    involved.
-
-### How to Sign Off Your Commits
 
 You must sign off each commit to indicate your acceptance of the DCO. Combine
 the signoff with your conventional commit message:
@@ -139,20 +131,18 @@ anniversary of its release.
 4. Test your changes
 5. Open a pull request saying what it changes and why
 
-Questions about contributing go in a new issue.
+Questions about contributing go in an issue.
 
-### Pull Request Checklist
+Before opening the pull request:
 
 - [ ] Commits follow the conventional commit format
 - [ ] All commits are signed off (DCO)
 - [ ] Tests pass (if applicable)
 - [ ] Documentation is updated (if applicable)
 
-## Run the checks locally before you push
-
 HyperI projects gate every push through CI (lint, format, tests, secret scan,
 dependency audit, build). Run the SAME checks locally first so your change lands
-green instead of bouncing:
+passing instead of bouncing:
 
 ```bash
 hyperi-ci check
@@ -165,15 +155,13 @@ the same suite CI runs -- and reports what to fix. Run it before every push and 
 pull request. It is the single best way to give your change the best chance of
 surviving CI.
 
-## CI/CD Workflow
-
 A merge to `main` runs CI and releases nothing by itself. A release is cut when the squash-merge commit ends with a `Release: true` trailer, or when a maintainer dispatches the CI workflow with `from-head: true`. semantic-release then reads the commit messages since the last release and picks the next version, the release commit updates `CHANGELOG.md` and `VERSION`, and hyperi-ci builds and publishes the release.
 
 ## Context
 
 ### What this is
 
-The suite's ingest edge: every wire protocol in the README's table terminated, every payload normalised to JSON, stamped, and routed to Kafka or straight to dfe-loader over gRPC. With dfe-ui, dfe-hyperdx and, where it is deployed, culvert, it is one of the few components reading untrusted input, so an advisory here outranks the same one in dfe-loader -- reachability first, per `dfe-infra/docs/threat-model.md`. It parses the transport framing only. Parsing a message body is the dfe-transform-* apps' job, and fitting a record to its table is dfe-loader's.
+The suite's ingest edge: every wire protocol in the README's table terminated, every payload normalised to JSON, stamped, and routed to Kafka or straight to dfe-loader over gRPC. With dfe-ui, dfe-hyperdx and, where it is deployed, culvert, it is one of the few components reading untrusted input, so an advisory here outranks the same one in dfe-loader -- reachability first, per `dfe-infra/docs/threat-model.md`. It parses the transport framing and stops there. Parsing a message body is the dfe-transform-* apps' job, and fitting a record to its table is dfe-loader's.
 
 ### Where things live
 
@@ -198,9 +186,9 @@ cargo nextest run                               # unit + integration, incl. the 
 cargo nextest run --test e2e --run-ignored all  # adds the ignored Kafka e2e tests (needs Docker)
 ```
 
-The build needs `protoc`, a C toolchain, `pkg-config` and librdkafka, as the README's quick start says. Three ways green lies. The
+The build needs `protoc`, a C toolchain, `pkg-config` and librdkafka, as the README's quick start says. Three ways a passing run lies. The
 default run skips the `#[ignore]` Kafka tests. Container tests skip silently
-when Docker is down locally and only panic under `$CI`. And `features: default`
+when Docker is down locally and panic under `$CI` alone. And `features: default`
 is `otlp` alone, with hyperi-ci adding `--features jemalloc`, so a local build is
 not the shipped one.
 
@@ -208,15 +196,15 @@ not the shipped one.
 
 | Don't | Do | Why |
 |---|---|---|
-| Read `Cargo.toml` for the version | Read `VERSION` | semantic-release writes only `CHANGELOG.md` and `VERSION`, so the version in `Cargo.toml` lags |
+| Read `Cargo.toml` for the version | Read `VERSION` | semantic-release writes `CHANGELOG.md` and `VERSION` and no other file, so the version in `Cargo.toml` lags |
 | `cargo test --test integration_kafka` | `--test e2e --run-ignored all` | No such target |
-| Trust green after Docker was down | Check the skip count, or set `CI=1` | A container test passes without running when Docker is down locally |
+| Trust a pass after Docker was down | Check the skip count, or set `CI=1` | A container test passes without running when Docker is down locally |
 | Hand-edit `Dockerfile`, or commit a chart | Fix `src/deployment.rs`, then `--emit-dockerfile Dockerfile` | The Dockerfile is generator output with a test asserting it matches, and the release assembles the chart from the contract, so a hand edit is reverted or never ships |
-| Bump scalo and stop | Bump, regenerate, move `release.helm.library` in `.hyperi-ci.yaml` to the same version, commit the diff | The generator is in scalo, so the drift guard fails by design, and a scalo-service release renders only the contract version its scalo release writes |
+| Bump scalo and stop | Bump, regenerate, move `release.helm.library` in `.hyperi-ci.yaml` to the same version, commit the diff | The generator is in scalo, so the drift guard fails by design, and a scalo-service release renders the contract version its scalo release writes and no other |
 | Rename a port in `src/deployment.rs` | Keep the name | Deployments name the receiver's ports to wire its listeners, and a rename breaks every one that names the old port |
-| Change the credential id rule or the bearer listeners alone | Change dfe-engine's copies with them | The engine refuses an ingest credential by its own copy of both (`src/dfe_engine/orgs/ingest_credentials.py` and `src/dfe_engine/api/v1/ingest_credentials.py` in dfe-engine), and nothing compares the two |
+| Change the credential id rule or the bearer listeners alone | Change dfe-engine's copies with them | The engine rejects an ingest credential by a separate copy of both (`src/dfe_engine/orgs/ingest_credentials.py` and `src/dfe_engine/api/v1/ingest_credentials.py` in dfe-engine), and nothing compares the two |
 | Read 202 as delivered on a listener with acknowledgements off | Compare `receiver_kafka_sends_total` with `receiver_kafka_delivered_total` | That 202 is answered at enqueue |
-| Read a 503 as "not written" | Allow for the retry to duplicate the record | The hold can expire while a broker is writing it |
+| Read a 503 as "not written" | Allow for the retry to duplicate the record | The hold can expire with a broker part way through writing it |
 | Set `VAULT_*` on the test OpenBao | Set `BAO_*` | `VAULT_` is ignored, a random root token is minted, everything 403s silently |
 
 ### Where this sits
@@ -225,7 +213,7 @@ Inbound: **scalo-rs** (crate `scalo`) by `cargo-dep` -- a runtime range plus a d
 
 Outbound: **dfe-infra** by `image-pin` lockstep -- its `versions.yaml` pins
 the image and the thin chart released here, and Argo deploys that published
-chart. **dfe-engine** by `mirrored-logic` -- it keeps its own copy of the credential id rule and the bearer listeners, so only a human closes that edge.
+chart. **dfe-engine** by `mirrored-logic` -- it keeps a copy of the credential id rule and the bearer listeners, so a human closes that edge and no check does.
 
 ```bash
 python3 ../dfe-infra/scripts/dfe-stack suite --consumer dfe-receiver

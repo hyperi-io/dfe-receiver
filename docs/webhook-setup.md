@@ -7,9 +7,9 @@ proving delivery. Why the intake is separate from `/ingest` is in
 [architecture.md](architecture.md#listeners-and-transports), and every field is
 in the generated [config-schema.yaml](config-schema.yaml).
 
-Every caller is declared separately and carries its own secret, topic and body
-format, so two callers never share a credential and a wrong secret is only ever
-tried against the caller the URL path names.
+Every caller is declared separately with a secret, topic and body
+format of its choosing, so two callers never share a credential and a wrong secret is
+tried against the caller the URL path names and no other.
 
 ## How the intake handles a request
 
@@ -45,28 +45,28 @@ flowchart TB
 
 A caller's records go to the caller's topic on Kafka, never to a gRPC destination, and the rules pick no topic for them. The rules still set `_org_id`, held to `ingest_bindings.credentials.<caller>` because the caller's name is its credential id, or the default org when it has none. With `routing.enrich` on, the default, records are stamped with `_source`, the caller name over any value the sender wrote, and `_timestamp_received`. An oversize body is never a DLQ entry, so unauthenticated bytes do not reach Kafka.
 
-With `webhook.bind_address` unset the routes join the ingest listener after its auth middleware and body limit. They keep their own per-caller auth and body limit, and share `server.tls`, `server.ip_filter`, `server.rate_limit` and the concurrency cap. Set, the intake runs on its own port through the same accept loops and limits, under `webhook.tls`.
+With `webhook.bind_address` unset the routes join the ingest listener after its auth middleware and body limit. They keep their per-caller auth and body limit, and share `server.tls`, `server.ip_filter`, `server.rate_limit` and the concurrency cap. Set, the intake runs on a separate port through the same accept loops and limits, under `webhook.tls`.
 
-## The six decisions
+## Configuring a caller
+
+Six decisions set up a caller:
 
 | Decision | Key | What hangs on it |
 |---|---|---|
-| Which listener | `webhook.bind_address` | Unset shares the ingest port. Set, the intake gets its own port, so only that port need be reachable from the product's egress |
-| How the sender proves itself | `callers[].auth.mode` | `hmac` if the product can sign, `header` if it can only attach a fixed header |
+| Which listener | `webhook.bind_address` | Unset shares the ingest port. Set, the intake gets a separate port, and that port alone need be reachable from the product's egress |
+| How the sender proves itself | `callers[].auth.mode` | `hmac` if the product can sign, `header` if all it can attach is a fixed header |
 | Where the secret comes from | `callers[].auth.secret_source` | A `provider:path[:key]` reference, never a literal in the file |
-| How stale is too stale | `callers[].auth.tolerance_secs` | The replay window, `hmac` only |
+| The replay window | `callers[].auth.tolerance_secs` | Seconds a signature stays valid, `hmac` mode |
 | How big a body is allowed | `webhook.max_body_size` | Applies to the intake alone, independently of `server.max_body_size` |
 | What reaches the topic | `callers[].body`, `callers[].filter`, `callers[].topic` | One object or an array to fan out, an optional CEL filter, and the topic name used verbatim |
 
-## Choosing the authentication mode
-
 `hmac` is the mode to use whenever the product supports it. The sender computes
 HMAC-SHA256 over the string `{timestamp}.{body}` and sends the hex digest in a
-signature header, with the same unix-seconds timestamp in its own header. That
+signature header, with the same unix-seconds timestamp in a second header. That
 proves both that the secret holder sent the request and that the body has not
 been altered, and the timestamp bounds replay.
 
-`header` exists because some products can only attach a static header to a
+`header` exists because some products can attach nothing but a static header to a
 webhook. It proves the sender holds the secret and nothing more: no body
 integrity, and no replay protection. Restrict the source addresses with
 `server.ip_filter` when using it.
@@ -76,18 +76,27 @@ learns nothing about the pipeline's state. Failures log at debug and count under
 `receiver_auth_failures_total{reason}`, so a credential spray does not write
 a warn line per attempt.
 
-## Secret references
-
 `secret_source` is a `provider:path[:key]` reference resolved through the same
-reader as bearer tokens and refreshed on `refresh_interval_secs`. A caller whose
-secret cannot be read refuses to start rather than serving unauthenticated --
-a missing secret is a configuration error, not a runtime degradation.
+reader as bearer tokens and refreshed on `refresh_interval_secs`. A caller with a
+secret that cannot be read stops startup rather than serving unauthenticated --
+a missing secret is a configuration error.
 
-## Worked example: an asset context source
+A sender outside the network needs a resolvable HTTPS endpoint with a publicly
+trusted certificate, which an internal certificate authority cannot provide.
+Prefer an outbound tunnel over opening an inbound port: the tunnel dials out, so
+no public address or inbound rule is needed on the receiver's network.
 
-The value of this source is not the feed on its own. It is that asset and
-identity records join to observability facts, so a noisy signal gains the
-context needed to judge it -- which host, owned by whom, running what, exposed
+Some cloud notification services cannot attach custom headers at all and sign
+with a certificate of theirs over an envelope that wraps the payload as a string.
+Neither shipped auth mode authenticates that envelope, so put a small function
+between the service and the intake to unwrap the payload and attach the caller's
+header. Do not weaken the intake to accommodate a sender.
+
+## Worked examples
+
+The first example is an asset context source. Its value is not the feed by itself. It is that asset and
+identity records join to observability facts, so a noisy signal adds the
+context needed to weigh it -- which host, owned by whom, running what, exposed
 where. Alert rules from an asset-inventory product, runZero's say, are one such source.
 
 ```yaml
@@ -106,9 +115,9 @@ webhook:
       body: single
 ```
 
-Records land on `asset_context_land` stamped with `_source: asset_context` and `_timestamp_received`, as a routed record is. The `_source` stamp is the caller name and wins over any value the sender supplies, which is kept as `_source_original`, so the join key cannot be spoofed by the payload. With `routing.enrich: false` neither is written, and only `_org_id` is.
+Records land on `asset_context_land` stamped with `_source: asset_context` and `_timestamp_received`, as a routed record is. The `_source` stamp is the caller name and wins over any value the sender supplies, which is kept as `_source_original`, so the join key cannot be spoofed by the payload. With `routing.enrich: false` neither is written, and `_org_id` alone is.
 
-The caller's name is also its credential id for tenancy. Bind it to the orgs
+The caller's name is its credential id for tenancy as well. Bind it to the orgs
 its records may land in, or they land in `routing.default_org_id`:
 
 ```yaml
@@ -119,11 +128,9 @@ ingest_bindings:
 ```
 
 Pair it with `server.ip_filter` restricted to the product's published egress
-range, because `header` mode carries no body integrity.
+range, because `header` mode has no body integrity.
 
-## Worked example: an observability feed
-
-An alerting platform that can attach an `Authorization` header fits `header`
+The second example is an observability feed. An alerting platform that can attach an `Authorization` header fits `header`
 mode directly -- the header accepts a bare secret or a `Bearer <secret>` form.
 A platform that signs its payloads should use `hmac` instead.
 
@@ -145,17 +152,17 @@ webhook:
 ```
 
 `body: array` checks, filters and stamps every element before delivering any of
-them, so one element that is not an object refuses the whole request with
+them, so one element that is not an object rejects the whole request with
 nothing on the topic. A sender that retries therefore duplicates nothing.
 
 The CEL filter is compiled at load, so a malformed expression is a startup
 error rather than a per-request surprise. A record the filter drops still
 answers 202: the sender did nothing wrong and must not retry.
 
-`contains` matches a substring of a string only. Test list membership with `"pii" in tags` and a map key with `"region" in meta`. `tags.contains("pii")` on a list is an evaluation error. A filter that errors on a record, or answers with something other than a boolean or a number, refuses the whole request with a 500 `filter_error`, and nothing is delivered. Only a filter that answers false drops a record.
+`contains` matches a substring of a string and nothing else. Test list membership with `"pii" in tags` and a map key with `"region" in meta`. `tags.contains("pii")` on a list is an evaluation error. A filter that errors on a record, or answers with something other than a boolean or a number, rejects the whole request with a 500 `filter_error`, and nothing is delivered. A filter that answers false drops a record, and nothing else does.
 
-On the shared listener the caller's secret is the only credential needed --
-`server.auth` does not apply to the webhook routes -- while `server.tls`,
+On the shared listener the caller's secret is the one credential needed --
+`server.auth` does not apply to the webhook routes -- and `server.tls`,
 `server.ip_filter` and `server.rate_limit` all still do.
 
 ## What the sender will see
@@ -168,7 +175,7 @@ On the shared listener the caller's secret is the only credential needed --
 | 404 | No caller of that name is declared | `unknown_caller` |
 | 413 | Over `webhook.max_body_size`, counted and never sent to the DLQ | -- |
 | 429 | `server.rate_limit` exhausted, with `retry-after` | -- |
-| 500 | The filter could not judge a record, and nothing was delivered | `filter_error` |
+| 500 | The filter could not evaluate a record, and nothing was delivered | `filter_error` |
 | 503 | A record could not be taken -- memory pressure, a full hold, the bus down -- with `retry-after` | -- |
 
 A 401 is the sender's problem and a 503 is ours, so treat them differently when
@@ -200,17 +207,4 @@ Then confirm the record arrived rather than assuming the 202 means delivery:
 read the caller's topic, and check `receiver_requests_success_total` moved and
 `receiver_auth_failures_total` did not. The integration suite covers both
 halves -- the intake's behaviour in `tests/integration/webhook.rs`, and the path
-through to a real broker in `tests/integration/protocol_kafka_roundtrip.rs`.
-
-## Reaching the receiver from a cloud sender
-
-A sender outside the network needs a resolvable HTTPS endpoint with a publicly
-trusted certificate, which an internal certificate authority cannot provide.
-Prefer an outbound tunnel over opening an inbound port: the tunnel dials out, so
-no public address or inbound rule is needed on the receiver's network.
-
-Some cloud notification services cannot attach custom headers at all and sign
-with their own certificate over an envelope that wraps the payload as a string.
-Neither shipped auth mode authenticates that envelope, so put a small function
-between the service and the intake to unwrap the payload and attach the caller's
-header. Do not weaken the intake to accommodate a sender.
+through to a running broker in `tests/integration/protocol_kafka_roundtrip.rs`.
