@@ -13,7 +13,7 @@ tried against the caller the URL path names and no other.
 
 ## How the intake handles a request
 
-This diagram shows the steps a webhook request goes through, in `src/server/webhook/`.
+A webhook request passes four admission checks in `src/server/webhook/` before its body is split into records.
 
 ```mermaid
 flowchart TB
