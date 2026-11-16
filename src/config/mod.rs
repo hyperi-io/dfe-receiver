@@ -1335,8 +1335,8 @@ pub struct TlsConfig {
 
     /// How often the certificate, key and CA are re-read, in seconds, from files and secrets alike.
     /// A rotated certificate is served from the next handshake, with no restart. 0 turns reload off.
-    /// Default: 3600 (1 hour)
-    pub refresh_interval_secs: u64,
+    /// Unset, scalo's default applies.
+    pub refresh_interval_secs: Option<u64>,
 }
 
 impl Default for TlsConfig {
@@ -1350,7 +1350,7 @@ impl Default for TlsConfig {
             cert_secret: None,
             key_secret: None,
             ca_secret: None,
-            refresh_interval_secs: 3600,
+            refresh_interval_secs: None,
         }
     }
 }

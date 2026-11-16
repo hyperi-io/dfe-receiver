@@ -42,7 +42,7 @@ properties:
         cert_secret: null
         key_secret: null
         ca_secret: null
-        refresh_interval_secs: 3600
+        refresh_interval_secs: null
       auth:
         mode: none
         accepted_headers: []
@@ -69,7 +69,7 @@ properties:
         cert_secret: null
         key_secret: null
         ca_secret: null
-        refresh_interval_secs: 3600
+        refresh_interval_secs: null
       auth:
         mode: none
         accepted_headers: []
@@ -99,7 +99,7 @@ properties:
         cert_secret: null
         key_secret: null
         ca_secret: null
-        refresh_interval_secs: 3600
+        refresh_interval_secs: null
       auth:
         mode: none
         accepted_headers: []
@@ -128,7 +128,7 @@ properties:
         cert_secret: null
         key_secret: null
         ca_secret: null
-        refresh_interval_secs: 3600
+        refresh_interval_secs: null
       auth:
         mode: none
         accepted_headers: []
@@ -158,7 +158,7 @@ properties:
         cert_secret: null
         key_secret: null
         ca_secret: null
-        refresh_interval_secs: 3600
+        refresh_interval_secs: null
       auth:
         mode: none
         accepted_headers: []
@@ -198,7 +198,7 @@ properties:
         cert_secret: null
         key_secret: null
         ca_secret: null
-        refresh_interval_secs: 3600
+        refresh_interval_secs: null
       auth:
         mode: none
         accepted_headers: []
@@ -231,7 +231,7 @@ properties:
         cert_secret: null
         key_secret: null
         ca_secret: null
-        refresh_interval_secs: 3600
+        refresh_interval_secs: null
       auth:
         mode: none
         accepted_headers: []
@@ -259,7 +259,7 @@ properties:
         cert_secret: null
         key_secret: null
         ca_secret: null
-        refresh_interval_secs: 3600
+        refresh_interval_secs: null
       accept_unauthenticated: false
       acknowledgements:
         enabled: true
@@ -279,7 +279,7 @@ properties:
         cert_secret: null
         key_secret: null
         ca_secret: null
-        refresh_interval_secs: 3600
+        refresh_interval_secs: null
       accept_unauthenticated: false
   flow:
     description: Flow (NetFlow v5/v9 + IPFIX + sFlow v5) receiver configuration.
@@ -334,7 +334,7 @@ properties:
         cert_secret: null
         key_secret: null
         ca_secret: null
-        refresh_interval_secs: 3600
+        refresh_interval_secs: null
       callers: []
       acknowledgements:
         enabled: true
@@ -547,7 +547,7 @@ $defs:
           cert_secret: null
           key_secret: null
           ca_secret: null
-          refresh_interval_secs: 3600
+          refresh_interval_secs: null
       auth:
         description: Authentication configuration.
         $ref: "#/$defs/AuthConfig"
@@ -763,11 +763,13 @@ $defs:
         description: |-
           How often the certificate, key and CA are re-read, in seconds, from files and secrets alike.
           A rotated certificate is served from the next handshake, with no restart. 0 turns reload off.
-          Default: 3600 (1 hour)
-        type: integer
+          Unset, scalo's default applies.
+        type:
+        - integer
+        - "null"
         format: uint64
         minimum: 0
-        default: 3600
+        default: null
   AuthConfig:
     description: Authentication configuration.
     type: object
@@ -910,7 +912,7 @@ $defs:
           cert_secret: null
           key_secret: null
           ca_secret: null
-          refresh_interval_secs: 3600
+          refresh_interval_secs: null
       auth:
         description: Authentication configuration for gRPC server.
         $ref: "#/$defs/AuthConfig"
@@ -973,7 +975,7 @@ $defs:
           cert_secret: null
           key_secret: null
           ca_secret: null
-          refresh_interval_secs: 3600
+          refresh_interval_secs: null
       auth:
         description: Authentication configuration for OTLP endpoints.
         $ref: "#/$defs/AuthConfig"
@@ -1038,7 +1040,7 @@ $defs:
           cert_secret: null
           key_secret: null
           ca_secret: null
-          refresh_interval_secs: 3600
+          refresh_interval_secs: null
       auth:
         description: Authentication configuration.
         $ref: "#/$defs/AuthConfig"
@@ -1105,7 +1107,7 @@ $defs:
           cert_secret: null
           key_secret: null
           ca_secret: null
-          refresh_interval_secs: 3600
+          refresh_interval_secs: null
       auth:
         description: Authentication configuration.
         $ref: "#/$defs/AuthConfig"
@@ -1265,7 +1267,7 @@ $defs:
           cert_secret: null
           key_secret: null
           ca_secret: null
-          refresh_interval_secs: 3600
+          refresh_interval_secs: null
       auth:
         description: Authentication configuration.
         $ref: "#/$defs/AuthConfig"
@@ -1343,7 +1345,7 @@ $defs:
           cert_secret: null
           key_secret: null
           ca_secret: null
-          refresh_interval_secs: 3600
+          refresh_interval_secs: null
       auth:
         description: Authentication configuration.
         $ref: "#/$defs/AuthConfig"
@@ -1402,7 +1404,7 @@ $defs:
           cert_secret: null
           key_secret: null
           ca_secret: null
-          refresh_interval_secs: 3600
+          refresh_interval_secs: null
       accept_unauthenticated:
         description: |-
           Start without client certificates, accepting every client that can
@@ -1457,7 +1459,7 @@ $defs:
           cert_secret: null
           key_secret: null
           ca_secret: null
-          refresh_interval_secs: 3600
+          refresh_interval_secs: null
       accept_unauthenticated:
         description: |-
           Start without client certificates, accepting every client that can
@@ -1759,7 +1761,7 @@ $defs:
           cert_secret: null
           key_secret: null
           ca_secret: null
-          refresh_interval_secs: 3600
+          refresh_interval_secs: null
       callers:
         description: The callers, one entry per product.
         type: array

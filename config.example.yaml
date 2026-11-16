@@ -106,7 +106,7 @@ server:
     # cert_secret: "vault:secret/tls:cert"
     # key_secret: "vault:secret/tls:key"
     # ca_secret: "vault:secret/tls:ca"
-    # refresh_interval_secs: 3600  # How often cert, key and CA are re-read, from files and secrets alike
+    # refresh_interval_secs: 60  # How often cert, key and CA are re-read, from files and secrets alike. Unset: scalo's default
 
   auth:
     # none, header, bearer, mtls, both. Anything else refuses to start. header
@@ -142,7 +142,7 @@ grpc:
     # client_auth: "none"               # none, optional, required
     # cert_secret: "vault:secret/tls:cert"  # Instead of cert_file
     # key_secret: "vault:secret/tls:key"
-    # refresh_interval_secs: 3600       # Re-read interval for cert, key and CA (1 hour)
+    # refresh_interval_secs: 60         # Re-read interval for cert, key and CA. Unset: scalo's default
 
   # server.ip_filter and server.rate_limit do NOT reach this port: tonic owns
   # the accept loop, so there is nowhere to reject a connection before it is
@@ -190,7 +190,7 @@ lumberjack:
     # client_auth: "none"               # none, optional, required
     # cert_secret: "vault:secret/tls:cert"
     # key_secret: "vault:secret/tls:key"
-    # refresh_interval_secs: 3600
+    # refresh_interval_secs: 60  # Unset: scalo's default
 
   # NO application auth on this listener. A Lumberjack frame carries no
   # credential, so nothing in the handler reads `lumberjack.auth` -- setting a
@@ -221,7 +221,7 @@ splunk_hec:
     # client_auth: "none"
     # cert_secret: "vault:secret/tls:cert"
     # key_secret: "vault:secret/tls:key"
-    # refresh_interval_secs: 3600
+    # refresh_interval_secs: 60  # Unset: scalo's default
 
   # Auth -- supports both "Authorization: Splunk <token>" and "Authorization: Bearer <token>"
   auth:
@@ -254,7 +254,7 @@ syslog:
     # client_auth: "none"
     # cert_secret: "vault:secret/tls:cert"
     # key_secret: "vault:secret/tls:key"
-    # refresh_interval_secs: 3600
+    # refresh_interval_secs: 60  # Unset: scalo's default
 
   # NO application auth on this listener. A syslog line carries no credential,
   # so nothing in the handler reads `syslog.auth` -- setting a mode there is
@@ -292,7 +292,7 @@ prometheus_rw:
     # client_auth: "none"
     # cert_secret: "vault:secret/tls:cert"
     # key_secret: "vault:secret/tls:key"
-    # refresh_interval_secs: 3600
+    # refresh_interval_secs: 60  # Unset: scalo's default
 
   # Auth (same options as HTTP auth)
   auth:
@@ -378,7 +378,7 @@ fluent:
     # client_auth: "none"
     # cert_secret: "vault:secret/tls:cert"
     # key_secret: "vault:secret/tls:key"
-    # refresh_interval_secs: 3600
+    # refresh_interval_secs: 60  # Unset: scalo's default
 
 # GELF (Graylog Extended Log Format, null-delimited JSON over TCP)
 #
@@ -401,7 +401,7 @@ gelf:
     # client_auth: "none"
     # cert_secret: "vault:secret/tls:cert"
     # key_secret: "vault:secret/tls:key"
-    # refresh_interval_secs: 3600
+    # refresh_interval_secs: 60  # Unset: scalo's default
 
 # Raw payload retention -- the common-header `_raw` field
 #

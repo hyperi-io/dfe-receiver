@@ -159,7 +159,7 @@ impl Files {
     fn tls(&self, source: Source) -> TlsConfig {
         let tls = TlsConfig {
             enabled: true,
-            refresh_interval_secs: 1,
+            refresh_interval_secs: Some(1),
             ..TlsConfig::default()
         };
         match source {

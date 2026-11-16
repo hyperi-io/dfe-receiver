@@ -68,6 +68,12 @@ impl Handshake {
     }
 }
 
+/// `tls.refresh_interval_secs`, else the interval scalo's `ServerTls` defaults to.
+fn reload_interval_secs(tls: &TlsConfig) -> u64 {
+    tls.refresh_interval_secs
+        .unwrap_or_else(|| ServerTlsConfig::default().reload_interval_secs)
+}
+
 /// What a gRPC listener's handshake offers: ALPN `h2`, which gRPC clients
 /// require and tonic offered itself when it ran the handshake.
 #[must_use]
@@ -119,7 +125,7 @@ pub async fn load_server_tls(
         ca_file: tls.ca_file.as_ref().map(PathBuf::from),
         ca_secret: tls.ca_secret.clone(),
         client_auth,
-        reload_interval_secs: tls.refresh_interval_secs,
+        reload_interval_secs: reload_interval_secs(tls),
         handshake_timeout_ms: connections.tls_handshake_timeout_ms,
     };
     // Boxed for the reason `secrets::read` boxes: the AWS provider's future, awaited
@@ -196,6 +202,19 @@ mod tests {
         ] {
             assert_eq!(parse_client_auth(name), mode, "{name:?}");
         }
+    }
+
+    #[test]
+    fn an_unset_refresh_interval_takes_scalos_default() {
+        let set = TlsConfig {
+            refresh_interval_secs: Some(7),
+            ..TlsConfig::default()
+        };
+        assert_eq!(reload_interval_secs(&set), 7);
+        assert_eq!(
+            reload_interval_secs(&TlsConfig::default()),
+            ServerTlsConfig::default().reload_interval_secs
+        );
     }
 
     #[tokio::test]
