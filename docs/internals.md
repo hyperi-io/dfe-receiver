@@ -83,7 +83,16 @@ librdkafka batches per scalo's `throughput` sizing profile: `batch.size` 128 KiB
 
 ## Configuration
 
-How the config is loaded, with and without `--config`, is in [architecture.md](architecture.md#configuration). Every key and its default is in [config-schema.yaml](config-schema.yaml), and [config.example.yaml](../config.example.yaml) is an annotated starting point. An example for a TLS listener with bearer tokens and one source rule:
+There are two ways in.
+
+- Without `--config` it's scalo's cascade: compiled defaults, then `defaults.yaml`, `settings.yaml` and `settings.{env}.yaml`, each searched in `./`, `./config/`, `/config/` and `~/.config/dfe-receiver/`, then `./.env`, then `DFE_RECEIVER_*` environment variables, then CLI arguments.
+- The container passes `--config /etc/dfe-receiver/config.yaml`, which reads that mounted file over the compiled defaults, then the flat `DFE_RECEIVER_*` variables.
+
+Routing, validation and enrichment reload on SIGHUP and when the config file changes, and so do the gRPC destinations. A reload builds a sender for a destination it adds. It retires one it removes, sending that destination's buffered records to it, or to the DLQ when it can't. With disk spillover on, a destination whose address changed moves to the new one on the same spool once no request is using its old sender, and replays what that sender spooled. The Kafka producer and the DLQ need a restart to change.
+
+Bearer tokens, TLS material and webhook caller secrets can be `provider:path[:key]` references -- `file:`, `vault:`, `aws:`, `env:` -- resolved through `scalo::secrets::resolve`. A reference field rejects a value that names no provider, and a webhook caller's secret is always a reference. Static bearer tokens and accepted header values can instead be literals in the file. The Kafka SASL credential is a plain value, set by `DFE_RECEIVER_KAFKA_SASL_PASSWORD` from the Kafka Secret. The receiver resolves no secret itself. It builds scalo's `secrets-vault` and `secrets-aws` features, so the OpenBao and AWS Secrets Manager providers are in the binary.
+
+Every key and its default is in [config-schema.yaml](config-schema.yaml), and [config.example.yaml](../config.example.yaml) is an annotated starting point. An example for a TLS listener with bearer tokens and one source rule:
 
 ```yaml
 server:

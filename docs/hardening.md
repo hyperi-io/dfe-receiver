@@ -55,30 +55,19 @@ Each HTTP request meets the cheapest refusal first, so a bot scan or an unauthen
 ---
 config:
   theme: base
-  look: neo
   fontFamily: Inter, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif
   themeVariables:
     fontSize: 15px
     lineColor: "#64748B"
     primaryTextColor: "#0F172A"
-    clusterBorder: "#0072B2"
-    edgeLabelBackground: "#FFFFFF"
     actorBkg: "#FFFFFF"
     actorBorder: "#94A3B8"
     actorTextColor: "#0F172A"
-    actorLineColor: "#94A3B8"
+    actorLineColor: "#64748B"
     signalColor: "#64748B"
-    signalTextColor: "#64748B"
-    labelBoxBkgColor: "#FFFFFF"
-    labelBoxBorderColor: "#94A3B8"
-    labelTextColor: "#0F172A"
-    loopTextColor: "#64748B"
-    noteBkgColor: "#FFFFFF"
-    noteTextColor: "#0F172A"
-    noteBorderColor: "#94A3B8"
-    activationBkgColor: "#F4F6F8"
-    activationBorderColor: "#94A3B8"
-    sequenceNumberColor: "#FFFFFF"
+    signalTextColor: "#0F172A"
+  themeCSS: >-
+    .messageText{paint-order:stroke;stroke:#FFFFFF;stroke-width:3px;stroke-linejoin:round}
 ---
 sequenceDiagram
     accTitle: L4 Detail -- HTTP request order
@@ -112,30 +101,19 @@ The handler answers malformed or non-object JSON with 400. A record missing a re
 ---
 config:
   theme: base
-  look: neo
   fontFamily: Inter, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif
   themeVariables:
     fontSize: 15px
     lineColor: "#64748B"
     primaryTextColor: "#0F172A"
-    clusterBorder: "#0072B2"
-    edgeLabelBackground: "#FFFFFF"
     actorBkg: "#FFFFFF"
     actorBorder: "#94A3B8"
     actorTextColor: "#0F172A"
-    actorLineColor: "#94A3B8"
+    actorLineColor: "#64748B"
     signalColor: "#64748B"
-    signalTextColor: "#64748B"
-    labelBoxBkgColor: "#FFFFFF"
-    labelBoxBorderColor: "#94A3B8"
-    labelTextColor: "#0F172A"
-    loopTextColor: "#64748B"
-    noteBkgColor: "#FFFFFF"
-    noteTextColor: "#0F172A"
-    noteBorderColor: "#94A3B8"
-    activationBkgColor: "#F4F6F8"
-    activationBorderColor: "#94A3B8"
-    sequenceNumberColor: "#FFFFFF"
+    signalTextColor: "#0F172A"
+  themeCSS: >-
+    .messageText{paint-order:stroke;stroke:#FFFFFF;stroke-width:3px;stroke-linejoin:round}
 ---
 sequenceDiagram
     accTitle: L4 Detail -- Ingest answers
@@ -458,22 +436,31 @@ config:
     .ui .label-icon{color:#D9480F}
     .ext .label-icon{color:#64748B}
 ---
-flowchart LR
+flowchart TB
     accTitle: L4 Detail -- AWS fronting
     accDescr: Senders reach the Cloudflare proxy, which forwards to an AWS NLB, then through the Kubernetes Service to Envoy Gateway, then to the receiver. Envoy Gateway asks the CrowdSec bouncer about each client.
 
-    senders("<b>Senders</b>")
-    cloudflare("<b>Cloudflare proxy</b>")
-    nlb("<b>AWS NLB</b>")
-    envoy("<b>Envoy Gateway</b>")
-    receiver("<b>dfe-receiver</b>")
-    crowdsec("<b>CrowdSec bouncer</b>")
-
-    senders --> cloudflare
-    cloudflare --> nlb
-    nlb --> envoy
-    envoy -->|requests| receiver
-    envoy -.->|IP check| crowdsec
+    subgraph path["Request path"]
+        direction TB
+        subgraph EDGE["In front of the cluster"]
+            direction LR
+            senders("<b>Senders</b>")
+            cloudflare("<b>Cloudflare proxy</b>")
+            nlb("<b>AWS NLB</b>")
+            senders --> cloudflare --> nlb
+        end
+        subgraph K8S["In the cluster"]
+            direction LR
+            envoy("<b>Envoy Gateway</b>")
+            receiver("<b>dfe-receiver</b>")
+            crowdsec("<b>CrowdSec bouncer</b>")
+            envoy -->|requests| receiver
+            envoy -.->|IP check| crowdsec
+        end
+        EDGE -->|Kubernetes Service| K8S
+    end
+  class senders,cloudflare,nlb,envoy,crowdsec ext
+  class receiver ingest
   classDef ext fill:#F4F6F8,stroke:#94A3B8,stroke-width:1.5px,stroke-dasharray:5 4,color:#0F172A
   classDef ingest fill:#FFFFFF,stroke:#0E8A7D,stroke-width:3px,color:#0F172A
   classDef xform fill:#FFFFFF,stroke:#7B4FB0,stroke-width:3px,color:#0F172A
@@ -485,11 +472,12 @@ flowchart LR
   classDef error fill:#FFFFFF,stroke:#C2410C,stroke-width:3px,color:#0F172A
   classDef control fill:#FFFFFF,stroke:#334155,stroke-width:3px,color:#0F172A
   classDef part fill:#FFFFFF,stroke:#94A3B8,stroke-width:1.5px,color:#0F172A
-  class senders,cloudflare,nlb,envoy,crowdsec ext
-  class receiver ingest
+  style path fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
+  style EDGE fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
+  style K8S fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
 ```
 
-*Figure 3. L4 Detail -- AWS fronting. Dashed boxes are outside the cluster, and the dotted arrow is the ext_authz call.* Up: [dfe-receiver documentation](README.md).
+*Figure 3. L4 Detail -- AWS fronting. Dashed boxes are outside DFE, and the dotted arrow is the ext_authz call.* Up: [dfe-receiver documentation](README.md).
 
 What each layer stops is in the [defence-in-depth table](#defence-in-depth-summary). The recurring charges are the flat Cloudflare plan and the NLB's hours and data, and Envoy Gateway and CrowdSec are open source. The "just use AWS" approach (ALB, AWS WAF, Shield Standard) bills ALB hours and data plus WAF per ACL, rule and request, and Bot Control costs extra. Price both against the expected traffic and the rules you enable.
 

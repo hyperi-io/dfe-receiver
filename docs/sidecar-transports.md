@@ -54,26 +54,30 @@ config:
     .ui .label-icon{color:#D9480F}
     .ext .label-icon{color:#64748B}
 ---
-flowchart LR
+flowchart TB
     accTitle: L4 Detail -- Sidecar transports
     accDescr: A source the receiver does not speak is collected by a Vector sidecar, a Fluent Bit sidecar or a custom collector. Vector sends to the gRPC port, Fluent Bit to the Fluent Forward port and a custom collector to HTTP ingest. The receiver writes the records to Kafka.
 
-    source("<b>Source protocol</b>")
-
-    subgraph sidecars["Sidecars"]
-        vector("<b>Vector</b>")
-        fluentbit("<b>Fluent Bit</b>")
-        custom("<b>Custom collector</b>")
+    subgraph COLLECT["Collect"]
+        direction LR
+        source("<b>Source protocol</b>")
+        vector("<b>Vector</b><br/><span>to gRPC 6000</span>")
+        fluentbit("<b>Fluent Bit</b><br/><span>to Forward 24224</span>")
+        custom("<b>Custom collector</b><br/><span>to HTTP 8080</span>")
+        source --> vector
+        source --> fluentbit
+        source --> custom
     end
-
-    receiver("<b>dfe-receiver</b>")
-    kafka[("<b>Kafka topics</b>")]
-
-    source --> sidecars
-    vector -->|gRPC 6000| receiver
-    fluentbit -->|Forward 24224| receiver
-    custom -->|HTTP 8080| receiver
-    receiver -->|records| kafka
+    subgraph INGEST["Ingest"]
+        direction LR
+        receiver("<b>dfe-receiver</b>")
+        kafka[("<b>Kafka topics</b>")]
+        receiver -->|records| kafka
+    end
+    COLLECT -->|each to its port| INGEST
+  class source,vector,fluentbit,custom ext
+  class receiver ingest
+  class kafka bus
   classDef ext fill:#F4F6F8,stroke:#94A3B8,stroke-width:1.5px,stroke-dasharray:5 4,color:#0F172A
   classDef ingest fill:#FFFFFF,stroke:#0E8A7D,stroke-width:3px,color:#0F172A
   classDef xform fill:#FFFFFF,stroke:#7B4FB0,stroke-width:3px,color:#0F172A
@@ -85,13 +89,11 @@ flowchart LR
   classDef error fill:#FFFFFF,stroke:#C2410C,stroke-width:3px,color:#0F172A
   classDef control fill:#FFFFFF,stroke:#334155,stroke-width:3px,color:#0F172A
   classDef part fill:#FFFFFF,stroke:#94A3B8,stroke-width:1.5px,color:#0F172A
-  class source,vector,fluentbit,custom ext
-  class receiver ingest
-  class kafka bus
-  style sidecars fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
+  style COLLECT fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
+  style INGEST fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
 ```
 
-*Figure 1. L4 Detail -- Sidecar transports. The dashed box is external.* Up: [dfe-receiver documentation](README.md).
+*Figure 1. L4 Detail -- Sidecar transports. Dashed boxes are outside DFE.* Up: [dfe-receiver documentation](README.md).
 
 ## Vector, Fluent Bit or a custom collector
 

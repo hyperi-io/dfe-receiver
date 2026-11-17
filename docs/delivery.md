@@ -1,6 +1,103 @@
-# Delivery and buffering
+# Delivery
 
-When a sender is answered, and what the receiver keeps for it until then. Each listener's answer, and the protocol rule behind it, is in [internals.md](internals.md#what-a-sender-is-told).
+Delivery is the last stage of [dfe-receiver](architecture.md): it sends each record to Kafka or a gRPC destination, and decides when the sender is answered.
+
+| | |
+|---|---|
+| Repo | [hyperi-io/dfe-receiver](https://github.com/hyperi-io/dfe-receiver) |
+| Image and chart | `ghcr.io/hyperi-io/dfe-receiver`, and the thin chart released beside it |
+| Config reference | `acknowledgements` on each listener, `kafka`, `destinations`, `loader`, `buffer` and `routing.dlq` in [config-schema.yaml](config-schema.yaml) |
+| Endpoints | None of its own. It answers through the listener that took the record |
+| Metrics | `receiver_kafka_*`, `receiver_destination_*`, `transport_ack_*`, `pipeline_delivery_guarantee`, in [metrics.md](metrics.md#kafka) |
+
+Which path a record takes is set by the listener that took it, not by the record.
+
+```mermaid
+---
+config:
+  theme: base
+  look: neo
+  fontFamily: Inter, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif
+  flowchart:
+    curve: linear
+    nodeSpacing: 40
+    rankSpacing: 64
+    padding: 18
+    wrappingWidth: 280
+    htmlLabels: true
+  elk:
+    preset: modelOrder
+  themeVariables:
+    fontSize: 15px
+    lineColor: "#64748B"
+    primaryTextColor: "#0F172A"
+    clusterBorder: "#0072B2"
+    edgeLabelBackground: "#FFFFFF"
+  themeCSS: >-
+    p{margin:0}
+    .node[data-look] rect,.node[data-look] path,.node[data-look] polygon,.node[data-look] .outer-path{filter:drop-shadow(0 1px 2px rgba(15,23,42,.10)) drop-shadow(0 6px 14px rgba(15,23,42,.10))}
+    .node rect{rx:10px;ry:10px}
+    .cluster rect{rx:16px;ry:16px}
+    .node .label div{min-width:150px}
+    .node.decision .label div{min-width:0}
+    .cluster[data-look] rect{filter:none}
+    .nodeLabel{line-height:1.35}
+    .nodeLabel b{font-weight:600;font-size:15px;letter-spacing:-0.01em}
+    .nodeLabel span{font-size:12.5px;font-weight:400;color:#334155}
+    .cluster-label span.nodeLabel{display:inline-block;background:#FFFFFF;color:#0B2A3F;border:1.5px solid #0072B2;border-radius:999px;padding:2px 12px;font-size:11.5px;font-weight:700;letter-spacing:.09em;text-transform:uppercase}
+    .flowchart-link{stroke-width:1.75px}
+    .labelBkg{background:transparent!important}
+    span.edgeLabel{display:inline-block;background:#FFFFFF!important;color:#1E293B;border:1px solid #94A3B8;border-radius:999px;padding:2px 10px;font-size:12px;font-weight:500}
+    span.edgeLabel p{background:transparent!important}
+    .label-icon{width:20px;height:20px;vertical-align:-4px;margin-right:6px}
+    .ingest .label-icon{color:#0E8A7D}
+    .xform .label-icon{color:#7B4FB0}
+    .load .label-icon{color:#0072B2}
+    .bus .label-icon{color:#A8517F}
+    .store .label-icon{color:#00785A}
+    .ui .label-icon{color:#D9480F}
+    .ext .label-icon{color:#64748B}
+---
+flowchart TB
+    accTitle: L4 Detail -- Delivery
+    accDescr: Routed records reach delivery. A record whose listener holds its answer goes straight to the sinks, and one answered at enqueue goes through the buffer and spool first. The sinks write to Kafka topics and gRPC destinations, and send records refused for good to the DLQ.
+
+    route("<b>Route and stamp</b><br/><span>topic and destinations</span>")
+    subgraph delivery["Delivery"]
+        direction LR
+        hold("<b>Answer hold</b><br/><span>held answers</span>")
+        buffer("<b>Buffer and spool</b><br/><span>answers at enqueue</span>")
+        sinks("<b>Sinks</b><br/><span>Kafka producer, gRPC senders</span>")
+        hold --> sinks
+        buffer --> sinks
+    end
+    kafka[("<b>Kafka topics</b>")]
+    grpc("<b>gRPC destinations</b><br/><span>loader, transforms, archiver</span>")
+    dlq[("<b>DLQ</b><br/><span>dead-letter queue</span>")]
+    route --> delivery
+    delivery --> kafka
+    delivery --> grpc
+    delivery -.-> dlq
+  class route,hold,buffer,sinks part
+  class kafka,dlq bus
+  class grpc load
+  classDef ext fill:#F4F6F8,stroke:#94A3B8,stroke-width:1.5px,stroke-dasharray:5 4,color:#0F172A
+  classDef ingest fill:#FFFFFF,stroke:#0E8A7D,stroke-width:3px,color:#0F172A
+  classDef xform fill:#FFFFFF,stroke:#7B4FB0,stroke-width:3px,color:#0F172A
+  classDef load fill:#FFFFFF,stroke:#0072B2,stroke-width:3px,color:#0F172A
+  classDef bus fill:#FFFFFF,stroke:#A8517F,stroke-width:3px,color:#0F172A
+  classDef store fill:#FFFFFF,stroke:#00785A,stroke-width:3px,color:#0F172A
+  classDef ui fill:#FFFFFF,stroke:#D9480F,stroke-width:3px,color:#0F172A
+  classDef decision fill:#FFFFFF,stroke:#9A6700,stroke-width:3px,color:#0F172A
+  classDef error fill:#FFFFFF,stroke:#C2410C,stroke-width:3px,color:#0F172A
+  classDef control fill:#FFFFFF,stroke:#334155,stroke-width:3px,color:#0F172A
+  classDef part fill:#FFFFFF,stroke:#94A3B8,stroke-width:1.5px,color:#0F172A
+  style delivery fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
+```
+
+*Figure 1. L4 Detail -- Delivery. The dotted arrow is the dead-letter path.* Up: [L3 Components -- Receiver](architecture.md). Down: [L4 Detail -- When a sender is answered](#the-answer-waits-for-the-destination).
+
+Each listener's answer, and the protocol rule behind it, is in [internals.md](internals.md#what-a-sender-is-told).
 
 ## The answer waits for the destination
 
@@ -54,24 +151,35 @@ config:
     .ui .label-icon{color:#D9480F}
     .ext .label-icon{color:#64748B}
 ---
-flowchart LR
+flowchart TB
     accTitle: L4 Detail -- When a sender is answered
     accDescr: A routed record whose listener holds its answer goes straight to its sink. The sender is told it was accepted when the destination confirms within the hold, and told to retry when it does not. A record whose listener answers at enqueue goes into the buffer, and the sender is told it was accepted at once.
-
-    held{"<b>Answer held?</b>"}
-    send("<b>Send to sink</b>")
-    buffer[("<b>Buffer</b>")]
-    confirmed{"<b>Confirmed<br/>in the hold?</b>"}
-    queued(["<b>Accepted<br/>at enqueue</b>"])
-    ok(["<b>Accepted</b>"])
-    retry(["<b>Told to retry</b>"])
-
-    held -->|yes| send
-    held -->|no| buffer
-    send --> confirmed
-    buffer --> queued
-    confirmed -->|yes| ok
-    confirmed -.->|no| retry
+    subgraph ans["Answer"]
+        direction TB
+        held{"<b>Answer held?</b>"}
+        subgraph HELD["Held"]
+            direction LR
+            send("<b>Send to sink</b>")
+            confirmed{"<b>Confirmed<br/>in the hold?</b>"}
+            ok(["<b>Accepted</b>"])
+            retry(["<b>Told to retry</b>"])
+            send --> confirmed
+            confirmed -->|yes| ok
+            confirmed -.->|no| retry
+        end
+        subgraph ENQ["Answered at enqueue"]
+            direction LR
+            buffer[("<b>Buffer</b>")]
+            queued(["<b>Accepted<br/>at enqueue</b>"])
+            buffer --> queued
+        end
+        held -->|yes| HELD
+        HELD ~~~ ENQ
+        held -->|no| ENQ
+    end
+  class held,confirmed decision
+  class send,buffer,queued,ok part
+  class retry error
   classDef ext fill:#F4F6F8,stroke:#94A3B8,stroke-width:1.5px,stroke-dasharray:5 4,color:#0F172A
   classDef ingest fill:#FFFFFF,stroke:#0E8A7D,stroke-width:3px,color:#0F172A
   classDef xform fill:#FFFFFF,stroke:#7B4FB0,stroke-width:3px,color:#0F172A
@@ -83,12 +191,12 @@ flowchart LR
   classDef error fill:#FFFFFF,stroke:#C2410C,stroke-width:3px,color:#0F172A
   classDef control fill:#FFFFFF,stroke:#334155,stroke-width:3px,color:#0F172A
   classDef part fill:#FFFFFF,stroke:#94A3B8,stroke-width:1.5px,color:#0F172A
-  class held,confirmed decision
-  class send,buffer,queued,ok part
-  class retry error
+  style ans fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
+  style HELD fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
+  style ENQ fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
 ```
 
-*Figure 1. L4 Detail -- When a sender is answered. The dotted arrow is the retry path.* Up: [L3 Components -- Receiver](architecture.md#components).
+*Figure 2. L4 Detail -- When a sender is answered. The dotted arrow is the retry path.* Up: [L4 Detail -- Delivery](delivery.md).
 
 A buffered record drains to the same sink later, and the sender has no copy of it by then. A record refused for good is answered as the next section says, whichever way it went.
 
