@@ -1,19 +1,16 @@
-# Setting up an inbound webhook caller
+# Webhook intake
 
-`POST /webhook/{caller}` accepts events pushed by a product -- an alert rule, a
-SaaS notification hook -- rather than streamed by an agent. This page is how the
-intake handles a request and how to configure a caller, from the auth choice to
-proving delivery. Why the intake is separate from `/ingest` is in
-[architecture.md](architecture.md#listeners-and-transports), and every field is
-in the generated [config-schema.yaml](config-schema.yaml).
+The webhook intake is the part of [dfe-receiver](architecture.md) that takes events a product pushes, such as an alert rule or a SaaS notification hook, rather than streams from an agent.
 
-Every caller is declared separately with a secret, topic and body
-format of its choosing, so two callers never share a credential and a wrong secret is
-tried against the caller the URL path names and no other.
+| | |
+|---|---|
+| Repo | [hyperi-io/dfe-receiver](https://github.com/hyperi-io/dfe-receiver) |
+| Image and chart | `ghcr.io/hyperi-io/dfe-receiver`, and the thin chart released beside it |
+| Config reference | `webhook` and `ingest_bindings.credentials` in [config-schema.yaml](config-schema.yaml) |
+| Endpoints | `POST /webhook/{caller}`, on the ingest port, or on 8090 with `webhook.bind_address` set |
+| Metrics | `receiver_requests_total{transport="webhook"}` and the rest of [metrics.md](metrics.md#requests-and-records) |
 
-## How the intake handles a request
-
-A webhook request passes four admission checks in `src/server/webhook/` before its body is split into records.
+A webhook request passes four admission checks before its body is split into records.
 
 ```mermaid
 ---
@@ -65,19 +62,24 @@ flowchart TB
     accTitle: L4 Detail -- Webhook intake
     accDescr: A webhook request is admitted in four steps, the listener limits, the caller lookup, the caller's auth and the readiness check. Its body is then split into records and filtered. Each record left is validated, stamped and written to the caller's topic.
 
-    subgraph s1["1 Admit"]
+    subgraph intake["Webhook intake"]
+    direction TB
+    subgraph s1["1 Check the caller"]
         direction LR
-        limits("<b>Listener limits</b>") --> lookup("<b>Caller lookup</b>") --> auth("<b>Caller auth</b>") --> ready("<b>Readiness</b>")
+        limits("<b>Listener limits</b>") --> lookup("<b>Caller lookup</b>") --> auth("<b>Caller auth</b>")
     end
-    subgraph s2["2 Prepare"]
+    subgraph s2["2 Admit and split"]
         direction LR
-        split("<b>Split body</b>") --> filter("<b>CEL filter</b>")
+        ready("<b>Readiness</b>") --> split("<b>Split body</b>") --> filter("<b>CEL filter</b>")
     end
     subgraph s3["3 Deliver"]
         direction LR
         validate("<b>Validate</b>") --> stamp("<b>Stamp and clamp</b>") --> topic[("<b>Caller topic</b>")]
     end
     s1 --> s2 --> s3
+    end
+  class limits,lookup,auth,ready,split,filter,validate,stamp part
+  class topic bus
   classDef ext fill:#F4F6F8,stroke:#94A3B8,stroke-width:1.5px,stroke-dasharray:5 4,color:#0F172A
   classDef ingest fill:#FFFFFF,stroke:#0E8A7D,stroke-width:3px,color:#0F172A
   classDef xform fill:#FFFFFF,stroke:#7B4FB0,stroke-width:3px,color:#0F172A
@@ -89,14 +91,25 @@ flowchart TB
   classDef error fill:#FFFFFF,stroke:#C2410C,stroke-width:3px,color:#0F172A
   classDef control fill:#FFFFFF,stroke:#334155,stroke-width:3px,color:#0F172A
   classDef part fill:#FFFFFF,stroke:#94A3B8,stroke-width:1.5px,color:#0F172A
-  class limits,lookup,auth,ready,split,filter,validate,stamp part
-  class topic bus
+  style intake fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
   style s1 fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
   style s2 fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
   style s3 fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
 ```
 
-*Figure 1. L4 Detail -- Webhook intake. Read each stage left to right, then down.* Up: [L3 Components -- Receiver](architecture.md#components).
+*Figure 1. L4 Detail -- Webhook intake. Read each stage left to right, then down.* Up: [L3 Components -- Receiver](architecture.md). Down: none.
+
+This page is how the
+intake handles a request and how to configure a caller, from the auth choice to
+proving delivery. Why the intake is separate from `/ingest` is in
+[architecture.md](architecture.md#why-its-built-this-way), and every field is
+in the generated [config-schema.yaml](config-schema.yaml).
+
+Every caller is declared separately with a secret, topic and body
+format of its choosing, so two callers never share a credential and a wrong secret is
+tried against the caller the URL path names and no other.
+
+## How the intake handles a request
 
 A caller's records go to the caller's topic on Kafka, never to a gRPC destination, and the rules pick no topic for them. The rules still set `_org_id`, held to `ingest_bindings.credentials.<caller>` because the caller's name is its credential id, or the default org when it has none. With `routing.enrich` on, the default, records are stamped with `_source`, the caller name over any value the sender wrote, and `_timestamp_received`. An oversize body is never a DLQ entry, so unauthenticated bytes do not reach Kafka.
 
