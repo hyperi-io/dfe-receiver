@@ -185,12 +185,6 @@ The two NGINX ingress controllers are often confused:
 of the Kubernetes Gateway API, built on Envoy Proxy.
 Open source, Apache 2.0.
 
-**Future path:** If service mesh features are ever needed (mTLS between
-services, traffic shifting, canary deployments), Istio ambient mesh
-(sidecar-less, GA since Istio 1.24) uses Envoy as its data plane. The
-Envoy Gateway investment transfers -- same proxy, same config patterns,
-same operational knowledge.
-
 **Security features via CRDs:**
 
 **ClientTrafficPolicy** (downstream -- client-to-Envoy):

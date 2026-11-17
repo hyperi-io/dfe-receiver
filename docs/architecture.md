@@ -1,48 +1,41 @@
 # dfe-receiver architecture
 
-Why the service is built the way it is, and the rules you cannot read off the
-code. Every setting and its default is in [config-schema.yaml](config-schema.yaml),
-and the component-by-component detail is in [internals.md](internals.md).
+dfe-receiver is DFE's front door for data. Agents and products send to it in whatever protocol they already speak, and it hands JSON on to Kafka or straight to the loader. This page covers why it's built that way and the rules you can't read off the code. Every setting and its default is in [config-schema.yaml](config-schema.yaml), and the component-by-component detail is in [internals.md](internals.md).
 
-## The problem
+## Why it exists
 
-Agents do not speak one protocol. A site running Filebeat, an
-OpenTelemetry collector, rsyslog, a Splunk forwarder and a Prometheus server has
-five wire formats on the floor and no appetite for changing any of them. The DFE
-pipeline behind wants one thing: JSON, on a Kafka topic or straight to the loader's
-gRPC listener.
+Agents don't speak one protocol. A site running Filebeat, an OpenTelemetry collector, rsyslog, a Splunk forwarder and a Prometheus server has five wire formats on the floor, and nobody wants to change any of them. The pipeline behind wants one thing: JSON, on a Kafka topic or straight to the loader's gRPC listener.
 
-Three ways to close that gap. Put a translator in front of each agent, and the
-deployment count multiplies. Teach dfe-loader the five protocols, and
-network-facing framing and decode move into the middle of the pipeline, next to
-the enrichment and schema logic. Or terminate every protocol once, at the edge,
-and normalise before anything else sees the data.
+There are three ways to close that gap:
 
-dfe-receiver is the third option. Everything below follows from it.
+- Put a translator in front of each agent. The number of things to deploy multiplies.
+- Teach dfe-loader all five protocols. Network-facing framing and decoding then sit in the middle of the pipeline, next to the enrichment and schema logic.
+- Terminate every protocol once, at the edge, and turn it into JSON before anything else sees the data.
 
-## What that makes it
+dfe-receiver is the third. For every record, it:
 
-The one external door for data. dfe-receiver, dfe-ui, dfe-hyperdx (user facing,
-behind the engine's token) and, where it is deployed, culvert are the components
-that take untrusted input -- the loader, archiver and transforms have no
-listener an outsider reaches, and dfe-fetcher dials out rather than being
-dialled. So a dependency advisory here is not the same finding as the identical
-advisory in dfe-loader. Grade reachability first, severity second, per
-`dfe-infra/docs/threat-model.md`. The ingest edge is
-`dfe-infra/docs/ingest-edge.md`: the receiver takes traffic from outside the
-cluster and produces to local Kafka, which never faces the network.
+- parses the transport framing of each standard machine format (the syslog RFCs, Beats, HEC, OTLP, flow and the rest) into JSON
+- stamps `_source`, `_org_id` and `_timestamp_received`
+- picks a topic and hands the record on.
 
-It is not a transform stage. The receiver parses the transport framing of each
-standard machine format (the syslog RFCs, Beats, HEC, OTLP, flow and the rest)
-into JSON, stamps `_source`, `_org_id` and `_timestamp_received`, picks a topic
-and hands over. Parsing a message body is the dfe-transform-* apps' job, and
-fitting a record to its table is dfe-loader's. `_raw` is the one copy of the
-original it can keep, where raw capture is on: for syslog and friends the wire
-bytes are gone by the time the loader sees the record.
+It doesn't parse the message body. That's the dfe-transform-* apps' job, and fitting a record to its table is dfe-loader's.
+
+With raw capture on, `_raw` keeps a copy of the original. For syslog and similar protocols it's the only copy: the wire bytes are gone by the time the loader sees the record. `_raw` is taken before redaction, so anything stripped from the parsed fields downstream is still there, indexed for full-text search. That's as much why capture is off by default as the doubled bytes.
+
+## The door outsiders reach
+
+Only a few DFE components take input from outside: the receiver, dfe-ui, dfe-hyperdx (behind the engine's token) and culvert where it's deployed. The loader, archiver and transforms have no listener an outsider can reach, and dfe-fetcher dials out rather than taking calls. So a dependency advisory here isn't the same finding as the same advisory in dfe-loader. Grade reachability first and severity second, as `dfe-infra/docs/threat-model.md` sets out.
+
+The receiver takes traffic from outside the cluster and produces to local Kafka, which never faces the network (`dfe-infra/docs/ingest-edge.md`).
+
+`auth.mode` defaults to `none`. A receiver nobody has configured auth on accepts unauthenticated posts, limited by nothing more than body size, request timeout, the concurrency and connection caps, the IP filter and the rate limiter. So whatever sits in front of it on the internet has to limit who reaches the ports: edge protection, or an allow list on the load balancer.
+
+- In a DFE deployment the public door is `exposure.groups.ingest` (`dfe-infra/docs/ingest-edge.md`). A load balancer renders once its allow list names someone, so an empty list means no public door at all. `publicService` stays off, and is refused if switched on.
+- The standalone thin chart defaults to an in-cluster Service alone. Setting `publicService.enabled` adds a load balancer, and an empty `publicService.loadBalancerSourceRanges` leaves it open to every address.
 
 ## Components
 
-Events and webhooks meet at validation, then routing and stamping, then the sinks, and refused records go to the DLQ.
+Every record takes the same path: events from agents and webhooks from products are validated, then routed and stamped, then sent on. Anything refused goes to the DLQ (dead-letter queue).
 
 ```mermaid
 flowchart TB
@@ -95,82 +88,59 @@ flowchart TB
 | Route and stamp | `src/routing/` | The rule set, the org clamp, the topic and destinations, and the `_source`, `_org_id` and `_timestamp_received` stamps |
 | Sinks | `src/sink/`, `src/buffer/` | The Kafka producer and one gRPC sink per destination, with a buffer in front for answers given at enqueue |
 | gRPC destinations | `destinations.*`, `loader.*` | scalo Push listeners: dfe-loader, the transforms, the archiver |
-| DLQ | `routing.dlq` | scalo's dead letter queue: by default the `dfe_receiver_dlq` topic, and a local file when Kafka does not take the entry |
+| DLQ | `routing.dlq` | scalo's dead letter queue: by default the `dfe_receiver_dlq` topic, and a local file when Kafka doesn't take the entry |
 
-Many handlers, one core path. A handler owns its socket, its framing and its
-decode, and nothing else. The moment it holds JSON bytes it calls the same
-pipeline every other handler calls, so validation, routing, backpressure and
-metrics exist once rather than once per handler.
-
-`ProtocolHandler` (`src/server/traits.rs`) is where the two halves meet: `name()`, `bind_address()`, `listeners()`, `start(shutdown)`. `Server::build_handlers` (`src/server/mod.rs`) collects the enabled handlers, and `Server::run` spawns each one. Adding a protocol is a directory under `src/server/`, a config section, a block in `build_handlers` and a port in the deployment contract (`src/deployment.rs`). It does not touch the core path.
-
-`listeners()` returns one `BoundAddr` per socket the handler binds, and `/readyz` waits on all of them: it answers 503 until every enabled listener is serving, and again once any of them stops. A listener that cannot bind, or stops before shutdown, fails its handler's `start()`, the handler's other listeners stop with it, and the process logs `Protocol handler failed` and stays up. The ingest port's `/readyz` 503 body names each failed handler, and the error stays in the log. An enabled handler that cannot be built fails the same way.
+A protocol handler owns its socket, its framing and its decoding, and nothing else. Once it has JSON bytes it calls the same pipeline every other handler calls. Validation, routing, backpressure and metrics exist once, not once per protocol.
 
 ## Listeners and transports
 
-HTTP is the exception to opt-in: it always runs. It serves `/livez` and `/readyz`
-beside `/ingest`, so exposing ingest exposes both probe paths. The chart's probes
-use the same paths on the metrics port.
+Every protocol is switched on in config, except HTTP, which always runs. It serves `/livez` and `/readyz` beside `/ingest`, so exposing ingest exposes both probes. The chart's probes use the same paths on the metrics port.
 
-`grpc.enabled` defaults to `false`, but a DFE deployment turns it on: dfe-infra's
-values set the listener on `0.0.0.0:6000`, where it takes Vector's gRPC sink
-(`PushEvents`). It speaks Vector's protocol, not scalo's Push.
+`/readyz` answers 503 until every enabled listener is serving, and again once any of them stops. When a listener can't bind, or stops before shutdown, its handler stops all its listeners. The process logs `Protocol handler failed` and stays up, the ingest port's `/readyz` 503 body names each failed handler, and the error stays in the log. An enabled handler that can't be built fails the same way.
 
-Records land on Kafka by default. `transport: grpc` (or `DFE_RECEIVER_TRANSPORT=grpc`), the same key dfe-loader and dfe-archiver read, sends them to the loader's Push listener with no broker in the path. Under it an unset `destinations.default` becomes `loader` and an unset `loader.transport` becomes `grpc`, and a config that sets either to the bus fails to start. dfe-infra's slim and mesh profiles set those two keys themselves.
+`grpc.enabled` defaults to `false`, but a DFE deployment turns it on. dfe-infra's values put the listener on `0.0.0.0:6000`, where it takes Vector's gRPC sink (`PushEvents`). It speaks Vector's protocol, not scalo's Push.
 
-The webhook intake has separate routes and per-caller auth rather than a route on
-`/ingest`. `/ingest` checks one server-wide credential in middleware
-before the body is read, where a product is identified per caller and a signed
-request needs the body to verify. Each product picks its payload format, so
-the `rules` rows cannot pick its topic. And with `webhook.bind_address` set it takes a
-separate listener, so a deployment can expose just that port to the product's egress.
+Webhooks get their own routes and per-caller auth instead of a route on `/ingest`, for three reasons:
 
-## The hot path, and what it costs
+- `/ingest` checks one server-wide credential before reading the body. A product is identified per caller, and a signed request needs the body to verify it.
+- Each product picks its own payload format, so the `rules` rows can't pick its topic.
+- With `webhook.bind_address` set, the intake gets its own listener, so a deployment can expose just that port to the product.
 
-A design target of petabytes a day sets the rules for the core path. The payload
-stays `bytes::Bytes` from socket to sink -- reference-counted, so a clone copies
-nothing. Field extraction for routing borrows out of the payload (`Cow<str>`)
-rather than building a DOM. Topic lookups use `FxHashMap`, and the default
-source's topic is formatted once, when the router is built.
+Records land on Kafka by default. `transport: grpc` (or `DFE_RECEIVER_TRANSPORT=grpc`), the same key dfe-loader and dfe-archiver read, sends them to the loader's Push listener with no broker in between. Under it an unset `destinations.default` becomes `loader` and an unset `loader.transport` becomes `grpc`, and a config that points either at the bus refuses to start. dfe-infra's slim and mesh profiles set both keys themselves.
 
-The consequence a reader should know: validation tests that the payload IS JSON and
-that any required fields are present. It does not test that the payload
-holds what downstream expects. That is deliberate -- a full parse at the door would
-cost the throughput the design exists for.
+## What a sender is told
 
-## Delivery: the answer waits for the destination
+A listener answers its sender in one of two ways, and which one depends on whether its protocol has an answer to give.
 
-A listener with an answer in its protocol holds it until every destination confirmed the request's records (`acknowledgements.enabled`, default on). A record not confirmed within the hold gets the protocol's retryable refusal, and the sender keeps it: duplicates, never loss. A buffer, and its spool, exist for answers given at enqueue alone, from syslog, GELF, flow and any listener with acknowledgements off. The hold, what is final, the producer and the spool are in [delivery.md](delivery.md).
+| Listeners | The sender is answered | A record that isn't confirmed |
+|---|---|---|
+| `server`, `grpc`, `otlp`, `splunk_hec`, `lumberjack`, `fluent`, `webhook`, `prometheus_rw`, with `acknowledgements.enabled` (the default) | Once every destination confirms the request's records, within the hold | Gets the protocol's retry signal, and the sender keeps it and sends it again |
+| syslog, GELF and flow, which have no answer to hold, and any listener with acknowledgements off | As soon as the record is queued | Is kept by the receiver, in its buffer and, with spillover on, its spool |
+
+A retry can deliver a record twice, because a destination can take a record and then miss the hold. Duplicates, never loss.
+
+An answer given at enqueue isn't a delivery receipt. The sender has been answered before a broker sees the record, so a kill loses whatever the producer and the buffer held. Turning acknowledgements off, or buffering a held record, gives that guarantee away.
+
+The buffer and spool exist for the second row alone. A held record goes straight to its sink, since the sender still has a copy. [delivery.md](delivery.md) has the hold times, what's final and what's retried, the Kafka producer and the spool.
+
+## Built for throughput, and what that costs
+
+The receiver is designed for petabytes a day, so the core path copies and parses as little as it can.
+
+- A payload stays `bytes::Bytes` from socket to sink. A clone bumps a reference count and copies nothing.
+- Routing reads its fields straight out of the payload (`Cow<str>`) instead of building a parsed tree.
+- Topic lookups go through `FxHashMap`, and the default source's topic is built once, when the router starts.
+
+The cost is in what validation checks. It checks the payload is JSON, that it's an object, and that the required fields are there, reading lazily with sonic-rs. It doesn't check that the fields hold what downstream expects. A full parse at the door would cost the throughput the receiver is built for.
 
 ## Configuration
 
-Two paths in. Without `--config` it is scalo's cascade: compiled defaults, then `defaults.yaml`, `settings.yaml` and `settings.{env}.yaml`, each searched in `./`, `./config/`, `/config/` and `~/.config/dfe-receiver/`, then `./.env`, then `DFE_RECEIVER_*` environment variables, then CLI arguments. The container passes `--config /etc/dfe-receiver/config.yaml`, which reads that mounted file over the compiled defaults, then the flat `DFE_RECEIVER_*` variables. Routing, validation and enrichment reload on SIGHUP and when the config file changes, and so do the gRPC destinations: a reload builds the sender of a destination it adds and retires one it removes, sending that one's buffered records to it or else the DLQ. With disk spillover on, a destination with a changed address moves to it on the same spool once no request uses its old sender, and replays what that sender spooled. The Kafka producer and the DLQ change with a restart alone.
+There are two ways in.
 
-Bearer tokens, TLS material and webhook caller secrets can be `provider:path[:key]` references -- `file:`, `vault:`, `aws:`, `env:` -- resolved through `scalo::secrets::resolve`, and a reference field rejects a value that names no provider. A webhook caller's secret is always one. Static bearer tokens and accepted header values can instead be literals in the file. The Kafka SASL credential is a plain value, set by `DFE_RECEIVER_KAFKA_SASL_PASSWORD` from the Kafka Secret. The receiver resolves no secret itself, and builds scalo's `secrets-vault` and `secrets-aws` features so the OpenBao and AWS Secrets Manager providers are in the binary.
+- Without `--config` it's scalo's cascade: compiled defaults, then `defaults.yaml`, `settings.yaml` and `settings.{env}.yaml`, each searched in `./`, `./config/`, `/config/` and `~/.config/dfe-receiver/`, then `./.env`, then `DFE_RECEIVER_*` environment variables, then CLI arguments.
+- The container passes `--config /etc/dfe-receiver/config.yaml`, which reads that mounted file over the compiled defaults, then the flat `DFE_RECEIVER_*` variables.
 
-## Invariants
+Routing, validation and enrichment reload on SIGHUP and when the config file changes, and so do the gRPC destinations. A reload builds a sender for a destination it adds. It retires one it removes, sending that destination's buffered records to it, or to the DLQ when it can't. With disk spillover on, a destination whose address changed moves to the new one on the same spool once no request is using its old sender, and replays what that sender spooled. The Kafka producer and the DLQ need a restart to change.
 
-In rough order of the damage getting them wrong does.
+Bearer tokens, TLS material and webhook caller secrets can be `provider:path[:key]` references -- `file:`, `vault:`, `aws:`, `env:` -- resolved through `scalo::secrets::resolve`. A reference field rejects a value that names no provider, and a webhook caller's secret is always a reference. Static bearer tokens and accepted header values can instead be literals in the file. The Kafka SASL credential is a plain value, set by `DFE_RECEIVER_KAFKA_SASL_PASSWORD` from the Kafka Secret. The receiver resolves no secret itself. It builds scalo's `secrets-vault` and `secrets-aws` features, so the OpenBao and AWS Secrets Manager providers are in the binary.
 
-1. An answer given at enqueue is not a delivery receipt. With
-   `acknowledgements.enabled: false` the client has been answered by the time a
-   broker sees the record, and a kill loses what the producer and the buffer
-   held. The default holds the answer until the destination confirmed it, and a
-   change that answers earlier, or buffers a held record, gives that away.
-
-2. The `Dockerfile` is generated, not written. It comes from the deployment contract in `src/deployment.rs`, and a unit test fails when the committed file no longer matches. Regenerate with `dfe-receiver --emit-dockerfile Dockerfile`. A scalo bump can change the generator, so a bump without a regenerate fails this repo's suite by design.
-
-3. No chart is committed. At release, hyperi-ci emits the contract with `generate-artefacts` and assembles a thin chart from it on the scalo-service library chart at `release.helm.library`, which moves with the scalo version in `Cargo.toml`. A deployment wires the receiver's listeners by port name, so a renamed port breaks it. The contract marks every ingest port public and the gRPC port internal. `hyperi-ci chart assemble --binary target/debug/dfe-receiver --image <image>@sha256:<digest>` builds the chart a release would ship and prints its directory.
-
-4. `auth.mode` defaults to `none`. A deployment that has not configured auth accepts unauthenticated posts, limited by body size, request timeout, the concurrency and connection caps, the IP filter and the rate limiter. Whatever faces the internet in front of it has to limit who reaches the ports: edge protection, or an allow list on the load balancer.
-
-   In a DFE deployment the public door is `exposure.groups.ingest` (`dfe-infra/docs/ingest-edge.md`). Load balancers render when its allow list names someone, so an empty list is no public door at all, and `publicService` stays off and is refused if switched on. The standalone thin chart's default is an in-cluster Service alone: there a load balancer exists once a deployment sets `publicService.enabled`, and an empty `publicService.loadBalancerSourceRanges` leaves it open to every address.
-
-5. `_raw` holds the payload before redaction. Anything stripped from the
-   parsed fields downstream is still in `_raw`, indexed for full-text search.
-   Capture is off by default for that reason as much as for the doubled bytes.
-
-6. `Config::validate()` runs in `load_config` (`src/main.rs`) on every start, `--config` path included. A test that builds a
-   `Config` struct directly never reaches it, which is how the brokerless test
-   configurations work. Do not read a passing test as proof that a YAML file
-   would be accepted.

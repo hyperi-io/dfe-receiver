@@ -128,7 +128,7 @@ The suite's ingest edge: every wire protocol in the README's table terminated, e
 | `src/config/mod.rs`, `src/deployment.rs` | `Config::validate()`, and the contract the Dockerfile and the released chart are generated from |
 | `Dockerfile`, `proto/` | Generated, or copied in from upstream. Do not hand-edit |
 | `tests/` | Targets `smoke`, `integration`, `e2e`, `orchestrator_lifecycle`. `common/mod.rs` is the container harness |
-| `docs/architecture.md` | Why it is built this way, and the invariants |
+| `docs/architecture.md` | What the receiver is and why it's built this way |
 
 ### Commands that prove a change
 
@@ -158,6 +158,8 @@ not the shipped one.
 | Read 202 as delivered on a listener with acknowledgements off | Compare `receiver_kafka_sends_total` with `receiver_kafka_delivered_total` | That 202 is answered at enqueue |
 | Read a 503 as "not written" | Allow for the retry to duplicate the record | The hold can expire with a broker part way through writing it |
 | Set `VAULT_*` on the test OpenBao | Set `BAO_*` | `VAULT_` is ignored, a random root token is minted, everything 403s silently |
+| Add a protocol by touching the core path | Add a directory under `src/server/` implementing `ProtocolHandler`, a config section, a block in `build_handlers` and a port in `src/deployment.rs` | A handler owns its socket, framing and decode, and hands JSON to the one shared pipeline. `listeners()` returns one `BoundAddr` per socket, which `/readyz` waits on |
+| Read a passing test as proof a YAML file is accepted | Load the file through `load_config` | `Config::validate()` runs in `load_config` (`src/main.rs`) on every start, and a test that builds a `Config` struct directly never reaches it |
 
 ### Where this sits
 
