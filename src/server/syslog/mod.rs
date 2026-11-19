@@ -24,6 +24,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use scalo::tls::ServerTlsOptions;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
@@ -149,13 +150,15 @@ impl ProtocolHandler for SyslogHandler {
                 .tls_bind_address
                 .parse()
                 .map_err(|e| Error::Config(format!("invalid syslog TLS bind address: {e}")))?;
-            // The config asks for a TLS listener, so no acceptor fails the start.
-            let acceptor = super::tls::build_tls_acceptor_async(&self.config.tls)
-                .await?
-                .ok_or_else(|| {
-                    Error::Tls("syslog TLS is enabled but no TLS acceptor was built".into())
-                })?;
-            Some((tls_addr, acceptor))
+            // The config asks for a TLS listener, so no TLS fails the start.
+            let tls = super::tls::load_server_tls(
+                &self.config.tls,
+                &self.pipeline.config().server.connections,
+                ServerTlsOptions::default(),
+            )
+            .await?
+            .ok_or_else(|| Error::Tls("syslog TLS is enabled but no TLS was loaded".into()))?;
+            Some((tls_addr, tls))
         } else {
             None
         };
@@ -201,8 +204,8 @@ impl ProtocolHandler for SyslogHandler {
         listeners.spawn("syslog UDP", udp.run(shutdown.clone()));
         let plain = tcp_listener(tcp_addr, None, "TCP", self.tcp_bound.clone());
         listeners.spawn("syslog TCP", plain.run(shutdown.clone()));
-        if let Some((tls_addr, acceptor)) = tls {
-            let secure = tcp_listener(tls_addr, Some(acceptor), "TLS", self.tls_bound.clone());
+        if let Some((tls_addr, tls)) = tls {
+            let secure = tcp_listener(tls_addr, Some(tls), "TLS", self.tls_bound.clone());
             listeners.spawn("syslog TLS", secure.run(shutdown.clone()));
         }
 

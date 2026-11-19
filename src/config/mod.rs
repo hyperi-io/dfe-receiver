@@ -37,7 +37,8 @@ use serde::{Deserialize, Serialize};
 use scalo::scaling::{ScalingComponent, ScalingPressure, ScalingPressureConfig};
 
 use crate::error::{Error, Result};
-use crate::server::tls::{ClientAuth, Handshake};
+use crate::server::tls::{Handshake, parse_client_auth};
+use scalo::tls::ClientAuth;
 
 /// Environment variable prefix for configuration.
 pub const ENV_PREFIX: &str = "DFE_RECEIVER";
@@ -556,6 +557,7 @@ impl Config {
             ("webhook", &self.webhook.tls),
         ] {
             known_client_auth(scope, tls)?;
+            one_source_each(scope, tls)?;
         }
 
         // A mode the parser does not recognise is refused on every listener,
@@ -749,13 +751,36 @@ fn header_credentials_configured(scope: &str, auth: &AuthConfig) -> Result<()> {
 
 /// Refuse a `tls.client_auth` the TLS builders do not recognise, an empty one included.
 fn known_client_auth(scope: &str, tls: &TlsConfig) -> Result<()> {
-    if ClientAuth::parse(&tls.client_auth).is_some() {
+    if parse_client_auth(&tls.client_auth).is_some() {
         return Ok(());
     }
     Err(Error::Config(format!(
         "{scope}.tls.client_auth is '{}', which is not one of none, optional, required",
         tls.client_auth
     )))
+}
+
+/// Refuse an enabled TLS block that sets the certificate, the key or the CA both
+/// as a file and as a secret: scalo's `ServerTls` reads one source for each, and
+/// which of two to prefer is not a guess a listener should make.
+fn one_source_each(scope: &str, tls: &TlsConfig) -> Result<()> {
+    if !tls.enabled {
+        return Ok(());
+    }
+    for (part, file, secret) in [
+        ("cert", &tls.cert_file, &tls.cert_secret),
+        ("key", &tls.key_file, &tls.key_secret),
+        ("ca", &tls.ca_file, &tls.ca_secret),
+    ] {
+        if file.is_some() && secret.is_some() {
+            return Err(Error::Config(format!(
+                "{scope}.tls.{part}_file and {scope}.tls.{part}_secret are both set -- \
+                 set one, the secret to read it from a secret manager or the file to read \
+                 it from disk"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Refuse a listener whose wire protocol carries no credential unless its
@@ -817,7 +842,7 @@ fn cert_half_is_enforced(scope: &str, auth: &AuthConfig, tls: &TlsConfig) -> Res
              accepts every client unauthenticated"
         )));
     }
-    if ClientAuth::parse(&tls.client_auth) != Some(ClientAuth::Required) {
+    if parse_client_auth(&tls.client_auth) != Some(ClientAuth::Required) {
         return Err(Error::Config(format!(
             "{scope}.auth.mode is '{mode}' but {scope}.tls.client_auth is '{}' -- \
              it must be 'required', or clients presenting no certificate are \
@@ -1284,33 +1309,34 @@ pub struct TlsConfig {
     /// Enable TLS.
     pub enabled: bool,
 
-    /// Path to certificate file (local file path).
+    /// Path to the PEM certificate chain, leaf first. Set this or `cert_secret`, not both.
     pub cert_file: Option<String>,
 
-    /// Path to private key file (local file path).
+    /// Path to the PEM private key. Set this or `key_secret`, not both.
     pub key_file: Option<String>,
 
-    /// Path to CA certificate for client verification (mTLS).
+    /// Path to the PEM CA certificate client certificates must chain to (mTLS). Set this or `ca_secret`, not both.
     pub ca_file: Option<String>,
 
     /// Client certificate requirement (none, optional, required).
     pub client_auth: String,
 
-    /// Secret source for certificate (overrides cert_file).
+    /// Secret source for the certificate, instead of `cert_file`.
     /// Format: "provider:path:key" (e.g., "vault:secret/tls:cert")
     pub cert_secret: Option<String>,
 
-    /// Secret source for private key (overrides key_file).
+    /// Secret source for the private key, instead of `key_file`.
     /// Format: "provider:path:key" (e.g., "vault:secret/tls:key")
     pub key_secret: Option<String>,
 
-    /// Secret source for CA certificate (overrides ca_file).
+    /// Secret source for the CA certificate, instead of `ca_file`.
     /// Format: "provider:path:key" (e.g., "vault:secret/tls:ca")
     pub ca_secret: Option<String>,
 
-    /// Refresh interval for secrets in seconds.
-    /// Default: 3600 (1 hour)
-    pub refresh_interval_secs: u64,
+    /// How often the certificate, key and CA are re-read, in seconds, from files and secrets alike.
+    /// A rotated certificate is served from the next handshake, with no restart. 0 turns reload off.
+    /// Unset, scalo's default applies.
+    pub refresh_interval_secs: Option<u64>,
 }
 
 impl Default for TlsConfig {
@@ -1324,7 +1350,7 @@ impl Default for TlsConfig {
             cert_secret: None,
             key_secret: None,
             ca_secret: None,
-            refresh_interval_secs: 3600,
+            refresh_interval_secs: None,
         }
     }
 }
@@ -3584,6 +3610,43 @@ mod tests {
             ..client_certificates_required()
         };
         assert!(with_listener("lumberjack", tls, false).validate().is_ok());
+    }
+
+    /// scalo's `ServerTls` reads one source for the certificate, key and CA, so a
+    /// block that sets both is refused at config load, on every listener that has TLS.
+    #[test]
+    fn a_tls_part_set_as_file_and_secret_is_refused_on_every_listener() {
+        let both = |part: &str| {
+            let mut tls = client_certificates_required();
+            let spec = Some("vault:secret/tls:value".to_string());
+            match part {
+                "cert" => tls.cert_secret = spec,
+                "key" => tls.key_secret = spec,
+                _ => tls.ca_secret = spec,
+            }
+            tls
+        };
+        for scope in ["lumberjack", "fluent", "gelf", "syslog"] {
+            for part in ["cert", "key", "ca"] {
+                let err = with_listener(scope, both(part), true)
+                    .validate()
+                    .expect_err(scope)
+                    .to_string();
+                assert!(
+                    err.contains(&format!("{scope}.tls.{part}_file"))
+                        && err.contains(&format!("{scope}.tls.{part}_secret")),
+                    "{scope} {part}: {err}"
+                );
+            }
+        }
+
+        let mut config = auth_base();
+        config.server.tls = both("cert");
+        assert!(config.validate().is_err(), "server.tls");
+
+        // A disabled block is not read, so what it holds is not refused.
+        config.server.tls.enabled = false;
+        assert!(config.validate().is_ok());
     }
 
     /// Client certificates on syslog's TLS listener leave UDP and plain TCP open.

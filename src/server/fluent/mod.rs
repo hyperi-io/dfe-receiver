@@ -20,9 +20,9 @@ pub mod scan;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use scalo::tls::{ServerTls, ServerTlsOptions};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -34,6 +34,7 @@ use crate::server::frame_clock::Clocked;
 use crate::server::hold::hold_until_settled;
 use crate::server::http::{Accept, ConnectionLimits};
 use crate::server::ip_filter::IpFilter;
+use crate::server::tls::handshake;
 use crate::server::traits::{BoundAddr, ProtocolHandler};
 use crate::tenancy::{Ingest, Principal};
 use convert::{Refused, extract_chunk_id, fluent_to_json, unsupported_compression};
@@ -228,7 +229,7 @@ async fn run_tcp(
     metrics: Arc<Metrics>,
     acks: Acks,
     shutdown: CancellationToken,
-    tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
+    tls: Option<ServerTls>,
     max_buffer_size: usize,
     ip_filter: IpFilter,
     bound: BoundAddr,
@@ -238,7 +239,7 @@ async fn run_tcp(
         .map_err(|e| Error::Server(format!("failed to bind Fluent Forward listener: {e}")))?;
     let _serving = bound.publish(&listener.local_addr());
 
-    let tls_enabled = tls_acceptor.is_some();
+    let tls_enabled = tls.is_some();
     info!(addr = %bind_addr, tls = tls_enabled, "Fluent Forward listener started");
 
     let accept = Accept {
@@ -275,26 +276,17 @@ async fn run_tcp(
                 let conn_shutdown = shutdown.clone();
                 let accept = accept.clone();
 
-                if let Some(ref acceptor) = tls_acceptor {
-                    let acceptor = acceptor.clone();
+                if let Some(ref tls) = tls {
+                    let tls = tls.clone();
                     tokio::spawn(async move {
                         let _open = open;
                         if !accept.first_byte(&stream).await {
                             return;
                         }
-                        let tls_result = timeout(accept.limits.tls_handshake, acceptor.accept(stream)).await;
-                        let tls_stream = match tls_result {
-                            Ok(Ok(s)) => s,
-                            Ok(Err(e)) => {
-                                metrics.inc_tls_handshake_failure();
-                                debug!(peer = %peer_addr, error = %e, "Fluent Forward TLS handshake failed");
-                                return;
-                            }
-                            Err(_) => {
-                                metrics.inc_tls_handshake_failure();
-                                warn!(peer = %peer_addr, "Fluent Forward TLS handshake timeout");
-                                return;
-                            }
+                        let Some(tls_stream) =
+                            handshake(&tls, stream, peer_addr, &metrics).await
+                        else {
+                            return;
                         };
 
                         handle_tcp_connection(
@@ -371,12 +363,12 @@ impl ProtocolHandler for FluentHandler {
             .parse()
             .map_err(|e| Error::Config(format!("invalid Fluent Forward bind address: {e}")))?;
 
-        // Build TLS acceptor if enabled
-        let tls_acceptor = if self.config.tls.enabled {
-            super::tls::build_tls_acceptor_async(&self.config.tls).await?
-        } else {
-            None
-        };
+        let tls = super::tls::load_server_tls(
+            &self.config.tls,
+            &self.pipeline.config().server.connections,
+            ServerTlsOptions::default(),
+        )
+        .await?;
 
         // Forward carries no credential, so the IP filter and the TLS
         // handshake are the whole admission surface on this port.
@@ -392,7 +384,7 @@ impl ProtocolHandler for FluentHandler {
             self.metrics.clone(),
             acks,
             shutdown,
-            tls_acceptor,
+            tls,
             self.config.max_message_size,
             ip_filter,
             self.bound.clone(),

@@ -29,6 +29,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use scalo::tls::ServerTlsOptions;
 use scalo::transport::grpc::sender_deadline;
 use tokio_util::sync::CancellationToken;
 use tonic::service::interceptor::InterceptedService;
@@ -42,10 +43,12 @@ use crate::metrics::Metrics;
 use crate::pipeline::{Acks, BatchOutcome, PipelineState};
 use crate::server::auth::{AuthMode, TokenAuth, grpc_auth_interceptor, principal_or_listener};
 use crate::server::content_encoding;
-use crate::server::grpc::{count_connections, count_oversize, count_unsupported_encoding};
+use crate::server::grpc::{
+    count_connections, count_oversize, count_unsupported_encoding, handshake_connections,
+};
 use crate::server::http::ConnectionLimits;
 use crate::server::http::{Accept, create_auth_state};
-use crate::server::tls::{Handshake, TlsCertProvider, build_tls_acceptor, uses_secrets};
+use crate::server::tls::{Handshake, grpc_options, load_server_tls};
 use crate::server::traits::{BoundAddr, Listeners, ProtocolHandler};
 use crate::tenancy::{Ingest, Principal};
 use convert::OtlpMode;
@@ -352,13 +355,7 @@ async fn run_grpc_server(
     let shared_config = pipeline.shared_config();
     let service = OtlpService::new(pipeline, metrics.clone(), mode, acks);
 
-    // Build TLS config if enabled
-    let tls_config = if config.tls.enabled {
-        let identity = super::tls::build_grpc_tls_config(&config.tls).await?;
-        Some(identity)
-    } else {
-        None
-    };
+    let tls = load_server_tls(&config.tls, &pipeline_server.connections, grpc_options()).await?;
 
     // Build auth interceptor if configured.
     //
@@ -385,14 +382,7 @@ async fn run_grpc_server(
     }
 
     let limits = ConnectionLimits::new(&pipeline_server.connections);
-    let mut builder = crate::server::grpc::keep_alive(tonic::transport::Server::builder(), &limits);
-
-    if let Some(tls) = tls_config {
-        builder = builder
-            .tls_config(tls)
-            .map_err(|e| Error::Tls(format!("OTLP gRPC TLS error: {e}")))?;
-    }
-    let mut builder = builder
+    let mut builder = crate::server::grpc::keep_alive(tonic::transport::Server::builder(), &limits)
         .layer(count_oversize(metrics.clone(), TRANSPORT))
         .layer(count_unsupported_encoding(metrics.clone(), TRANSPORT));
 
@@ -436,15 +426,25 @@ async fn run_grpc_server(
         .with_nodelay(Some(true));
     let _serving = bound.publish(&incoming.local_addr());
 
-    info!(addr = %addr, mode = ?mode, "OTLP gRPC server listening");
+    info!(addr = %addr, mode = ?mode, tls = tls.is_some(), "OTLP gRPC server listening");
 
-    router
-        .serve_with_incoming_shutdown(
-            count_connections(incoming, metrics, TRANSPORT, limits),
-            shutdown.cancelled_owned(),
-        )
-        .await
-        .map_err(|e| Error::Server(format!("OTLP gRPC server error: {e}")))?;
+    let connections = count_connections(incoming, metrics.clone(), TRANSPORT, limits);
+    let served = match tls {
+        Some(tls) => {
+            router
+                .serve_with_incoming_shutdown(
+                    handshake_connections(connections, tls, metrics),
+                    shutdown.cancelled_owned(),
+                )
+                .await
+        }
+        None => {
+            router
+                .serve_with_incoming_shutdown(connections, shutdown.cancelled_owned())
+                .await
+        }
+    };
+    served.map_err(|e| Error::Server(format!("OTLP gRPC server error: {e}")))?;
 
     info!("OTLP gRPC server stopped");
     Ok(())
@@ -619,35 +619,22 @@ async fn run_http_server(
         .await
         .map_err(|e| Error::Server(format!("failed to bind OTLP HTTP: {e}")))?;
 
-    // Same TLS wiring as the Splunk HEC listener, over the same `tls:` block
-    // the gRPC endpoint uses.
-    let tls_provider = if config.tls.enabled && uses_secrets(&config.tls) {
-        let provider = TlsCertProvider::new(config.tls.clone()).await?;
-        provider.start_refresh_task();
-        Some(provider)
-    } else {
-        None
-    };
-    let tls_acceptor = if tls_provider.is_some() {
-        None
-    } else {
-        build_tls_acceptor(&config.tls)?
-    };
+    // The same `tls:` block the gRPC endpoint uses.
+    let tls = load_server_tls(
+        &config.tls,
+        &server.connections,
+        ServerTlsOptions::default(),
+    )
+    .await?;
 
     let accept = Accept::new(&server, metrics, TRANSPORT);
-
-    let acceptor_handle = if let Some(ref provider) = tls_provider {
-        Some(provider.acceptor_handle())
-    } else {
-        tls_acceptor.map(|a| Arc::new(parking_lot::RwLock::new(a)))
-    };
 
     // Published once TLS is ready, so a failed TLS setup never reads as serving.
     let _serving = bound.publish(&listener.local_addr());
 
-    if let Some(handle) = acceptor_handle {
+    if let Some(tls) = tls {
         info!(addr = %addr, mode = ?mode, tls = true, "OTLP HTTP server listening");
-        crate::server::http::run_tls_server(listener, app, handle, accept, shutdown).await?;
+        crate::server::http::run_tls_server(listener, app, tls, accept, shutdown).await?;
     } else {
         info!(addr = %addr, mode = ?mode, tls = false, "OTLP HTTP server listening");
         // The shared accept loop, not `axum::serve`: it runs the IP filter and

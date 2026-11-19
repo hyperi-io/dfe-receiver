@@ -42,7 +42,7 @@ properties:
         cert_secret: null
         key_secret: null
         ca_secret: null
-        refresh_interval_secs: 3600
+        refresh_interval_secs: null
       auth:
         mode: none
         accepted_headers: []
@@ -69,7 +69,7 @@ properties:
         cert_secret: null
         key_secret: null
         ca_secret: null
-        refresh_interval_secs: 3600
+        refresh_interval_secs: null
       auth:
         mode: none
         accepted_headers: []
@@ -99,7 +99,7 @@ properties:
         cert_secret: null
         key_secret: null
         ca_secret: null
-        refresh_interval_secs: 3600
+        refresh_interval_secs: null
       auth:
         mode: none
         accepted_headers: []
@@ -128,7 +128,7 @@ properties:
         cert_secret: null
         key_secret: null
         ca_secret: null
-        refresh_interval_secs: 3600
+        refresh_interval_secs: null
       auth:
         mode: none
         accepted_headers: []
@@ -158,7 +158,7 @@ properties:
         cert_secret: null
         key_secret: null
         ca_secret: null
-        refresh_interval_secs: 3600
+        refresh_interval_secs: null
       auth:
         mode: none
         accepted_headers: []
@@ -198,7 +198,7 @@ properties:
         cert_secret: null
         key_secret: null
         ca_secret: null
-        refresh_interval_secs: 3600
+        refresh_interval_secs: null
       auth:
         mode: none
         accepted_headers: []
@@ -231,7 +231,7 @@ properties:
         cert_secret: null
         key_secret: null
         ca_secret: null
-        refresh_interval_secs: 3600
+        refresh_interval_secs: null
       auth:
         mode: none
         accepted_headers: []
@@ -259,7 +259,7 @@ properties:
         cert_secret: null
         key_secret: null
         ca_secret: null
-        refresh_interval_secs: 3600
+        refresh_interval_secs: null
       accept_unauthenticated: false
       acknowledgements:
         enabled: true
@@ -279,7 +279,7 @@ properties:
         cert_secret: null
         key_secret: null
         ca_secret: null
-        refresh_interval_secs: 3600
+        refresh_interval_secs: null
       accept_unauthenticated: false
   flow:
     description: Flow (NetFlow v5/v9 + IPFIX + sFlow v5) receiver configuration.
@@ -334,7 +334,7 @@ properties:
         cert_secret: null
         key_secret: null
         ca_secret: null
-        refresh_interval_secs: 3600
+        refresh_interval_secs: null
       callers: []
       acknowledgements:
         enabled: true
@@ -547,7 +547,7 @@ $defs:
           cert_secret: null
           key_secret: null
           ca_secret: null
-          refresh_interval_secs: 3600
+          refresh_interval_secs: null
       auth:
         description: Authentication configuration.
         $ref: "#/$defs/AuthConfig"
@@ -710,19 +710,23 @@ $defs:
         type: boolean
         default: false
       cert_file:
-        description: Path to certificate file (local file path).
+        description: >-
+          Path to the PEM certificate chain, leaf first. Set this or `cert_secret`, not
+          both.
         type:
         - string
         - "null"
         default: null
       key_file:
-        description: Path to private key file (local file path).
+        description: Path to the PEM private key. Set this or `key_secret`, not both.
         type:
         - string
         - "null"
         default: null
       ca_file:
-        description: Path to CA certificate for client verification (mTLS).
+        description: >-
+          Path to the PEM CA certificate client certificates must chain to (mTLS). Set
+          this or `ca_secret`, not both.
         type:
         - string
         - "null"
@@ -733,7 +737,7 @@ $defs:
         default: none
       cert_secret:
         description: |-
-          Secret source for certificate (overrides cert_file).
+          Secret source for the certificate, instead of `cert_file`.
           Format: "provider:path:key" (e.g., "vault:secret/tls:cert")
         type:
         - string
@@ -741,7 +745,7 @@ $defs:
         default: null
       key_secret:
         description: |-
-          Secret source for private key (overrides key_file).
+          Secret source for the private key, instead of `key_file`.
           Format: "provider:path:key" (e.g., "vault:secret/tls:key")
         type:
         - string
@@ -749,7 +753,7 @@ $defs:
         default: null
       ca_secret:
         description: |-
-          Secret source for CA certificate (overrides ca_file).
+          Secret source for the CA certificate, instead of `ca_file`.
           Format: "provider:path:key" (e.g., "vault:secret/tls:ca")
         type:
         - string
@@ -757,12 +761,15 @@ $defs:
         default: null
       refresh_interval_secs:
         description: |-
-          Refresh interval for secrets in seconds.
-          Default: 3600 (1 hour)
-        type: integer
+          How often the certificate, key and CA are re-read, in seconds, from files and secrets alike.
+          A rotated certificate is served from the next handshake, with no restart. 0 turns reload off.
+          Unset, scalo's default applies.
+        type:
+        - integer
+        - "null"
         format: uint64
         minimum: 0
-        default: 3600
+        default: null
   AuthConfig:
     description: Authentication configuration.
     type: object
@@ -905,7 +912,7 @@ $defs:
           cert_secret: null
           key_secret: null
           ca_secret: null
-          refresh_interval_secs: 3600
+          refresh_interval_secs: null
       auth:
         description: Authentication configuration for gRPC server.
         $ref: "#/$defs/AuthConfig"
@@ -968,7 +975,7 @@ $defs:
           cert_secret: null
           key_secret: null
           ca_secret: null
-          refresh_interval_secs: 3600
+          refresh_interval_secs: null
       auth:
         description: Authentication configuration for OTLP endpoints.
         $ref: "#/$defs/AuthConfig"
@@ -1033,7 +1040,7 @@ $defs:
           cert_secret: null
           key_secret: null
           ca_secret: null
-          refresh_interval_secs: 3600
+          refresh_interval_secs: null
       auth:
         description: Authentication configuration.
         $ref: "#/$defs/AuthConfig"
@@ -1100,7 +1107,7 @@ $defs:
           cert_secret: null
           key_secret: null
           ca_secret: null
-          refresh_interval_secs: 3600
+          refresh_interval_secs: null
       auth:
         description: Authentication configuration.
         $ref: "#/$defs/AuthConfig"
@@ -1260,7 +1267,7 @@ $defs:
           cert_secret: null
           key_secret: null
           ca_secret: null
-          refresh_interval_secs: 3600
+          refresh_interval_secs: null
       auth:
         description: Authentication configuration.
         $ref: "#/$defs/AuthConfig"
@@ -1338,7 +1345,7 @@ $defs:
           cert_secret: null
           key_secret: null
           ca_secret: null
-          refresh_interval_secs: 3600
+          refresh_interval_secs: null
       auth:
         description: Authentication configuration.
         $ref: "#/$defs/AuthConfig"
@@ -1397,7 +1404,7 @@ $defs:
           cert_secret: null
           key_secret: null
           ca_secret: null
-          refresh_interval_secs: 3600
+          refresh_interval_secs: null
       accept_unauthenticated:
         description: |-
           Start without client certificates, accepting every client that can
@@ -1452,7 +1459,7 @@ $defs:
           cert_secret: null
           key_secret: null
           ca_secret: null
-          refresh_interval_secs: 3600
+          refresh_interval_secs: null
       accept_unauthenticated:
         description: |-
           Start without client certificates, accepting every client that can
@@ -1754,7 +1761,7 @@ $defs:
           cert_secret: null
           key_secret: null
           ca_secret: null
-          refresh_interval_secs: 3600
+          refresh_interval_secs: null
       callers:
         description: The callers, one entry per product.
         type: array

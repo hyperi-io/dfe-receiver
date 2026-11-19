@@ -30,6 +30,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
+use scalo::tls::ServerTlsOptions;
 use serde::Serialize;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -42,7 +43,7 @@ use crate::pipeline::{Acks, BatchOutcome, PipelineState};
 use crate::server::auth::{TokenAuth, principal_or_listener};
 use crate::server::content_encoding::{self, EncodingError};
 use crate::server::http::{Accept, create_auth_state};
-use crate::server::tls::{Handshake, TlsCertProvider, build_tls_acceptor, uses_secrets};
+use crate::server::tls::{Handshake, load_server_tls};
 use crate::server::traits::{BoundAddr, ProtocolHandler};
 use crate::tenancy::{Ingest, Principal};
 
@@ -356,34 +357,21 @@ async fn run_hec_server(
         .await
         .map_err(|e| Error::Server(format!("HEC failed to bind: {e}")))?;
 
-    // TLS setup (same pattern as HTTP handler)
-    let tls_provider = if config.tls.enabled && uses_secrets(&config.tls) {
-        let provider = TlsCertProvider::new(config.tls.clone()).await?;
-        provider.start_refresh_task();
-        Some(provider)
-    } else {
-        None
-    };
-
-    let tls_acceptor = if tls_provider.is_some() {
-        None
-    } else {
-        build_tls_acceptor(&config.tls)?
-    };
+    let tls = load_server_tls(
+        &config.tls,
+        &server.connections,
+        ServerTlsOptions::default(),
+    )
+    .await?;
 
     let accept = Accept::new(&server, metrics, TRANSPORT);
 
     // Published once TLS is ready, so a failed TLS setup never reads as serving.
     let _serving = bound.publish(&listener.local_addr());
 
-    if let Some(ref provider) = tls_provider {
-        let acceptor_handle = provider.acceptor_handle();
-        info!(addr = %addr, tls = true, hot_reload = true, "Splunk HEC server listening");
-        crate::server::http::run_tls_server(listener, app, acceptor_handle, accept, shutdown).await
-    } else if let Some(acceptor) = tls_acceptor {
-        let acceptor_handle = Arc::new(parking_lot::RwLock::new(acceptor));
-        info!(addr = %addr, tls = true, hot_reload = false, "Splunk HEC server listening");
-        crate::server::http::run_tls_server(listener, app, acceptor_handle, accept, shutdown).await
+    if let Some(tls) = tls {
+        info!(addr = %addr, tls = true, "Splunk HEC server listening");
+        crate::server::http::run_tls_server(listener, app, tls, accept, shutdown).await
     } else {
         info!(addr = %addr, tls = false, "Splunk HEC server listening");
         // The shared accept loop, not `axum::serve`: it runs the IP filter and

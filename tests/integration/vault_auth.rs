@@ -29,11 +29,14 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
-use dfe_receiver::config::{BearerConfig, TlsConfig, WebhookAuthConfig, WebhookAuthMode};
+use dfe_receiver::config::{
+    BearerConfig, ConnectionsConfig, TlsConfig, WebhookAuthConfig, WebhookAuthMode,
+};
 use dfe_receiver::server::auth::BearerTokenProvider;
-use dfe_receiver::server::tls::build_tls_acceptor_async;
+use dfe_receiver::server::tls::load_server_tls;
 use dfe_receiver::server::webhook::auth::{AuthFailure, CallerAuth};
 use dfe_receiver::tenancy::Principal;
+use scalo::tls::ServerTlsOptions;
 use tempfile::NamedTempFile;
 
 use crate::common::{OPENBAO_ROOT_TOKEN, docker_available, shared_openbao};
@@ -482,13 +485,14 @@ async fn test_tls_material_loads_from_file_specs() {
         ..TlsConfig::default()
     };
 
-    let acceptor = build_tls_acceptor_async(&config)
-        .await
-        .expect("cert and key resolve through the file provider");
-    assert!(
-        acceptor.is_some(),
-        "an enabled TLS config must produce an acceptor"
-    );
+    let tls = load_server_tls(
+        &config,
+        &ConnectionsConfig::default(),
+        ServerTlsOptions::default(),
+    )
+    .await
+    .expect("cert and key resolve through the file provider");
+    assert!(tls.is_some(), "an enabled TLS config must load a ServerTls");
 }
 
 /// A `file:` spec naming a path that is not there must name the path, not fail
@@ -503,11 +507,14 @@ async fn test_tls_material_from_a_missing_file_names_the_path() {
         ..TlsConfig::default()
     };
 
-    let err = build_tls_acceptor_async(&config)
-        .await
-        .err()
-        .expect("a missing cert file cannot load")
-        .to_string();
+    let err = load_server_tls(
+        &config,
+        &ConnectionsConfig::default(),
+        ServerTlsOptions::default(),
+    )
+    .await
+    .expect_err("a missing cert file cannot load")
+    .to_string();
     assert!(
         err.contains("/nonexistent/dfe-receiver-test/server.crt"),
         "the error must name the path: {err}"
@@ -660,14 +667,18 @@ async fn test_tls_material_loads_from_vault_container() {
         ..TlsConfig::default()
     };
 
-    let acceptor = bao
-        .with_env(async { build_tls_acceptor_async(&config).await })
+    let tls = bao
+        .with_env(async {
+            load_server_tls(
+                &config,
+                &ConnectionsConfig::default(),
+                ServerTlsOptions::default(),
+            )
+            .await
+        })
         .await
         .expect("the certificate and the key both resolve from OpenBao");
-    assert!(
-        acceptor.is_some(),
-        "an enabled TLS config must produce an acceptor"
-    );
+    assert!(tls.is_some(), "an enabled TLS config must load a ServerTls");
 }
 
 /// A `header`-mode webhook caller's secret loads from a `vault:` reference and

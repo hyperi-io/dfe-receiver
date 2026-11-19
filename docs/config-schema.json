@@ -44,7 +44,7 @@
           "cert_secret": null,
           "key_secret": null,
           "ca_secret": null,
-          "refresh_interval_secs": 3600
+          "refresh_interval_secs": null
         },
         "auth": {
           "mode": "none",
@@ -77,7 +77,7 @@
           "cert_secret": null,
           "key_secret": null,
           "ca_secret": null,
-          "refresh_interval_secs": 3600
+          "refresh_interval_secs": null
         },
         "auth": {
           "mode": "none",
@@ -113,7 +113,7 @@
           "cert_secret": null,
           "key_secret": null,
           "ca_secret": null,
-          "refresh_interval_secs": 3600
+          "refresh_interval_secs": null
         },
         "auth": {
           "mode": "none",
@@ -148,7 +148,7 @@
           "cert_secret": null,
           "key_secret": null,
           "ca_secret": null,
-          "refresh_interval_secs": 3600
+          "refresh_interval_secs": null
         },
         "auth": {
           "mode": "none",
@@ -184,7 +184,7 @@
           "cert_secret": null,
           "key_secret": null,
           "ca_secret": null,
-          "refresh_interval_secs": 3600
+          "refresh_interval_secs": null
         },
         "auth": {
           "mode": "none",
@@ -231,7 +231,7 @@
           "cert_secret": null,
           "key_secret": null,
           "ca_secret": null,
-          "refresh_interval_secs": 3600
+          "refresh_interval_secs": null
         },
         "auth": {
           "mode": "none",
@@ -270,7 +270,7 @@
           "cert_secret": null,
           "key_secret": null,
           "ca_secret": null,
-          "refresh_interval_secs": 3600
+          "refresh_interval_secs": null
         },
         "auth": {
           "mode": "none",
@@ -304,7 +304,7 @@
           "cert_secret": null,
           "key_secret": null,
           "ca_secret": null,
-          "refresh_interval_secs": 3600
+          "refresh_interval_secs": null
         },
         "accept_unauthenticated": false,
         "acknowledgements": {
@@ -328,7 +328,7 @@
           "cert_secret": null,
           "key_secret": null,
           "ca_secret": null,
-          "refresh_interval_secs": 3600
+          "refresh_interval_secs": null
         },
         "accept_unauthenticated": false
       }
@@ -395,7 +395,7 @@
           "cert_secret": null,
           "key_secret": null,
           "ca_secret": null,
-          "refresh_interval_secs": 3600
+          "refresh_interval_secs": null
         },
         "callers": [],
         "acknowledgements": {
@@ -631,7 +631,7 @@
             "cert_secret": null,
             "key_secret": null,
             "ca_secret": null,
-            "refresh_interval_secs": 3600
+            "refresh_interval_secs": null
           }
         },
         "auth": {
@@ -760,7 +760,7 @@
           "default": false
         },
         "cert_file": {
-          "description": "Path to certificate file (local file path).",
+          "description": "Path to the PEM certificate chain, leaf first. Set this or `cert_secret`, not both.",
           "type": [
             "string",
             "null"
@@ -768,7 +768,7 @@
           "default": null
         },
         "key_file": {
-          "description": "Path to private key file (local file path).",
+          "description": "Path to the PEM private key. Set this or `key_secret`, not both.",
           "type": [
             "string",
             "null"
@@ -776,7 +776,7 @@
           "default": null
         },
         "ca_file": {
-          "description": "Path to CA certificate for client verification (mTLS).",
+          "description": "Path to the PEM CA certificate client certificates must chain to (mTLS). Set this or `ca_secret`, not both.",
           "type": [
             "string",
             "null"
@@ -789,7 +789,7 @@
           "default": "none"
         },
         "cert_secret": {
-          "description": "Secret source for certificate (overrides cert_file).\nFormat: \"provider:path:key\" (e.g., \"vault:secret/tls:cert\")",
+          "description": "Secret source for the certificate, instead of `cert_file`.\nFormat: \"provider:path:key\" (e.g., \"vault:secret/tls:cert\")",
           "type": [
             "string",
             "null"
@@ -797,7 +797,7 @@
           "default": null
         },
         "key_secret": {
-          "description": "Secret source for private key (overrides key_file).\nFormat: \"provider:path:key\" (e.g., \"vault:secret/tls:key\")",
+          "description": "Secret source for the private key, instead of `key_file`.\nFormat: \"provider:path:key\" (e.g., \"vault:secret/tls:key\")",
           "type": [
             "string",
             "null"
@@ -805,7 +805,7 @@
           "default": null
         },
         "ca_secret": {
-          "description": "Secret source for CA certificate (overrides ca_file).\nFormat: \"provider:path:key\" (e.g., \"vault:secret/tls:ca\")",
+          "description": "Secret source for the CA certificate, instead of `ca_file`.\nFormat: \"provider:path:key\" (e.g., \"vault:secret/tls:ca\")",
           "type": [
             "string",
             "null"
@@ -813,11 +813,14 @@
           "default": null
         },
         "refresh_interval_secs": {
-          "description": "Refresh interval for secrets in seconds.\nDefault: 3600 (1 hour)",
-          "type": "integer",
+          "description": "How often the certificate, key and CA are re-read, in seconds, from files and secrets alike.\nA rotated certificate is served from the next handshake, with no restart. 0 turns reload off.\nUnset, scalo's default applies.",
+          "type": [
+            "integer",
+            "null"
+          ],
           "format": "uint64",
           "minimum": 0,
-          "default": 3600
+          "default": null
         }
       }
     },
@@ -955,7 +958,7 @@
             "cert_secret": null,
             "key_secret": null,
             "ca_secret": null,
-            "refresh_interval_secs": 3600
+            "refresh_interval_secs": null
           }
         },
         "auth": {
@@ -1025,7 +1028,7 @@
             "cert_secret": null,
             "key_secret": null,
             "ca_secret": null,
-            "refresh_interval_secs": 3600
+            "refresh_interval_secs": null
           }
         },
         "auth": {
@@ -1092,7 +1095,7 @@
             "cert_secret": null,
             "key_secret": null,
             "ca_secret": null,
-            "refresh_interval_secs": 3600
+            "refresh_interval_secs": null
           }
         },
         "auth": {
@@ -1164,7 +1167,7 @@
             "cert_secret": null,
             "key_secret": null,
             "ca_secret": null,
-            "refresh_interval_secs": 3600
+            "refresh_interval_secs": null
           }
         },
         "auth": {
@@ -1334,7 +1337,7 @@
             "cert_secret": null,
             "key_secret": null,
             "ca_secret": null,
-            "refresh_interval_secs": 3600
+            "refresh_interval_secs": null
           }
         },
         "auth": {
@@ -1417,7 +1420,7 @@
             "cert_secret": null,
             "key_secret": null,
             "ca_secret": null,
-            "refresh_interval_secs": 3600
+            "refresh_interval_secs": null
           }
         },
         "auth": {
@@ -1477,7 +1480,7 @@
             "cert_secret": null,
             "key_secret": null,
             "ca_secret": null,
-            "refresh_interval_secs": 3600
+            "refresh_interval_secs": null
           }
         },
         "accept_unauthenticated": {
@@ -1527,7 +1530,7 @@
             "cert_secret": null,
             "key_secret": null,
             "ca_secret": null,
-            "refresh_interval_secs": 3600
+            "refresh_interval_secs": null
           }
         },
         "accept_unauthenticated": {
@@ -1882,7 +1885,7 @@
             "cert_secret": null,
             "key_secret": null,
             "ca_secret": null,
-            "refresh_interval_secs": 3600
+            "refresh_interval_secs": null
           }
         },
         "callers": {

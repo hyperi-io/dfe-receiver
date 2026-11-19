@@ -80,6 +80,7 @@ A DFE deployment scales on that score through dfe-keda-shim: dfe-infra adds a `m
 | `spool_*` | The disk spool, with spillover on: `spool_bytes`, `spool_messages`, `spool_disk_available` and the rest |
 | `worker_pool_*` | scalo's worker pool |
 | flow | `flow_records_emitted_total{transport,mode}`, `flow_rate_limited_total{transport}`, `flow_template_evicted_total`, `flow_kernel_drops_total`, `transport_decode_err_total{transport,reason}`, `transport_drops_total{transport,reason}`, `handler_experimental{handler}` |
+| `tls_*` | Every TLS listener's handshakes and certificate reloads: `tls_handshakes_total{protocol,key_exchange}`, `tls_handshake_failures_total{reason}`, `tls_certificate_reloads_total{result}` |
 | `process_*`, `container_*` | Resident and virtual memory, open file descriptors, start time, and the cgroup memory and CPU limits, not in the manifest |
 
 ## Alerts

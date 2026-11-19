@@ -23,11 +23,13 @@ use bytes::Bytes;
 use socket2::{SockRef, TcpKeepalive};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::time::{Instant, timeout};
+use tokio::time::Instant;
 use tokio_stream::StreamExt;
 use tokio_util::codec::{Decoder, FramedRead};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
+
+use scalo::tls::ServerTls;
 
 use super::convert::Converter;
 use super::framing::SyslogFrameDecoder;
@@ -39,6 +41,7 @@ use crate::server::frame_clock::{Clocked, Framing};
 use crate::server::hold::{Held, hold};
 use crate::server::http::{Accept, ConnectionLimits};
 use crate::server::ip_filter::IpFilter;
+use crate::server::tls::handshake;
 use crate::server::traits::BoundAddr;
 
 /// The idle timer's period with idle closing off, when it is never polled.
@@ -59,7 +62,7 @@ pub(super) struct TcpListenerTask {
     pub(super) bind_addr: SocketAddr,
     pub(super) pipeline: Arc<PipelineState>,
     pub(super) metrics: Arc<Metrics>,
-    pub(super) tls: Option<tokio_rustls::TlsAcceptor>,
+    pub(super) tls: Option<ServerTls>,
     pub(super) connection: Connection,
     pub(super) label: &'static str,
     pub(super) ip_filter: IpFilter,
@@ -129,25 +132,14 @@ impl TcpListenerTask {
                 if !accept.first_byte(&stream).await {
                     return;
                 }
-                let Some(acceptor) = tls else {
+                let Some(tls) = tls else {
                     reader.read(accept.clock(stream)).await;
                     return;
                 };
-                let handshake = timeout(accept.limits.tls_handshake, acceptor.accept(stream)).await;
-                let tls_stream = match handshake {
-                    Ok(Ok(s)) => s,
-                    Ok(Err(e)) => {
-                        reader.metrics.inc_tls_handshake_failure();
-                        debug!(peer = %peer_addr, error = %e, "Syslog TLS handshake failed");
-                        return;
-                    }
-                    Err(_) => {
-                        reader.metrics.inc_tls_handshake_failure();
-                        warn!(peer = %peer_addr, "Syslog TLS handshake timeout");
-                        return;
-                    }
+                let Some(tls_stream) = handshake(&tls, stream, peer_addr, &reader.metrics).await
+                else {
+                    return;
                 };
-                debug!(peer = %peer_addr, "Syslog TLS connection established");
                 reader.read(accept.clock(tls_stream)).await;
             });
         }
