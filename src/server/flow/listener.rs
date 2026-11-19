@@ -31,8 +31,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::RawCapture;
 use crate::error::{Error, Result};
-use crate::pipeline::PipelineState;
-use crate::server::flow::config::{FlowListenerConfig, OutputMode};
+use crate::pipeline::{BatchOutcome, PipelineState};
+use crate::server::flow::config::FlowListenerConfig;
 use crate::server::flow::decoder::FlowDecoder;
 use crate::server::flow::dispatch::{ProtocolKind, dispatch_protocol_kind, length_sanity_check};
 use crate::server::flow::envelope::render_packet;
@@ -389,96 +389,37 @@ impl UdpFlowListener {
         };
 
         let mode_label = cfg.output.mode.label();
-        let is_exploded = matches!(cfg.output.mode, OutputMode::Exploded);
         // A flow packet carries no credential, and the envelope writes `_source`.
         let ingest = Ingest::built(Principal::Listener(D::PROTOCOL), D::PROTOCOL);
 
-        if is_exploded {
-            // All-or-nothing per packet: pre-clone every rendered envelope
-            // into its own `Bytes` before any send so a mid-batch failure
-            // cannot leave the buffer pointing at half-consumed ranges. The
-            // first send proves the pipeline has capacity; if it fails we
-            // drop the WHOLE packet (no event leaves the listener). If a
-            // later send fails the remaining records are charged to
-            // `drops_total{reason="channel_full"}` and emission stops --
-            // some events from this packet will already have been emitted
-            // in that case, but we never start emission unless the first
-            // event succeeds.
-            let total = ranges.len();
-            if total == 0 {
-                return;
-            }
-            let events: Vec<Bytes> = ranges
-                .into_iter()
-                .map(|r| Bytes::copy_from_slice(&json_buf[r]))
-                .collect();
-
-            // Probe with the first event. If it fails, charge ALL N to drops
-            // and return without partial emission.
-            let mut iter = events.into_iter();
-            let first = iter.next().unwrap_or_else(|| {
-                unreachable!("events is non-empty (proven by len check at line 366)")
-            });
-            match pipeline.process(first, &ingest).await {
-                Ok(()) => {
-                    metrics
-                        .records_emitted_total
-                        .inc(&[("transport", D::PROTOCOL), ("mode", mode_label)]);
-                }
-                Err(_) => {
-                    for _ in 0..total {
-                        metrics
-                            .drops_total
-                            .inc(&[("transport", D::PROTOCOL), ("reason", "channel_full")]);
-                    }
-                    return;
-                }
-            }
-            // Pipeline accepted the first event; emit the rest. A later
-            // failure stops emission and charges the remaining tail to
-            // drops_total{reason="channel_full"}.
-            let mut emitted = 1usize;
-            for ev in iter {
-                emitted += 1;
-                match pipeline.process(ev, &ingest).await {
-                    Ok(()) => {
-                        metrics
-                            .records_emitted_total
-                            .inc(&[("transport", D::PROTOCOL), ("mode", mode_label)]);
-                    }
-                    Err(_) => {
-                        let remaining = total - emitted + 1;
-                        for _ in 0..remaining {
-                            metrics
-                                .drops_total
-                                .inc(&[("transport", D::PROTOCOL), ("reason", "channel_full")]);
-                        }
-                        return;
-                    }
-                }
-            }
-            return;
+        // Each envelope gets its own `Bytes`: `json_buf` is reused by the next packet.
+        let events: Vec<Bytes> = ranges
+            .into_iter()
+            .map(|r| Bytes::copy_from_slice(&json_buf[r]))
+            .collect();
+        let outcome = pipeline.process_batch(&events, &ingest).await;
+        let (emitted, dropped) = packet_tally(events.len(), &outcome);
+        if emitted > 0 {
+            metrics
+                .records_emitted_total
+                .add(&[("transport", D::PROTOCOL), ("mode", mode_label)], emitted);
         }
-
-        // Canonical mode: ranges.len() == 1 so the simple loop is safe --
-        // no partial-emit hazard.
-        for range in ranges {
-            let bytes = Bytes::copy_from_slice(&json_buf[range]);
-            match pipeline.process(bytes, &ingest).await {
-                Ok(()) => {
-                    metrics
-                        .records_emitted_total
-                        .inc(&[("transport", D::PROTOCOL), ("mode", mode_label)]);
-                }
-                Err(_) => {
-                    metrics
-                        .drops_total
-                        .inc(&[("transport", D::PROTOCOL), ("reason", "channel_full")]);
-                    return;
-                }
-            }
+        if dropped > 0 {
+            metrics.drops_total.add(
+                &[("transport", D::PROTOCOL), ("reason", "channel_full")],
+                dropped,
+            );
         }
     }
+}
+
+/// The records of a packet of `total` the pipeline took, and the rest.
+///
+/// The batch stops at the first retryable failure, so a packet whose first
+/// record found no room emits nothing.
+fn packet_tally(total: usize, outcome: &BatchOutcome) -> (u64, u64) {
+    let emitted = outcome.accepted.min(total);
+    (emitted as u64, (total - emitted) as u64)
 }
 
 #[inline]
@@ -503,5 +444,121 @@ mod tests {
         assert_eq!(flow_transport(ProtocolKind::Ipfix), "netflow");
         assert_eq!(flow_transport(ProtocolKind::Unknown), "flow");
         assert_eq!(flow_transport(ProtocolKind::TooShort), "flow");
+    }
+
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use scalo::memory::UsageSource;
+
+    use crate::buffer::{MemoryGuard, MemoryGuardConfig};
+    use crate::config::{Config, DestinationSpec, GrpcDestination, SharedConfig};
+    use crate::server::flow::metrics::mock::{MockLabelledCounter, flow_metrics_for_test};
+    use crate::sink::grpc::test_destination::TestDestination;
+
+    /// A NetFlow v5 datagram carrying `records` flows.
+    fn v5_packet(records: u16) -> Vec<u8> {
+        let mut packet = vec![0u8; 24];
+        packet[0..2].copy_from_slice(&5u16.to_be_bytes());
+        packet[2..4].copy_from_slice(&records.to_be_bytes());
+        packet[8..12].copy_from_slice(&1_700_000_000u32.to_be_bytes());
+        for flow in 0..records {
+            let mut record = [0u8; 48];
+            record[0..4].copy_from_slice(&[10, 0, 0, 1]);
+            record[4..8].copy_from_slice(&[10, 0, 0, 2]);
+            record[32..34].copy_from_slice(&(1024 + flow).to_be_bytes());
+            record[38] = 6;
+            packet.extend_from_slice(&record);
+        }
+        packet
+    }
+
+    /// A pipeline sending every record to `destination` alone, its memory
+    /// guard counting only what the pipeline reserves against 1 MB.
+    async fn pipeline_to(destination: &TestDestination) -> Arc<PipelineState> {
+        let mut config = Config::default();
+        config.buffer.memory_limit = 1_000_000;
+        config.loader.transport = "memory".to_string();
+        config.routing.dlq.file_path = "/dev/null/dlq".to_string();
+        config.destinations.default = "alpha".into();
+        config.destinations.named.insert(
+            "alpha".to_string(),
+            DestinationSpec {
+                grpc: Some(GrpcDestination {
+                    endpoint: destination.endpoint().to_string(),
+                    ..GrpcDestination::default()
+                }),
+                kafka: None,
+            },
+        );
+        let guard = MemoryGuard::with_usage_source(
+            MemoryGuardConfig {
+                limit_bytes: 1_000_000,
+                pressure_threshold: config.buffer.pressure_threshold,
+                ..Default::default()
+            },
+            UsageSource::Reservations,
+        );
+        let shared = SharedConfig::new(config);
+        let state = PipelineState::with_governor(
+            shared,
+            CancellationToken::new(),
+            None,
+            Some(Arc::new(guard)),
+        );
+        Arc::new(state.await.unwrap())
+    }
+
+    /// Decode and emit one packet of `records` flows in exploded mode, and
+    /// return what was counted emitted and dropped.
+    async fn emit(pipeline: &Arc<PipelineState>, records: u16) -> (u64, u64) {
+        let emitted = Arc::new(MockLabelledCounter(AtomicU64::new(0)));
+        let drops = Arc::new(MockLabelledCounter(AtomicU64::new(0)));
+        let metrics = FlowMetrics {
+            records_emitted_total: emitted.clone(),
+            drops_total: drops.clone(),
+            ..flow_metrics_for_test()
+        };
+        let cfg: FlowListenerConfig = scalo::yaml::from_str(
+            "ports: [2055]\ntopic: flows\noutput:\n  mode: exploded\n",
+            "flow.yaml",
+            scalo::yaml::Profile::Config,
+        )
+        .unwrap();
+        let mut decoder = NetflowDecoder::new(64, 64, metrics.clone());
+        let mut json_buf = Vec::new();
+        UdpFlowListener::decode_and_emit::<NetflowDecoder>(
+            &mut decoder,
+            &v5_packet(records),
+            "192.0.2.10:2055".parse().unwrap(),
+            ProtocolKind::NetflowV5,
+            "2026-11-20T00:00:00Z",
+            &mut json_buf,
+            &cfg,
+            RawCapture::default(),
+            &metrics,
+            pipeline,
+        )
+        .await;
+        (
+            emitted.0.load(Ordering::Relaxed),
+            drops.0.load(Ordering::Relaxed),
+        )
+    }
+
+    /// A packet's records reach a gRPC destination in one batch, and a
+    /// packet whose first record the pipeline cannot take emits nothing and
+    /// counts every record dropped.
+    #[tokio::test]
+    async fn a_packet_is_sent_as_one_batch() {
+        let destination = TestDestination::start();
+        let pipeline = pipeline_to(&destination).await;
+
+        assert_eq!(emit(&pipeline, 3).await, (3, 0));
+        assert_eq!(destination.batches(), 1, "one send per record");
+        assert_eq!(destination.records(), 3);
+
+        pipeline.memory_guard().add_bytes(900_000);
+        assert_eq!(emit(&pipeline, 3).await, (0, 3));
+        assert_eq!(destination.batches(), 1);
     }
 }

@@ -411,7 +411,10 @@ fn enqueue(
                 let total = KAFKA_ERRORS.load(Ordering::Relaxed);
                 error!(error = %e, topic, total_errors = total, "Kafka send failed (1 in 1000)");
             }
-            delivery.refusing.trip();
+            // A full queue is librdkafka's backpressure under load, not a producer that is down.
+            if e.rdkafka_error_code() != Some(RDKafkaErrorCode::QueueFull) {
+                delivery.refusing.trip();
+            }
             Err((
                 Error::Transport(format!("kafka send failed: {e}")),
                 record.delivery_opaque,
@@ -1095,6 +1098,30 @@ mod tests {
 
         assert!(matches!(result, Err(Error::Rejected(_))), "got {result:?}");
         assert!(sink.is_healthy());
+    }
+
+    /// A full producer queue refuses the record as retryable and leaves the
+    /// sink healthy: it is backpressure, and the next record may fit.
+    #[tokio::test]
+    async fn a_full_queue_is_retryable_and_leaves_the_sink_healthy() {
+        let mut config = unroutable_config("60000");
+        config
+            .librdkafka_overrides
+            .insert("queue.buffering.max.messages".to_string(), "1".to_string());
+        let sink = KafkaSink::new(&config, None).unwrap();
+        let record = Bytes::from_static(b"{}");
+
+        let _queued = sink
+            .confirm("events", &record)
+            .unwrap_or_else(|e| panic!("the first record fits the queue: {e}"));
+        let refused = sink.confirm("events", &record);
+
+        assert!(
+            matches!(&refused, Err(Error::Transport(reason)) if reason.contains("full")),
+            "got {:?}",
+            refused.err()
+        );
+        assert!(sink.is_healthy(), "a full queue marked the producer down");
     }
 
     /// A record librdkafka refused never gets a delivery report, so it must not

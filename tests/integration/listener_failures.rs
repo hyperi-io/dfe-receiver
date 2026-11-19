@@ -464,8 +464,31 @@ async fn first_readyz(http: SocketAddr) -> u16 {
     panic!("nothing answered {url} within {READY_DEADLINE:?}");
 }
 
-/// A destination outage is shared by every replica, so the ingest port's
-/// `/readyz` must not fail on it while every listener serves.
+/// Status codes the ingest port answers a one-record POST with until it answers
+/// `want`, or the last one seen at [`READY_DEADLINE`].
+async fn ingest_until(http: SocketAddr, want: u16) -> Option<u16> {
+    let client = reqwest::Client::new();
+    let deadline = Instant::now() + READY_DEADLINE;
+    let mut last = None;
+    while Instant::now() < deadline {
+        let sent = client
+            .post(format!("http://{http}/ingest"))
+            .header("content-type", "application/json")
+            .body(r#"{"a":1}"#)
+            .send()
+            .await;
+        last = sent.ok().map(|response| response.status().as_u16());
+        if last == Some(want) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    last
+}
+
+/// A destination outage is shared by every replica, so neither the ingest
+/// port's `/readyz` nor admission fails on it while every listener serves:
+/// only the records bound for the down destination are refused.
 #[tokio::test]
 async fn the_ingest_readyz_passes_with_an_unhealthy_sink() {
     let spool = tempfile::tempdir().expect("spool dir");
@@ -495,9 +518,15 @@ async fn the_ingest_readyz_passes_with_an_unhealthy_sink() {
     let shutdown = CancellationToken::new();
     let server = run(Server::new(pipeline.clone(), metrics()), &shutdown);
     assert!(
-        eventually(|| pipeline.probe_ready() && !pipeline.is_ready()).await,
-        "the test needs every listener serving and the sink unhealthy"
+        eventually(|| pipeline.probe_ready()).await,
+        "the test needs every listener serving"
     );
+    assert_eq!(
+        ingest_until(http, 503).await,
+        Some(503),
+        "the test needs the down destination's records refused"
+    );
+    assert!(pipeline.is_ready(), "a sink outage stopped admission");
 
     assert_eq!(
         first_readyz(http).await,
