@@ -43,7 +43,7 @@ use rdkafka::message::Message;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use tokio::time::timeout;
 
-use super::common::{KafkaHandle, KafkaTestConfig, kafka_backend, test_topic};
+use super::common::{KafkaHandle, KafkaTestConfig, create_topic, kafka_backend, test_topic};
 
 /// The Kafka backend for a test that only runs when asked for: a missing one
 /// fails it rather than passing it untested.
@@ -233,6 +233,7 @@ async fn test_receiver_kafka_sink() {
     let config = kf.to_receiver_kafka_config();
 
     let topic = test_topic("sink");
+    create_topic(&kf, &topic, &[]).await;
     let sink = KafkaSink::new(&config, None).expect("Failed to create KafkaSink");
 
     // Send messages through the sink
@@ -277,6 +278,7 @@ async fn test_full_pipeline_to_kafka() {
 
     // Configure routing to use test topic
     let topic = test_topic("pipeline");
+    create_topic(&kf, &topic, &[]).await;
     config.routing.default_source = topic.clone();
     config.routing.topic_suffix = "".to_string(); // No suffix for test
 
@@ -341,6 +343,7 @@ async fn test_http_to_kafka() {
 
     // Configure routing
     let topic = test_topic("http");
+    create_topic(&kf, &topic, &[]).await;
     config.routing.default_source = topic.clone();
     config.routing.topic_suffix = "".to_string();
 
@@ -430,6 +433,9 @@ async fn test_category_routing() {
     let auth_topic = test_topic("auth");
     let network_topic = test_topic("network");
     let default_topic = test_topic("default");
+    for topic in [&auth_topic, &network_topic, &default_topic] {
+        create_topic(&kf, topic, &[]).await;
+    }
 
     config
         .routing
@@ -521,6 +527,7 @@ async fn test_dlq_routing() {
 
     // Configure DLQ
     let dlq_topic = test_topic("dlq");
+    create_topic(&kf, &dlq_topic, &[]).await;
     config.routing.dlq.enabled = true;
     config.routing.dlq.topic = dlq_topic.clone();
     config.routing.topic_suffix = "".to_string();
