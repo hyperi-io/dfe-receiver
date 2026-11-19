@@ -164,8 +164,10 @@ fn count_failure(failure: SendFailure, records: usize) {
 ///
 /// scalo's `Fatal` carries no gRPC status, so a refusal of this one record
 /// cannot be told from a destination refusing every record: it stays
-/// transient, queued and retried in order. `FilteredDlq` is scalo's verdict on
-/// the record itself, which a retry would only repeat, so it is rejected.
+/// transient, queued and retried in order. `FilteredDlq` says a record was
+/// dead-lettered: the record itself on a single send, which is rejected, and
+/// some record of a batch, whose rejection queues the batch to be resent one
+/// record at a time.
 pub(crate) fn push_outcome(result: SendResult) -> Result<()> {
     match result {
         SendResult::Ok => Ok(()),

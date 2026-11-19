@@ -42,7 +42,9 @@ use dfe_receiver::server::flow::metrics::mock::flow_metrics_for_test;
 use dfe_receiver::server::traits::ProtocolHandler;
 use tokio_util::sync::CancellationToken;
 
-use crate::common::{kafka_backend, kafka_consume_next, kafka_consumer, test_topic_suffix};
+use crate::common::{
+    create_topic, kafka_backend, kafka_consume_next, kafka_consumer, test_topic_suffix,
+};
 
 /// Build a valid NetFlow v5 datagram with one flow record (72 bytes total).
 /// Mirrors `src/server/netflow/tests/decode_v5.rs::build_v5_packet_with_one_flow`.
@@ -129,6 +131,7 @@ async fn netflow_v5_end_to_end_to_kafka() {
 
     let topic_suffix = test_topic_suffix();
     let topic = format!("netflow{topic_suffix}");
+    create_topic(&kf, &topic, &[]).await;
 
     // ------------------------------------------------------------------
     // 2. Subscribe to Kafka BEFORE producing.
@@ -348,6 +351,7 @@ async fn netflow_v9_end_to_end_to_kafka() {
     };
     let topic_suffix = test_topic_suffix();
     let topic = format!("netflow{topic_suffix}");
+    create_topic(&kf, &topic, &[]).await;
     let consumer = kafka_consumer(&kf, &topic).expect("kafka consumer setup");
     tokio::time::sleep(Duration::from_secs(1)).await;
 
@@ -428,6 +432,7 @@ async fn netflow_nsel_end_to_end_to_kafka() {
     };
     let topic_suffix = test_topic_suffix();
     let topic = format!("netflow{topic_suffix}");
+    create_topic(&kf, &topic, &[]).await;
     let consumer = kafka_consumer(&kf, &topic).expect("kafka consumer setup");
     tokio::time::sleep(Duration::from_secs(1)).await;
 

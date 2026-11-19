@@ -30,8 +30,8 @@ use scalo::transport::{PayloadFormat, Record, RecordMeta};
 use tokio_util::sync::CancellationToken;
 
 use crate::common::{
-    kafka_backend, kafka_consume_next, kafka_consumer, kafka_plain_config, start_kafka_container,
-    test_topic,
+    create_topic, kafka_backend, kafka_consume_next, kafka_consumer, kafka_plain_config,
+    start_kafka_container, test_topic,
 };
 use crate::{skip_if_no_docker, test_name};
 
@@ -48,6 +48,7 @@ async fn test_kafka_sink_send_and_consume() {
     };
 
     let topic = test_topic("send");
+    create_topic(&kf, &topic, &[]).await;
     let consumer = kafka_consumer(&kf, &topic).expect("consumer setup");
     tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -78,6 +79,7 @@ async fn test_kafka_sink_send_many() {
     };
 
     let topic = test_topic("batch");
+    create_topic(&kf, &topic, &[]).await;
     // Subscribe and wait for consumer to actually join the group
     let consumer = kafka_consumer(&kf, &topic).expect("consumer setup");
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -116,6 +118,7 @@ async fn test_kafka_sink_binary_payload() {
     };
 
     let topic = test_topic("binary");
+    create_topic(&kf, &topic, &[]).await;
     let consumer = kafka_consumer(&kf, &topic).expect("consumer setup");
     tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -140,6 +143,7 @@ async fn test_kafka_sink_large_payload() {
     };
 
     let topic = test_topic("large");
+    create_topic(&kf, &topic, &[]).await;
     let consumer = kafka_consumer(&kf, &topic).expect("consumer setup");
     tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -169,6 +173,9 @@ async fn test_kafka_sink_multiple_topics() {
         test_topic("multi-b"),
         test_topic("multi-c"),
     ];
+    for topic in &topics {
+        create_topic(&kf, topic, &[]).await;
+    }
 
     let consumers: Vec<_> = topics
         .iter()
@@ -210,6 +217,7 @@ async fn test_kafka_sink_invalid_topic_recoverable() {
 
     // Recovery test: valid send should still work
     let good_topic = test_topic("recovery");
+    create_topic(&kf, &good_topic, &[]).await;
     sink.send(&good_topic, Bytes::from(r#"{"recovered":true}"#))
         .await
         .expect("sink unusable after invalid topic attempt");
@@ -228,6 +236,7 @@ async fn an_enqueued_record_survives_an_outage_past_the_message_timeout() {
         .expect("Kafka container");
     let kf = kafka_plain_config(&bootstrap);
     let topic = test_topic("outage");
+    create_topic(&kf, &topic, &[]).await;
     let consumer = kafka_consumer(&kf, &topic).expect("consumer setup");
 
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -341,6 +350,7 @@ async fn a_spooled_record_stays_spooled_until_a_broker_confirms_it() {
         .expect("Kafka container");
     let kf = kafka_plain_config(&bootstrap);
     let topic = test_topic("spool-ack");
+    create_topic(&kf, &topic, &[]).await;
     let consumer = kafka_consumer(&kf, &topic).expect("consumer setup");
     tokio::time::sleep(Duration::from_secs(2)).await;
 
@@ -400,28 +410,6 @@ async fn a_spooled_record_stays_spooled_until_a_broker_confirms_it() {
         RECORDS,
         "only {seen:?} of {RECORDS} records landed"
     );
-}
-
-/// Create `topic`, one partition, with the topic `config` given.
-async fn create_topic(kf: &crate::common::KafkaTestConfig, topic: &str, config: &[(&str, &str)]) {
-    use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
-    use rdkafka::client::DefaultClientContext;
-
-    let mut client = rdkafka::ClientConfig::new();
-    client.set("bootstrap.servers", &kf.brokers);
-    kf.apply_sasl(&mut client);
-    let admin: AdminClient<DefaultClientContext> = client.create().expect("admin client");
-    let new_topic = config.iter().fold(
-        NewTopic::new(topic, 1, TopicReplication::Fixed(1)),
-        |new_topic, (key, value)| new_topic.set(key, value),
-    );
-    for created in admin
-        .create_topics(&[new_topic], &AdminOptions::new())
-        .await
-        .expect("create topics")
-    {
-        created.expect("topic created");
-    }
 }
 
 /// Producer settings under which librdkafka refuses a record over 1024 bytes

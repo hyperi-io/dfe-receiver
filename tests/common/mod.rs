@@ -432,6 +432,32 @@ impl KafkaTestConfig {
 // Kafka consumer helper
 // ---------------------------------------------------------------------------
 
+/// Create `topic`, one partition, with the topic `config` given, before a
+/// test produces to it: scalo's producers do not create their topics.
+pub async fn create_topic(kf: &KafkaTestConfig, topic: &str, config: &[(&str, &str)]) {
+    use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
+    use rdkafka::client::DefaultClientContext;
+
+    let mut client = rdkafka::ClientConfig::new();
+    client.set("bootstrap.servers", &kf.brokers);
+    kf.apply_sasl(&mut client);
+    let admin: AdminClient<DefaultClientContext> = client.create().expect("admin client");
+    let new_topic = config.iter().fold(
+        NewTopic::new(topic, 1, TopicReplication::Fixed(1)),
+        |new_topic, (key, value)| new_topic.set(key, value),
+    );
+    for created in admin
+        .create_topics(&[new_topic], &AdminOptions::new())
+        .await
+        .expect("create topics")
+    {
+        match created {
+            Ok(_) | Err((_, rdkafka::types::RDKafkaErrorCode::TopicAlreadyExists)) => {}
+            Err((name, code)) => panic!("create {name}: {code:?}"),
+        }
+    }
+}
+
 /// Build a consumer subscribed to `topic` with a unique group. Caller can
 /// then poll `recv()` for messages. The consumer must be created *before*
 /// producing to avoid race conditions with librdkafka's metadata refresh.

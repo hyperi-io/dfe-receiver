@@ -35,7 +35,7 @@ use dfe_receiver::server::webhook::WebhookHandler;
 use prost::Message;
 use tokio_util::sync::CancellationToken;
 
-use crate::common::{kafka_backend, kafka_consume_next, kafka_consumer, test_topic};
+use crate::common::{create_topic, kafka_backend, kafka_consume_next, kafka_consumer, test_topic};
 
 /// Build a config wired to route via Kafka (rather than the in-memory loader).
 fn kafka_config(kf: &crate::common::KafkaTestConfig, topic: &str) -> Config {
@@ -69,6 +69,7 @@ async fn test_prometheus_rw_to_kafka_roundtrip() {
     };
 
     let topic = test_topic("promrw");
+    create_topic(&kf, &topic, &[]).await;
     let mut config = kafka_config(&kf, &topic);
     config.prometheus_rw.enabled = true;
     config.prometheus_rw.bind_address = "127.0.0.1:0".to_string();
@@ -166,6 +167,7 @@ async fn test_splunk_hec_to_kafka_roundtrip() {
     };
 
     let topic = test_topic("hec");
+    create_topic(&kf, &topic, &[]).await;
     let mut config = kafka_config(&kf, &topic);
     config.splunk_hec.enabled = true;
     config.splunk_hec.bind_address = "127.0.0.1:0".to_string();
@@ -263,6 +265,7 @@ async fn test_webhook_to_kafka_roundtrip() {
 
     // The caller's topic is fixed by config and carries no suffix.
     let topic = test_topic("webhook");
+    create_topic(&kf, &topic, &[]).await;
     let mut config = kafka_config(&kf, &topic);
     config.webhook.enabled = true;
     config.webhook.bind_address = Some("127.0.0.1:0".to_string());
@@ -375,6 +378,7 @@ async fn test_webhook_array_with_a_bad_element_delivers_nothing() {
     secret_file.flush().unwrap();
 
     let topic = test_topic("webhook-array");
+    create_topic(&kf, &topic, &[]).await;
     let mut config = kafka_config(&kf, &topic);
     config.webhook.enabled = true;
     config.webhook.bind_address = Some("127.0.0.1:0".to_string());
@@ -472,6 +476,7 @@ async fn test_http_to_kafka_roundtrip() {
     };
 
     let topic = test_topic("http");
+    create_topic(&kf, &topic, &[]).await;
     let config = kafka_config(&kf, &topic);
 
     let consumer = kafka_consumer(&kf, &topic).expect("consumer setup");
