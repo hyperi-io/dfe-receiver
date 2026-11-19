@@ -175,6 +175,11 @@ for attempt in $(seq 1 60); do
     sleep 2
 done
 
+# scalo's producers never ask the broker to create a topic, so every topic the
+# rules and the flow listeners route to is created first.
+docker exec "${KAFKA_CID}" rpk topic create \
+    cisco_ios_land cylance_land panw_land main_land netflow_land sflow_land
+
 # ----------------------------------------------------------------------------
 # Write ephemeral config
 # ----------------------------------------------------------------------------
