@@ -113,8 +113,8 @@ static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
 
 /// A sink's last failure, for a health flag that only traffic can restore.
 ///
-/// Readiness sheds every request while a sink is unhealthy, so a flag set by a
-/// failure and cleared only by a later success would never clear. Once
+/// A held record bound for an unhealthy sink is refused unsent, so a flag set
+/// by a failure and cleared only by a later success would never clear. Once
 /// [`SINK_RETRY_AFTER`] has passed since the last failure the latch admits
 /// traffic again, and the next result sets or clears it.
 #[derive(Debug, Default)]

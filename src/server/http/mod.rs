@@ -992,7 +992,7 @@ async fn ingest_handler(
         principal.as_ref().map(|Extension(p)| p),
         TRANSPORT,
     ));
-    // Shed load when pipeline is not ready (memory pressure, sink down, draining)
+    // Shed load under memory pressure.
     if !state.pipeline.is_ready() {
         debug!(
             transport = "http",

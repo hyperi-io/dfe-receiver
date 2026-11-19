@@ -228,10 +228,6 @@ impl<S: Sink + 'static> Delivery<S> {
         }
     }
 
-    fn is_healthy(&self) -> bool {
-        self.at_enqueue().is_healthy() && (self.enqueue_sink.is_none() || self.primary.is_healthy())
-    }
-
     async fn stats(&self) -> Option<InMemoryBufferStats> {
         match &self.queued {
             Some(queued) => Some(queued.stats().await),
@@ -485,6 +481,12 @@ struct Dispatch<'a> {
     bus_usage: Vec<(usize, String, u64)>,
 }
 
+/// The retryable refusal of a held record bound for destination `name`, whose
+/// sink is down.
+fn destination_down(name: &str) -> Error {
+    Error::Transport(format!("destination '{name}' is down"))
+}
+
 /// A held record the bus queued, waiting on its delivery report.
 struct HeldOnBus {
     record: usize,
@@ -528,11 +530,20 @@ impl<'a> Dispatch<'a> {
             .any(|destination| matches!(destination.sink, DestinationSink::Discard))
     }
 
-    fn push_grpc(&mut self, name: &Arc<str>, payload: Bytes) {
+    /// Add `payload` to destination `name`'s batch. A held batch is refused
+    /// on its first record for a destination whose sink is down, checked
+    /// once per destination per request.
+    fn push_grpc(&mut self, name: &Arc<str>, payload: Bytes, sink: &GrpcSink) -> Result<()> {
         match self.grpc.iter_mut().find(|(n, _)| n == name) {
             Some((_, payloads)) => payloads.push(payload),
-            None => self.grpc.push((Arc::clone(name), vec![payload])),
+            None => {
+                if self.ticket.is_some() && !sink.is_healthy() {
+                    return Err(destination_down(name));
+                }
+                self.grpc.push((Arc::clone(name), vec![payload]));
+            }
         }
+        Ok(())
     }
 }
 
@@ -829,29 +840,15 @@ impl PipelineState {
 
     /// Admission check for a request: shed with 503 when this is false.
     ///
-    /// Consults sink health as well as pressure, because accepting a record
-    /// the pipeline cannot deliver loses it. Listener state stays with
-    /// [`probe_ready`](Self::probe_ready): one listener that failed to bind
-    /// does not shed the traffic another one is serving.
+    /// Memory pressure only. A destination that is down refuses the records
+    /// bound for it and no others: a held record fails at once in
+    /// [`send_to_destinations`](Self::send_to_destinations), and an answer at
+    /// enqueue is queued by the buffer in front of the destination until that
+    /// is full. Listener state stays with [`probe_ready`](Self::probe_ready):
+    /// one listener that failed to bind does not shed the traffic another one
+    /// is serving.
     pub fn is_ready(&self) -> bool {
-        if self.under_pressure() {
-            return false;
-        }
-
-        // Check sink health
-        if let Some(ref kafka) = self.kafka
-            && !kafka.is_healthy()
-        {
-            return false;
-        }
-
-        // Every named destination must be able to take a record: a record the
-        // rules send to one of them cannot be served by the others.
-        self.routes
-            .load()
-            .destinations
-            .values()
-            .all(|destination| destination.grpc().is_none_or(Delivery::is_healthy))
+        !self.under_pressure()
     }
 
     /// What `/readyz` answers: every listener the server enabled is bound and
@@ -862,8 +859,8 @@ impl PipelineState {
     ///
     /// A sink outage is shared by every replica, so failing the probe on it
     /// empties the Service of endpoints fleet-wide and turns a degradation
-    /// into an outage. Shedding stays with [`is_ready`](Self::is_ready), which
-    /// still answers 503 + retry-after per request while the pod remains
+    /// into an outage. The records bound for a down destination are refused
+    /// per request with the protocol's retry signal while the pod remains
     /// routable.
     pub fn probe_ready(&self) -> bool {
         let serving = self
@@ -1399,6 +1396,10 @@ impl PipelineState {
         let Some(ticket) = dispatch.ticket else {
             return kafka.at_enqueue().send(topic, payload.clone()).await;
         };
+        // Held, a record for a bus that is not delivering fails now, not at its report.
+        if !kafka.primary.is_healthy() {
+            return Err(destination_down(crate::config::BUS_DESTINATION));
+        }
         let piece = ticket.piece();
         match kafka.primary.confirm(topic, payload) {
             Ok(confirmation) => {
@@ -1458,7 +1459,7 @@ impl PipelineState {
                     // Never batched: the batch would leave it out and report it sent.
                     Some(reason) => self.settle_refused("", payload, &reason, dispatch).await?,
                     // Bytes clone is a refcount bump, not a payload copy.
-                    None => dispatch.push_grpc(name, payload.clone()),
+                    None => dispatch.push_grpc(name, payload.clone(), &delivery.primary)?,
                 },
                 DestinationSink::Discard => {}
             }
@@ -2643,6 +2644,65 @@ mod tests {
         assert_eq!(outcome.settled(), 0, "a held batch is all or nothing");
     }
 
+    /// A destination that is down refuses the held records bound for it, at
+    /// once and unsent, while admission stays open and a record bound
+    /// elsewhere is taken.
+    #[tokio::test]
+    async fn a_down_destination_refuses_only_the_records_bound_for_it() {
+        use scalo::rules::{MatchConfig, RuleConfig, SetAction};
+
+        let alpha = crate::sink::grpc::test_destination::TestDestination::start();
+        let mut config = test_config();
+        grpc_destinations(&mut config, &["alpha"]);
+        if let Some(grpc) = config
+            .destinations
+            .named
+            .get_mut("alpha")
+            .and_then(|spec| spec.grpc.as_mut())
+        {
+            grpc.endpoint = alpha.endpoint().to_string();
+        }
+        config.destinations.default = "loader".into();
+        config.rules.rules = vec![
+            RuleConfig::new("to-alpha", "_source", SetAction::value("alpha-bound"))
+                .matching(MatchConfig::equals("app", "alpha")),
+        ];
+        config
+            .destinations
+            .sources
+            .insert("alpha-bound".to_string(), "alpha".into());
+        let state = test_state_with(config).await;
+        let acks = holding(&state);
+        let to_alpha = [Bytes::from(r#"{"app":"alpha"}"#)];
+
+        alpha.refuse_every_send();
+        let refused = state
+            .process_batch_acked(&to_alpha, &acks, None, &http())
+            .await;
+        assert!(refused.unavailable.is_some(), "{refused:?}");
+        assert_eq!(alpha.batches(), 1, "the first batch was never sent");
+
+        assert!(state.is_ready(), "a down destination shed every request");
+        let again = state
+            .process_batch_acked(&to_alpha, &acks, None, &http())
+            .await;
+        assert!(
+            again.unavailable.as_ref().is_some_and(Error::is_retryable),
+            "{again:?}"
+        );
+        assert_eq!(again.settled(), 0, "a held batch is all or nothing");
+        assert_eq!(
+            alpha.batches(),
+            1,
+            "a record for a down destination was sent"
+        );
+
+        let elsewhere = state
+            .process_batch_acked(&[Bytes::from(r#"{"app":"other"}"#)], &acks, None, &http())
+            .await;
+        assert_eq!(elsewhere.accepted, 1, "{elsewhere:?}");
+    }
+
     /// A next hop that takes the connection and never answers is cut off at
     /// the hold, not at its 20 s send deadline, so the sender hears retryable
     /// while it still waits.
@@ -2798,6 +2858,21 @@ mod tests {
             "a record no broker confirmed was answered as taken: {held:?}"
         );
         assert_eq!(held.settled(), 0);
+
+        // The failed report marks the bus down: admission stays open, and the
+        // next held record is refused before it is queued.
+        assert!(
+            state.is_ready(),
+            "a bus that is not delivering shed every request"
+        );
+        let again = state
+            .process_batch_acked(&record, &holding(&state), None, &http())
+            .await;
+        assert!(
+            matches!(&again.unavailable, Some(Error::Transport(reason)) if reason.contains("is down")),
+            "the held record was queued on a bus that is down: {again:?}"
+        );
+        assert_eq!(again.settled(), 0);
     }
 
     /// A validation DLQ writing to files under `dir`, for records missing `org_id`.

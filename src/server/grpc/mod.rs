@@ -97,7 +97,7 @@ impl Vector for VectorService {
         &self,
         request: Request<PushEventsRequest>,
     ) -> std::result::Result<Response<PushEventsResponse>, Status> {
-        // Shed load when pipeline is not ready (memory pressure, sink down, draining)
+        // Shed load under memory pressure.
         if !self.pipeline.is_ready() {
             debug!(
                 transport = "grpc",

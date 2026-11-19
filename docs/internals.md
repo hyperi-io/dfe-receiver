@@ -159,7 +159,7 @@ The chart a release assembles from the deployment contract scales on CPU alone: 
 
 In a DFE deployment, dfe-infra's values set the CPU target to 70% and add the ScalingPressure trigger (target 70, read through dfe-keda-shim) by default. The slim profile clears the trigger, so slim scales on CPU alone. The engine's [KEDA scaling page](https://github.com/hyperi-io/dfe-engine/blob/main/docs/deployment/keda-scaling.md) covers the triggers for every app.
 
-Probes hit the metrics listener (9090, port name `metrics`), not the ingest port, so a saturated intake does not fail the pod's liveness check. `/readyz` answers 503 until every listener an enabled handler binds is serving, again once any of them stops, and under memory pressure. A destination outage does not fail it, and ingest sheds per request with 503 instead. The ingest port's `/readyz` gives the same answer.
+Probes hit the metrics listener (9090, port name `metrics`), not the ingest port, so a saturated intake does not fail the pod's liveness check. `/readyz` answers 503 until every listener an enabled handler binds is serving, again once any of them stops, and under memory pressure. A destination outage fails neither the probe nor admission. A request with a record bound for the down destination gets the protocol's retry signal, at once when its answer is held, and a request bound elsewhere is taken. Answers given at enqueue queue in the buffer in front of the destination until it is full. The ingest port's `/readyz` gives the same answer.
 
 Further reading:
 
