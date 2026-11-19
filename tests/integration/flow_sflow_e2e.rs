@@ -41,7 +41,9 @@ use dfe_receiver::server::flow::metrics::mock::flow_metrics_for_test;
 use dfe_receiver::server::traits::ProtocolHandler;
 use tokio_util::sync::CancellationToken;
 
-use crate::common::{kafka_backend, kafka_consume_next, kafka_consumer, test_topic_suffix};
+use crate::common::{
+    create_topic, kafka_backend, kafka_consume_next, kafka_consumer, test_topic_suffix,
+};
 
 /// Minimal Ethernet + IPv4 + TCP header (54 bytes) for the sampled_header
 /// payload. Mirrors `src/server/sflow/tests/decode_flow.rs::build_eth_ipv4_tcp_header`.
@@ -157,6 +159,7 @@ async fn sflow_v5_end_to_end_to_kafka() {
 
     let topic_suffix = test_topic_suffix();
     let topic = format!("sflow{topic_suffix}");
+    create_topic(&kf, &topic, &[]).await;
 
     let consumer = kafka_consumer(&kf, &topic).expect("kafka consumer setup");
     tokio::time::sleep(Duration::from_secs(1)).await;

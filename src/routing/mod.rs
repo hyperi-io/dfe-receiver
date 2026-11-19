@@ -301,6 +301,21 @@ struct Found<'j> {
 struct Record<'j> {
     json: &'j JsonPayload<'j>,
     found: &'j Found<'j>,
+    /// Whether the record's `_source` is the listener's own stamp.
+    stamped: bool,
+}
+
+impl<'j> Record<'j> {
+    fn new(json: &'j JsonPayload<'j>, found: &'j Found<'j>, ingest: &Ingest) -> Self {
+        let stamped = ingest
+            .listener_stamp()
+            .is_some_and(|stamp| text(&found.source) == Some(stamp));
+        Self {
+            json,
+            found,
+            stamped,
+        }
+    }
 }
 
 impl FieldSource for Record<'_> {
@@ -314,6 +329,24 @@ impl FieldSource for Record<'_> {
 
     fn cel_value(&self, name: &str) -> Option<cel::Value> {
         self.json.cel_value(name)
+    }
+
+    /// Another target's rows see a `_source` no row set only when the listener
+    /// stamped it, and never a sender's `_org_id`.
+    fn unassigned_target(&self, path: &FieldPath) -> Lookup<'_> {
+        match path.as_str() {
+            SOURCE_FIELD if self.stamped => self.found.source.clone(),
+            SOURCE_FIELD | ORG_FIELD => Lookup::Missing,
+            _ => self.json.lookup(path),
+        }
+    }
+
+    fn unassigned_target_cel(&self, name: &str) -> Option<cel::Value> {
+        match name {
+            SOURCE_FIELD if self.stamped => self.json.cel_value(name),
+            SOURCE_FIELD | ORG_FIELD => None,
+            _ => self.json.cel_value(name),
+        }
     }
 }
 
@@ -462,10 +495,7 @@ impl Router {
         let json = JsonPayload::trusted(&bytes);
         let found = self.found(&json, &bytes, self.enrichment_enabled);
         let binding = self.bindings.resolve(ingest.principal());
-        let record = Record {
-            json: &json,
-            found: &found,
-        };
+        let record = Record::new(&json, &found, ingest);
         let clamp = Clamp::new(self.org, binding.orgs(), binding.default_org());
         let outcome = tally.evaluate_clamped(&record, &clamp);
         let org = self.final_org(&outcome, &found, binding);
@@ -553,10 +583,7 @@ impl Router {
         let json = JsonPayload::trusted(&bytes);
         let found = self.found(&json, &bytes, stamp.is_some());
         let binding = self.bindings.resolve(ingest.principal());
-        let record = Record {
-            json: &json,
-            found: &found,
-        };
+        let record = Record::new(&json, &found, ingest);
         let clamp = Clamp::new(self.org, binding.orgs(), binding.default_org());
         let outcome = tally.evaluate_clamped(&record, &clamp);
         let org = self.final_org(&outcome, &found, binding);
@@ -1191,6 +1218,119 @@ mod tests {
         let (_, value, _) = route(&r, &credential("acme-agents"), r#"{"host":"web-1"}"#);
         assert_eq!(value["_source"], "web");
         assert_eq!(value["_org_id"], "acme-dev");
+    }
+
+    /// A compatibility profile's org row as dfe-engine compiles it: held to the
+    /// records of the source labelled `label`, taking the org the record names.
+    fn profile_org_row(label: &str) -> RuleConfig {
+        RuleConfig::new(
+            format!("compat.dfe-legacy-2x.org-tags.{label}"),
+            ORG_FIELD,
+            SetAction::from("tags.event.org_id"),
+        )
+        .matching(MatchConfig::all(vec![
+            MatchConfig::equals(SOURCE_FIELD, label),
+            MatchConfig::exists("tags.event.org_id"),
+        ]))
+    }
+
+    /// Records `rule` fired on since `r` compiled.
+    fn hits(r: &Router, rule: &str) -> u64 {
+        r.rules()
+            .usage()
+            .iter()
+            .filter(|row| row.rule == rule)
+            .map(|row| row.hits)
+            .sum()
+    }
+
+    const TAGGED_ORG: &str = r#""tags":{"event":{"org_id":"acme-dev"}}"#;
+
+    #[test]
+    fn a_sender_source_no_row_assigned_satisfies_no_source_guard() {
+        let rows = vec![
+            equals("auth", "type", "auth", SOURCE_FIELD, "auth"),
+            profile_org_row("auth"),
+        ];
+        let r = router(&with_bindings(config_with(rows)));
+        let record = format!(r#"{{"_source":"auth",{TAGGED_ORG}}}"#);
+        let (to, value, org) = route(&r, &credential("acme-agents"), &record);
+        assert_eq!(value["_source"], "main");
+        assert_eq!(value["_source_original"], "auth");
+        assert_eq!(to.topic(), Some("main_land"));
+        assert_eq!(org, "acme", "the binding's default, not the guarded row's");
+        assert_eq!(hits(&r, "compat.dfe-legacy-2x.org-tags.auth"), 0);
+    }
+
+    #[test]
+    fn a_sender_source_no_row_assigned_satisfies_no_cel_source_guard() {
+        let guarded = RuleConfig::new(
+            "cel-auth-org",
+            ORG_FIELD,
+            SetAction::from("tags.event.org_id"),
+        )
+        .when(r#"_source == "auth""#);
+        let r = router(&with_bindings(config_with(vec![guarded])));
+        let record = format!(r#"{{"_source":"auth",{TAGGED_ORG}}}"#);
+        let (_, value, org) = route(&r, &credential("acme-agents"), &record);
+        assert_eq!(value["_source"], "main");
+        assert_eq!(org, "acme", "the binding's default, not the guarded row's");
+        assert_eq!(hits(&r, "cel-auth-org"), 0);
+    }
+
+    #[test]
+    fn a_source_guard_holds_on_the_source_a_row_assigned() {
+        let rows = vec![
+            equals("auth", "type", "auth", SOURCE_FIELD, "auth"),
+            profile_org_row("auth"),
+        ];
+        let r = router(&with_bindings(config_with(rows)));
+        let record = format!(r#"{{"type":"auth",{TAGGED_ORG}}}"#);
+        let (to, value, org) = route(&r, &credential("acme-agents"), &record);
+        assert_eq!(value["_source"], "auth");
+        assert_eq!(to.topic(), Some("auth_land"));
+        assert_eq!(org, "acme-dev");
+        assert_eq!(hits(&r, "compat.dfe-legacy-2x.org-tags.auth"), 1);
+    }
+
+    /// dfe-engine labels a fetcher-fed source with a row confirming the
+    /// `_source` the fetcher sends, so that row must still read it.
+    #[test]
+    fn a_row_confirming_a_fetcher_source_labels_it_and_holds_its_guard() {
+        let rows = vec![
+            equals("source.auth", SOURCE_FIELD, "auth", SOURCE_FIELD, "auth"),
+            profile_org_row("auth"),
+        ];
+        let r = router(&with_bindings(config_with(rows)));
+        let record = format!(r#"{{"_source":"auth",{TAGGED_ORG}}}"#);
+        let (to, value, org) = route(&r, &credential("acme-agents"), &record);
+        assert_eq!(value["_source"], "auth");
+        assert!(value.get("_source_original").is_none());
+        assert_eq!(to.topic(), Some("auth_land"));
+        assert_eq!(org, "acme-dev");
+    }
+
+    #[test]
+    fn a_sender_org_satisfies_no_source_row_guard() {
+        let guarded = equals("beta-only", ORG_FIELD, "beta", SOURCE_FIELD, "beta_secrets");
+        for source_org_id in [SourceOrgId::Disallow, SourceOrgId::Allow] {
+            let mut config = with_bindings(config_with(vec![guarded.clone()]));
+            config.routing.source_org_id = source_org_id;
+            let r = router(&config);
+            let record = Bytes::from(r#"{"_org_id":"beta","a":1}"#);
+            let payload = if r.strips_org_id() {
+                strip_org_id(record).expect("strips")
+            } else {
+                record
+            };
+            let mut tally = r.tally();
+            let routed = r
+                .route(payload, &credential("acme-agents"), NOW, &mut tally)
+                .expect("routes");
+            let value: serde_json::Value = serde_json::from_slice(&routed.payload).unwrap();
+            assert_eq!(routed.org, "acme", "{source_org_id:?}");
+            assert_eq!(value["_source"], "main", "{source_org_id:?}");
+        }
     }
 
     #[test]

@@ -326,7 +326,7 @@ impl Wiring {
                     deadline_ms: if name == crate::config::LOADER_DESTINATION {
                         loader_timeout_ms
                     } else {
-                        acks::NEXT_HOP_DEADLINE_MS
+                        acks::next_hop_deadline_ms()
                     },
                     confirms_delivery: grpc.confirms_delivery,
                 }),
@@ -704,7 +704,7 @@ impl PipelineState {
         // A buffer, and its spool, only serve a listener that answers at
         // enqueue; a held answer sends past them.
         let at_enqueue = config.answers_at_enqueue();
-        let held_message_timeout = config.holds_answers().then_some(acks::HELD_MESSAGE_TIMEOUT);
+        let held_message_timeout = config.holds_answers().then_some(acks::next_hop_deadline());
         info!(
             holds_answers = config.holds_answers(),
             answers_at_enqueue = at_enqueue,
@@ -2742,7 +2742,7 @@ mod tests {
     /// timeout would give it up after 20 s with nothing to resend it.
     #[tokio::test]
     async fn records_answered_at_enqueue_never_run_on_the_held_timeout() {
-        let held = Some(acks::HELD_MESSAGE_TIMEOUT);
+        let held = Some(acks::next_hop_deadline());
         let mut config = test_config();
         unroutable_bus(&mut config);
 

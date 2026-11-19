@@ -2838,7 +2838,7 @@ impl Default for LoaderConfig {
         Self {
             address: "dfe-loader:6000".to_string(),
             transport: TRANSPORT_KAFKA.to_string(),
-            timeout_ms: crate::pipeline::acks::NEXT_HOP_DEADLINE_MS,
+            timeout_ms: crate::pipeline::acks::next_hop_deadline_ms(),
             grpc_endpoint: None,
         }
     }

@@ -27,16 +27,35 @@ use scalo::transport::ack::{
     AckControl, AckKind, EffectiveGuarantee, HeldAcks, Refused, SinkConfirmation, Ticket, Tickets,
 };
 use scalo::transport::grpc::hold_budget;
+use scalo::transport::hold::{HoldLadder, Rung};
+
+/// The receiver's rung on scalo's hold ladder: it is the first hop.
+#[allow(clippy::expect_used)]
+fn rung() -> Rung {
+    HoldLadder::DEFAULT
+        .rung(0)
+        .expect("the default hold ladder has a depth-0 rung")
+}
 
 /// The longest a listener holds an answer.
-pub const MAX_HOLD: Duration = Duration::from_secs(25);
+#[must_use]
+pub fn max_hold() -> Duration {
+    rung().hold
+}
 
-/// Deadline for one send to the next gRPC hop, inside [`MAX_HOLD`].
-pub const NEXT_HOP_DEADLINE_MS: u64 = 20_000;
+/// The deadline one send to the next hop gets: a gRPC send timeout, or
+/// librdkafka's `message.timeout.ms` while answers are held. It sits inside
+/// [`max_hold`], so the next hop answers before the hold ends.
+#[must_use]
+pub fn next_hop_deadline() -> Duration {
+    rung().next_hop_deadline
+}
 
-/// librdkafka's `message.timeout.ms` while answers are held: inside
-/// [`MAX_HOLD`], so a delivery report settles a request before its hold ends.
-pub const HELD_MESSAGE_TIMEOUT: Duration = Duration::from_secs(20);
+/// [`next_hop_deadline`] in milliseconds, as the loader config takes it.
+#[must_use]
+pub fn next_hop_deadline_ms() -> u64 {
+    u64::try_from(next_hop_deadline().as_millis()).unwrap_or(u64::MAX)
+}
 
 /// Bytes one listener may hold when the memory guard reports no limit.
 const DEFAULT_MAX_HELD_BYTES: u64 = 256 * 1024 * 1024;
@@ -67,7 +86,7 @@ impl Acks {
     pub fn at_enqueue() -> Self {
         Self {
             tickets: None,
-            max_hold: MAX_HOLD,
+            max_hold: max_hold(),
         }
     }
 
@@ -86,7 +105,7 @@ impl Acks {
             tickets: config
                 .enabled
                 .then(|| Tickets::new(transport, max_held_bytes)),
-            max_hold: hold_budget(MAX_HOLD, request_timeout),
+            max_hold: hold_budget(max_hold(), request_timeout),
         };
         EffectiveGuarantee::of(Some(&ListenerAcks(config.enabled)), sink).publish_for(transport);
         acks
@@ -186,11 +205,14 @@ mod tests {
         ticket.deadline().saturating_duration_since(Instant::now())
     }
 
-    /// The Kafka report and the next gRPC hop both settle inside the hold.
+    /// The hold and the next hop's deadline are the ladder's first rung, and
+    /// the next hop settles inside the hold.
     #[test]
     fn downstream_deadlines_sit_inside_the_hold() {
-        assert!(HELD_MESSAGE_TIMEOUT < MAX_HOLD);
-        assert!(Duration::from_millis(NEXT_HOP_DEADLINE_MS) < MAX_HOLD);
+        assert_eq!(max_hold(), HoldLadder::DEFAULT.top());
+        assert_eq!(next_hop_deadline(), Duration::from_secs(20));
+        assert_eq!(next_hop_deadline_ms(), 20_000);
+        assert!(next_hop_deadline() < max_hold());
     }
 
     /// A listener bounded by its own request timeout holds past the Kafka
@@ -213,11 +235,7 @@ mod tests {
                 SinkConfirmation::Remote,
             );
             let hold = held_for(&acks);
-            assert!(hold > HELD_MESSAGE_TIMEOUT, "{listener} holds {hold:?}");
-            assert!(
-                hold > Duration::from_millis(NEXT_HOP_DEADLINE_MS),
-                "{listener} holds {hold:?}"
-            );
+            assert!(hold > next_hop_deadline(), "{listener} holds {hold:?}");
         }
     }
 
@@ -233,7 +251,8 @@ mod tests {
         );
         assert!(
             held_for(&acks.holding_at_most(Duration::from_secs(60))) > Duration::from_secs(24),
-            "a cap above the hold leaves it at {MAX_HOLD:?}"
+            "a cap above the hold leaves it at {:?}",
+            max_hold()
         );
 
         let _held = capped.admit(990, None).expect("holding").expect("admitted");
@@ -388,7 +407,8 @@ mod tests {
         let ticket = on.admit(10, None).expect("holding").expect("admitted");
         let remaining = ticket.deadline().saturating_duration_since(Instant::now());
         assert!(
-            remaining <= MAX_HOLD && remaining > MAX_HOLD.saturating_sub(Duration::from_secs(1))
+            remaining <= max_hold()
+                && remaining > max_hold().saturating_sub(Duration::from_secs(1))
         );
     }
 }
