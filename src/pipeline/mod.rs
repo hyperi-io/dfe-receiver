@@ -2757,6 +2757,83 @@ mod tests {
         assert_eq!(outcome.settled(), 0, "a held batch is all or nothing");
     }
 
+    /// Five listeners, each holding up to its quarter of the memory limit,
+    /// each request arriving once the one before it is held: the pressure
+    /// brake refuses before the bytes held pass the limit.
+    #[tokio::test]
+    #[ignore = "one admitted request can take the bytes held past the memory limit"]
+    async fn the_brake_bounds_what_five_listeners_hold() {
+        let stalled = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = stalled.local_addr().unwrap();
+        let holder = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = stalled.accept().await {
+                held.push(socket);
+            }
+        });
+        let mut config = test_config();
+        config.buffer.memory_limit = 4_000;
+        config.buffer.pressure_threshold = 0.8;
+        grpc_destinations(&mut config, &["alpha"]);
+        if let Some(grpc) = config
+            .destinations
+            .named
+            .get_mut("alpha")
+            .and_then(|spec| spec.grpc.as_mut())
+        {
+            grpc.endpoint = format!("http://{addr}");
+        }
+        let state = test_state_on_reservations(config).await;
+        let limit = state.memory_guard().limit_bytes();
+        let ceiling = acks::max_held_bytes(limit);
+        let listener = |name: &'static str| {
+            state.acks(
+                name,
+                AcknowledgementsConfig::default(),
+                Some(Duration::from_secs(2)),
+            )
+        };
+        let (l1, l2, l3, l4, l5) = (
+            listener("l1"),
+            listener("l2"),
+            listener("l3"),
+            listener("l4"),
+            listener("l5"),
+        );
+        // `{"a":"..."}` of `bytes` bytes.
+        let record = |bytes: u64| {
+            let pad = usize::try_from(bytes - 8).unwrap();
+            [Bytes::from(format!(r#"{{"a":"{}"}}"#, "x".repeat(pad)))]
+        };
+        // The first listener holds just short of the brake, every other one its ceiling.
+        let just_short = limit * 8 / 10 - 3 * ceiling - 1;
+        let (r1, r2, r3, r4, r5) = (
+            record(just_short),
+            record(ceiling),
+            record(ceiling),
+            record(ceiling),
+            record(ceiling),
+        );
+
+        let sender = http();
+        // Polled in order: each request takes its lease before the next one meets the brake.
+        let (_, _, _, _, _, held) = tokio::join!(
+            biased;
+            state.process_batch_acked(&r1, &l1, None, &sender),
+            state.process_batch_acked(&r2, &l2, None, &sender),
+            state.process_batch_acked(&r3, &l3, None, &sender),
+            state.process_batch_acked(&r4, &l4, None, &sender),
+            state.process_batch_acked(&r5, &l5, None, &sender),
+            async { state.memory_guard().current_bytes() },
+        );
+        holder.abort();
+
+        assert!(
+            held <= limit,
+            "{held} bytes held past the {limit}-byte memory limit"
+        );
+    }
+
     /// A Kafka config pointed at an unroutable broker whose records time out
     /// locally after a second.
     fn unroutable_bus(config: &mut Config) {
