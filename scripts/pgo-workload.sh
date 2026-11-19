@@ -176,8 +176,9 @@ for attempt in $(seq 1 60); do
 done
 
 # scalo's producers never ask the broker to create a topic, so every topic the
-# rules and the flow listeners route to is created first.
-docker exec "${KAFKA_CID}" rpk topic create \
+# rules and the flow listeners route to is created first. rpk runs on the host
+# network because the broker's metadata points it at 19092, a host port.
+docker run --rm --network host "$KAFKA_IMAGE" topic create -X brokers=127.0.0.1:19092 \
     cisco_ios_land cylance_land panw_land main_land netflow_land sflow_land
 
 # ----------------------------------------------------------------------------
