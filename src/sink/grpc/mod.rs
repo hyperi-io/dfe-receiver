@@ -24,6 +24,9 @@ use tracing::{debug, error, info, warn};
 use crate::error::{Error, Result};
 use crate::sink::{FailureLatch, SINK_RETRY_AFTER, Sink};
 
+#[cfg(test)]
+pub(crate) mod test_destination;
+
 /// Counts records a gRPC destination did not take, by `reason`.
 pub const SEND_FAILURES_TOTAL: &str = "receiver_destination_send_failures_total";
 

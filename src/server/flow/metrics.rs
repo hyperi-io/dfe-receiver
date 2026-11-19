@@ -38,7 +38,11 @@ pub trait FlowCounter: Send + Sync {
 }
 
 pub trait FlowLabelledCounter: Send + Sync {
-    fn inc(&self, labels: &[(&'static str, &str)]);
+    fn add(&self, labels: &[(&'static str, &str)], n: u64);
+
+    fn inc(&self, labels: &[(&'static str, &str)]) {
+        self.add(labels, 1);
+    }
 }
 
 pub trait FlowHistogram: Send + Sync {
@@ -76,10 +80,10 @@ struct PromLabelledCounter {
 }
 
 impl FlowLabelledCounter for PromLabelledCounter {
-    fn inc(&self, labels: &[(&'static str, &str)]) {
+    fn add(&self, labels: &[(&'static str, &str)], n: u64) {
         let labels: Vec<(&'static str, String)> =
             labels.iter().map(|(k, v)| (*k, (*v).to_string())).collect();
-        metrics::counter!(self.name, &labels).increment(1);
+        metrics::counter!(self.name, &labels).increment(n);
     }
 }
 
@@ -277,8 +281,8 @@ pub mod mock {
 
     pub struct MockLabelledCounter(pub AtomicU64);
     impl FlowLabelledCounter for MockLabelledCounter {
-        fn inc(&self, _labels: &[(&'static str, &str)]) {
-            self.0.fetch_add(1, Ordering::Relaxed);
+        fn add(&self, _labels: &[(&'static str, &str)], n: u64) {
+            self.0.fetch_add(n, Ordering::Relaxed);
         }
     }
 
@@ -331,7 +335,8 @@ pub mod mock {
             let c = MockLabelledCounter(AtomicU64::new(0));
             c.inc(&[("transport", "netflow"), ("reason", "parse_err")]);
             c.inc(&[("transport", "sflow"), ("reason", "parse_err")]);
-            assert_eq!(c.0.load(Ordering::Relaxed), 2);
+            c.add(&[("transport", "sflow"), ("reason", "parse_err")], 3);
+            assert_eq!(c.0.load(Ordering::Relaxed), 5);
         }
 
         #[test]
