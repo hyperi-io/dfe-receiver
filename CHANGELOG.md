@@ -3,6 +3,18 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.15.70](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.69...v1.15.70) (2026-11-19)
+
+### Bug Fixes
+
+* **catalog:** list the flow ingest as alpha ([0274f69](https://github.com/hyperi-io/dfe-receiver/commit/0274f6918195b9959d1ee49067688403ab9df3b6)), closes [#254](https://github.com/hyperi-io/dfe-receiver/issues/254)
+* **pgo:** create Kafka topics before the receiver writes ([acfeae4](https://github.com/hyperi-io/dfe-receiver/commit/acfeae4b4da353ca122763b63afd0388d7f53662))
+* **pgo:** create the workload's topics from the host network ([ba35d98](https://github.com/hyperi-io/dfe-receiver/commit/ba35d98ca33d8b845b6066792db7f1c7c3b3b667))
+* **receiver:** rebuild on scalo 2.14.32 ([8f5920d](https://github.com/hyperi-io/dfe-receiver/commit/8f5920d52e4380e7ac631af37e390551064bd514)), closes [#253](https://github.com/hyperi-io/dfe-receiver/issues/253)
+* **security:** bump libz-sys to 1.1.33 ([98113a8](https://github.com/hyperi-io/dfe-receiver/commit/98113a836d8fee65e8b09d8c3ed27fd894215c8f))
+* **tests:** create e2e Kafka topics before the receiver writes ([22e1b45](https://github.com/hyperi-io/dfe-receiver/commit/22e1b45c59b98ed40410f631c7c1c8e319f46bde))
+* **tls:** use scalo ServerTls for every listener ([f2cdbac](https://github.com/hyperi-io/dfe-receiver/commit/f2cdbacfb52a5e260fc942af232e537a8393e4ae)), closes [#270](https://github.com/hyperi-io/dfe-receiver/issues/270)
+
 ## [1.15.69](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.68...v1.15.69) (2026-11-15)
 
 ### Bug Fixes
