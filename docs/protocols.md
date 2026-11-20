@@ -64,7 +64,7 @@ The other listeners do not offer the knob: their payload is JSON or passes throu
 
 ## Flow (NetFlow + sFlow) is experimental
 
-Status: experimental. `flow.experimental` defaults to `true`, and with it set the handler logs a startup WARN and sets `handler_experimental{handler="flow"} 1`. The generated capability catalogue lists flow as alpha.
+Status: experimental, off by default behind `flow.enabled` (default `false`), tracked in <https://github.com/hyperi-io/dfe-receiver/issues/288>. `flow.experimental` defaults to `true`, and with it set the handler logs a startup WARN and sets `handler_experimental{handler="flow"} 1`. The generated capability catalogue lists flow as alpha.
 
 Native UDP ingestion for NetFlow v5/v9, IPFIX and sFlow v5, with autosense dispatch on each of the default ports (2055, 4739, 6343). `canonical` output (default) is one JSON envelope per UDP datagram with a `flows: [...]` array, and `exploded` one envelope per flow record, which multiplies the events. A record's kind is `flow`, `counter` (an sFlow counter sample), `security_event` (an NSEL firewall event, Cisco ASA firewallEvent / NF_F_FW_EVENT) or `nat_translation` (a CGNAT NAT44 natEvent). One listener per port takes every flow protocol by default, and `flow.split:` runs a NetFlow listener and an sFlow listener instead.
 
