@@ -77,11 +77,19 @@ struct MemoryLease<'a> {
 }
 
 impl<'a> MemoryLease<'a> {
+    /// Lease `bytes`, or `None` when holding them takes usage or the leases
+    /// outstanding past the limit.
+    ///
+    /// Charged before the check, so two requests racing for the same headroom
+    /// cannot both take it. The leases are checked as well as usage because a
+    /// usage reading re-sampled while leases are held can lag them.
     // Borrowed, not `Arc<MemoryGuard>`: the borrow proves the lease cannot
     // outlive the guard, and spends no refcount pair per event on the hot path.
-    fn acquire(guard: &'a MemoryGuard, bytes: u64) -> Self {
+    fn try_acquire(guard: &'a MemoryGuard, bytes: u64) -> Option<Self> {
         guard.add_bytes(bytes);
-        Self { guard, bytes }
+        let lease = Self { guard, bytes };
+        let held = guard.current_bytes().max(guard.reserved_bytes());
+        (held <= guard.limit_bytes()).then_some(lease)
     }
 }
 
@@ -934,6 +942,16 @@ impl PipelineState {
         Ok(())
     }
 
+    /// The inbound brake, then a lease on `bytes` held until the request is
+    /// answered. The brake reads usage before the request, so a request it
+    /// lets through can still be too big for the headroom left: the lease
+    /// refuses that one.
+    fn lease(&self, bytes: u64) -> Result<MemoryLease<'_>> {
+        self.brake()?;
+        MemoryLease::try_acquire(&self.memory_guard, bytes)
+            .ok_or_else(|| Error::Buffer("request would pass the memory limit".into()))
+    }
+
     /// Process a message from `ingest` through the pipeline, answered at enqueue.
     ///
     /// This is a HOT PATH function.
@@ -949,10 +967,8 @@ impl PipelineState {
     /// [`process`](Self::process), uncounted.
     #[inline]
     async fn process_one(&self, payload: Bytes, ingest: &Ingest) -> Result<()> {
-        self.brake()?;
-
         // Tracked for the life of this future.
-        let _lease = MemoryLease::acquire(&self.memory_guard, payload.len() as u64);
+        let _lease = self.lease(payload.len() as u64)?;
 
         let routes = self.routes();
         let mut dispatch = Dispatch::new(None, &routes);
@@ -1081,14 +1097,15 @@ impl PipelineState {
         if payloads.is_empty() {
             return outcome;
         }
-        if let Err(e) = self.brake() {
-            outcome.unavailable = Some(e);
-            return outcome;
-        }
-
         // One lease for the whole batch, held until its answer.
         let total_bytes: u64 = payloads.iter().map(|p| p.len() as u64).sum();
-        let _lease = MemoryLease::acquire(&self.memory_guard, total_bytes);
+        let _lease = match self.lease(total_bytes) {
+            Ok(lease) => lease,
+            Err(e) => {
+                outcome.unavailable = Some(e);
+                return outcome;
+            }
+        };
 
         let ticket = match hold.and_then(|(acks, deadline)| acks.admit(total_bytes, deadline)) {
             None => None,
@@ -2758,10 +2775,10 @@ mod tests {
     }
 
     /// Five listeners, each holding up to its quarter of the memory limit,
-    /// each request arriving once the one before it is held: the pressure
-    /// brake refuses before the bytes held pass the limit.
+    /// each request arriving once the one before it is held: the request that
+    /// would take the bytes held past the limit is refused, though the brake
+    /// let it through.
     #[tokio::test]
-    #[ignore = "one admitted request can take the bytes held past the memory limit"]
     async fn the_brake_bounds_what_five_listeners_hold() {
         let stalled = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = stalled.local_addr().unwrap();
@@ -2817,7 +2834,7 @@ mod tests {
 
         let sender = http();
         // Polled in order: each request takes its lease before the next one meets the brake.
-        let (_, _, _, _, _, held) = tokio::join!(
+        let (_, _, _, _, last, held) = tokio::join!(
             biased;
             state.process_batch_acked(&r1, &l1, None, &sender),
             state.process_batch_acked(&r2, &l2, None, &sender),
@@ -2831,6 +2848,16 @@ mod tests {
         assert!(
             held <= limit,
             "{held} bytes held past the {limit}-byte memory limit"
+        );
+        assert_eq!(
+            held,
+            just_short + 3 * ceiling,
+            "the four requests before it stay held"
+        );
+        assert!(
+            last.unavailable.as_ref().is_some_and(Error::is_retryable),
+            "{:?}",
+            last.unavailable
         );
     }
 
@@ -3649,7 +3676,7 @@ mod tests {
         let before = guard.reserved_bytes();
 
         {
-            let _lease = MemoryLease::acquire(&guard, 4096);
+            let _lease = MemoryLease::try_acquire(&guard, 4096).expect("under the limit");
             assert_eq!(
                 guard.reserved_bytes(),
                 before + 4096,
@@ -3662,6 +3689,35 @@ mod tests {
             before,
             "drop must return the tracked bytes to baseline"
         );
+
+        assert!(MemoryLease::try_acquire(&guard, guard.limit_bytes() + 1).is_none());
+        assert_eq!(
+            guard.reserved_bytes(),
+            before,
+            "a refused lease must return its bytes"
+        );
+    }
+
+    /// A usage reading taken while leases are held can count less than they
+    /// hold, and the lease still refuses to go past the limit.
+    #[tokio::test]
+    async fn a_lease_counts_what_a_fresh_reading_misses() {
+        let cgroup = tempfile::tempdir().unwrap();
+        std::fs::write(cgroup.path().join("memory.current"), "0").unwrap();
+        let guard = MemoryGuard::with_usage_source(
+            MemoryGuardConfig {
+                limit_bytes: 4_000,
+                ..Default::default()
+            },
+            scalo::memory::UsageSource::CgroupV2(cgroup.path().to_path_buf()),
+        );
+
+        let _held = MemoryLease::try_acquire(&guard, 3_000).expect("under the limit");
+        // Past the guard's 50 ms cache, so the next check re-reads the file.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        assert!(MemoryLease::try_acquire(&guard, 1_500).is_none());
+        assert_eq!(guard.reserved_bytes(), 3_000);
     }
 
     /// A lease held across an await must release when the future is dropped.
@@ -3677,7 +3733,7 @@ mod tests {
         let held = Arc::clone(&guard);
 
         let outcome = tokio::time::timeout(Duration::from_millis(50), async move {
-            let _lease = MemoryLease::acquire(&held, 4096);
+            let _lease = MemoryLease::try_acquire(&held, 4096).expect("under the limit");
             assert_eq!(
                 held.reserved_bytes(),
                 before + 4096,
