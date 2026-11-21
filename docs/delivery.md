@@ -211,7 +211,7 @@ The hold sits short of the listener's request timeout or a gRPC sender's `grpc-t
 | `message.timeout.ms` of the producer for held answers, unless the operator set one | 20 s | `HELD_MESSAGE_TIMEOUT`, `src/pipeline/acks.rs` |
 | A gRPC destination's send deadline | 20 s | `NEXT_HOP_DEADLINE_MS`, and `loader.timeout_ms` for the loader |
 
-A listener holds at most a quarter of the memory limit in unanswered bytes, 256 MiB when the guard reports no limit, and answers a request past it with the retry signal. Admission, that ceiling and the `transport_ack_*` metrics are scalo's `Tickets`, behind the pipeline's pressure brake and memory lease.
+A listener holds at most a quarter of the memory limit in unanswered bytes, 256 MiB when the guard reports no limit, and answers a request past it with the retry signal. Admission, that ceiling and the `transport_ack_*` metrics are scalo's `Tickets`, behind the pipeline's pressure brake and memory lease. The lease answers the retry signal to a request the brake let through whose bytes would take the memory guard's usage reading past the memory limit.
 
 ## What is final, and what is retried
 
