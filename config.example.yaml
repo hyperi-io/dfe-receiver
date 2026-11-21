@@ -642,11 +642,9 @@ scaling:
 # Unified mode (default): one listener on each port accepts all flow protocols.
 # Split mode: `flow.split:` opt-in, two independent listeners per protocol.
 #
-# Status: EXPERIMENTAL when first enabled -- emits a WARN log at startup.
-# Flip `experimental: false` once stability is proven.
 flow:
   enabled: false              # set true to receive flow data
-  experimental: true          # WARN-log + info-metric at startup; flip to false after stabilisation period
+  experimental: false         # true adds a startup WARN log and an info metric
   bind_address: "0.0.0.0"
   ports: [2055, 4739, 6343]   # all three common ports, all autosense (v5/v9/IPFIX/sFlow)
   output:

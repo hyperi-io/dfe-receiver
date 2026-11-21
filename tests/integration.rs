@@ -26,6 +26,8 @@ mod config_dotenv;
 mod container_hygiene;
 #[path = "integration/flow_corpus.rs"]
 mod flow_corpus;
+#[path = "integration/flow_exploded.rs"]
+mod flow_exploded;
 #[path = "integration/flow_netflow_e2e.rs"]
 mod flow_netflow_e2e;
 #[path = "integration/flow_sflow_e2e.rs"]

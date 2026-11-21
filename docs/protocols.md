@@ -62,9 +62,9 @@ Every field is optional at both levels: an unset field inherits, so "off" and "n
 
 The other listeners do not offer the knob: their payload is JSON or passes through untouched, which the loader keeps whole in `_json`. `_raw` exists in the `timeseries` common-header profile and no other. A source using `minimal` or `passthrough` pays for capture at the receiver and has the field dropped at the loader, and the receiver cannot see the destination profile to warn.
 
-## Flow (NetFlow + sFlow) is experimental
+## Flow (NetFlow + sFlow)
 
-Status: experimental, off by default behind `flow.enabled` (default `false`), tracked in <https://github.com/hyperi-io/dfe-receiver/issues/288>. `flow.experimental` defaults to `true`, and with it set the handler logs a startup WARN and sets `handler_experimental{handler="flow"} 1`. The generated capability catalogue lists flow as alpha.
+Status: stable, off by default behind `flow.enabled` (default `false`). `flow.experimental` defaults to `false`, and set to `true` it makes the handler log a startup WARN and set `handler_experimental{handler="flow"} 1`. The generated capability catalogue lists flow as stable.
 
 Native UDP ingestion for NetFlow v5/v9, IPFIX and sFlow v5, with autosense dispatch on each of the default ports (2055, 4739, 6343). `canonical` output (default) is one JSON envelope per UDP datagram with a `flows: [...]` array, and `exploded` one envelope per flow record, which multiplies the events. A record's kind is `flow`, `counter` (an sFlow counter sample), `security_event` (an NSEL firewall event, Cisco ASA firewallEvent / NF_F_FW_EVENT) or `nat_translation` (a CGNAT NAT44 natEvent). One listener per port takes every flow protocol by default, and `flow.split:` runs a NetFlow listener and an sFlow listener instead.
 

@@ -370,7 +370,7 @@
           "topic": ""
         },
         "split": null,
-        "experimental": true,
+        "experimental": false,
         "raw_capture": {
           "enabled": null,
           "max_bytes": null,
@@ -1635,9 +1635,9 @@
           ]
         },
         "experimental": {
-          "description": "EXPERIMENTAL marker. When true (default), the handler emits a startup\nWARN log and sets `dfe_handler_experimental{handler=\"flow\"} 1`.\nFlipped to false in a follow-up PR after stability period.",
+          "description": "Experimental marker. When true, the handler emits a startup WARN log\nand sets `dfe_handler_experimental{handler=\"flow\"} 1`. Off by default.",
           "type": "boolean",
-          "default": true
+          "default": false
         },
         "raw_capture": {
           "description": "Raw-record capture override (inherits the common `raw_capture` block).\n\n`_raw` carries the decoder's verbatim record rendering: a JSON array\nof every record in `canonical` mode, the single record in `exploded`.",

@@ -219,10 +219,9 @@ pub struct FlowConfig {
     /// If present, switches to split mode and `flow.enabled` MUST be false.
     pub split: Option<FlowSplitConfig>,
 
-    /// EXPERIMENTAL marker. When true (default), the handler emits a startup
-    /// WARN log and sets `dfe_handler_experimental{handler="flow"} 1`.
-    /// Flipped to false in a follow-up PR after stability period.
-    #[serde(default = "yes")]
+    /// Experimental marker. When true, the handler emits a startup WARN log
+    /// and sets `dfe_handler_experimental{handler="flow"} 1`. Off by default.
+    #[serde(default)]
     pub experimental: bool,
 
     /// Raw-record capture override (inherits the common `raw_capture` block).
@@ -263,7 +262,7 @@ impl Default for FlowConfig {
             netflow: NetflowSubConfig::default(),
             sflow: SflowSubConfig::default(),
             split: None,
-            experimental: true,
+            experimental: false,
             raw_capture: crate::config::RawCaptureConfig::default(),
         }
     }
@@ -344,7 +343,7 @@ enabled: true
         assert!(cfg.netflow.enabled);
         assert!(cfg.sflow.enabled);
         assert!(cfg.split.is_none());
-        assert!(cfg.experimental, "experimental defaults to true");
+        assert!(!cfg.experimental, "experimental defaults to false");
     }
 
     #[test]
@@ -471,14 +470,14 @@ split:
     }
 
     #[test]
-    fn experimental_can_be_disabled() {
+    fn experimental_can_be_enabled() {
         let yaml = r"
 enabled: true
-experimental: false
+experimental: true
 ";
         let cfg: FlowConfig =
             scalo::yaml::from_str(yaml, "flow.yaml", scalo::yaml::Profile::Config).unwrap();
-        assert!(!cfg.experimental);
+        assert!(cfg.experimental);
     }
 
     #[test]
