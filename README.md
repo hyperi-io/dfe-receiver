@@ -27,7 +27,7 @@ The front door of a DFE deployment: takes events in the protocols agents already
 | Fluent Forward | 24224 | Fluentd, Fluent Bit |
 | GELF TCP | 12201 | Graylog GELF output, Fluent Bit |
 | Prometheus Remote Write | 9091 | Prometheus, VictoriaMetrics |
-| Flow (NetFlow + sFlow), experimental ([#288](https://github.com/hyperi-io/dfe-receiver/issues/288)) | 2055 / 4739 / 6343 UDP | NetFlow v5/v9, IPFIX, sFlow v5 exporters (v7 not supported) |
+| Flow (NetFlow + sFlow) | 2055 / 4739 / 6343 UDP | NetFlow v5/v9, IPFIX, sFlow v5 exporters (v7 not supported) |
 
 HTTP always runs, and the other listeners are opt-in. A listener that answers at enqueue (acknowledgements off, or syslog, GELF and flow) buffers in memory behind a circuit breaker, and disk spillover is opt-in.
 
