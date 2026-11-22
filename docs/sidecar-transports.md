@@ -275,6 +275,8 @@ Tailing files and forwarding them:
     Port   24224
 ```
 
+The receiver decodes Forward's MessagePack and turns each record into JSON at the edge. Everything past the receiver is JSON only. Fluent Bit's `http` output can post to HTTP ingest (`/ingest`) instead, with `Format json` (its default) or `json_lines`. `Format msgpack` isn't accepted there.
+
 Fluent Bit is a good choice when:
 
 - You need a small memory footprint
