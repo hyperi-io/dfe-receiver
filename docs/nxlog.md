@@ -93,6 +93,6 @@ The output sends nothing until a `<Route>` sends an input to `dfe`, as in the HT
 </Output>
 ```
 
-The GELF listener takes TCP and splits on a NUL byte, which is `xm_gelf`'s default (`UseNullDelimiter TRUE`). It has no UDP port, so `GELF_UDP` has nowhere to land. `xm_gelf` cuts `short_message` to 64 characters unless the event carries a `$ShortMessage` field, hence the `Exec` line.
+The GELF listener takes TCP and splits on a NUL byte, which is `xm_gelf`'s default (`UseNullDelimiter TRUE`). It has no UDP port, so `GELF_UDP` has nowhere to land. `xm_gelf` cuts `short_message` to 64 characters unless the event carries a `$ShortMessage` field, hence the `Exec` line. The `Exec` copies `$Message`, and an `im_file` input leaves that unset. Add the `$Message = $raw_event` line from the HTTP section to the input first. Without it, `short_message` keeps the first 64 characters of the line and drops the rest.
 
-The GELF listener is off by default. Set `gelf.enabled: true` in the receiver config, and set `accept_unauthenticated: true` or `tls.client_auth: required` under `gelf`, because an enabled listener refuses to start without one of them. `accept_unauthenticated` takes every sender that reaches the port, so pair it with an IP allowlist.
+The GELF listener is off by default. Set `gelf.enabled: true` in the receiver config. An enabled listener refuses to start unless `gelf.accept_unauthenticated: true` is set, or `gelf.tls.enabled: true` is set with `gelf.tls.client_auth: required` and a `gelf.tls.ca_file`. `accept_unauthenticated` takes every sender that reaches the port, so pair it with `server.ip_filter.cidrs`.
