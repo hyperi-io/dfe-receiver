@@ -50,11 +50,13 @@ value:    windows_security
 </Route>
 ```
 
-CE `om_http` has no directive for an extra header, so it can't send a bearer token. Authenticate it with a client certificate: set the HTTP listener's `auth.mode` to `mtls` and give NXLog `HTTPSCertFile` and `HTTPSCertKeyFile`. EE adds `AddHeader`, so a bearer token works there as well.
+`im_msvistalog` runs on Windows only, and the CE Linux image does not carry it. On Linux, delete the `windows_security` input and its name in the route. Left in, CE logs a module load error and routes the other inputs.
+
+CE `om_http` has no directive for an extra header, so it can't send a bearer token. Authenticate it with a client certificate: set the HTTP listener's `auth.mode` to `mtls`, with `server.tls.enabled: true`, `server.tls.client_auth: required` and a `server.tls.ca_file`, and give NXLog `HTTPSCertFile` and `HTTPSCertKeyFile`. The receiver refuses `mtls` when TLS is off. EE adds `AddHeader`, so a bearer token works there as well.
 
 `to_json()` drops `$raw_event` and any field starting with `.` or `_`. An input that puts its text in `$raw_event` alone, as `im_file` and `im_tcp` do, needs `$Message = $raw_event;` first. Without it the record arrives with no log line.
 
-CE sends one event per POST and waits for a 200, 201 or 202 before the next. It reconnects and resends after a timeout or a dropped connection, so a record is never lost in transfer, but the throughput is low. EE's `BatchMode` puts many events in one POST, and the receiver splits a JSON array or newline-delimited body into one event each.
+CE sends one event per POST and waits for a 200, 201 or 202 before the next. It reconnects and resends after a timeout or a dropped connection, so a record is never lost in transfer, but the throughput is low. Any other status makes it resend the same event, including the 503 a receiver returns while its sink cannot confirm. EE's `BatchMode` puts many events in one POST, and the receiver splits a JSON array or newline-delimited body into one event each.
 
 ## Syslog and GELF
 
