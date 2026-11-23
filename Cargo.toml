@@ -127,7 +127,9 @@ snap = "1.1.2"
 
 base64 = "0.23.1"
 
-chrono = { version = "0.4.45", features = ["serde"] }
+jiff = ">=1.0.0, <2"
+# Only where syslog_loose and netgauze take or return chrono types.
+chrono = "0.4.45"
 uuid = { version = "1.29.0", features = ["v4"] }
 async-trait = "0.1.92"
 

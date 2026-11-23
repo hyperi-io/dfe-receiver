@@ -155,7 +155,7 @@ impl UdpFlowListener {
                 }
                 recv = udp.recv_from(&mut buf) => match recv {
                     Ok((n, src)) => {
-                        let now = chrono::Utc::now().to_rfc3339();
+                        let now = crate::server::time_text::rfc3339_utc(jiff::Timestamp::now());
                         self.process_packet(&buf[..n], src, &now, &mut json_buf).await;
                     }
                     Err(e) => {
@@ -191,7 +191,7 @@ impl UdpFlowListener {
                         tracing::warn!(error = %e, "flow readable() error");
                         continue;
                     }
-                    let now = chrono::Utc::now().to_rfc3339();
+                    let now = crate::server::time_text::rfc3339_utc(jiff::Timestamp::now());
                     for _ in 0..DRAIN_BURST {
                         match udp.try_recv_from(&mut buf) {
                             Ok((n, src)) => {

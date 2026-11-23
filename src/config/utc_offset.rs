@@ -15,25 +15,25 @@ use std::borrow::Cow;
 use std::fmt;
 use std::str::FromStr;
 
-use chrono::{FixedOffset, Offset, Utc};
+use jiff::tz::Offset;
 use serde::{Deserialize, Serialize};
 
 /// A fixed offset from UTC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct UtcOffset(FixedOffset);
+pub struct UtcOffset(Offset);
 
 impl UtcOffset {
-    /// The offset as chrono holds it.
+    /// The offset.
     #[must_use]
-    pub fn fixed(self) -> FixedOffset {
+    pub fn offset(self) -> Offset {
         self.0
     }
 }
 
 impl Default for UtcOffset {
     fn default() -> Self {
-        Self(Utc.fix())
+        Self(Offset::UTC)
     }
 }
 
@@ -44,12 +44,33 @@ impl FromStr for UtcOffset {
         if s.eq_ignore_ascii_case("utc") || s.eq_ignore_ascii_case("z") {
             return Ok(Self::default());
         }
-        // chrono stops at the offset and ignores what follows, so the length
-        // admits `+HHMM` and `+HH:MM` only.
-        match (s.len(), s.parse::<FixedOffset>()) {
-            (5 | 6, Ok(offset)) => Ok(Self(offset)),
-            _ => Err(format!("{s:?} is not UTC, Z or an offset like +10:00")),
-        }
+        offset_seconds(s)
+            .and_then(|secs| Offset::from_seconds(secs).ok())
+            .map(Self)
+            .ok_or_else(|| format!("{s:?} is not UTC, Z or an offset like +10:00"))
+    }
+}
+
+/// Seconds east of UTC in five or six bytes: a sign, two hour digits, any run
+/// of colons and whitespace, two minute digits under 60, and the rest unread.
+/// Under 24 hours.
+fn offset_seconds(s: &str) -> Option<i32> {
+    if !matches!(s.len(), 5 | 6) {
+        return None;
+    }
+    let &[sign, h1 @ b'0'..=b'9', h2 @ b'0'..=b'9', ..] = s.as_bytes() else {
+        return None;
+    };
+    let minutes = s[3..].trim_start_matches(|c: char| c == ':' || c.is_whitespace());
+    let &[m1 @ b'0'..=b'5', m2 @ b'0'..=b'9', ..] = minutes.as_bytes() else {
+        return None;
+    };
+    let digit = |c: u8| i32::from(c - b'0');
+    let secs = (digit(h1) * 10 + digit(h2)) * 3600 + (digit(m1) * 10 + digit(m2)) * 60;
+    match sign {
+        b'+' if secs < 86_400 => Some(secs),
+        b'-' if secs < 86_400 => Some(-secs),
+        _ => None,
     }
 }
 
@@ -69,11 +90,13 @@ impl From<UtcOffset> for String {
 
 impl fmt::Display for UtcOffset {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.0.local_minus_utc() == 0 {
-            f.write_str("UTC")
-        } else {
-            write!(f, "{}", self.0)
+        let secs = self.0.seconds();
+        if secs == 0 {
+            return f.write_str("UTC");
         }
+        let sign = if secs < 0 { '-' } else { '+' };
+        let minutes = secs.unsigned_abs() / 60;
+        write!(f, "{sign}{:02}:{:02}", minutes / 60, minutes % 60)
     }
 }
 
@@ -108,7 +131,7 @@ mod tests {
             ("-0800", -28_800, "-08:00"),
         ] {
             let offset: UtcOffset = text.parse().unwrap();
-            assert_eq!(offset.fixed().local_minus_utc(), seconds, "{text}");
+            assert_eq!(offset.offset().seconds(), seconds, "{text}");
             assert_eq!(offset.to_string(), printed, "{text}");
         }
     }

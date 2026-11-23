@@ -26,7 +26,6 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 
 use bytes::Bytes;
-use chrono::{DateTime, Utc};
 use scalo::logger::log_debounced;
 use tracing::warn;
 
@@ -34,6 +33,7 @@ use crate::error::{Error, Result};
 
 use super::proto;
 use crate::server::metric_record::{Exemplar, exemplar_fields};
+use crate::server::time_text::{self, Fraction};
 
 /// The `_source` this listener stamps on a series that carries no `_source` label.
 pub const SOURCE: &str = "prometheus";
@@ -73,12 +73,10 @@ impl PrometheusRwMode {
 fn epoch_ms_to_rfc3339(epoch_ms: i64) -> String {
     let secs = epoch_ms / 1000;
     let nanos = ((epoch_ms % 1000) * 1_000_000) as u32;
-    match DateTime::from_timestamp(secs, nanos) {
-        Some(dt) => dt
-            .with_timezone(&Utc)
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-        None => epoch_ms.to_string(),
-    }
+    time_text::instant(secs, nanos).map_or_else(
+        || epoch_ms.to_string(),
+        |at| time_text::rfc3339_z(at, Fraction::Millis),
+    )
 }
 
 /// Convert epoch milliseconds to RFC 3339 with nanosecond precision.
@@ -86,12 +84,10 @@ fn epoch_ms_to_rfc3339(epoch_ms: i64) -> String {
 fn epoch_ms_to_rfc3339_nanos(epoch_ms: i64) -> String {
     let secs = epoch_ms / 1000;
     let nanos = ((epoch_ms % 1000) * 1_000_000) as u32;
-    match DateTime::from_timestamp(secs, nanos) {
-        Some(dt) => dt
-            .with_timezone(&Utc)
-            .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
-        None => epoch_ms.to_string(),
-    }
+    time_text::instant(secs, nanos).map_or_else(
+        || epoch_ms.to_string(),
+        |at| time_text::rfc3339_z(at, Fraction::Nanos),
+    )
 }
 
 /// Convert epoch milliseconds to ClickHouse DateTime64(9) format.
@@ -99,10 +95,7 @@ fn epoch_ms_to_rfc3339_nanos(epoch_ms: i64) -> String {
 fn epoch_ms_to_ch_datetime(epoch_ms: i64) -> String {
     let secs = epoch_ms / 1000;
     let nanos = ((epoch_ms % 1000) * 1_000_000) as u32;
-    match DateTime::from_timestamp(secs, nanos) {
-        Some(dt) => dt.format("%Y-%m-%d %H:%M:%S%.9f").to_string(),
-        None => epoch_ms.to_string(),
-    }
+    time_text::instant(secs, nanos).map_or_else(|| epoch_ms.to_string(), time_text::clickhouse_utc)
 }
 
 // ---------------------------------------------------------------------------

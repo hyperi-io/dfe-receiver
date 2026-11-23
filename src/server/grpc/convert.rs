@@ -17,6 +17,7 @@ use bytes::Bytes;
 use serde_json::json;
 
 use crate::error::{Error, Result};
+use crate::server::time_text::{self, Fraction};
 
 use super::pb::event;
 
@@ -349,9 +350,10 @@ fn timestamp_to_json(ts: &prost_types::Timestamp) -> serde_json::Value {
     let secs = ts.seconds;
     let nanos = ts.nanos as u32;
 
-    // Use chrono for proper ISO 8601 formatting
-    if let Some(dt) = chrono::DateTime::from_timestamp(secs, nanos) {
-        serde_json::Value::String(dt.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true))
+    if let Some(at) = time_text::instant(secs, nanos) {
+        serde_json::Value::String(time_text::rfc3339_z(at, Fraction::Nanos))
+    } else if let Some(leap) = time_text::leap_second_z(secs, nanos) {
+        serde_json::Value::String(leap)
     } else {
         // Fallback: raw seconds
         json!(secs)

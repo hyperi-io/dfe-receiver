@@ -35,6 +35,7 @@ pub mod raw_capture;
 pub mod sflow;
 pub mod splunk_hec;
 pub mod syslog;
+mod time_text;
 pub mod tls;
 pub mod traits;
 pub mod webhook;

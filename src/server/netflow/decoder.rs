@@ -651,12 +651,12 @@ fn map_fields_to_canonical(fields: &[Field]) -> NetflowFields {
     // for the duration field.
     if out.duration_ms.is_none()
         && let (Some(start), Some(end)) = (&out.t_flow_start, &out.t_flow_end)
-        && let (Ok(s), Ok(e)) = (
-            chrono::DateTime::parse_from_rfc3339(start),
-            chrono::DateTime::parse_from_rfc3339(end),
+        && let (Some(s), Some(e)) = (
+            crate::server::time_text::parse_rfc3339(start),
+            crate::server::time_text::parse_rfc3339(end),
         )
     {
-        let delta_ms = (e - s).num_milliseconds();
+        let delta_ms = e.timestamp().duration_since(s.timestamp()).as_millis();
         if delta_ms >= 0 {
             out.duration_ms = Some(delta_ms as u64);
         }

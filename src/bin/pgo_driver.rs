@@ -692,6 +692,13 @@ fn hec_bodies(events: &[Bytes]) -> Vec<Bytes> {
         .collect()
 }
 
+/// Time since the Unix epoch, zero for a clock set before it.
+fn since_epoch() -> Duration {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+}
+
 /// Remote-write requests shaped like a Prometheus agent's: 50 series across
 /// node-exporter metric families, one sample each.
 fn prom_rw_bodies() -> Vec<Bytes> {
@@ -703,7 +710,7 @@ fn prom_rw_bodies() -> Vec<Bytes> {
         "node_filesystem_avail_bytes",
         "node_load1",
     ];
-    let ts = chrono::Utc::now().timestamp_millis();
+    let ts = i64::try_from(since_epoch().as_millis()).unwrap_or(i64::MAX);
     (0..8)
         .map(|variant| {
             let timeseries = (0..50)
@@ -751,7 +758,7 @@ fn otlp_bodies() -> Vec<Bytes> {
             value: Some(Value::StringValue(value.into())),
         }),
     };
-    let ts = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0) as u64;
+    let ts = u64::try_from(since_epoch().as_nanos()).unwrap_or(0);
     (0..4u64)
         .map(|variant| {
             let log_records = (0..50u64)
