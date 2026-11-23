@@ -3,6 +3,16 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.15.71](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.70...v1.15.71) (2026-11-23)
+
+### What's Changed
+* fix(receiver): batch flow packets and reject records for down sinks by @catinspace-au in https://github.com/hyperi-io/dfe-receiver/pull/287
+* docs(flow): document flow.enabled and fix links by @catinspace-au in https://github.com/hyperi-io/dfe-receiver/pull/289
+* fix(pipeline): reject requests that would go over the memory limit by @catinspace-au in https://github.com/hyperi-io/dfe-receiver/pull/290
+* fix(ci): default main releases to candidates by @catinspace-au in https://github.com/hyperi-io/dfe-receiver/pull/291
+* fix: rebuild on scalo 2.14.33 by @catinspace-au in https://github.com/hyperi-io/dfe-receiver/pull/294
+* fix(deps): url 2.5.9 for RUSTSEC-2026-0592 by @catinspace-au in https://github.com/hyperi-io/dfe-receiver/pull/295
+
 ## [1.15.70](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.69...v1.15.70) (2026-11-19)
 
 ### Bug Fixes
