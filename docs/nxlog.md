@@ -75,6 +75,8 @@ Use these where HTTP can't go, or where the agent speaks one of them today.
 </Output>
 ```
 
+The output sends nothing until a `<Route>` sends an input to `dfe`, as in the HTTP example.
+
 `Syslog_TLS` is NXLog's name for RFC 5425 octet counting, and it works over plain `om_tcp` as well as `om_ssl`. The receiver reads octet-counted and newline-framed syslog on the same port. Syslog carries the message text and a handful of header fields, so most of what NXLog parsed doesn't survive it.
 
 ```text
@@ -92,3 +94,5 @@ Use these where HTTP can't go, or where the agent speaks one of them today.
 ```
 
 The GELF listener takes TCP and splits on a NUL byte, which is `xm_gelf`'s default (`UseNullDelimiter TRUE`). It has no UDP port, so `GELF_UDP` has nowhere to land. `xm_gelf` cuts `short_message` to 64 characters unless the event carries a `$ShortMessage` field, hence the `Exec` line.
+
+The GELF listener is off by default. Set `gelf.enabled: true` in the receiver config, and set `accept_unauthenticated: true` or `tls.client_auth: required` under `gelf`, because an enabled listener refuses to start without one of them. `accept_unauthenticated` takes every sender that reaches the port, so pair it with an IP allowlist.
