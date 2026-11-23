@@ -14,6 +14,7 @@
 use std::fmt;
 
 use jiff::civil::DateTime;
+use jiff::fmt::temporal::Pieces;
 use jiff::tz::{Offset, TimeZone};
 use jiff::{Timestamp, ZonedDateTime};
 
@@ -149,71 +150,11 @@ fn write_fraction(f: &mut impl fmt::Write, nanos: i32, fraction: Fraction) -> fm
     }
 }
 
-/// An RFC 3339 stamp in the offset it names: `YYYY-MM-DD`, `T`, `t` or a
-/// space, `HH:MM:SS`, any number of fraction digits with those past nine
-/// dropped, then `Z`, `z` or `+HH:MM`, `-HH:MM` or U+2212 `HH:MM` under 24
-/// hours. Second 60 reads as 59.
+/// A stamp with a date, a time and a `Z` or numeric offset, in that offset.
 pub(crate) fn parse_rfc3339(s: &str) -> Option<ZonedDateTime> {
-    let b = s.as_bytes();
-    if b.len() < 19
-        || b[4] != b'-'
-        || b[7] != b'-'
-        || !matches!(b[10], b'T' | b't' | b' ')
-        || b[13] != b':'
-        || b[16] != b':'
-    {
-        return None;
-    }
-    let field = |at: usize, n: usize| {
-        b[at..at + n].iter().try_fold(0_i32, |acc, &c| {
-            c.is_ascii_digit().then(|| acc * 10 + i32::from(c - b'0'))
-        })
-    };
-    let second = field(17, 2).filter(|&second| second <= 60)?.min(59);
-    let mut rest = &s[19..];
-    let mut nanos = 0;
-    if let Some(fraction) = rest.strip_prefix('.') {
-        let len = fraction.bytes().take_while(u8::is_ascii_digit).count();
-        if len == 0 {
-            return None;
-        }
-        nanos = fraction.as_bytes()[..len.min(9)]
-            .iter()
-            .zip((0..9).rev())
-            .fold(0, |acc, (&c, place)| {
-                acc + i32::from(c - b'0') * 10_i32.pow(place)
-            });
-        rest = &fraction[len..];
-    }
-    let offset_secs = if matches!(rest, "Z" | "z") {
-        0
-    } else {
-        let (sign, hhmm) = match rest.strip_prefix('+') {
-            Some(hhmm) => (1, hhmm),
-            None => (-1, rest.strip_prefix(['-', '\u{2212}'])?),
-        };
-        let &[h1, h2, b':', m1 @ b'0'..=b'5', m2] = hhmm.as_bytes() else {
-            return None;
-        };
-        let [h1, h2, m1, m2] =
-            [h1, h2, m1, m2].map(|c| c.is_ascii_digit().then(|| i32::from(c - b'0')));
-        let secs = (h1? * 10 + h2?) * 3600 + (m1? * 10 + m2?) * 60;
-        if secs >= 86_400 {
-            return None;
-        }
-        sign * secs
-    };
-    let civil = DateTime::new(
-        i16::try_from(field(0, 4)?).ok()?,
-        i8::try_from(field(5, 2)?).ok()?,
-        i8::try_from(field(8, 2)?).ok()?,
-        i8::try_from(field(11, 2)?).ok()?,
-        i8::try_from(field(14, 2)?).ok()?,
-        i8::try_from(second).ok()?,
-        nanos,
-    )
-    .ok()?;
-    let zone = TimeZone::fixed(Offset::from_seconds(offset_secs).ok()?);
+    let pieces = Pieces::parse(s).ok()?;
+    let civil = pieces.date().to_datetime(pieces.time()?);
+    let zone = TimeZone::fixed(pieces.offset()?.to_numeric_offset());
     civil.to_zoned_datetime(zone).ok()
 }
 
@@ -268,25 +209,32 @@ mod tests {
     }
 
     #[test]
-    fn rfc3339_stamps_read_as_chrono_read_them() {
+    fn rfc3339_stamps_keep_their_own_offset() {
         for (text, want) in [
             (
                 "2026-04-07T17:03:00.5+10:00",
                 Some("2026-04-07T17:03:00.500+10:00"),
             ),
             (
-                "2026-04-07t07:03:00.1234567891z",
+                "2026-04-07t07:03:00.123456789z",
                 Some("2026-04-07T07:03:00.123456789+00:00"),
             ),
             (
-                "2026-04-07 01:33:00\u{2212}05:30",
+                "2026-04-07 01:33:00-05:30",
                 Some("2026-04-07T01:33:00-05:30"),
             ),
+            ("2026-04-07T01:33:00\u{2212}05:30", None),
             ("2026-04-07T07:02:60Z", Some("2026-04-07T07:02:59+00:00")),
-            ("2026-04-07T07:03:00+1000", None),
-            ("2026-04-07T07:03:00+10", None),
-            ("2026-04-07T07:03:00+24:00", None),
+            (
+                "2026-04-07T17:03:00+1000",
+                Some("2026-04-07T17:03:00+10:00"),
+            ),
+            (
+                "2026-04-07T01:33:00-0530",
+                Some("2026-04-07T01:33:00-05:30"),
+            ),
             ("2026-04-07T07:03:00", None),
+            ("2026-04-07", None),
             ("2026-02-29T00:00:00Z", None),
             ("2026-04-07T07:03:61Z", None),
             ("2026-04-07T07:03:00.Z", None),

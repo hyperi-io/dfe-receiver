@@ -15,6 +15,7 @@ use std::borrow::Cow;
 use std::fmt;
 use std::str::FromStr;
 
+use jiff::fmt::strtime;
 use jiff::tz::Offset;
 use serde::{Deserialize, Serialize};
 
@@ -44,33 +45,11 @@ impl FromStr for UtcOffset {
         if s.eq_ignore_ascii_case("utc") || s.eq_ignore_ascii_case("z") {
             return Ok(Self::default());
         }
-        offset_seconds(s)
-            .and_then(|secs| Offset::from_seconds(secs).ok())
+        ["%:z", "%z"]
+            .into_iter()
+            .find_map(|format| strtime::parse(format, s).ok()?.offset())
             .map(Self)
             .ok_or_else(|| format!("{s:?} is not UTC, Z or an offset like +10:00"))
-    }
-}
-
-/// Seconds east of UTC in five or six bytes: a sign, two hour digits, any run
-/// of colons and whitespace, two minute digits under 60, and the rest unread.
-/// Under 24 hours.
-fn offset_seconds(s: &str) -> Option<i32> {
-    if !matches!(s.len(), 5 | 6) {
-        return None;
-    }
-    let &[sign, h1 @ b'0'..=b'9', h2 @ b'0'..=b'9', ..] = s.as_bytes() else {
-        return None;
-    };
-    let minutes = s[3..].trim_start_matches(|c: char| c == ':' || c.is_whitespace());
-    let &[m1 @ b'0'..=b'5', m2 @ b'0'..=b'9', ..] = minutes.as_bytes() else {
-        return None;
-    };
-    let digit = |c: u8| i32::from(c - b'0');
-    let secs = (digit(h1) * 10 + digit(h2)) * 3600 + (digit(m1) * 10 + digit(m2)) * 60;
-    match sign {
-        b'+' if secs < 86_400 => Some(secs),
-        b'-' if secs < 86_400 => Some(-secs),
-        _ => None,
     }
 }
 
