@@ -161,7 +161,7 @@ rustls = "0.23.46"
 rcgen = { version = ">=0.14.10, <0.15", default-features = false, features = ["pem", "aws_lc_rs"] }
 rdkafka = { version = "0.39", features = ["cmake-build", "ssl", "sasl"] }
 temp-env = { version = "0.3.6", features = ["async_closure"] }
-pcap-file = ">=2.0, <3"
+pcap-file = ">=3.0.0, <4"
 sha2 = ">=0.11.1, <0.12"
 # Allocation counts for benches/syslog_allocs.rs only.
 allocation-counter = "0.8.1"
