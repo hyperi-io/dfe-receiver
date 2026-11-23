@@ -126,7 +126,7 @@ impl GrpcSink {
                 debug!(records, "Sent to gRPC destination");
                 self.failures.clear();
             }
-            SendResult::Backpressured => {
+            SendResult::Backpressured | SendResult::RetryAfter(_) => {
                 count_failure(SendFailure::Unavailable, records);
                 if scalo::logger::log_debounced(&self.unavailable_logged, FAILURE_LOG_INTERVAL_MS) {
                     warn!(
@@ -139,7 +139,7 @@ impl GrpcSink {
                     );
                 }
             }
-            SendResult::Fatal(e) => {
+            SendResult::Fatal(e) | SendResult::Reject(e) => {
                 count_failure(SendFailure::Failed, records);
                 if scalo::logger::log_debounced(&self.failed_logged, FAILURE_LOG_INTERVAL_MS) {
                     error!(
@@ -170,11 +170,19 @@ fn count_failure(failure: SendFailure, records: usize) {
 /// transient, queued and retried in order. `FilteredDlq` says a record was
 /// dead-lettered: the record itself on a single send, which is rejected, and
 /// some record of a batch, whose rejection queues the batch to be resent one
-/// record at a time.
+/// record at a time. `Reject` is scalo's permanent refusal, so it is rejected
+/// and dead-lettered, and `RetryAfter` is retried as backpressure is.
 pub(crate) fn push_outcome(result: SendResult) -> Result<()> {
     match result {
         SendResult::Ok => Ok(()),
         SendResult::Backpressured => Err(Error::Transport("gRPC loader backpressured".into())),
+        SendResult::RetryAfter(wait) => Err(Error::Transport(format!(
+            "gRPC loader asked for a {} ms wait before the next try",
+            wait.as_millis()
+        ))),
+        SendResult::Reject(e) => Err(Error::Rejected(format!(
+            "gRPC destination refused the records for good: {e}"
+        ))),
         SendResult::Fatal(e) => Err(Error::Transport(format!("gRPC loader send failed: {e}"))),
         SendResult::FilteredDlq => Err(Error::Rejected(
             "gRPC transport routed the record to a dead-letter queue".into(),
@@ -284,6 +292,14 @@ mod tests {
         ));
         assert!(matches!(
             push_outcome(SendResult::FilteredDlq),
+            Err(Error::Rejected(_))
+        ));
+        assert!(matches!(
+            push_outcome(SendResult::RetryAfter(std::time::Duration::from_secs(1))),
+            Err(Error::Transport(_))
+        ));
+        assert!(matches!(
+            push_outcome(SendResult::Reject(TransportError::Send("refused".into()))),
             Err(Error::Rejected(_))
         ));
     }

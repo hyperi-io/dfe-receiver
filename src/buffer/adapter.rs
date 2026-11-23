@@ -36,7 +36,9 @@ use std::future::Future;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use scalo::transport::{Record, SendResult, TransportBase, TransportResult, TransportSender};
+use scalo::transport::{
+    DeliveryGuarantee, Record, SendResult, TransportBase, TransportResult, TransportSender,
+};
 
 use crate::buffer::{Disposal, Rejects};
 use crate::error::Error;
@@ -165,6 +167,11 @@ impl<S: ReceiverSink + 'static> TransportBase for ScaloSinkAdapter<S> {
 
     fn name(&self) -> &'static str {
         "receiver-sink-adapter"
+    }
+
+    /// A drained record is answered only once the Kafka or gRPC destination confirms it.
+    fn delivery_guarantee(&self) -> DeliveryGuarantee {
+        DeliveryGuarantee::Acknowledged
     }
 }
 

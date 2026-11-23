@@ -850,7 +850,7 @@ impl PipelineState {
     ///
     /// Memory pressure only. A destination that is down refuses the records
     /// bound for it and no others: a held record fails at once in
-    /// [`send_to_destinations`](Self::send_to_destinations), and an answer at
+    /// `send_to_destinations`, and an answer at
     /// enqueue is queued by the buffer in front of the destination until that
     /// is full. Listener state stays with [`probe_ready`](Self::probe_ready):
     /// one listener that failed to bind does not shed the traffic another one

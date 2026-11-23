@@ -22,7 +22,7 @@ doctest = false
 
 [dependencies]
 # The floor moves with `release.helm.library` in .hyperi-ci.yaml.
-scalo = { version = ">=2.14.33, <3", features = [
+scalo = { version = ">=2.14.34, <3", features = [
     "config",
     "config-reload",
     "config-schema",
@@ -61,7 +61,7 @@ schemars = { version = ">=1.2.3, <2", default-features = false, features = ["std
 
 # The Kafka sink's own producer, because scalo's producer context has no
 # delivery callback. Same range and build as scalo so cargo resolves one librdkafka.
-rdkafka = { version = ">=0.39, <0.40", features = ["dynamic-linking"] }
+rdkafka = { version = ">=0.40.0, <0.41", features = ["dynamic-linking"] }
 
 # Direct, for the labelled counter!/gauge! macros.
 metrics = "0.24.6"
@@ -159,7 +159,7 @@ dotenvy = "0.15.7"
 rustls = "0.23.46"
 # aws-lc-rs only, like the runtime: ring beside it leaves rustls without a default provider.
 rcgen = { version = ">=0.14.10, <0.15", default-features = false, features = ["pem", "aws_lc_rs"] }
-rdkafka = { version = "0.39", features = ["cmake-build", "ssl", "sasl"] }
+rdkafka = { version = ">=0.40.0, <0.41", features = ["cmake-build", "ssl", "sasl"] }
 temp-env = { version = "0.3.6", features = ["async_closure"] }
 pcap-file = ">=3.0.0, <4"
 sha2 = ">=0.11.1, <0.12"
@@ -167,7 +167,7 @@ sha2 = ">=0.11.1, <0.12"
 allocation-counter = "0.8.1"
 
 # Test support: contract e2e helpers, the Vector-compat gRPC client and the shared Kafka broker.
-scalo = { version = ">=2.14.33, <3", features = [
+scalo = { version = ">=2.14.34, <3", features = [
     "deployment-test-support",
     "transport-grpc-vector-compat",
     "transport-kafka-test-support",
