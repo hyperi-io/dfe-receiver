@@ -236,7 +236,11 @@ impl Config {
         let cfg = config::try_get().ok_or_else(|| {
             Error::Config("the config cascade is not set up: scalo's run_app sets it up".into())
         })?;
+        Self::from_cascade(cfg)
+    }
 
+    /// The config the cascade `cfg` holds, with the flat env overrides applied.
+    fn from_cascade(cfg: &config::Config) -> Result<Self> {
         // A config that does not fit fails startup: running on defaults would
         // ingest somewhere the operator never configured.
         let mut config: Config = cfg
@@ -246,8 +250,8 @@ impl Config {
             .unmarshal()
             .map_err(|e| Error::Config(format!("invalid config: {e}")))?;
 
-        // Store config path for reload support
-        config.config_path = config_path.map(String::from);
+        // A cascade load has no file path to reload from.
+        config.config_path = None;
 
         // Apply flat env var overrides (DFE_RECEIVER_*)
         config.apply_flat_env(ENV_PREFIX);
@@ -3140,16 +3144,15 @@ mod tests {
     use super::*;
     use temp_env;
 
-    /// Set up the cascade as `run_app` does with no `--config`, from the
-    /// environment the test has set.
-    fn setup_cascade() {
-        match config::setup(config::ConfigOptions {
+    /// A cascade built as `run_app` builds one with no `--config`, from the
+    /// environment the test has set. Built per test, because the global
+    /// cascade keeps the environment of whichever test set it up first.
+    fn cascade() -> config::Config {
+        config::Config::new(config::ConfigOptions {
             env_prefix: ENV_PREFIX.to_string(),
             ..Default::default()
-        }) {
-            Ok(()) | Err(config::ConfigError::AlreadyInitialised) => {}
-            Err(e) => panic!("cascade setup failed: {e}"),
-        }
+        })
+        .expect("the cascade builds")
     }
 
     #[test]
@@ -4530,8 +4533,7 @@ webhook:
                 ("DFE_RECEIVER__LOADER__TRANSPORT", Some("kafka")),
             ],
             || {
-                setup_cascade();
-                let config = Config::load(None).expect("the cascade loads");
+                let config = Config::from_cascade(&cascade()).expect("the cascade loads");
                 assert_eq!(config.transport, TRANSPORT_GRPC);
                 assert_eq!(
                     config.destinations.default,
@@ -5428,8 +5430,8 @@ scaling:
             "DFE_RECEIVER__SERVER__MAX_BODY_SIZE",
             Some("not-a-number"),
             || {
-                setup_cascade();
-                let err = Config::load(None).expect_err("a value that does not fit fails the load");
+                let err = Config::from_cascade(&cascade())
+                    .expect_err("a value that does not fit fails the load");
                 assert!(
                     matches!(err, Error::Config(ref msg) if msg.starts_with("invalid config")),
                     "{err}"
