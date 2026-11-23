@@ -105,6 +105,18 @@ RECEIVER_PID=""
 KAFKA_CID=""
 CONFIG_DIR=""
 
+# A receiver killed before it exits writes no .profraw, so it gets the
+# shutdown grace its deployment contract asks for.
+# The binary is instrumented, so these calls send their profile to /dev/null.
+CONTRACT_DIR="$(mktemp -d -t pgo-contract-XXXXXX)"
+env LLVM_PROFILE_FILE=/dev/null "${RECEIVER_BIN}" generate-artefacts --output-dir "${CONTRACT_DIR}" >/dev/null 2>&1 || true
+RECEIVER_GRACE="$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["termination_grace_seconds"])' "${CONTRACT_DIR}/deployment-contract.json" 2>/dev/null || true)"
+rm -rf "${CONTRACT_DIR}"
+if [[ ! "${RECEIVER_GRACE}" =~ ^[0-9]+$ ]]; then
+    echo "error: no termination_grace_seconds from the deployment contract that ${RECEIVER_BIN} generate-artefacts wrote (got '${RECEIVER_GRACE}')" >&2
+    exit 1
+fi
+
 cleanup() {
     local rc=$?
     if [[ "$KEEP" == "1" ]]; then
@@ -117,14 +129,24 @@ cleanup() {
     echo "pgo-workload: cleanup" >&2
     if [[ -n "$RECEIVER_PID" ]] && kill -0 "$RECEIVER_PID" 2>/dev/null; then
         kill -TERM "$RECEIVER_PID" 2>/dev/null || true
-        # Give the receiver up to 10s to flush + exit cleanly
-        for _ in 1 2 3 4 5 6 7 8 9 10; do
-            if ! kill -0 "$RECEIVER_PID" 2>/dev/null; then
-                break
-            fi
+        local waited=0
+        while kill -0 "$RECEIVER_PID" 2>/dev/null && [[ "${waited}" -lt "${RECEIVER_GRACE}" ]]; do
             sleep 1
+            waited=$((waited + 1))
         done
-        kill -KILL "$RECEIVER_PID" 2>/dev/null || true
+        if kill -0 "$RECEIVER_PID" 2>/dev/null; then
+            echo "pgo-workload: receiver still running ${RECEIVER_GRACE}s after SIGTERM, killing it; it writes no profile" >&2
+            tail -100 "$CONFIG_DIR/receiver.log" >&2 || true
+            kill -KILL "$RECEIVER_PID" 2>/dev/null || true
+            rc=1
+        else
+            echo "pgo-workload: receiver exited ${waited}s after SIGTERM" >&2
+        fi
+    fi
+    if [[ -n "$RECEIVER_PID" && -n "${LLVM_PROFILE_FILE:-}" ]] \
+        && ! compgen -G "$(dirname "${LLVM_PROFILE_FILE}")/pgo-${RECEIVER_PID}_*.profraw" >/dev/null; then
+        echo "pgo-workload: receiver ${RECEIVER_PID} left no .profraw under $(dirname "${LLVM_PROFILE_FILE}")" >&2
+        rc=1
     fi
     if [[ -n "$KAFKA_CID" ]]; then
         docker rm -f "$KAFKA_CID" >/dev/null 2>&1 || true
