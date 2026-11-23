@@ -5,6 +5,7 @@ How dfe-receiver is built, hardened and tuned, and how to point a caller at it.
 - [dfe-receiver architecture](architecture.md)
 - [Protocol handlers](protocol-handlers.md)
 - [Webhook intake](webhook-setup.md)
+- [NXLog](nxlog.md) -- CE and EE configs for the HTTP, syslog and GELF listeners
 - [Delivery](delivery.md)
 - [dfe-receiver internals](internals.md)
 - [Protocol parsing](protocols.md)
