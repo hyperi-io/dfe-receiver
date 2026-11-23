@@ -147,13 +147,15 @@ pub fn hec_event_to_json(event: HecEvent) -> Result<Bytes> {
     Ok(Bytes::from(json))
 }
 
-/// HEC `time`, epoch seconds, as RFC 3339 UTC to the microsecond, `None` past chrono's range.
+/// HEC `time`, epoch seconds, as RFC 3339 UTC to the microsecond, `None` past
+/// the instants `jiff::Timestamp` holds.
 fn rfc3339(time: f64) -> Option<String> {
     let micros = (time * 1_000_000.0).round();
     if !micros.is_finite() || micros.abs() >= i64::MAX as f64 {
         return None;
     }
-    chrono::DateTime::from_timestamp_micros(micros as i64).map(|ts| ts.to_rfc3339())
+    let at = jiff::Timestamp::from_microsecond(micros as i64).ok()?;
+    Some(crate::server::time_text::rfc3339_utc(at))
 }
 
 /// Metadata extracted from query parameters or headers for raw events.

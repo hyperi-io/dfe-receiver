@@ -18,13 +18,16 @@
 use std::fmt;
 
 use bytes::Bytes;
-use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, Offset, TimeZone, Timelike, Utc};
+use jiff::civil::DateTime;
+use jiff::tz::{Offset, TimeZone};
+use jiff::{Timestamp, ZonedDateTime};
 use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
 use syslog_loose::{ProcId, Protocol, StructuredElement, SyslogFacility, SyslogSeverity, Variant};
 
 use crate::config::RawCapture;
 use crate::error::{Error, Result};
 use crate::server::raw_capture;
+use crate::server::time_text::{self, Rfc3339};
 
 /// The `_source` this listener stamps on every record it builds.
 pub const SOURCE: &str = "syslog";
@@ -38,14 +41,14 @@ const RECORD_OVERHEAD: usize = 192;
 /// How syslog lines become pipeline records.
 #[derive(Debug, Clone, Copy)]
 pub struct Converter {
-    zone: FixedOffset,
+    zone: Offset,
     raw_capture: RawCapture,
 }
 
 impl Converter {
     /// A converter reading zone-less stamps in `zone`, capturing `_raw` per `raw_capture`.
     #[must_use]
-    pub fn new(zone: FixedOffset, raw_capture: RawCapture) -> Self {
+    pub fn new(zone: Offset, raw_capture: RawCapture) -> Self {
         Self { zone, raw_capture }
     }
 
@@ -59,7 +62,7 @@ impl Converter {
     ///
     /// [`Error::Validation`] when the record cannot be serialised.
     pub fn convert(&self, raw: &str) -> Result<Bytes> {
-        let record = parse(raw, self.zone, Utc::now);
+        let record = parse(raw, self.zone, Timestamp::now);
         let captured = raw_capture::borrow_str(raw, self.raw_capture);
         let capacity = raw.len() + captured.map_or(0, |(text, _)| text.len()) + RECORD_OVERHEAD;
         let mut out = Vec::with_capacity(capacity);
@@ -81,7 +84,7 @@ impl Converter {
 ///
 /// [`Error::Validation`] when the record cannot be serialised.
 pub fn syslog_to_json(raw: &str, raw_capture: RawCapture) -> Result<Bytes> {
-    Converter::new(Utc.fix(), raw_capture).convert(raw)
+    Converter::new(Offset::UTC, raw_capture).convert(raw)
 }
 
 /// A process id as the line gave it.
@@ -96,7 +99,7 @@ enum ProcIdText<'a> {
 struct Record<'a> {
     facility: Option<SyslogFacility>,
     severity: Option<SyslogSeverity>,
-    timestamp: Option<DateTime<FixedOffset>>,
+    timestamp: Option<ZonedDateTime>,
     hostname: Option<&'a str>,
     appname: Option<&'a str>,
     procid: Option<ProcIdText<'a>>,
@@ -123,20 +126,30 @@ impl<'a> Record<'a> {
 }
 
 /// Read a syslog line. `now` gives the year for a stamp that has none.
-fn parse(raw: &str, zone: FixedOffset, now: fn() -> DateTime<Utc>) -> Record<'_> {
+fn parse(raw: &str, zone: Offset, now: fn() -> Timestamp) -> Record<'_> {
     let line = raw
         .trim_start_matches(BOM)
         .trim_start()
         .trim_end_matches(|c: char| c == '\0' || c.is_whitespace());
     let (pri, rest) = split_pri(line);
     if pri.is_some() && rest.starts_with("1 ") {
+        // syslog_loose takes and returns chrono types, converted here and in `from_chrono`.
+        let chrono_zone = chrono::FixedOffset::east_opt(zone.seconds());
         let msg =
-            syslog_loose::parse_message_with_year_tz(line, |_| 0, Some(zone), Variant::RFC5424);
+            syslog_loose::parse_message_with_year_tz(line, |_| 0, chrono_zone, Variant::RFC5424);
         if matches!(msg.protocol, Protocol::RFC5424(_)) {
             return from_5424(line, msg);
         }
     }
     parse_3164(pri, rest, zone, now)
+}
+
+/// A stamp `syslog_loose` read, in its own offset. A leap second is the :59
+/// second, as its civil fields read.
+fn from_chrono(at: chrono::DateTime<chrono::FixedOffset>) -> Option<ZonedDateTime> {
+    let nanos = at.timestamp_subsec_nanos() % 1_000_000_000;
+    let zone = TimeZone::fixed(Offset::from_seconds(at.offset().local_minus_utc()).ok()?);
+    Some(time_text::instant(at.timestamp(), nanos)?.to_zoned_datetime(zone))
 }
 
 /// The PRI value and the text after it, when `line` opens with a valid `<PRI>`.
@@ -173,7 +186,7 @@ fn from_5424<'a>(line: &'a str, msg: syslog_loose::Message<&'a str>) -> Record<'
     Record {
         facility: msg.facility,
         severity: msg.severity,
-        timestamp: msg.timestamp,
+        timestamp: msg.timestamp.and_then(from_chrono),
         hostname: msg.hostname,
         appname: msg.appname,
         procid: msg.procid.map(|p| match p {
@@ -232,12 +245,7 @@ fn count_sd_elements(text: &str) -> usize {
 /// The header is `STAMP SP HOSTNAME SP TAG: MSG`. Cisco IOS may open it with a
 /// sequence number (`123456: `) and a clock marker (`*` or `.`), and ends its
 /// stamp with a colon in place of a host: `.407 EST: %LINK-3-UPDOWN: ...`.
-fn parse_3164(
-    pri: Option<u8>,
-    rest: &str,
-    zone: FixedOffset,
-    now: fn() -> DateTime<Utc>,
-) -> Record<'_> {
+fn parse_3164(pri: Option<u8>, rest: &str, zone: Offset, now: fn() -> Timestamp) -> Record<'_> {
     let whole = Record::body(pri, rest.trim_start());
     let Some(stamp_at) = stamp_start(rest) else {
         return whole;
@@ -289,7 +297,7 @@ fn stamp_start(rest: &str) -> Option<usize> {
 
 /// A stamp read off the front of a header.
 struct Stamp<'a> {
-    at: DateTime<FixedOffset>,
+    at: ZonedDateTime,
     /// The stamp carried fractional seconds.
     fractional: bool,
     /// The header after the stamp.
@@ -297,14 +305,14 @@ struct Stamp<'a> {
 }
 
 /// An RFC 3339 stamp, or `MMM DD [YYYY] HH:MM:SS[.frac]` read in `zone`.
-fn read_stamp(s: &str, zone: FixedOffset, now: fn() -> DateTime<Utc>) -> Option<Stamp<'_>> {
+fn read_stamp(s: &str, zone: Offset, now: fn() -> Timestamp) -> Option<Stamp<'_>> {
     let b = s.as_bytes();
     if b.first().is_some_and(u8::is_ascii_digit) {
         let end = b
             .iter()
             .position(u8::is_ascii_whitespace)
             .unwrap_or(b.len());
-        let at = DateTime::parse_from_rfc3339(&s[..end]).ok()?;
+        let at = time_text::parse_rfc3339(&s[..end])?;
         return Some(Stamp {
             at,
             fractional: false,
@@ -337,14 +345,23 @@ fn read_stamp(s: &str, zone: FixedOffset, now: fn() -> DateTime<Utc>) -> Option<
         }
         at += 1 + digits;
     }
+    let zone = TimeZone::fixed(zone);
     let year = match year {
         Some(year) => i32::try_from(year).ok()?,
-        None => year_for(month, now().with_timezone(&zone)),
+        None => year_for(month, &now().to_zoned_datetime(zone.clone())),
     };
-    let naive =
-        NaiveDate::from_ymd_opt(year, month, day)?.and_hms_nano_opt(hour, minute, second, nanos)?;
+    let civil = DateTime::new(
+        i16::try_from(year).ok()?,
+        i8::try_from(month).ok()?,
+        i8::try_from(day).ok()?,
+        i8::try_from(hour).ok()?,
+        i8::try_from(minute).ok()?,
+        i8::try_from(second).ok()?,
+        i32::try_from(nanos).ok()?,
+    )
+    .ok()?;
     Some(Stamp {
-        at: zone.from_local_datetime(&naive).single()?,
+        at: civil.to_zoned_datetime(zone).ok()?,
         fractional,
         rest: &s[at..],
     })
@@ -352,11 +369,12 @@ fn read_stamp(s: &str, zone: FixedOffset, now: fn() -> DateTime<Utc>) -> Option<
 
 /// The year of a stamp in `month` with none of its own, received at `now`: a
 /// December stamp arriving in January is last year's, and the reverse next year's.
-fn year_for(month: u32, now: DateTime<FixedOffset>) -> i32 {
+fn year_for(month: u32, now: &ZonedDateTime) -> i32 {
+    let year = i32::from(now.year());
     match (month, now.month()) {
-        (12, 1) => now.year() - 1,
-        (1, 12) => now.year() + 1,
-        _ => now.year(),
+        (12, 1) => year - 1,
+        (1, 12) => year + 1,
+        _ => year,
     }
 }
 
@@ -483,8 +501,8 @@ impl Serialize for Output<'_, '_> {
         if let Some(severity) = r.severity {
             map.serialize_entry("severity", severity.as_str())?;
         }
-        if let Some(ts) = r.timestamp {
-            map.serialize_entry("timestamp", &Rfc3339(ts))?;
+        if let Some(ts) = &r.timestamp {
+            map.serialize_entry("timestamp", &Display(Rfc3339::zoned(ts)))?;
         }
         if let Some(hostname) = r.hostname {
             map.serialize_entry("hostname", hostname)?;
@@ -520,45 +538,6 @@ struct Display<T>(T);
 impl<T: fmt::Display> Serialize for Display<T> {
     fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
         serializer.collect_str(&self.0)
-    }
-}
-
-/// A stamp written as `to_rfc3339` writes it, with no buffer of its own.
-struct Rfc3339(DateTime<FixedOffset>);
-
-impl fmt::Display for Rfc3339 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let ts = self.0;
-        write!(
-            f,
-            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
-            ts.year(),
-            ts.month(),
-            ts.day(),
-            ts.hour(),
-            ts.minute(),
-            ts.second()
-        )?;
-        let nanos = ts.nanosecond() % 1_000_000_000;
-        if nanos != 0 {
-            if nanos.is_multiple_of(1_000_000) {
-                write!(f, ".{:03}", nanos / 1_000_000)?;
-            } else if nanos.is_multiple_of(1_000) {
-                write!(f, ".{:06}", nanos / 1_000)?;
-            } else {
-                write!(f, ".{nanos:09}")?;
-            }
-        }
-        let offset = ts.offset().local_minus_utc();
-        let sign = if offset < 0 { '-' } else { '+' };
-        let minutes = offset.unsigned_abs() / 60;
-        write!(f, "{sign}{:02}:{:02}", minutes / 60, minutes % 60)
-    }
-}
-
-impl Serialize for Rfc3339 {
-    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
-        serializer.collect_str(self)
     }
 }
 
@@ -611,11 +590,11 @@ mod tests {
     use super::*;
 
     /// 2026-11-03T00:00:00Z, so a stamp with no year reads as 2026.
-    fn fixed_now() -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 11, 3, 0, 0, 0).unwrap()
+    fn fixed_now() -> Timestamp {
+        "2026-11-03T00:00:00Z".parse().unwrap()
     }
 
-    fn to_json(raw: &str, zone: FixedOffset, capture: RawCapture) -> serde_json::Value {
+    fn to_json(raw: &str, zone: Offset, capture: RawCapture) -> serde_json::Value {
         let record = parse(raw, zone, fixed_now);
         let out = serde_json::to_vec(&Output {
             record: &record,
@@ -626,7 +605,7 @@ mod tests {
     }
 
     fn json(raw: &str) -> serde_json::Value {
-        to_json(raw, Utc.fix(), RawCapture::OFF)
+        to_json(raw, Offset::UTC, RawCapture::OFF)
     }
 
     fn field<'v>(json: &'v serde_json::Value, key: &str) -> Option<&'v str> {
@@ -1067,9 +1046,9 @@ mod tests {
     /// The stamp each line carries, read in `zone` where it has none of its own.
     #[test]
     fn stamps_keep_their_fraction_and_take_the_default_zone() {
-        let utc = Utc.fix();
-        let east = FixedOffset::east_opt(10 * 3600).unwrap();
-        let cases: &[(&str, FixedOffset, Option<&str>)] = &[
+        let utc = Offset::UTC;
+        let east = Offset::from_seconds(10 * 3600).unwrap();
+        let cases: &[(&str, Offset, Option<&str>)] = &[
             (
                 "<189>*Mar  1 18:46:11.407: %SYS-5",
                 utc,
@@ -1136,9 +1115,10 @@ mod tests {
     #[test]
     fn a_stamp_with_no_year_takes_the_year_it_most_likely_has() {
         let at = |y, m| {
-            Utc.with_ymd_and_hms(y, m, 1, 0, 0, 0)
+            jiff::civil::date(y, m, 1)
+                .at(0, 0, 0, 0)
+                .to_zoned_datetime(TimeZone::UTC)
                 .unwrap()
-                .fixed_offset()
         };
         for (month, now, want) in [
             (12, at(2027, 1), 2026),
@@ -1147,23 +1127,30 @@ mod tests {
             (11, at(2026, 11), 2026),
             (1, at(2026, 1), 2026),
         ] {
-            assert_eq!(year_for(month, now), want, "month {month} at {now}");
+            assert_eq!(year_for(month, &now), want, "month {month} at {now}");
         }
     }
 
     #[test]
     fn rfc3339_matches_chrono() {
+        use chrono::{TimeZone as _, Timelike as _};
+
         let zones = [0, 11 * 3600, -(5 * 3600 + 30 * 60)];
         let nanos = [0, 500_000_000, 123_000_000, 123_456_000, 123_456_789, 1];
         for offset in zones {
             for n in nanos {
-                let zone = FixedOffset::east_opt(offset).unwrap();
+                let zone = chrono::FixedOffset::east_opt(offset).unwrap();
                 let ts = zone
                     .with_ymd_and_hms(2026, 3, 1, 8, 5, 9)
                     .unwrap()
                     .with_nanosecond(n)
                     .unwrap();
-                assert_eq!(Rfc3339(ts).to_string(), ts.to_rfc3339(), "{ts:?}");
+                let converted = from_chrono(ts).unwrap();
+                assert_eq!(
+                    Rfc3339::zoned(&converted).to_string(),
+                    ts.to_rfc3339(),
+                    "{ts:?}"
+                );
             }
         }
     }
@@ -1225,7 +1212,7 @@ mod tests {
     fn capture_adds_raw_without_disturbing_the_parsed_fields() {
         let raw =
             r#"<165>1 2026-03-03T10:30:00.123+11:00 web01 nginx 1234 ID47 [ex@1 a="b"] hello"#;
-        let json = to_json(raw, Utc.fix(), RawCapture::on());
+        let json = to_json(raw, Offset::UTC, RawCapture::on());
 
         assert_eq!(json["message"], "hello");
         assert_eq!(json["hostname"], "web01");
@@ -1239,7 +1226,7 @@ mod tests {
     #[test]
     fn raw_keeps_the_pri_and_the_bytes_the_parse_strips() {
         let raw = "\u{feff}<165>1 2026-03-03T10:30:00Z web01 nginx - - - hello\0";
-        let json = to_json(raw, Utc.fix(), RawCapture::on());
+        let json = to_json(raw, Offset::UTC, RawCapture::on());
         assert_eq!(json["facility"], "local4");
         assert_eq!(json["message"], "hello");
         assert_eq!(json["_raw"], raw);
@@ -1248,7 +1235,7 @@ mod tests {
     #[test]
     fn raw_distinguishes_a_malformed_line_from_a_clean_parse() {
         let raw = "<999 not really syslog at all";
-        let json = to_json(raw, Utc.fix(), RawCapture::on());
+        let json = to_json(raw, Offset::UTC, RawCapture::on());
         assert!(json.get("facility").is_none());
         assert_eq!(json["_raw"], raw);
     }
@@ -1269,7 +1256,7 @@ mod tests {
                 max_bytes: 16,
                 on_oversize: policy,
             };
-            let json = to_json(raw, Utc.fix(), cfg);
+            let json = to_json(raw, Offset::UTC, cfg);
             assert_eq!(field(&json, "_raw"), want_raw, "{policy:?}");
             assert_eq!(
                 json.get("_raw_truncated")
@@ -1283,7 +1270,7 @@ mod tests {
     #[test]
     fn the_converter_writes_what_the_parse_reads() {
         let raw = "<34>Oct 11 22:14:15 mymachine su: failed";
-        let bytes = Converter::new(Utc.fix(), RawCapture::on())
+        let bytes = Converter::new(Offset::UTC, RawCapture::on())
             .convert(raw)
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();

@@ -15,25 +15,26 @@ use std::borrow::Cow;
 use std::fmt;
 use std::str::FromStr;
 
-use chrono::{FixedOffset, Offset, Utc};
+use jiff::fmt::strtime;
+use jiff::tz::Offset;
 use serde::{Deserialize, Serialize};
 
 /// A fixed offset from UTC.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct UtcOffset(FixedOffset);
+pub struct UtcOffset(Offset);
 
 impl UtcOffset {
-    /// The offset as chrono holds it.
+    /// The offset.
     #[must_use]
-    pub fn fixed(self) -> FixedOffset {
+    pub fn offset(self) -> Offset {
         self.0
     }
 }
 
 impl Default for UtcOffset {
     fn default() -> Self {
-        Self(Utc.fix())
+        Self(Offset::UTC)
     }
 }
 
@@ -44,12 +45,11 @@ impl FromStr for UtcOffset {
         if s.eq_ignore_ascii_case("utc") || s.eq_ignore_ascii_case("z") {
             return Ok(Self::default());
         }
-        // chrono stops at the offset and ignores what follows, so the length
-        // admits `+HHMM` and `+HH:MM` only.
-        match (s.len(), s.parse::<FixedOffset>()) {
-            (5 | 6, Ok(offset)) => Ok(Self(offset)),
-            _ => Err(format!("{s:?} is not UTC, Z or an offset like +10:00")),
-        }
+        ["%:z", "%z"]
+            .into_iter()
+            .find_map(|format| strtime::parse(format, s).ok()?.offset())
+            .map(Self)
+            .ok_or_else(|| format!("{s:?} is not UTC, Z or an offset like +10:00"))
     }
 }
 
@@ -69,11 +69,13 @@ impl From<UtcOffset> for String {
 
 impl fmt::Display for UtcOffset {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.0.local_minus_utc() == 0 {
-            f.write_str("UTC")
-        } else {
-            write!(f, "{}", self.0)
+        let secs = self.0.seconds();
+        if secs == 0 {
+            return f.write_str("UTC");
         }
+        let sign = if secs < 0 { '-' } else { '+' };
+        let minutes = secs.unsigned_abs() / 60;
+        write!(f, "{sign}{:02}:{:02}", minutes / 60, minutes % 60)
     }
 }
 
@@ -108,7 +110,7 @@ mod tests {
             ("-0800", -28_800, "-08:00"),
         ] {
             let offset: UtcOffset = text.parse().unwrap();
-            assert_eq!(offset.fixed().local_minus_utc(), seconds, "{text}");
+            assert_eq!(offset.offset().seconds(), seconds, "{text}");
             assert_eq!(offset.to_string(), printed, "{text}");
         }
     }

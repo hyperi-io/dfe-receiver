@@ -55,7 +55,7 @@ async fn test_kafka_sink_send_and_consume() {
     let sink = make_sink(&kf);
     let payload = format!(
         r#"{{"test":"kafka-sink","ts":"{}","id":{}}}"#,
-        chrono::Utc::now().to_rfc3339(),
+        jiff::Timestamp::now().display_with_offset(jiff::tz::Offset::UTC),
         uuid::Uuid::new_v4()
     );
 

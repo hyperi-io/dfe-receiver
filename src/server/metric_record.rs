@@ -9,6 +9,8 @@
 //! Metric record fields the OTLP and Prometheus remote-write listeners write
 //! the same way, so a metric looks alike whichever listener took it.
 
+use crate::server::time_text::{self, Fraction};
+
 /// One exemplar, as either metric listener reads it.
 pub(crate) struct Exemplar {
     pub time_unix_nano: u64,
@@ -79,10 +81,8 @@ pub(crate) fn nanos_to_rfc3339(nanos: u64) -> String {
     }
     let secs = (nanos / 1_000_000_000) as i64;
     let nsecs = (nanos % 1_000_000_000) as u32;
-    match chrono::DateTime::from_timestamp(secs, nsecs) {
-        Some(dt) => dt.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
-        None => String::new(),
-    }
+    time_text::instant(secs, nsecs)
+        .map_or_else(String::new, |at| time_text::rfc3339_z(at, Fraction::Nanos))
 }
 
 /// Nanoseconds since the epoch as ClickHouse `DateTime64(9)` text, empty for
@@ -93,8 +93,5 @@ pub(crate) fn nanos_to_ch_datetime(nanos: u64) -> String {
     }
     let secs = (nanos / 1_000_000_000) as i64;
     let nsecs = (nanos % 1_000_000_000) as u32;
-    match chrono::DateTime::from_timestamp(secs, nsecs) {
-        Some(dt) => dt.format("%Y-%m-%d %H:%M:%S%.9f").to_string(),
-        None => String::new(),
-    }
+    time_text::instant(secs, nsecs).map_or_else(String::new, time_text::clickhouse_utc)
 }

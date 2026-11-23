@@ -164,7 +164,7 @@ impl ProtocolHandler for SyslogHandler {
         };
 
         let cfg = &self.config;
-        let converter = Converter::new(cfg.timezone.fixed(), self.raw_capture);
+        let converter = Converter::new(cfg.timezone.offset(), self.raw_capture);
         let seconds = |s: u64| (s > 0).then(|| Duration::from_secs(s));
         let millis = |ms: u64| (ms > 0).then(|| Duration::from_millis(ms));
         let connection = Connection {
@@ -223,8 +223,6 @@ impl ProtocolHandler for SyslogHandler {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use chrono::Offset;
-
     use super::*;
 
     #[test]
@@ -299,7 +297,7 @@ mod tests {
             bind_addr: "127.0.0.1:0".parse().unwrap(),
             pipeline,
             metrics: Arc::clone(&metrics),
-            converter: Converter::new(chrono::Utc.fix(), RawCapture::OFF),
+            converter: Converter::new(jiff::tz::Offset::UTC, RawCapture::OFF),
             ip_filter: IpFilter::from_config(&config.server.ip_filter),
             bound: bound.clone(),
             recv_buffer_size: 256 * 1024,
