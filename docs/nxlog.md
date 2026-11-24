@@ -54,9 +54,50 @@ value:    windows_security
 
 CE `om_http` has no directive for an extra header, so it can't send a bearer token. Authenticate it with a client certificate: set the HTTP listener's `auth.mode` to `mtls`, with `server.tls.enabled: true`, `server.tls.client_auth: required` and a `server.tls.ca_file`, and give NXLog `HTTPSCertFile` and `HTTPSCertKeyFile`. The receiver refuses `mtls` when TLS is off. EE adds `AddHeader`, so a bearer token works there as well.
 
-`to_json()` drops `$raw_event` and any field starting with `.` or `_`. An input that puts its text in `$raw_event` alone, as `im_file` and `im_tcp` do, needs `$Message = $raw_event;` first. Without it the record arrives with no log line.
+`to_json()` drops `$raw_event` and keeps every other field, including one starting with `.` or `_`, because `IncludeHiddenFields` on `xm_json` defaults to `TRUE`. An input that puts its text in `$raw_event` alone, as `im_file` and `im_tcp` do, needs `$Message = $raw_event;` first. Without it the record arrives with no log line. Set `IncludeHiddenFields FALSE` on the extension to leave the hidden fields out.
 
 CE sends one event per POST and waits for a 200, 201 or 202 before the next. It reconnects and resends after a timeout or a dropped connection, so a record is never lost in transfer, but the throughput is low. Any other status makes it resend the same event, including the 503 a receiver returns while its sink cannot confirm. EE's `BatchMode` puts many events in one POST, and the receiver splits a JSON array or newline-delimited body into one event each.
+
+## Enterprise Edition
+
+EE sends a bearer token and batches, and it can write Kafka directly. Each of the three below was run against a live stack, 25 events in and 25 rows counted in the source's table.
+
+**HTTP with a bearer token and batches.** Mint an ingest credential for the receiver's HTTP listener and put it in an `AddHeader` line. Without the header the receiver answers 401 and NXLog keeps retrying, so nothing lands.
+
+```text
+<Input nxproof_http>
+    Module              im_file
+    File                '/var/log/app/*.log'
+    # The batch size is set on the input.
+    BatchSize           10
+    BatchFlushInterval  2
+    Exec                $Message = $raw_event;
+</Input>
+
+<Output dfe>
+    Module       om_http
+    URL          https://dfe-receiver.example.com:8080/ingest
+    ContentType  application/json
+    AddHeader    Authorization: Bearer <ingest token>
+    BatchMode    jsonarray
+    Exec         to_json();
+</Output>
+```
+
+`BatchMode` takes `jsonarray` or `ndjson` and the receiver reads both. `BatchSize` and `BatchFlushInterval` belong on the input module. On `om_http` the first is a configuration error and `FlushLimit` is deprecated. With a batch of 10, an `ndjson` run of 25 events took three POSTs. A source routes on `SourceModuleName`, so name the `<Input>` block for the source's rule, as in `nxproof_http` here.
+
+**Kafka straight to the landing topic.** `om_kafka` produces to the source's `<source>_land` topic and skips the receiver. The source is an [external origin](https://github.com/hyperi-io/dfe-engine/blob/main/docs/data-plane/external-pipelines.md) with no match rule, and its `connection` block gives the topic and the bootstrap address.
+
+```text
+<Output dfe_kafka>
+    Module      om_kafka
+    BrokerList  kafka.example.com:9092
+    Topic       acme-logs_land
+    Exec        to_json();
+</Output>
+```
+
+`om_kafka` sends `$raw_event` as the message, so `to_json()` is what makes each message one JSON object. The module is in the separate `nxlog-kafka` package on Linux. The proof ran against a plaintext listener, and a DFE-owned broker adds SASL settings that this page doesn't cover.
 
 ## Syslog and GELF
 
