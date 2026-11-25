@@ -129,6 +129,11 @@ fn msgpack_to_json(val: &Value, lossy: &mut bool) -> serde_json::Value {
     }
 }
 
+/// Null and empty text hold no time, so the Forward time takes the field.
+fn is_blank(value: &serde_json::Value) -> bool {
+    value.is_null() || value.as_str() == Some("")
+}
+
 /// Convert a single entry (timestamp + record) to pipeline JSON.
 fn entry_to_json(tag: &str, timestamp: f64, record: &Value) -> Result<Bytes> {
     let mut lossy = false;
@@ -150,13 +155,17 @@ fn entry_to_json(tag: &str, timestamp: f64, record: &Value) -> Result<Bytes> {
         serde_json::Value::String(tag.to_string()),
     );
 
+    // The Forward time fills `timestamp` only where the record has no time, and otherwise
+    // lands in `_timestamp`, so a record's own timestamp is kept.
     if timestamp > 0.0 {
-        obj.insert(
-            "timestamp".to_string(),
-            serde_json::Number::from_f64(timestamp)
-                .map(serde_json::Value::Number)
-                .unwrap_or(serde_json::Value::Null),
-        );
+        let forward = serde_json::Number::from_f64(timestamp)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null);
+        if obj.get("timestamp").is_none_or(is_blank) {
+            obj.insert("timestamp".to_string(), forward);
+        } else if !obj.contains_key("_timestamp") {
+            obj.insert("_timestamp".to_string(), forward);
+        }
     }
 
     // Source tag for routing
@@ -759,6 +768,104 @@ mod tests {
 
         let json: serde_json::Value = serde_json::from_slice(&payloads[0]).unwrap();
         assert!((json["timestamp"].as_f64().unwrap() - 1_700_000_000.0).abs() < 0.001);
+    }
+
+    /// A record's own `timestamp` is kept, and the Forward time lands in `_timestamp`
+    /// beside it. A record with no usable `timestamp` takes the Forward time as `timestamp`.
+    #[test]
+    fn a_records_own_timestamp_is_kept_and_the_forward_time_lands_beside_it() {
+        use serde_json::{Value as Json, json};
+
+        let word = |s: &str| Value::String(s.into());
+        let rec = |pairs: Vec<(&str, Value)>| {
+            Value::Map(pairs.into_iter().map(|(k, v)| (word(k), v)).collect())
+        };
+        let mut eventtime_data = 1_700_000_000_u32.to_be_bytes().to_vec();
+        eventtime_data.extend_from_slice(&500_000_000_u32.to_be_bytes());
+        let eventtime = Value::Ext(0, eventtime_data);
+        let integer_time = Value::Integer(1_700_000_000.into());
+        let own = "2026-11-26T01:02:03.456+10:00";
+        let half = json!(1_700_000_000.5);
+        let whole = json!(1_700_000_000.0);
+
+        // (record, Forward time, want `timestamp`, want `_timestamp`)
+        let cases: Vec<(Value, Value, Option<Json>, Option<Json>)> = vec![
+            (
+                rec(vec![("timestamp", word(own))]),
+                eventtime.clone(),
+                Some(json!(own)),
+                Some(half.clone()),
+            ),
+            (
+                rec(vec![("timestamp", Value::Integer(1_234.into()))]),
+                eventtime.clone(),
+                Some(json!(1_234)),
+                Some(half.clone()),
+            ),
+            (
+                rec(vec![(
+                    "timestamp",
+                    rec(vec![("epoch", Value::Integer(5.into()))]),
+                )]),
+                eventtime.clone(),
+                Some(json!({"epoch": 5})),
+                Some(half.clone()),
+            ),
+            (
+                rec(vec![("msg", word("hi"))]),
+                eventtime.clone(),
+                Some(half.clone()),
+                None,
+            ),
+            (
+                rec(vec![("timestamp", word(own))]),
+                integer_time,
+                Some(json!(own)),
+                Some(whole),
+            ),
+            (
+                rec(vec![("timestamp", Value::Nil)]),
+                eventtime.clone(),
+                Some(half.clone()),
+                None,
+            ),
+            (
+                rec(vec![("timestamp", word(""))]),
+                eventtime.clone(),
+                Some(half.clone()),
+                None,
+            ),
+            (
+                rec(vec![("timestamp", word(own))]),
+                Value::Integer(0.into()),
+                Some(json!(own)),
+                None,
+            ),
+            (
+                rec(vec![
+                    ("timestamp", word(own)),
+                    ("_timestamp", word("sender")),
+                ]),
+                eventtime,
+                Some(json!(own)),
+                Some(json!("sender")),
+            ),
+        ];
+        for (i, (record, time, want_timestamp, want_underscore)) in cases.into_iter().enumerate() {
+            let msg = Value::Array(vec![word("app.log"), time, record]);
+            let payloads = fluent_to_json(&msg, TEST_LIMIT).unwrap();
+            let json: Json = serde_json::from_slice(&payloads[0]).unwrap();
+            assert_eq!(
+                json.get("timestamp"),
+                want_timestamp.as_ref(),
+                "case {i}: timestamp"
+            );
+            assert_eq!(
+                json.get("_timestamp"),
+                want_underscore.as_ref(),
+                "case {i}: _timestamp"
+            );
+        }
     }
 
     #[test]
