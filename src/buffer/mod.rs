@@ -33,8 +33,9 @@ use crate::sink::Sink as ReceiverSink;
 pub enum SinkBackend<S: ReceiverSink + 'static> {
     /// In-memory buffer with circuit breaker (default, no disk).
     InMemory(InMemoryBuffer<S>),
-    /// scalo TieredSink with disk spool (opt-in via spillover config).
-    Tiered(scalo::tiered_sink::TieredSink<adapter::ScaloSinkAdapter<S>>),
+    /// scalo TieredSink with disk spool (opt-in via spillover config), boxed
+    /// because it is far larger than the in-memory buffer.
+    Tiered(Box<scalo::tiered_sink::TieredSink<adapter::ScaloSinkAdapter<S>>>),
 }
 
 #[async_trait]
@@ -208,12 +209,12 @@ mod tests {
         )
         .await
         .expect("tiered sink");
-        let backend = SinkBackend::Tiered(tiered);
+        let backend = SinkBackend::Tiered(Box::new(tiered));
 
         backend.flush().await.expect("flush");
         assert_eq!(primary.0.load(Ordering::SeqCst), 1);
         if let SinkBackend::Tiered(tiered) = backend {
-            tiered.shutdown().await;
+            (*tiered).shutdown().await;
         }
     }
 }
