@@ -3303,15 +3303,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = unstartable_dlq(dir.path());
         let recorder = crate::buffer::rejects::CountedKeys::default();
-        let lines = crate::metrics::testing::LogLines::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(lines.clone())
-            .finish();
+        let lines = crate::metrics::testing::capture_logs();
 
-        let dlq = tracing::subscriber::with_default(subscriber, || {
-            metrics::with_local_recorder(&recorder, || {
-                spawn_dlq(&config, &CancellationToken::new())
-            })
+        let dlq = metrics::with_local_recorder(&recorder, || {
+            spawn_dlq(&config, &CancellationToken::new())
         });
 
         dlq.expect("a DLQ that fails to start is not fatal");
@@ -3588,15 +3583,7 @@ mod tests {
         )
         .await
         .unwrap();
-        for logged in &crate::validation::VALIDATION_FAILURE_LOGGED {
-            logged.store(0, std::sync::atomic::Ordering::Relaxed);
-        }
-        let lines = crate::metrics::testing::LogLines::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(lines.clone())
-            .with_max_level(tracing::Level::INFO)
-            .finish();
-        let _default = tracing::subscriber::set_default(subscriber);
+        let lines = crate::metrics::testing::capture_logs();
 
         // The parser quotes the bytes around the fault, so this refusal's reason carries XYZZY.
         let not_json = Bytes::from_static(br#"{"k":XYZZY}"#);

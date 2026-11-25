@@ -18,10 +18,7 @@
 
 pub mod depth;
 
-use std::sync::atomic::AtomicU64;
-
 use bytes::Bytes;
-use scalo::logger::log_debounced;
 use scalo::logger::security;
 use sonic_rs::LazyValue;
 
@@ -41,17 +38,13 @@ pub(crate) fn is_json_object(record: &[u8]) -> bool {
     matches!((first, last), (Some(b'{'), Some(b'}')))
 }
 
-/// When each failure reason last wrote its security line, indexed by
-/// [`ValidationFailureReason::index`].
-pub(crate) static VALIDATION_FAILURE_LOGGED: [AtomicU64; ValidationFailureReason::ALL.len()] =
-    [const { AtomicU64::new(0) }; ValidationFailureReason::ALL.len()];
-
 /// Record a record refused at `action` for `reason`.
 ///
 /// Every refusal counts on `receiver_validation_failures_total`. The security
 /// event is written at most once per `VALIDATION_LOG_INTERVAL_MS` per reason
 /// and names the reason label only, so a sender can neither drive the log at
-/// the rate it sends nor write its record into it.
+/// the rate it sends nor write its record into it. The debounce lives on
+/// `metrics`, so with none every refusal writes its line.
 pub fn record_validation_failure(
     metrics: Option<&Metrics>,
     action: &str,
@@ -60,10 +53,7 @@ pub fn record_validation_failure(
     if let Some(metrics) = metrics {
         metrics.inc_validation_failure(reason);
     }
-    if log_debounced(
-        &VALIDATION_FAILURE_LOGGED[reason.index()],
-        VALIDATION_LOG_INTERVAL_MS,
-    ) {
+    if metrics.is_none_or(|m| m.validation_log_due(reason, VALIDATION_LOG_INTERVAL_MS)) {
         security::input_validation_failure(action, reason.label(), None);
     }
 }
