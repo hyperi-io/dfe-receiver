@@ -21,10 +21,10 @@ The front door of a DFE deployment: takes events in the protocols agents already
 | Webhook (`POST /webhook/{caller}`) | shares HTTP, or 8090 | Product alert rules and notification hooks (runZero, ...) |
 | OTLP gRPC | 4317 | OpenTelemetry collectors |
 | OTLP HTTP | 4318 | OpenTelemetry collectors |
-| Lumberjack/Beats | 5044 | Filebeat, Logstash Beats output |
+| Lumberjack/Beats | 5044 | Filebeat, Logstash Beats output, [Zeek](docs/zeek.md) and [Suricata](docs/suricata.md) through Filebeat |
 | Splunk HEC | 8088 | Splunk forwarders, Fluentd HEC output |
 | Syslog UDP/TCP/TLS | 514 / 6514 | syslogd, rsyslog, syslog-ng, NXLog |
-| Fluent Forward | 24224 | Fluentd, Fluent Bit |
+| Fluent Forward | 24224 | Fluentd, Fluent Bit, Zeek and Suricata logs through Fluent Bit |
 | GELF TCP | 12201 | Graylog GELF output, Fluent Bit, NXLog |
 | Prometheus Remote Write | 9091 | Prometheus, VictoriaMetrics |
 | Flow (NetFlow + sFlow), experimental ([#288](https://github.com/hyperi-io/dfe-receiver/issues/288)) | 2055 / 4739 / 6343 UDP | NetFlow v5/v9, IPFIX, sFlow v5 exporters (v7 not supported) |
