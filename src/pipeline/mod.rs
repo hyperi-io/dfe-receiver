@@ -197,17 +197,18 @@ enum Drain {
 }
 
 impl<S: Sink + 'static> Delivery<S> {
-    /// The sink, with a buffer in front of it when `queued` and its spool,
-    /// with spillover on, at `spool` under the spillover path. The buffer
-    /// sends through `enqueue_sink` where given, else through `primary`.
+    /// The sink, with a buffer in front of it where `settings` answers at
+    /// enqueue and its spool, with spillover on, at `spool` under the
+    /// spillover path. The buffer sends through `enqueue_sink` where given,
+    /// else through `primary`.
     async fn build(
         primary: S,
         enqueue_sink: Option<S>,
         spool: &Path,
-        buffer: &BufferConfig,
+        settings: &DeliverySettings,
         rejects: Rejects,
-        queued: bool,
     ) -> Self {
+        let queued = settings.at_enqueue;
         let primary = Arc::new(primary);
         let enqueue_sink = enqueue_sink.filter(|_| queued).map(Arc::new);
         let queued = if queued {
@@ -215,7 +216,14 @@ impl<S: Sink + 'static> Delivery<S> {
                 .as_ref()
                 .map_or_else(|| Arc::clone(&primary), Arc::clone);
             Some(Arc::new(
-                build_sink_backend(behind, spool, buffer, rejects).await,
+                build_sink_backend(
+                    behind,
+                    spool,
+                    &settings.buffer,
+                    rejects,
+                    settings.memory.as_ref(),
+                )
+                .await,
             ))
         } else {
             None
@@ -397,15 +405,7 @@ impl Destination {
                 let primary = GrpcSink::new(endpoint, Some(*deadline_ms)).await?;
                 let spool = claim_spool(spools, grpc_spool(name))?;
                 DestinationSink::Grpc(
-                    Delivery::build(
-                        primary,
-                        None,
-                        &spool,
-                        &settings.buffer,
-                        rejects.clone(),
-                        settings.at_enqueue,
-                    )
-                    .await,
+                    Delivery::build(primary, None, &spool, settings, rejects.clone()).await,
                 )
             }
         };
@@ -444,6 +444,9 @@ struct SpoolMove {
 struct DeliverySettings {
     buffer: BufferConfig,
     at_enqueue: bool,
+    /// The runtime's guard, which reserves what a spool drain reads. `None`
+    /// leaves the drain unbounded by memory.
+    memory: Option<Arc<MemoryGuard>>,
 }
 
 /// Whether a batch reaches the pipeline for the first time or again.
@@ -688,6 +691,7 @@ impl PipelineState {
         // memory source watches) so ingest byte reservations feed the
         // UnifiedPressure latch. The buffer-configured guard is built only
         // when no guard is injected, which tests alone do.
+        let spool_memory_guard = runtime_memory_guard.clone();
         let (memory_guard, pressure) = match (governor, runtime_memory_guard) {
             (Some(gov), Some(guard)) => (guard, Some(gov.pressure())),
             // An injected guard is the caller's whether a governor came with it
@@ -727,6 +731,11 @@ impl PipelineState {
             "Listener acknowledgements resolved"
         );
 
+        let settings = DeliverySettings {
+            buffer: config.buffer.clone(),
+            at_enqueue,
+            memory: spool_memory_guard,
+        };
         let mut spools = FxHashSet::default();
         let kafka = if config.kafka.brokers.is_empty() {
             None
@@ -738,27 +747,13 @@ impl PipelineState {
                 .then(|| KafkaSink::new(&config.kafka, None))
                 .transpose()?;
             let spool = claim_spool(&mut spools, PathBuf::from(BUS_SPOOL))?;
-            Some(
-                Delivery::build(
-                    primary,
-                    enqueue_sink,
-                    &spool,
-                    &config.buffer,
-                    rejects.clone(),
-                    at_enqueue,
-                )
-                .await,
-            )
+            Some(Delivery::build(primary, enqueue_sink, &spool, &settings, rejects.clone()).await)
         };
 
         // Build the named destination set: one sink per destination the config
         // actually refers to, so an unused declaration opens no connection.
         // A record can reach any of them, so a listener confirms no more than
         // the weakest does.
-        let settings = DeliverySettings {
-            buffer: config.buffer.clone(),
-            at_enqueue,
-        };
         let mut destinations = DestinationSet::default();
         let mut sink_confirmation = SinkConfirmation::Remote;
         for name in destinations_config.referenced_names() {
@@ -2232,7 +2227,8 @@ fn spillover_config(
 
 /// Build the buffer in front of `primary`: scalo's `TieredSink` spooling under
 /// `spool` when spillover is on, else the in-memory buffer. Either way a record
-/// the primary refuses for good goes to `rejects`, never the buffer.
+/// the primary refuses for good goes to `rejects`, never the buffer. The spool's
+/// drain reserves what it reads with `memory` where given.
 ///
 /// A spool that does not open leaves the in-memory buffer in its place, with
 /// `receiver_spool_available` at 0, so the receiver runs on rather than exiting.
@@ -2242,6 +2238,7 @@ async fn build_sink_backend<S: crate::sink::Sink + 'static>(
     spool: &Path,
     buffer_config: &BufferConfig,
     rejects: Rejects,
+    memory: Option<&Arc<MemoryGuard>>,
 ) -> SinkBackend<S> {
     if buffer_config.spillover.enabled {
         let config = spillover_config(&buffer_config.spillover, spool);
@@ -2258,6 +2255,10 @@ async fn build_sink_backend<S: crate::sink::Sink + 'static>(
         };
         match opened {
             Ok(tiered) => {
+                let tiered = match memory {
+                    Some(guard) => tiered.with_memory_guard(Arc::clone(guard)),
+                    None => tiered,
+                };
                 available.set(1.0);
                 info!(
                     path = %path.display(),
@@ -2653,6 +2654,10 @@ mod tests {
         )
         .await
         .unwrap();
+        let guard = Arc::new(MemoryGuard::with_usage_source(
+            MemoryGuardConfig::default(),
+            scalo::memory::UsageSource::Reservations,
+        ));
 
         // Spillover path, the spool under it, and whether that spool opens.
         let cases = [
@@ -2668,6 +2673,7 @@ mod tests {
                 Path::new(spool),
                 &config.buffer,
                 Rejects::default(),
+                Some(&guard),
             )
             .await;
 
