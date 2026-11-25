@@ -28,7 +28,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -40,7 +40,7 @@ use rdkafka::error::{KafkaError, RDKafkaErrorCode};
 use rdkafka::message::Message;
 use rdkafka::producer::{BaseRecord, DeliveryResult, Producer, ProducerContext, ThreadedProducer};
 use rdkafka::util::Timeout;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use scalo::transport::kafka::{PRODUCER_HIGH_THROUGHPUT, producer_client_config};
 use tokio::sync::{Notify, oneshot};
 use tokio_util::task::AbortOnDropHandle;
@@ -76,6 +76,60 @@ static MISSING_TOPIC: AtomicU64 = AtomicU64::new(0);
 /// (log 1 in 1000).
 static NOT_AUTHORISED: AtomicU64 = AtomicU64::new(0);
 
+/// Topics the cluster reported it does not serve, each with when it last said so.
+///
+/// Per topic, because a missing topic is one source's fault: it must not mark
+/// the whole sink down and refuse every other source's records with it.
+struct UnservedTopics {
+    /// How many topics are listed, so a record's check reads one atomic while
+    /// every topic is served.
+    listed: AtomicUsize,
+    topics: RwLock<FxHashMap<Box<str>, FailureLatch>>,
+}
+
+impl UnservedTopics {
+    fn new() -> Self {
+        Self {
+            listed: AtomicUsize::new(0),
+            topics: RwLock::new(FxHashMap::default()),
+        }
+    }
+
+    /// The cluster does not serve `topic`.
+    fn mark(&self, topic: &str) {
+        if let Some(latch) = self.topics.read().get(topic) {
+            latch.trip();
+            return;
+        }
+        let mut topics = self.topics.write();
+        topics.entry(Box::from(topic)).or_default().trip();
+        self.listed.store(topics.len(), Ordering::Relaxed);
+    }
+
+    /// A broker took a record for `topic`, so it is served.
+    fn clear(&self, topic: &str) {
+        if self.listed.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        let mut topics = self.topics.write();
+        topics.remove(topic);
+        self.listed.store(topics.len(), Ordering::Relaxed);
+    }
+
+    /// Whether records for `topic` are refused unsent: the cluster said it
+    /// does not serve it less than [`SINK_RETRY_AFTER`] ago. After that one
+    /// attempt goes through to ask again.
+    fn refuses(&self, topic: &str) -> bool {
+        if self.listed.load(Ordering::Relaxed) == 0 {
+            return false;
+        }
+        self.topics
+            .read()
+            .get(topic)
+            .is_some_and(|latch| !latch.admits(SINK_RETRY_AFTER))
+    }
+}
+
 /// What the broker did with the records the sink queued.
 ///
 /// Written by [`DeliveryObserver`] on librdkafka's own polling thread, read by
@@ -84,8 +138,12 @@ struct DeliveryState {
     /// Tripped by a failed delivery report, cleared by the next successful
     /// one. Kept apart from the enqueue latch because a queue that still
     /// accepts records would otherwise mask a broker that refuses every one of
-    /// them.
+    /// them. A topic the cluster does not serve is kept apart from it too, in
+    /// `unserved`.
     failures: FailureLatch,
+
+    /// Topics the cluster reported it does not serve.
+    unserved: UnservedTopics,
 
     /// Topics whose first delivery failure has been logged. A refusing broker
     /// reports per record, so the log gets one line per topic and the counters
@@ -118,6 +176,7 @@ impl DeliveryState {
     fn new() -> Self {
         Self {
             failures: FailureLatch::default(),
+            unserved: UnservedTopics::new(),
             logged: RwLock::new(FxHashSet::default()),
             awaiting_report: AtomicU64::new(0),
             refusing: FailureLatch::default(),
@@ -149,9 +208,10 @@ struct DeliveryObserver {
 
 impl DeliveryObserver {
     /// A broker took the record.
-    fn delivered(&self) {
+    fn delivered(&self, topic: &str) {
         metrics::counter!("receiver_kafka_delivered_total").increment(1);
         self.state.failures.clear();
+        self.state.unserved.clear(topic);
     }
 
     /// No broker confirmed the record. A message timeout can expire while a
@@ -162,7 +222,11 @@ impl DeliveryObserver {
             "reason" => failure_reason(err)
         )
         .increment(1);
-        self.state.failures.trip();
+        if topic_missing(err) {
+            self.state.unserved.mark(topic);
+        } else {
+            self.state.failures.trip();
+        }
         if topic_missing(err) && scalo::logger::log_sampled(&MISSING_TOPIC, 1000) {
             let total = MISSING_TOPIC.load(Ordering::Relaxed);
             error!(
@@ -201,7 +265,7 @@ impl ProducerContext for DeliveryObserver {
 
     fn delivery(&self, result: &DeliveryResult<'_>, settlement: Self::DeliveryOpaque) {
         match result {
-            Ok(_) => self.delivered(),
+            Ok(msg) => self.delivered(msg.topic()),
             Err((err, msg)) => {
                 self.failed(msg.topic(), err);
                 if matches!(*settlement, Settling::Answered) {
@@ -277,7 +341,7 @@ fn refused_for_good(err: &KafkaError) -> bool {
 /// same as one that will never exist, so its records are kept and offered
 /// again rather than refused for good. One that never exists is a config
 /// error, shown by the log, the `reason` on
-/// `receiver_kafka_delivery_failures_total` and the sink reading unhealthy.
+/// `receiver_kafka_delivery_failures_total` and its held records refused unsent.
 fn topic_missing(err: &KafkaError) -> bool {
     matches!(
         err.rdkafka_error_code(),
@@ -331,12 +395,27 @@ fn producer_config(
     message_timeout: Option<Duration>,
 ) -> ClientConfig {
     let timeout_ms = message_timeout.map(|timeout| timeout.as_millis().to_string());
+    let propagation_ms = HELD_TOPIC_PROPAGATION.as_millis().to_string();
     let mut defaults = PRODUCER_HIGH_THROUGHPUT.to_vec();
     if let Some(ref ms) = timeout_ms {
         defaults.push((MESSAGE_TIMEOUT_KEY, ms.as_str()));
+        defaults.push((TOPIC_PROPAGATION_KEY, propagation_ms.as_str()));
     }
     producer_client_config(config, &defaults)
 }
+
+/// The librdkafka key bounding how long a topic the cluster does not serve is
+/// waited for before its records fail with that reason.
+const TOPIC_PROPAGATION_KEY: &str = "topic.metadata.propagation.max.ms";
+
+/// How long a record for a topic the cluster does not serve waits for it, on
+/// a producer whose records are held for an answer.
+///
+/// librdkafka's own wait is 30 s, past the message timeout and past what a
+/// sender waits, so a missing topic would otherwise end as a message timeout
+/// that names no cause. Short of the sender's own timeout, the report names
+/// the topic and the sender is told to retry.
+const HELD_TOPIC_PROPAGATION: Duration = Duration::from_secs(2);
 
 /// The librdkafka key bounding how long a record may wait for its broker.
 const MESSAGE_TIMEOUT_KEY: &str = "message.timeout.ms";
@@ -563,6 +642,14 @@ impl KafkaSink {
         )
         .map_err(|(e, _)| e)?;
         Ok(confirmation)
+    }
+
+    /// Whether the cluster said less than [`SINK_RETRY_AFTER`] ago that it does
+    /// not serve `topic`, so a held record for it is refused unsent. Every
+    /// other topic is unaffected.
+    #[must_use]
+    pub fn topic_unserved(&self, topic: &str) -> bool {
+        self.delivery.unserved.refuses(topic)
     }
 
     /// Records the producer holds that no broker has confirmed yet: queued
@@ -1031,8 +1118,82 @@ mod tests {
         observer.failed("events", &timed_out());
         assert!(state.failures.is_tripped());
 
-        observer.delivered();
+        observer.delivered("events");
         assert!(!state.failures.is_tripped());
+    }
+
+    /// A topic the cluster does not serve is refused on its own, and a broker
+    /// taking a record for it lifts the refusal. The sink as a whole stays up.
+    #[test]
+    fn an_unserved_topic_is_refused_alone_until_a_broker_takes_a_record() {
+        let state = Arc::new(DeliveryState::new());
+        let observer = DeliveryObserver {
+            state: Arc::clone(&state),
+        };
+        let unserved = KafkaError::MessageProduction(RDKafkaErrorCode::UnknownTopicOrPartition);
+
+        assert!(!state.unserved.refuses("absent"), "nothing listed");
+        observer.failed("absent", &unserved);
+
+        assert!(state.unserved.refuses("absent"));
+        assert!(!state.unserved.refuses("served"), "another topic");
+        assert!(!state.failures.is_tripped(), "the sink as a whole is up");
+
+        observer.delivered("served");
+        assert!(state.unserved.refuses("absent"), "another topic's success");
+        observer.delivered("absent");
+        assert!(!state.unserved.refuses("absent"));
+        assert_eq!(state.unserved.listed.load(Ordering::Relaxed), 0);
+    }
+
+    /// The refusal ends [`SINK_RETRY_AFTER`] after the cluster last said the
+    /// topic is not served, so one attempt asks again.
+    #[test]
+    fn an_unserved_topic_is_asked_again_after_the_retry_wait() {
+        let unserved = UnservedTopics::new();
+        unserved.mark("absent");
+        let topics = unserved.topics.read();
+        let latch = topics.get("absent").expect("listed");
+        assert!(!latch.admits(SINK_RETRY_AFTER));
+        assert!(latch.admits(Duration::ZERO));
+    }
+
+    /// A cluster that serves one topic and not another, with no Docker:
+    /// librdkafka's in-process mock broker. A held record for the missing
+    /// topic is answered with the reason inside the sender's timeout, the next
+    /// one is refused unsent, and the served topic is delivered throughout.
+    #[tokio::test]
+    async fn a_missing_topic_fails_fast_and_leaves_other_topics_alone() {
+        let cluster = rdkafka::mocking::MockCluster::new(1).expect("mock cluster");
+        cluster.create_topic("served", 1, 1).expect("topic");
+        let config = KafkaConfig {
+            brokers: vec![cluster.bootstrap_servers()],
+            ..KafkaConfig::default()
+        };
+        let sink = KafkaSink::new(&config, Some(Duration::from_secs(20))).unwrap();
+        let record = Bytes::from_static(b"{}");
+
+        let started = Instant::now();
+        let first = sink.confirm("absent", &record).expect("queued locally");
+        let answer = tokio::time::timeout(Duration::from_secs(10), first.confirmed())
+            .await
+            .expect("the report names the missing topic before the message timeout");
+        assert!(matches!(answer, Err(Error::Transport(_))), "{answer:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "answered after {:?}",
+            started.elapsed()
+        );
+        assert!(sink.topic_unserved("absent"));
+        assert!(sink.is_healthy(), "one topic marked the whole sink down");
+
+        let served = sink.confirm("served", &record).expect("queued locally");
+        tokio::time::timeout(Duration::from_secs(10), served.confirmed())
+            .await
+            .expect("the served topic's report arrives")
+            .expect("the served topic is delivered");
+        assert!(!sink.topic_unserved("served"));
+        assert!(sink.topic_unserved("absent"), "another topic's success");
     }
 
     /// A record no broker ever takes has to reach the sink's health flag.
