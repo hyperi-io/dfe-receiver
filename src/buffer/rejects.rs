@@ -322,7 +322,7 @@ pub(crate) mod test_dlq {
     }
 }
 
-/// A recorder counting each counter by `name{label=value,...}`.
+/// A recorder keeping each counter and gauge by `name{label=value,...}`.
 #[cfg(test)]
 #[derive(Default)]
 pub(crate) struct CountedKeys(std::sync::Mutex<std::collections::HashMap<String, Arc<AtomicU64>>>);
@@ -336,6 +336,25 @@ impl CountedKeys {
             .unwrap()
             .get(key)
             .map_or(0, |hits| hits.load(Ordering::Relaxed))
+    }
+
+    /// What the gauge keyed `key` was last set to, `None` when nothing set it.
+    pub(crate) fn level(&self, key: &str) -> Option<f64> {
+        self.0
+            .lock()
+            .unwrap()
+            .get(key)
+            .map(|bits| f64::from_bits(bits.load(Ordering::Relaxed)))
+    }
+
+    /// The cell behind `key`, created on first use.
+    fn cell(&self, key: &metrics::Key) -> Arc<AtomicU64> {
+        let labels: Vec<String> = key
+            .labels()
+            .map(|l| format!("{}={}", l.key(), l.value()))
+            .collect();
+        let name = format!("{}{{{}}}", key.name(), labels.join(","));
+        Arc::clone(self.0.lock().unwrap().entry(name).or_default())
     }
 }
 
@@ -380,17 +399,11 @@ impl metrics::Recorder for CountedKeys {
     }
 
     fn register_counter(&self, key: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Counter {
-        let labels: Vec<String> = key
-            .labels()
-            .map(|l| format!("{}={}", l.key(), l.value()))
-            .collect();
-        let name = format!("{}{{{}}}", key.name(), labels.join(","));
-        let hits = Arc::clone(self.0.lock().unwrap().entry(name).or_default());
-        metrics::Counter::from_arc(Arc::new(Hits(hits)))
+        metrics::Counter::from_arc(Arc::new(Hits(self.cell(key))))
     }
 
-    fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
-        metrics::Gauge::noop()
+    fn register_gauge(&self, key: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
+        metrics::Gauge::from_arc(self.cell(key))
     }
 
     fn register_histogram(

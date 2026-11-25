@@ -207,7 +207,7 @@ impl<S: Sink + 'static> Delivery<S> {
         buffer: &BufferConfig,
         rejects: Rejects,
         queued: bool,
-    ) -> Result<Self> {
+    ) -> Self {
         let primary = Arc::new(primary);
         let enqueue_sink = enqueue_sink.filter(|_| queued).map(Arc::new);
         let queued = if queued {
@@ -215,17 +215,22 @@ impl<S: Sink + 'static> Delivery<S> {
                 .as_ref()
                 .map_or_else(|| Arc::clone(&primary), Arc::clone);
             Some(Arc::new(
-                build_sink_backend(behind, spool, buffer, rejects).await?,
+                build_sink_backend(behind, spool, buffer, rejects).await,
             ))
         } else {
             None
         };
-        Ok(Self {
+        Self {
             primary,
             queued,
             enqueue_sink,
             drain: Mutex::new(Drain::Idle),
-        })
+        }
+    }
+
+    /// Whether the buffer spools to disk: false where the spool did not open.
+    fn spools(&self) -> bool {
+        matches!(self.queued.as_deref(), Some(SinkBackend::Tiered(_)))
     }
 
     /// The sink an at-enqueue answer sends through.
@@ -371,8 +376,7 @@ impl Destination {
     ///
     /// # Errors
     ///
-    /// The gRPC sink, a spool another destination claimed, or the buffer
-    /// failing to build.
+    /// The gRPC sink failing to build, or a spool another destination claimed.
     async fn build(
         name: &str,
         wiring: Wiring,
@@ -401,7 +405,7 @@ impl Destination {
                         rejects.clone(),
                         settings.at_enqueue,
                     )
-                    .await?,
+                    .await,
                 )
             }
         };
@@ -440,13 +444,6 @@ struct SpoolMove {
 struct DeliverySettings {
     buffer: BufferConfig,
     at_enqueue: bool,
-}
-
-impl DeliverySettings {
-    /// Whether a gRPC destination's buffer spools to disk.
-    fn spools(&self) -> bool {
-        self.at_enqueue && self.buffer.spillover.enabled
-    }
 }
 
 /// Whether a batch reaches the pipeline for the first time or again.
@@ -750,7 +747,7 @@ impl PipelineState {
                     rejects.clone(),
                     at_enqueue,
                 )
-                .await?,
+                .await,
             )
         };
 
@@ -1791,8 +1788,7 @@ impl PipelineState {
                     next.insert(name, Arc::clone(kept));
                 }
                 Some(kept)
-                    if self.settings.spools()
-                        && kept.grpc().is_some()
+                    if kept.grpc().is_some_and(Delivery::spools)
                         && matches!(wiring, Wiring::Grpc { .. }) =>
                 {
                     // Claimed here so no destination this reload adds can take the spool.
@@ -2234,46 +2230,54 @@ fn spillover_config(
     config
 }
 
-/// Build the appropriate `SinkBackend` based on spillover configuration.
+/// Build the buffer in front of `primary`: scalo's `TieredSink` spooling under
+/// `spool` when spillover is on, else the in-memory buffer. Either way a record
+/// the primary refuses for good goes to `rejects`, never the buffer.
 ///
-/// When `spillover.enabled` is true, wraps the primary sink in scalo's `TieredSink`
-/// with disk spillover. Otherwise, uses the default in-memory buffer. Either way
-/// a record the primary refuses for good goes to `rejects`, never the buffer.
+/// A spool that does not open leaves the in-memory buffer in its place, with
+/// `receiver_spool_available` at 0, so the receiver runs on rather than exiting.
+/// A restart once the directory is fixed opens it.
 async fn build_sink_backend<S: crate::sink::Sink + 'static>(
     primary: Arc<S>,
     spool: &Path,
     buffer_config: &BufferConfig,
     rejects: Rejects,
-) -> Result<SinkBackend<S>> {
+) -> SinkBackend<S> {
     if buffer_config.spillover.enabled {
-        let adapter = crate::buffer::adapter::ScaloSinkAdapter::new(primary, rejects);
         let config = spillover_config(&buffer_config.spillover, spool);
-        tokio::fs::create_dir_all(&config.spool_path)
-            .await
-            .map_err(|e| {
-                Error::Config(format!(
-                    "failed to create spool directory {}: {e}",
-                    config.spool_path.display()
-                ))
-            })?;
         let path = config.spool_path.clone();
-
-        let tiered = scalo::tiered_sink::TieredSink::new(adapter, config)
-            .await
-            .map_err(|e| Error::Config(format!("failed to create tiered sink: {e}")))?;
-
-        info!(
-            path = %path.display(),
-            max_usage_percent = buffer_config.spillover.max_usage_percent,
-            "Disk spillover enabled"
-        );
-
-        Ok(SinkBackend::Tiered(tiered))
-    } else {
-        Ok(SinkBackend::InMemory(
-            InMemoryBuffer::new(primary, buffer_config).with_rejects(rejects),
-        ))
+        let adapter =
+            crate::buffer::adapter::ScaloSinkAdapter::new(Arc::clone(&primary), rejects.clone());
+        let available =
+            metrics::gauge!("receiver_spool_available", "spool" => spool.display().to_string());
+        let opened = match tokio::fs::create_dir_all(&path).await {
+            Ok(()) => scalo::tiered_sink::TieredSink::new(adapter, config)
+                .await
+                .map_err(|e| e.to_string()),
+            Err(e) => Err(format!("cannot create the directory: {e}")),
+        };
+        match opened {
+            Ok(tiered) => {
+                available.set(1.0);
+                info!(
+                    path = %path.display(),
+                    max_usage_percent = buffer_config.spillover.max_usage_percent,
+                    "Disk spillover enabled"
+                );
+                return SinkBackend::Tiered(tiered);
+            }
+            Err(e) => {
+                available.set(0.0);
+                error!(
+                    path = %path.display(),
+                    error = %e,
+                    "Disk spool did not open, so its records buffer in memory until a \
+                     restart opens it"
+                );
+            }
+        }
     }
+    SinkBackend::InMemory(InMemoryBuffer::new(primary, buffer_config).with_rejects(rejects))
 }
 
 /// Main pipeline orchestrator.
@@ -2629,6 +2633,62 @@ mod tests {
             panic!("alpha is a gRPC destination");
         };
         assert!(delivery.queued.is_none(), "a buffer was built");
+    }
+
+    /// A spool that does not open, under a regular file or held by another
+    /// sink, leaves the buffer in memory: it still delivers, and the spool
+    /// reads unavailable. One that opens spools and reads available.
+    #[tokio::test]
+    async fn a_spool_that_does_not_open_falls_back_to_memory() {
+        let recorder = crate::buffer::rejects::CountedKeys::default();
+        let _local = metrics::set_default_local_recorder(&recorder);
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("delivered.ndjson");
+        let primary = Arc::new(FileSink::new(&out.to_string_lossy()).unwrap());
+        let file = dir.path().join("file");
+        std::fs::write(&file, b"").unwrap();
+        let holder = scalo::tiered_sink::TieredSink::new(
+            crate::buffer::adapter::ScaloSinkAdapter::new(Arc::clone(&primary), Rejects::default()),
+            scalo::tiered_sink::TieredSinkConfig::new(dir.path().join("held")),
+        )
+        .await
+        .unwrap();
+
+        // Spillover path, the spool under it, and whether that spool opens.
+        let cases = [
+            (file, BUS_SPOOL, false),
+            (dir.path().to_path_buf(), "held", false),
+            (dir.path().to_path_buf(), "free", true),
+        ];
+        for (path, spool, opens) in cases {
+            let mut config = test_config();
+            spill_to(&mut config, &path);
+            let backend = build_sink_backend(
+                Arc::clone(&primary),
+                Path::new(spool),
+                &config.buffer,
+                Rejects::default(),
+            )
+            .await;
+
+            assert_eq!(matches!(backend, SinkBackend::Tiered(_)), opens, "{spool}");
+            assert_eq!(
+                recorder.level(&format!("receiver_spool_available{{spool={spool}}}")),
+                Some(if opens { 1.0 } else { 0.0 }),
+                "{spool}"
+            );
+            backend.send("events", Bytes::from(spool)).await.unwrap();
+            backend.flush().await.unwrap();
+            if let SinkBackend::Tiered(tiered) = backend {
+                tiered.shutdown().await;
+            }
+        }
+        holder.shutdown().await;
+
+        assert_eq!(
+            std::fs::read_to_string(&out).unwrap(),
+            "kafka\nheld\nfree\n"
+        );
     }
 
     /// A destination that refuses the record answers the held request as a

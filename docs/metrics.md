@@ -48,6 +48,7 @@ Enqueue and delivery are separate counts. librdkafka takes a record into its que
 | `dlq_backend_start_failures_total` | Counter | `backend` | DLQ backends that failed to start (scalo emits this one). The receiver runs on with the others, and with none a held dead letter is not taken |
 | `receiver_records_rejected_total` | Counter | `outcome` | Records a destination can never take (over its size ceiling), on any sink: `dead_lettered`, `dropped` when no DLQ is configured or no DLQ backend can hold the entry (counted in `pipeline_dead_letters_dropped_total{reason}` as well), or `dlq_refused` when the DLQ did not confirm the write, so the record stays buffered or its sender is told to retry |
 | `receiver_messages_spilled_total` / `receiver_messages_drained_total` | Counter | | Records a destination's buffer held back, in memory or on disk, and those since sent on |
+| `receiver_spool_available` | Gauge | `spool` | With spillover on, `1` when the disk spool opened at startup and `0` when it did not, logged at ERROR with the path and the cause. At `0` that buffer runs in memory until a restart opens the spool. `spool` is `kafka` or `grpc/<destination>` |
 
 ## gRPC destinations
 

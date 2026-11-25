@@ -1207,6 +1207,13 @@ const RECEIVER_SERIES: &[SeriesSpec] = &[
         "Held-back records that have since left the buffer for the sink",
     ),
     (
+        "receiver_spool_available",
+        MetricType::Gauge,
+        &["spool"],
+        "1 when a buffer's disk spool opened, 0 when it did not and the buffer runs in memory \
+         until a restart opens it, by spool (kafka, grpc/<destination>)",
+    ),
+    (
         "receiver_kafka_send_duration_seconds",
         MetricType::Histogram,
         &[],
