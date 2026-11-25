@@ -11,6 +11,7 @@ How dfe-receiver is built, hardened and tuned, and how to point a caller at it.
 - [SNMP](snmp.md) -- polling and traps through Telegraf to the HTTP listener
 - [gNMI streaming telemetry](gnmi.md) -- Telegraf subscriptions to the HTTP listener
 - [BGP over BMP](bmp.md) -- pmacct's pmbmpd to a landing topic, or through Fluent Bit to the HTTP listener
+- [Siemens and industrial OT](ot.md) -- OPC UA, S7comm and Modbus TCP through Telegraf to the HTTP listener
 - [Delivery](delivery.md)
 - [dfe-receiver internals](internals.md)
 - [Protocol parsing](protocols.md)
