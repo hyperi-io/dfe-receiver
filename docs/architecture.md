@@ -104,7 +104,7 @@ flowchart TB
 ## How data flows
 
 1. A protocol handler owns its socket, its framing and its decoding, and nothing else. Once it has JSON bytes it calls the same pipeline every other handler calls, so validation, routing, backpressure and metrics exist once, not once per protocol.
-2. The webhook intake takes `POST /webhook/{caller}` from a product. It checks that caller's own secret, splits the body into records and runs the caller's CEL filter.
+2. The webhook intake takes `POST /webhook/{caller}` from a product. It checks that caller's own secret, splits the body into records and runs the caller's [CEL](https://github.com/cel-expr/cel-spec/blob/master/doc/langdef.md) filter.
 3. Validate checks each record is a JSON object no deeper than 64 levels, with the fields `validation.required_fields` names. A record missing one goes to the DLQ or is refused, per `validation.dlq_on_invalid`.
 4. Route and stamp runs the rule set, holds `_org_id` to the orgs the sender is bound to, and picks the topic and destinations. It writes `_source`, `_org_id` and `_timestamp_received` back into the record.
 5. Delivery hands the record to the Kafka producer, or to one gRPC sender per destination, and answers the sender. A record a destination refuses for good goes to the DLQ: by default the `dfe_receiver_dlq` topic, and a local file when Kafka doesn't take the entry.

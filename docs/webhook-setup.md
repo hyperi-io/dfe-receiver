@@ -126,7 +126,7 @@ Six decisions set up a caller:
 | Where the secret comes from | `callers[].auth.secret_source` | A `provider:path[:key]` reference, never a literal in the file |
 | The replay window | `callers[].auth.tolerance_secs` | Seconds a signature stays valid, `hmac` mode |
 | How big a body is allowed | `webhook.max_body_size` | Applies to the intake alone, independently of `server.max_body_size` |
-| What reaches the topic | `callers[].body`, `callers[].filter`, `callers[].topic` | One object or an array to fan out, an optional CEL filter, and the topic name used verbatim |
+| What reaches the topic | `callers[].body`, `callers[].filter`, `callers[].topic` | One object or an array to fan out, an optional [CEL](https://github.com/cel-expr/cel-spec/blob/master/doc/langdef.md) filter, and the topic name used verbatim |
 
 `hmac` is the mode to use whenever the product supports it. The sender computes
 HMAC-SHA256 over the string `{timestamp}.{body}` and sends the hex digest in a
