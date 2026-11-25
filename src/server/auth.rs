@@ -52,10 +52,6 @@ use crate::tenancy::{Principal, is_credential_id};
 /// Shortest gap between two log lines for one failure reason, or one misconfiguration.
 const AUTH_LOG_INTERVAL_MS: u64 = 5_000;
 
-/// When each failure reason last wrote its log line, indexed by [`AuthFailureReason::index`].
-static AUTH_FAILURE_LOGGED: [AtomicU64; AuthFailureReason::ALL.len()] =
-    [const { AtomicU64::new(0) }; AuthFailureReason::ALL.len()];
-
 /// When a request last found the auth configuration unusable.
 static AUTH_MISCONFIGURED_LOGGED: AtomicU64 = AtomicU64::new(0);
 
@@ -531,7 +527,7 @@ pub fn record_auth_failure(
     resource: Option<&str>,
 ) {
     metrics.inc_auth_failure(reason);
-    if !log_debounced(&AUTH_FAILURE_LOGGED[reason.index()], AUTH_LOG_INTERVAL_MS) {
+    if !metrics.auth_log_due(reason, AUTH_LOG_INTERVAL_MS) {
         return;
     }
     let mut event = SecurityEvent::new("auth.failure", transport, SecurityOutcome::Failure)
@@ -1537,40 +1533,10 @@ mod tests {
         assert!(!provider.is_valid("d"));
     }
 
-    /// Every line a test subscriber writes.
-    #[derive(Clone, Default)]
-    struct Captured(Arc<parking_lot::Mutex<Vec<u8>>>);
-
-    impl std::io::Write for Captured {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
-        type Writer = Self;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
-    }
-
     /// A spray of refused requests writes one log line and counts every refusal.
     #[tokio::test(flavor = "current_thread")]
     async fn a_credential_spray_logs_one_line_and_counts_every_attempt() {
-        let captured = Captured::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(captured.clone())
-            .with_max_level(tracing::Level::INFO)
-            .finish();
-        let _default = tracing::subscriber::set_default(subscriber);
-        AUTH_FAILURE_LOGGED[AuthFailureReason::MissingHeader.index()]
-            .store(0, std::sync::atomic::Ordering::Relaxed);
+        let captured = crate::metrics::testing::capture_logs();
 
         let metrics = Arc::new(Metrics::default());
         let app = axum::Router::new()
@@ -1587,7 +1553,7 @@ mod tests {
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         }
 
-        let log = String::from_utf8(captured.0.lock().clone()).unwrap();
+        let log = captured.text();
         assert_eq!(
             log.lines().count(),
             1,

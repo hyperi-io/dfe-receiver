@@ -214,6 +214,9 @@ pub struct Metrics {
     /// When each validation failure reason last wrote its security line, by
     /// [`ValidationFailureReason::index`].
     validation_logged: [AtomicU64; ValidationFailureReason::ALL.len()],
+    /// When each auth failure reason last wrote its log line, by
+    /// [`AuthFailureReason::index`].
+    auth_logged: [AtomicU64; AuthFailureReason::ALL.len()],
     request_timeouts_total: AtomicU64,
     body_size_rejected_total: AtomicU64,
     unsupported_encoding_total: AtomicU64,
@@ -301,6 +304,7 @@ impl Metrics {
             validation_failures_invalid_json: AtomicU64::new(0),
             validation_failures_missing_field: AtomicU64::new(0),
             validation_logged: [const { AtomicU64::new(0) }; ValidationFailureReason::ALL.len()],
+            auth_logged: [const { AtomicU64::new(0) }; AuthFailureReason::ALL.len()],
             request_timeouts_total: AtomicU64::new(0),
             body_size_rejected_total: AtomicU64::new(0),
             unsupported_encoding_total: AtomicU64::new(0),
@@ -745,6 +749,12 @@ impl Metrics {
         interval_ms: u64,
     ) -> bool {
         log_debounced(&self.validation_logged[reason.index()], interval_ms)
+    }
+
+    /// Whether the log line for an auth failure of `reason` is due, once per
+    /// `interval_ms` for each reason on this collector.
+    pub(crate) fn auth_log_due(&self, reason: AuthFailureReason, interval_ms: u64) -> bool {
+        log_debounced(&self.auth_logged[reason.index()], interval_ms)
     }
 
     /// Record a request timed out on `transport` (408).
@@ -1842,6 +1852,11 @@ mod tests {
             second.validation_log_due(invalid, 5_000),
             "another collector"
         );
+
+        let missing = AuthFailureReason::MissingHeader;
+        assert!(first.auth_log_due(missing, 5_000));
+        assert!(!first.auth_log_due(missing, 5_000), "same auth reason");
+        assert!(second.auth_log_due(missing, 5_000), "another collector");
     }
 
     /// A connection counts from its guard's creation to its drop, and a stray
