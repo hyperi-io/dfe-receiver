@@ -21,7 +21,7 @@ use crate::error::{Error, Result};
 use crate::server::budget::{MAX_COPIED_BYTES, MAX_RECORDS};
 use crate::server::fluent::scan::{Scan, Scanner};
 
-/// The `_source` this listener stamps on every record it builds.
+/// The `_source` this listener stamps on a record that carries none.
 pub const SOURCE: &str = "fluent";
 
 /// Extract a unix timestamp (seconds) from a msgpack value.
@@ -129,6 +129,11 @@ fn msgpack_to_json(val: &Value, lossy: &mut bool) -> serde_json::Value {
     }
 }
 
+/// Null and empty text hold no time, so the Forward time takes the field.
+fn is_blank(value: &serde_json::Value) -> bool {
+    value.is_null() || value.as_str() == Some("")
+}
+
 /// Convert a single entry (timestamp + record) to pipeline JSON.
 fn entry_to_json(tag: &str, timestamp: f64, record: &Value) -> Result<Bytes> {
     let mut lossy = false;
@@ -145,25 +150,35 @@ fn entry_to_json(tag: &str, timestamp: f64, record: &Value) -> Result<Bytes> {
         crate::metrics::count_lossy_decode("fluent");
     }
 
-    obj.insert(
-        "tag".to_string(),
-        serde_json::Value::String(tag.to_string()),
-    );
-
-    if timestamp > 0.0 {
-        obj.insert(
-            "timestamp".to_string(),
-            serde_json::Number::from_f64(timestamp)
-                .map(serde_json::Value::Number)
-                .unwrap_or(serde_json::Value::Null),
-        );
+    // The Fluent tag fills `tag` only where the record has none, and otherwise lands in
+    // `_tag`, as the timestamp below does.
+    let fluent_tag = serde_json::Value::String(tag.to_string());
+    if obj.get("tag").is_none_or(is_blank) {
+        obj.insert("tag".to_string(), fluent_tag);
+    } else if !obj.contains_key("_tag") {
+        obj.insert("_tag".to_string(), fluent_tag);
     }
 
-    // Source tag for routing
-    obj.insert(
-        "_source".to_string(),
-        serde_json::Value::String(SOURCE.to_string()),
-    );
+    // The Forward time fills `timestamp` only where the record has no time, and otherwise
+    // lands in `_timestamp`, so a record's own timestamp is kept.
+    if timestamp > 0.0 {
+        let forward = serde_json::Number::from_f64(timestamp)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null);
+        if obj.get("timestamp").is_none_or(is_blank) {
+            obj.insert("timestamp".to_string(), forward);
+        } else if !obj.contains_key("_timestamp") {
+            obj.insert("_timestamp".to_string(), forward);
+        }
+    }
+
+    // A sender's `_source` is left for routing, which keeps it as `_source_original`.
+    if obj.get("_source").is_none_or(is_blank) {
+        obj.insert(
+            "_source".to_string(),
+            serde_json::Value::String(SOURCE.to_string()),
+        );
+    }
 
     serde_json::to_vec(&obj)
         .map(Bytes::from)
@@ -759,6 +774,182 @@ mod tests {
 
         let json: serde_json::Value = serde_json::from_slice(&payloads[0]).unwrap();
         assert!((json["timestamp"].as_f64().unwrap() - 1_700_000_000.0).abs() < 0.001);
+    }
+
+    /// A record's own `timestamp` is not overwritten. The Forward time lands in
+    /// `_timestamp` beside it, and a record with no usable `timestamp` takes it as `timestamp`.
+    #[test]
+    fn the_listener_stamps_never_overwrite_a_records_own_timestamp() {
+        use serde_json::{Value as Json, json};
+
+        let word = |s: &str| Value::String(s.into());
+        let rec = |pairs: Vec<(&str, Value)>| {
+            Value::Map(pairs.into_iter().map(|(k, v)| (word(k), v)).collect())
+        };
+        let mut eventtime_data = 1_700_000_000_u32.to_be_bytes().to_vec();
+        eventtime_data.extend_from_slice(&500_000_000_u32.to_be_bytes());
+        let eventtime = Value::Ext(0, eventtime_data);
+        let integer_time = Value::Integer(1_700_000_000.into());
+        let own = "2026-11-26T01:02:03.456+10:00";
+        let half = json!(1_700_000_000.5);
+        let whole = json!(1_700_000_000.0);
+
+        // (record, Forward time, want `timestamp`, want `_timestamp`)
+        let cases: Vec<(Value, Value, Option<Json>, Option<Json>)> = vec![
+            (
+                rec(vec![("timestamp", word(own))]),
+                eventtime.clone(),
+                Some(json!(own)),
+                Some(half.clone()),
+            ),
+            (
+                rec(vec![("timestamp", Value::Integer(1_234.into()))]),
+                eventtime.clone(),
+                Some(json!(1_234)),
+                Some(half.clone()),
+            ),
+            (
+                rec(vec![(
+                    "timestamp",
+                    rec(vec![("epoch", Value::Integer(5.into()))]),
+                )]),
+                eventtime.clone(),
+                Some(json!({"epoch": 5})),
+                Some(half.clone()),
+            ),
+            (
+                rec(vec![("msg", word("hi"))]),
+                eventtime.clone(),
+                Some(half.clone()),
+                None,
+            ),
+            (
+                rec(vec![("timestamp", word(own))]),
+                integer_time,
+                Some(json!(own)),
+                Some(whole),
+            ),
+            (
+                rec(vec![("timestamp", Value::Nil)]),
+                eventtime.clone(),
+                Some(half.clone()),
+                None,
+            ),
+            (
+                rec(vec![("timestamp", word(""))]),
+                eventtime.clone(),
+                Some(half.clone()),
+                None,
+            ),
+            (
+                rec(vec![("timestamp", word(own))]),
+                Value::Integer(0.into()),
+                Some(json!(own)),
+                None,
+            ),
+            (
+                rec(vec![
+                    ("timestamp", word(own)),
+                    ("_timestamp", word("sender")),
+                ]),
+                eventtime,
+                Some(json!(own)),
+                Some(json!("sender")),
+            ),
+        ];
+        for (i, (record, time, want_timestamp, want_underscore)) in cases.into_iter().enumerate() {
+            let msg = Value::Array(vec![word("app.log"), time, record]);
+            let payloads = fluent_to_json(&msg, TEST_LIMIT).unwrap();
+            let json: Json = serde_json::from_slice(&payloads[0]).unwrap();
+            assert_eq!(
+                json.get("timestamp"),
+                want_timestamp.as_ref(),
+                "case {i}: timestamp"
+            );
+            assert_eq!(
+                json.get("_timestamp"),
+                want_underscore.as_ref(),
+                "case {i}: _timestamp"
+            );
+        }
+    }
+
+    /// A record's own `tag` and `_source` are not overwritten. The Fluent tag lands in
+    /// `_tag` beside a sender's `tag`, and a sender's `_source` is left for routing.
+    #[test]
+    fn the_listener_stamps_never_overwrite_a_records_own_tag_and_source() {
+        use serde_json::{Value as Json, json};
+
+        let word = |s: &str| Value::String(s.into());
+        let rec = |pairs: Vec<(&str, Value)>| {
+            Value::Map(pairs.into_iter().map(|(k, v)| (word(k), v)).collect())
+        };
+
+        // (record, want `tag`, want `_tag`, want `_source`). The Fluent tag is "app.log".
+        type Stamps = (Value, Option<Json>, Option<Json>, Option<Json>);
+        let stamps: Vec<Stamps> = vec![
+            (
+                rec(vec![("msg", word("hi"))]),
+                Some(json!("app.log")),
+                None,
+                Some(json!("fluent")),
+            ),
+            (
+                rec(vec![("tag", word("sender"))]),
+                Some(json!("sender")),
+                Some(json!("app.log")),
+                Some(json!("fluent")),
+            ),
+            (
+                rec(vec![("tag", Value::Nil)]),
+                Some(json!("app.log")),
+                None,
+                Some(json!("fluent")),
+            ),
+            (
+                rec(vec![("tag", word("sender")), ("_tag", word("own"))]),
+                Some(json!("sender")),
+                Some(json!("own")),
+                Some(json!("fluent")),
+            ),
+            (
+                rec(vec![("_tag", word("own"))]),
+                Some(json!("app.log")),
+                Some(json!("own")),
+                Some(json!("fluent")),
+            ),
+            (
+                rec(vec![("_source", word("crates"))]),
+                Some(json!("app.log")),
+                None,
+                Some(json!("crates")),
+            ),
+            (
+                rec(vec![("_source", word(""))]),
+                Some(json!("app.log")),
+                None,
+                Some(json!("fluent")),
+            ),
+        ];
+        for (i, (record, want_tag, want_underscore_tag, want_source)) in
+            stamps.into_iter().enumerate()
+        {
+            let time = Value::Integer(1_700_000_000.into());
+            let msg = Value::Array(vec![word("app.log"), time, record]);
+            let payloads = fluent_to_json(&msg, TEST_LIMIT).unwrap();
+            let json: Json = serde_json::from_slice(&payloads[0]).unwrap();
+            assert_eq!(json.get("tag"), want_tag.as_ref(), "stamp case {i}: tag");
+            assert_eq!(
+                json.get("_tag"),
+                want_underscore_tag.as_ref(),
+                "stamp case {i}: _tag"
+            );
+            assert_eq!(
+                json.get("_source"),
+                want_source.as_ref(),
+                "stamp case {i}: _source"
+            );
+        }
     }
 
     #[test]
