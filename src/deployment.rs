@@ -359,7 +359,7 @@ fn capabilities() -> Vec<scalo::deployment::Capability> {
                 ingest("prometheus_rw", "Prometheus Remote Write."),
                 ingest("fluent", "Fluent Forward protocol."),
                 ingest("gelf", "Graylog Extended Log Format."),
-                ingest("flow", "NetFlow v5/v9 + IPFIX + sFlow v5.").maturity("alpha"),
+                ingest("flow", "NetFlow v5/v9 + IPFIX + sFlow v5."),
                 ingest("webhook", "Generic authenticated webhook intake: POST /webhook/{caller}, per-caller HMAC or static-header auth, per-caller topic."),
             ]),
         Capability::sink("destinations")

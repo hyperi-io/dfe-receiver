@@ -319,14 +319,13 @@ impl ProtocolHandler for FlowHandler {
             return Ok(());
         }
 
-        // EXPERIMENTAL marker: WARN log + info-gauge.
+        // Experimental marker, off by default: WARN log + info-gauge.
         if self.cfg.experimental {
             warn!(
                 handler = "flow",
-                "EXPERIMENTAL: flow handler (NetFlow + sFlow) is experimental; \
-                 behaviour may change between minor versions, and production use \
-                 is at your own risk. Set flow.experimental: false to suppress \
-                 this warning once the handler stabilises."
+                "flow.experimental is true, so the flow handler (NetFlow + sFlow) \
+                 reports itself experimental. The handler is stable and the default \
+                 is false."
             );
             self.metrics
                 .handler_experimental

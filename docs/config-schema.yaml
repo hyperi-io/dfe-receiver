@@ -312,7 +312,7 @@ properties:
         enabled: true
         topic: ""
       split: null
-      experimental: true
+      experimental: false
       raw_capture:
         enabled: null
         max_bytes: null
@@ -1537,11 +1537,10 @@ $defs:
         - type: "null"
       experimental:
         description: |-
-          EXPERIMENTAL marker. When true (default), the handler emits a startup
-          WARN log and sets `dfe_handler_experimental{handler="flow"} 1`.
-          Flipped to false in a follow-up PR after stability period.
+          Experimental marker. When true, the handler emits a startup WARN log
+          and sets `dfe_handler_experimental{handler="flow"} 1`. Off by default.
         type: boolean
-        default: true
+        default: false
       raw_capture:
         description: |-
           Raw-record capture override (inherits the common `raw_capture` block).
