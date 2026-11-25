@@ -95,7 +95,7 @@ rules:
 
 Every eve record has `event_type`, so that is the key. The `fluent` listener refuses to start on the same terms as `lumberjack` above.
 
-The listener keeps a `timestamp` the record carries, and the Fluent Bit time lands in `_timestamp` beside it. A record with no `timestamp` takes that time as `timestamp`. With the `time_key` parser, `_timestamp` is eve's time as an epoch float. The listener also adds `tag`.
+The listener keeps a `timestamp` the record carries, and the Fluent Bit time lands in `_timestamp` beside it. A record with no `timestamp` takes that time as `timestamp`. With the `time_key` parser, `_timestamp` is eve's time as an epoch float. The listener adds `tag`, or `_tag` when the record has its own `tag`.
 
 The run added `exit_on_eof: true` to the input so Fluent Bit stopped after a finished file, which a live log doesn't want.
 
