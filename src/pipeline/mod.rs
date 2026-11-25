@@ -1996,7 +1996,7 @@ async fn close_spool(destination: Arc<Destination>) {
         return;
     };
     if let Some(SinkBackend::Tiered(spool)) = delivery.queued.and_then(Arc::into_inner) {
-        spool.shutdown().await;
+        (*spool).shutdown().await;
     }
 }
 
@@ -2264,7 +2264,7 @@ async fn build_sink_backend<S: crate::sink::Sink + 'static>(
                     max_usage_percent = buffer_config.spillover.max_usage_percent,
                     "Disk spillover enabled"
                 );
-                return SinkBackend::Tiered(tiered);
+                return SinkBackend::Tiered(Box::new(tiered));
             }
             Err(e) => {
                 available.set(0.0);
@@ -2680,7 +2680,7 @@ mod tests {
             backend.send("events", Bytes::from(spool)).await.unwrap();
             backend.flush().await.unwrap();
             if let SinkBackend::Tiered(tiered) = backend {
-                tiered.shutdown().await;
+                (*tiered).shutdown().await;
             }
         }
         holder.shutdown().await;
