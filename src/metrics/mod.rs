@@ -36,6 +36,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::time::Duration;
 
+use scalo::logger::log_debounced;
 use scalo::metrics::MetricType;
 use scalo::metrics::MetricsManager;
 use scalo::metrics::ServiceMetrics;
@@ -210,6 +211,12 @@ pub struct Metrics {
     validation_failures_total: AtomicU64,
     validation_failures_invalid_json: AtomicU64,
     validation_failures_missing_field: AtomicU64,
+    /// When each validation failure reason last wrote its security line, by
+    /// [`ValidationFailureReason::index`].
+    validation_logged: [AtomicU64; ValidationFailureReason::ALL.len()],
+    /// When each auth failure reason last wrote its log line, by
+    /// [`AuthFailureReason::index`].
+    auth_logged: [AtomicU64; AuthFailureReason::ALL.len()],
     request_timeouts_total: AtomicU64,
     body_size_rejected_total: AtomicU64,
     unsupported_encoding_total: AtomicU64,
@@ -296,6 +303,8 @@ impl Metrics {
             validation_failures_total: AtomicU64::new(0),
             validation_failures_invalid_json: AtomicU64::new(0),
             validation_failures_missing_field: AtomicU64::new(0),
+            validation_logged: [const { AtomicU64::new(0) }; ValidationFailureReason::ALL.len()],
+            auth_logged: [const { AtomicU64::new(0) }; AuthFailureReason::ALL.len()],
             request_timeouts_total: AtomicU64::new(0),
             body_size_rejected_total: AtomicU64::new(0),
             unsupported_encoding_total: AtomicU64::new(0),
@@ -730,6 +739,22 @@ impl Metrics {
         if let Some(ref dfe) = self.dfe {
             dfe.validation_failure(dfe_reason);
         }
+    }
+
+    /// Whether the security line for a `reason` failure is due, once per
+    /// `interval_ms` for each reason on this collector.
+    pub(crate) fn validation_log_due(
+        &self,
+        reason: ValidationFailureReason,
+        interval_ms: u64,
+    ) -> bool {
+        log_debounced(&self.validation_logged[reason.index()], interval_ms)
+    }
+
+    /// Whether the log line for an auth failure of `reason` is due, once per
+    /// `interval_ms` for each reason on this collector.
+    pub(crate) fn auth_log_due(&self, reason: AuthFailureReason, interval_ms: u64) -> bool {
+        log_debounced(&self.auth_logged[reason.index()], interval_ms)
     }
 
     /// Record a request timed out on `transport` (408).
@@ -1343,9 +1368,10 @@ impl Default for Metrics {
 /// Test doubles that read what the receiver recorded: counter totals and log lines.
 #[cfg(test)]
 pub(crate) mod testing {
+    use std::cell::RefCell;
     use std::collections::HashMap;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, OnceLock};
 
     use parking_lot::Mutex;
 
@@ -1377,6 +1403,74 @@ pub(crate) mod testing {
         fn make_writer(&'a self) -> Self::Writer {
             self.clone()
         }
+    }
+
+    thread_local! {
+        /// The lines the current thread's capture collects, `None` outside one.
+        static CAPTURE: RefCell<Option<LogLines>> = const { RefCell::new(None) };
+    }
+
+    /// Writes each line to the capture of the thread that logged it, and drops
+    /// it where that thread has none.
+    #[derive(Clone, Copy)]
+    struct Routed;
+
+    impl std::io::Write for Routed {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            CAPTURE.with(|capture| match capture.borrow_mut().as_mut() {
+                Some(lines) => lines.write(buf),
+                None => Ok(buf.len()),
+            })
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Routed {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            *self
+        }
+    }
+
+    /// The INFO-and-above events one thread logged since [`capture_logs`].
+    pub(crate) struct LogCapture(LogLines);
+
+    impl LogCapture {
+        /// Everything captured so far.
+        pub(crate) fn text(&self) -> String {
+            self.0.text()
+        }
+    }
+
+    impl Drop for LogCapture {
+        fn drop(&mut self) {
+            CAPTURE.with(|capture| *capture.borrow_mut() = None);
+        }
+    }
+
+    /// Capture the calling thread's INFO-and-above events until the guard drops.
+    ///
+    /// The subscriber is process-wide, installed on first use. A thread-local
+    /// one is not enough: while it is the only subscriber registered, another
+    /// thread's first hit of a callsite caches that callsite as disabled, and
+    /// the capturing thread's later events from it are lost.
+    pub(crate) fn capture_logs() -> LogCapture {
+        static INSTALLED: OnceLock<()> = OnceLock::new();
+        INSTALLED.get_or_init(|| {
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(Routed)
+                .with_max_level(tracing::Level::INFO)
+                .finish();
+            // Another global subscriber would already see every thread's events.
+            let _ = tracing::subscriber::set_global_default(subscriber);
+        });
+        let lines = LogLines::default();
+        CAPTURE.with(|capture| *capture.borrow_mut() = Some(lines.clone()));
+        LogCapture(lines)
     }
 
     /// Sums each counter across its label sets, as a `sum()` over the name reads it.
@@ -1739,6 +1833,30 @@ mod tests {
         assert_eq!(metrics.get_auth_failures_total(), 2);
         assert_eq!(metrics.get_validation_failures_total(), 1);
         assert_eq!(metrics.get_tls_handshake_failures_total(), 1);
+    }
+
+    /// The security-line debounce belongs to one collector and one reason, so
+    /// a test, or a second pipeline, never spends another's line.
+    #[test]
+    fn each_collector_debounces_its_own_validation_log_lines() {
+        let (first, second) = (Metrics::default(), Metrics::default());
+        let invalid = ValidationFailureReason::InvalidJson;
+
+        assert!(first.validation_log_due(invalid, 5_000));
+        assert!(!first.validation_log_due(invalid, 5_000), "same reason");
+        assert!(
+            first.validation_log_due(ValidationFailureReason::NotAnObject, 5_000),
+            "another reason has its own line"
+        );
+        assert!(
+            second.validation_log_due(invalid, 5_000),
+            "another collector"
+        );
+
+        let missing = AuthFailureReason::MissingHeader;
+        assert!(first.auth_log_due(missing, 5_000));
+        assert!(!first.auth_log_due(missing, 5_000), "same auth reason");
+        assert!(second.auth_log_due(missing, 5_000), "another collector");
     }
 
     /// A connection counts from its guard's creation to its drop, and a stray

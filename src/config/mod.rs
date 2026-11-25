@@ -4411,14 +4411,17 @@ webhook:
                 "destinations.sources.orders",
             ),
         ] {
-            let err = load_yaml(&format!("{brokers}{empty}"))
-                .validate()
-                .expect_err("an empty list delivers nowhere")
-                .to_string();
-            assert!(err.contains(names), "{empty}: {err}");
-            load_yaml(&format!("{brokers}{filled}"))
-                .validate()
-                .unwrap_or_else(|e| panic!("{filled}: {e}"));
+            // The plaintext broker is refused in production, so the app environment is pinned.
+            in_app_env(None, || {
+                let err = load_yaml(&format!("{brokers}{empty}"))
+                    .validate()
+                    .expect_err("an empty list delivers nowhere")
+                    .to_string();
+                assert!(err.contains(names), "{empty}: {err}");
+                load_yaml(&format!("{brokers}{filled}"))
+                    .validate()
+                    .unwrap_or_else(|e| panic!("{filled}: {e}"));
+            });
         }
     }
 

@@ -495,6 +495,12 @@ fn destination_down(name: &str) -> Error {
     Error::Transport(format!("destination '{name}' is down"))
 }
 
+/// The retryable refusal of a held record bound for `topic`, which the
+/// cluster does not serve. The topic stays out of what a sender is told.
+fn topic_not_served(topic: &str) -> Error {
+    Error::Transport(format!("topic '{topic}' is not served by the cluster"))
+}
+
 /// A held record the bus queued, waiting on its delivery report.
 struct HeldOnBus {
     record: usize,
@@ -1408,6 +1414,10 @@ impl PipelineState {
         // Held, a record for a bus that is not delivering fails now, not at its report.
         if !kafka.primary.is_healthy() {
             return Err(destination_down(crate::config::BUS_DESTINATION));
+        }
+        // One topic the cluster does not serve refuses only its own records.
+        if kafka.primary.topic_unserved(topic) {
+            return Err(topic_not_served(topic));
         }
         let piece = ticket.piece();
         match kafka.primary.confirm(topic, payload) {
@@ -3045,6 +3055,53 @@ mod tests {
         assert_eq!(again.settled(), 0);
     }
 
+    /// A source whose landing topic the cluster does not serve is answered
+    /// retryable inside its sender's timeout, then refused unsent, while a
+    /// source on a served topic keeps landing. librdkafka's in-process mock
+    /// broker stands in for the cluster, so no Docker is needed.
+    #[tokio::test]
+    async fn a_missing_topic_refuses_only_its_own_held_records() {
+        let cluster = rdkafka::mocking::MockCluster::new(1).expect("mock cluster");
+        cluster.create_topic("served_land", 1, 1).expect("topic");
+        let mut config = test_config();
+        config.destinations.default = crate::config::BUS_DESTINATION.into();
+        config.kafka.brokers = vec![cluster.bootstrap_servers()];
+        let state = test_state_with(config).await;
+        let acks = holding(&state);
+        let record = [Bytes::from(r#"{"a":1}"#)];
+        let ingest = http();
+        let send = |topic: &'static str| {
+            state.process_batch_to_topic(&record, topic, "source", &acks, &ingest)
+        };
+
+        let first = tokio::time::timeout(Duration::from_secs(10), send("absent_land"))
+            .await
+            .expect("the cluster's answer settles the request before the message timeout");
+        assert!(
+            first.unavailable.as_ref().is_some_and(Error::is_retryable),
+            "{first:?}"
+        );
+        assert_eq!(first.settled(), 0);
+
+        let started = std::time::Instant::now();
+        let again = send("absent_land").await;
+        assert!(
+            matches!(&again.unavailable, Some(Error::Transport(reason)) if reason.contains("not served")),
+            "{again:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "refused after {:?}",
+            started.elapsed()
+        );
+
+        let served = tokio::time::timeout(Duration::from_secs(10), send("served_land"))
+            .await
+            .expect("the served topic's report arrives");
+        assert_eq!(served.accepted, 1, "{served:?}");
+        assert!(served.unavailable.is_none(), "{served:?}");
+    }
+
     /// A validation DLQ writing to files under `dir`, for records missing `org_id`.
     fn file_dlq(config: &mut Config, dir: &std::path::Path) {
         config.routing.dlq = crate::config::DlqConfig {
@@ -3303,15 +3360,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = unstartable_dlq(dir.path());
         let recorder = crate::buffer::rejects::CountedKeys::default();
-        let lines = crate::metrics::testing::LogLines::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(lines.clone())
-            .finish();
+        let lines = crate::metrics::testing::capture_logs();
 
-        let dlq = tracing::subscriber::with_default(subscriber, || {
-            metrics::with_local_recorder(&recorder, || {
-                spawn_dlq(&config, &CancellationToken::new())
-            })
+        let dlq = metrics::with_local_recorder(&recorder, || {
+            spawn_dlq(&config, &CancellationToken::new())
         });
 
         dlq.expect("a DLQ that fails to start is not fatal");
@@ -3588,15 +3640,7 @@ mod tests {
         )
         .await
         .unwrap();
-        for logged in &crate::validation::VALIDATION_FAILURE_LOGGED {
-            logged.store(0, std::sync::atomic::Ordering::Relaxed);
-        }
-        let lines = crate::metrics::testing::LogLines::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(lines.clone())
-            .with_max_level(tracing::Level::INFO)
-            .finish();
-        let _default = tracing::subscriber::set_default(subscriber);
+        let lines = crate::metrics::testing::capture_logs();
 
         // The parser quotes the bytes around the fault, so this refusal's reason carries XYZZY.
         let not_json = Bytes::from_static(br#"{"k":XYZZY}"#);
