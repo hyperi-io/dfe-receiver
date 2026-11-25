@@ -8,6 +8,8 @@ How dfe-receiver is built, hardened and tuned, and how to point a caller at it.
 - [NXLog](nxlog.md) -- CE and EE configs for the HTTP, syslog and GELF listeners
 - [Zeek](zeek.md) -- Filebeat to lumberjack, Fluent Bit to fluent
 - [Suricata](suricata.md) -- Filebeat to lumberjack, Fluent Bit to fluent
+- [SNMP](snmp.md) -- polling and traps through Telegraf to the HTTP listener
+- [BGP over BMP](bmp.md) -- pmacct's pmbmpd to a landing topic, or through Fluent Bit to the HTTP listener
 - [Delivery](delivery.md)
 - [dfe-receiver internals](internals.md)
 - [Protocol parsing](protocols.md)
