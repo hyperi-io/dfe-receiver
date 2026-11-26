@@ -59,7 +59,7 @@ impl Handshake {
     pub fn of(tls: &TlsConfig) -> Self {
         if tls.enabled
             && parse_client_auth(&tls.client_auth) == Some(ClientAuth::Required)
-            && (tls.ca_file.is_some() || tls.ca_secret.is_some())
+            && (!tls.ca_files.is_empty() || tls.ca_secret.is_some())
         {
             Self::RequiresClientCertificate
         } else {
@@ -118,15 +118,17 @@ pub async fn load_server_tls(
         ))
     })?;
     let config = ServerTlsConfig {
+        profile: tls.profile,
         cert_file: tls.cert_file.as_ref().map(PathBuf::from),
         cert_secret: tls.cert_secret.clone(),
         key_file: tls.key_file.as_ref().map(PathBuf::from),
         key_secret: tls.key_secret.clone(),
-        ca_file: tls.ca_file.as_ref().map(PathBuf::from),
+        ca_files: tls.ca_files.iter().map(PathBuf::from).collect(),
         ca_secret: tls.ca_secret.clone(),
         client_auth,
         reload_interval_secs: reload_interval_secs(tls),
         handshake_timeout_ms: connections.tls_handshake_timeout_ms,
+        ..ServerTlsConfig::default()
     };
     // Boxed for the reason `secrets::read` boxes: the AWS provider's future, awaited
     // inline, overflows rustc's layout query depth in every listener's async block.
@@ -217,6 +219,81 @@ mod tests {
         );
     }
 
+    /// A listener on the shipped default takes TLS 1.2 senders (rsyslog on RHEL 7,
+    /// Windows Server 2016 and 2019) as well as TLS 1.3. `strong` takes 1.3 only,
+    /// which is why it is not the receiver's default.
+    #[tokio::test]
+    async fn the_default_listener_takes_tls_1_2_and_1_3_senders() {
+        use std::sync::Arc;
+
+        use rustls::pki_types::{CertificateDer, ServerName};
+        use rustls::version::{TLS12, TLS13};
+        use scalo::crypto::CryptoProfile;
+
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+            .unwrap()
+            .self_signed(&key)
+            .unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let (cert_file, key_file) = (dir.path().join("tls.crt"), dir.path().join("tls.key"));
+        std::fs::write(&cert_file, cert.pem()).unwrap();
+        std::fs::write(&key_file, key.serialize_pem()).unwrap();
+        let mut roots = rustls::RootCertStore::empty();
+        roots
+            .add(CertificateDer::from(cert.der().to_vec()))
+            .unwrap();
+
+        assert_eq!(TlsConfig::default().profile, CryptoProfile::Commercial);
+        for (profile, version, served) in [
+            (TlsConfig::default().profile, &TLS12, true),
+            (TlsConfig::default().profile, &TLS13, true),
+            (CryptoProfile::Strong, &TLS12, false),
+        ] {
+            let tls = TlsConfig {
+                profile,
+                cert_file: Some(cert_file.to_string_lossy().into_owned()),
+                key_file: Some(key_file.to_string_lossy().into_owned()),
+                ..enabled()
+            };
+            let server = load_server_tls(
+                &tls,
+                &ConnectionsConfig::default(),
+                ServerTlsOptions::default(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let accept = tokio::spawn(async move {
+                let (stream, peer) = listener.accept().await.unwrap();
+                server.accept(stream, Some(peer)).await.is_ok()
+            });
+
+            let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+            let client = rustls::ClientConfig::builder_with_provider(provider)
+                .with_protocol_versions(&[version])
+                .unwrap()
+                .with_root_certificates(roots.clone())
+                .with_no_client_auth();
+            let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let connected = tokio_rustls::TlsConnector::from(Arc::new(client))
+                .connect(ServerName::try_from("localhost").unwrap(), stream)
+                .await;
+            let label = format!("{profile:?} over {:?}", version.version);
+            assert_eq!(connected.is_ok(), served, "{label}: client side");
+            if let Ok(stream) = connected {
+                assert_eq!(
+                    stream.get_ref().1.protocol_version(),
+                    Some(version.version),
+                    "{label}"
+                );
+            }
+            assert_eq!(accept.await.unwrap(), served, "{label}: server side");
+        }
+    }
+
     #[tokio::test]
     async fn a_disabled_block_loads_nothing() {
         let loaded = load_server_tls(
@@ -271,7 +348,7 @@ mod tests {
                     client_auth: "required".into(),
                     ..enabled()
                 },
-                "ca_file",
+                "ca_files",
             ),
             (
                 "a secret naming no provider",

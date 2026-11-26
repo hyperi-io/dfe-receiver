@@ -44,7 +44,7 @@ rules:
       set: { _source: { value: suricata_eve } }
 ```
 
-The listener is off by default. An enabled one refuses to start unless `lumberjack.accept_unauthenticated: true` is set, or `lumberjack.tls.enabled: true` is set with `lumberjack.tls.client_auth: required` and a `lumberjack.tls.ca_file`. `accept_unauthenticated` takes every sender that reaches the port, so pair it with `server.ip_filter.cidrs`. The Filebeat side of TLS is `output.logstash.ssl.*`, which wasn't run for this page.
+The listener is off by default. An enabled one refuses to start unless `lumberjack.accept_unauthenticated: true` is set, or `lumberjack.tls.enabled: true` is set with `lumberjack.tls.client_auth: required` and a `lumberjack.tls.ca_files`. `accept_unauthenticated` takes every sender that reaches the port, so pair it with `server.ip_filter.cidrs`. The Filebeat side of TLS is `output.logstash.ssl.*`, which wasn't run for this page.
 
 `suricata_eve` is dfe-transform-elastic's source name, so a source defined under it takes the Filebeat shape as it arrives. The run below stopped at the receiver and the loader, so the transform wasn't in the path.
 

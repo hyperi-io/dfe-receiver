@@ -52,7 +52,7 @@ value:    windows_security
 
 `im_msvistalog` runs on Windows only, and the CE Linux image does not carry it. On Linux, delete the `windows_security` input and its name in the route. Left in, CE logs a module load error and routes the other inputs.
 
-CE `om_http` has no directive for an extra header, so it can't send a bearer token. Authenticate it with a client certificate: set the HTTP listener's `auth.mode` to `mtls`, with `server.tls.enabled: true`, `server.tls.client_auth: required` and a `server.tls.ca_file`, and give NXLog `HTTPSCertFile` and `HTTPSCertKeyFile`. The receiver refuses `mtls` when TLS is off. EE adds `AddHeader`, so a bearer token works there as well.
+CE `om_http` has no directive for an extra header, so it can't send a bearer token. Authenticate it with a client certificate: set the HTTP listener's `auth.mode` to `mtls`, with `server.tls.enabled: true`, `server.tls.client_auth: required` and a `server.tls.ca_files`, and give NXLog `HTTPSCertFile` and `HTTPSCertKeyFile`. The receiver refuses `mtls` when TLS is off. EE adds `AddHeader`, so a bearer token works there as well.
 
 `to_json()` drops `$raw_event` and keeps every other field, including one starting with `.` or `_`, because `IncludeHiddenFields` on `xm_json` defaults to `TRUE`. An input that puts its text in `$raw_event` alone, as `im_file` and `im_tcp` do, needs `$Message = $raw_event;` first. Without it the record arrives with no log line. Set `IncludeHiddenFields FALSE` on the extension to leave the hidden fields out.
 
@@ -138,4 +138,4 @@ The output sends nothing until a `<Route>` sends an input to `dfe`, as in the HT
 
 The GELF listener takes TCP and splits on a NUL byte, which is `xm_gelf`'s default (`UseNullDelimiter TRUE`). It has no UDP port, so `GELF_UDP` has nowhere to land. `xm_gelf` cuts `short_message` to 64 characters unless the event carries a `$ShortMessage` field, hence the `Exec` line. The `Exec` copies `$Message`, and an `im_file` input leaves that unset. Add the `$Message = $raw_event` line from the HTTP section to the input first. Without it, `short_message` keeps the first 64 characters of the line and drops the rest.
 
-The GELF listener is off by default. Set `gelf.enabled: true` in the receiver config. An enabled listener refuses to start unless `gelf.accept_unauthenticated: true` is set, or `gelf.tls.enabled: true` is set with `gelf.tls.client_auth: required` and a `gelf.tls.ca_file`. `accept_unauthenticated` takes every sender that reaches the port, so pair it with `server.ip_filter.cidrs`.
+The GELF listener is off by default. Set `gelf.enabled: true` in the receiver config. An enabled listener refuses to start unless `gelf.accept_unauthenticated: true` is set, or `gelf.tls.enabled: true` is set with `gelf.tls.client_auth: required` and a `gelf.tls.ca_files`. `accept_unauthenticated` takes every sender that reaches the port, so pair it with `server.ip_filter.cidrs`.
