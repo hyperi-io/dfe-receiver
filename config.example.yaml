@@ -100,7 +100,7 @@ server:
     enabled: false
     cert_file: "/etc/ssl/receiver.crt"
     key_file: "/etc/ssl/receiver.key"
-    ca_file: "/etc/ssl/ca.crt"
+    ca_files: ["/etc/ssl/ca.crt"]
     client_auth: "none"  # none, optional, required
     # Secret manager sources, in place of the file paths: set cert_secret or cert_file, never both
     # cert_secret: "vault:secret/tls:cert"
@@ -138,7 +138,7 @@ grpc:
     enabled: false
     cert_file: "/etc/ssl/grpc-receiver.crt"
     key_file: "/etc/ssl/grpc-receiver.key"
-    # ca_file: "/etc/ssl/ca.crt"        # For mTLS
+    # ca_files: ["/etc/ssl/ca.crt"]        # For mTLS
     # client_auth: "none"               # none, optional, required
     # cert_secret: "vault:secret/tls:cert"  # Instead of cert_file
     # key_secret: "vault:secret/tls:key"
@@ -186,7 +186,7 @@ lumberjack:
     enabled: false
     cert_file: "/etc/ssl/beats-receiver.crt"
     key_file: "/etc/ssl/beats-receiver.key"
-    # ca_file: "/etc/ssl/ca.crt"        # For mTLS
+    # ca_files: ["/etc/ssl/ca.crt"]        # For mTLS
     # client_auth: "none"               # none, optional, required
     # cert_secret: "vault:secret/tls:cert"
     # key_secret: "vault:secret/tls:key"
@@ -217,7 +217,7 @@ splunk_hec:
     enabled: false
     cert_file: "/etc/ssl/hec-receiver.crt"
     key_file: "/etc/ssl/hec-receiver.key"
-    # ca_file: "/etc/ssl/ca.crt"
+    # ca_files: ["/etc/ssl/ca.crt"]
     # client_auth: "none"
     # cert_secret: "vault:secret/tls:cert"
     # key_secret: "vault:secret/tls:key"
@@ -250,7 +250,7 @@ syslog:
     enabled: false
     cert_file: "/etc/ssl/syslog-receiver.crt"
     key_file: "/etc/ssl/syslog-receiver.key"
-    # ca_file: "/etc/ssl/ca.crt"
+    # ca_files: ["/etc/ssl/ca.crt"]
     # client_auth: "none"
     # cert_secret: "vault:secret/tls:cert"
     # key_secret: "vault:secret/tls:key"
@@ -288,7 +288,7 @@ prometheus_rw:
     enabled: false
     cert_file: "/etc/ssl/prometheus-receiver.crt"
     key_file: "/etc/ssl/prometheus-receiver.key"
-    # ca_file: "/etc/ssl/ca.crt"
+    # ca_files: ["/etc/ssl/ca.crt"]
     # client_auth: "none"
     # cert_secret: "vault:secret/tls:cert"
     # key_secret: "vault:secret/tls:key"
@@ -374,7 +374,7 @@ fluent:
     enabled: false
     cert_file: "/etc/ssl/fluent-receiver.crt"
     key_file: "/etc/ssl/fluent-receiver.key"
-    # ca_file: "/etc/ssl/ca.crt"
+    # ca_files: ["/etc/ssl/ca.crt"]
     # client_auth: "none"
     # cert_secret: "vault:secret/tls:cert"
     # key_secret: "vault:secret/tls:key"
@@ -397,7 +397,7 @@ gelf:
     enabled: false
     cert_file: "/etc/ssl/gelf-receiver.crt"
     key_file: "/etc/ssl/gelf-receiver.key"
-    # ca_file: "/etc/ssl/ca.crt"
+    # ca_files: ["/etc/ssl/ca.crt"]
     # client_auth: "none"
     # cert_secret: "vault:secret/tls:cert"
     # key_secret: "vault:secret/tls:key"
@@ -564,7 +564,10 @@ kafka:
     password: ""
   tls:
     enabled: false
-    ca_file: "/etc/ssl/kafka-ca.crt"
+    trust: bundle                       # native adds ca_paths to the OS store, bundle trusts them alone
+    ca_paths: ["/etc/ssl/kafka-ca.crt"]
+    # client_cert_path: "/etc/ssl/kafka-client.crt"  # mutual TLS, with client_key_path
+    # client_key_path: "/etc/ssl/kafka-client.key"
   # Raw librdkafka overrides (highest priority, override profile defaults).
   # The producer runs scalo's high-throughput profile (zstd, idempotent,
   # acks=all); tune batching, linger or the codec here, e.g. linger.ms: "20".

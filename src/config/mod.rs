@@ -771,14 +771,19 @@ fn one_source_each(scope: &str, tls: &TlsConfig) -> Result<()> {
     if !tls.enabled {
         return Ok(());
     }
-    for (part, file, secret) in [
-        ("cert", &tls.cert_file, &tls.cert_secret),
-        ("key", &tls.key_file, &tls.key_secret),
-        ("ca", &tls.ca_file, &tls.ca_secret),
+    for (file, has_file, part, secret) in [
+        (
+            "cert_file",
+            tls.cert_file.is_some(),
+            "cert",
+            &tls.cert_secret,
+        ),
+        ("key_file", tls.key_file.is_some(), "key", &tls.key_secret),
+        ("ca_files", !tls.ca_files.is_empty(), "ca", &tls.ca_secret),
     ] {
-        if file.is_some() && secret.is_some() {
+        if has_file && secret.is_some() {
             return Err(Error::Config(format!(
-                "{scope}.tls.{part}_file and {scope}.tls.{part}_secret are both set -- \
+                "{scope}.tls.{file} and {scope}.tls.{part}_secret are both set -- \
                  set one, the secret to read it from a secret manager or the file to read \
                  it from disk"
             )));
@@ -801,7 +806,7 @@ fn unauthenticated_is_accepted(
     Err(Error::Config(format!(
         "{scope} accepts any client that can reach its port -- {unit} carries no \
          credential. Authenticate clients at the handshake with {scope}.tls.enabled: \
-         true, {scope}.tls.client_auth: required and {scope}.tls.ca_file (or \
+         true, {scope}.tls.client_auth: required and {scope}.tls.ca_files (or \
          {scope}.tls.ca_secret) naming the CA their certificates are issued from, or \
          set {scope}.accept_unauthenticated: true and restrict the senders with \
          server.ip_filter.cidrs"
@@ -1319,8 +1324,8 @@ pub struct TlsConfig {
     /// Path to the PEM private key. Set this or `key_secret`, not both.
     pub key_file: Option<String>,
 
-    /// Path to the PEM CA certificate client certificates must chain to (mTLS). Set this or `ca_secret`, not both.
-    pub ca_file: Option<String>,
+    /// Paths to the PEM CA certificates client certificates must chain to (mTLS). Set this or `ca_secret`, not both.
+    pub ca_files: Vec<String>,
 
     /// Client certificate requirement (none, optional, required).
     pub client_auth: String,
@@ -1333,7 +1338,7 @@ pub struct TlsConfig {
     /// Format: "provider:path:key" (e.g., "vault:secret/tls:key")
     pub key_secret: Option<String>,
 
-    /// Secret source for the CA certificate, instead of `ca_file`.
+    /// Secret source for the CA certificate, instead of `ca_files`.
     /// Format: "provider:path:key" (e.g., "vault:secret/tls:ca")
     pub ca_secret: Option<String>,
 
@@ -1349,7 +1354,7 @@ impl Default for TlsConfig {
             enabled: false,
             cert_file: None,
             key_file: None,
-            ca_file: None,
+            ca_files: Vec::new(),
             client_auth: "none".to_string(),
             cert_secret: None,
             key_secret: None,
@@ -2451,9 +2456,7 @@ impl KafkaConfig {
         if self.tls.enabled && self.sasl.as_ref().map_or(true, |s| !s.enabled) {
             config.security_protocol = "ssl".to_string();
         }
-        config.ssl_ca_location = self.tls.ca_file.clone();
-        config.ssl_certificate_location = self.tls.cert_file.clone();
-        config.ssl_key_location = self.tls.key_file.clone();
+        config.tls = self.tls.client.clone();
 
         config.librdkafka_overrides = self.librdkafka_overrides.clone();
 
@@ -2800,21 +2803,17 @@ impl std::fmt::Debug for SaslConfig {
     }
 }
 
-/// Kafka TLS configuration.
+/// Kafka TLS configuration: `enabled` beside scalo's client `tls` section
+/// (`profile`, `trust`, `ca_paths`, `client_cert_path`, `client_key_path`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(default)]
 pub struct KafkaTlsConfig {
     /// Enable TLS for Kafka.
     pub enabled: bool,
 
-    /// CA certificate file.
-    pub ca_file: Option<String>,
-
-    /// Client certificate file.
-    pub cert_file: Option<String>,
-
-    /// Client key file.
-    pub key_file: Option<String>,
+    /// The client TLS section. A private CA is `trust: bundle` with `ca_paths`.
+    #[serde(flatten)]
+    pub client: scalo::tls_config::ClientTlsConfig,
 }
 
 /// dfe-loader connection configuration.
@@ -3503,7 +3502,7 @@ mod tests {
             enabled: true,
             cert_file: Some("/etc/ssl/receiver.crt".to_string()),
             key_file: Some("/etc/ssl/receiver.key".to_string()),
-            ca_file: Some("/etc/ssl/ca.crt".to_string()),
+            ca_files: vec!["/etc/ssl/ca.crt".to_string()],
             client_auth: "required".to_string(),
             ..TlsConfig::default()
         }
@@ -3565,7 +3564,7 @@ mod tests {
         for key in [
             "gelf.tls.enabled: true",
             "gelf.tls.client_auth: required",
-            "gelf.tls.ca_file",
+            "gelf.tls.ca_files",
         ] {
             assert!(err.contains(key), "{key} is missing from: {err}");
         }
@@ -3588,7 +3587,7 @@ mod tests {
             ..client_certificates_required()
         };
         let no_ca = TlsConfig {
-            ca_file: None,
+            ca_files: Vec::new(),
             ..client_certificates_required()
         };
         let off = TlsConfig {
@@ -3606,9 +3605,9 @@ mod tests {
     }
 
     #[test]
-    fn a_ca_secret_names_the_ca_as_well_as_a_ca_file() {
+    fn a_ca_secret_names_the_ca_as_well_as_ca_files() {
         let tls = TlsConfig {
-            ca_file: None,
+            ca_files: Vec::new(),
             ca_secret: Some("vault:secret/tls:ca".to_string()),
             ..client_certificates_required()
         };
@@ -4948,6 +4947,35 @@ kafka:
         });
         config.kafka.tls.enabled = tls;
         config
+    }
+
+    /// `kafka.tls` is scalo's client section beside `enabled`, and reaches the
+    /// producer whole.
+    #[test]
+    fn the_kafka_tls_section_reaches_the_producer() {
+        let config: Config = scalo::yaml::from_str(
+            "kafka:\n  brokers: [kafka:9093]\n  tls:\n    enabled: true\n    trust: bundle\n    \
+             ca_paths: /etc/tls/ca.pem\n    client_cert_path: /etc/tls/client.pem\n    \
+             client_key_path: /etc/tls/client.key\n",
+            "config.yaml",
+            scalo::yaml::Profile::Config,
+        )
+        .unwrap();
+        let tls = config
+            .kafka
+            .to_scalo_kafka_config_for_producer()
+            .unwrap()
+            .tls;
+        assert_eq!(tls.trust, scalo::tls_config::TrustChoice::Bundle);
+        assert_eq!(tls.ca_paths, [std::path::PathBuf::from("/etc/tls/ca.pem")]);
+        assert_eq!(
+            tls.client_cert_path.as_deref(),
+            Some("/etc/tls/client.pem".as_ref())
+        );
+        assert_eq!(
+            tls.client_key_path.as_deref(),
+            Some("/etc/tls/client.key".as_ref())
+        );
     }
 
     /// A PLAIN password never crosses a plaintext transport, whatever the

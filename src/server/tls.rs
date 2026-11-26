@@ -59,7 +59,7 @@ impl Handshake {
     pub fn of(tls: &TlsConfig) -> Self {
         if tls.enabled
             && parse_client_auth(&tls.client_auth) == Some(ClientAuth::Required)
-            && (tls.ca_file.is_some() || tls.ca_secret.is_some())
+            && (!tls.ca_files.is_empty() || tls.ca_secret.is_some())
         {
             Self::RequiresClientCertificate
         } else {
@@ -122,11 +122,12 @@ pub async fn load_server_tls(
         cert_secret: tls.cert_secret.clone(),
         key_file: tls.key_file.as_ref().map(PathBuf::from),
         key_secret: tls.key_secret.clone(),
-        ca_file: tls.ca_file.as_ref().map(PathBuf::from),
+        ca_files: tls.ca_files.iter().map(PathBuf::from).collect(),
         ca_secret: tls.ca_secret.clone(),
         client_auth,
         reload_interval_secs: reload_interval_secs(tls),
         handshake_timeout_ms: connections.tls_handshake_timeout_ms,
+        ..ServerTlsConfig::default()
     };
     // Boxed for the reason `secrets::read` boxes: the AWS provider's future, awaited
     // inline, overflows rustc's layout query depth in every listener's async block.
@@ -271,7 +272,7 @@ mod tests {
                     client_auth: "required".into(),
                     ..enabled()
                 },
-                "ca_file",
+                "ca_files",
             ),
             (
                 "a secret naming no provider",

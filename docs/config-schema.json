@@ -39,7 +39,7 @@
           "enabled": false,
           "cert_file": null,
           "key_file": null,
-          "ca_file": null,
+          "ca_files": [],
           "client_auth": "none",
           "cert_secret": null,
           "key_secret": null,
@@ -72,7 +72,7 @@
           "enabled": false,
           "cert_file": null,
           "key_file": null,
-          "ca_file": null,
+          "ca_files": [],
           "client_auth": "none",
           "cert_secret": null,
           "key_secret": null,
@@ -108,7 +108,7 @@
           "enabled": false,
           "cert_file": null,
           "key_file": null,
-          "ca_file": null,
+          "ca_files": [],
           "client_auth": "none",
           "cert_secret": null,
           "key_secret": null,
@@ -143,7 +143,7 @@
           "enabled": false,
           "cert_file": null,
           "key_file": null,
-          "ca_file": null,
+          "ca_files": [],
           "client_auth": "none",
           "cert_secret": null,
           "key_secret": null,
@@ -179,7 +179,7 @@
           "enabled": false,
           "cert_file": null,
           "key_file": null,
-          "ca_file": null,
+          "ca_files": [],
           "client_auth": "none",
           "cert_secret": null,
           "key_secret": null,
@@ -226,7 +226,7 @@
           "enabled": false,
           "cert_file": null,
           "key_file": null,
-          "ca_file": null,
+          "ca_files": [],
           "client_auth": "none",
           "cert_secret": null,
           "key_secret": null,
@@ -265,7 +265,7 @@
           "enabled": false,
           "cert_file": null,
           "key_file": null,
-          "ca_file": null,
+          "ca_files": [],
           "client_auth": "none",
           "cert_secret": null,
           "key_secret": null,
@@ -299,7 +299,7 @@
           "enabled": false,
           "cert_file": null,
           "key_file": null,
-          "ca_file": null,
+          "ca_files": [],
           "client_auth": "none",
           "cert_secret": null,
           "key_secret": null,
@@ -323,7 +323,7 @@
           "enabled": false,
           "cert_file": null,
           "key_file": null,
-          "ca_file": null,
+          "ca_files": [],
           "client_auth": "none",
           "cert_secret": null,
           "key_secret": null,
@@ -390,7 +390,7 @@
           "enabled": false,
           "cert_file": null,
           "key_file": null,
-          "ca_file": null,
+          "ca_files": [],
           "client_auth": "none",
           "cert_secret": null,
           "key_secret": null,
@@ -476,9 +476,14 @@
         "sasl": null,
         "tls": {
           "enabled": false,
-          "ca_file": null,
-          "cert_file": null,
-          "key_file": null
+          "profile": "strong",
+          "trust": "native",
+          "ca_paths": [],
+          "client_cert_path": null,
+          "client_key_path": null,
+          "pin_sha256": [],
+          "server_name": null,
+          "key_share": "profile"
         },
         "librdkafka_overrides": {
           "statistics.interval.ms": "0"
@@ -626,7 +631,7 @@
             "enabled": false,
             "cert_file": null,
             "key_file": null,
-            "ca_file": null,
+            "ca_files": [],
             "client_auth": "none",
             "cert_secret": null,
             "key_secret": null,
@@ -775,13 +780,13 @@
           ],
           "default": null
         },
-        "ca_file": {
-          "description": "Path to the PEM CA certificate client certificates must chain to (mTLS). Set this or `ca_secret`, not both.",
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null
+        "ca_files": {
+          "description": "Paths to the PEM CA certificates client certificates must chain to (mTLS). Set this or `ca_secret`, not both.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
         },
         "client_auth": {
           "description": "Client certificate requirement (none, optional, required).",
@@ -805,7 +810,7 @@
           "default": null
         },
         "ca_secret": {
-          "description": "Secret source for the CA certificate, instead of `ca_file`.\nFormat: \"provider:path:key\" (e.g., \"vault:secret/tls:ca\")",
+          "description": "Secret source for the CA certificate, instead of `ca_files`.\nFormat: \"provider:path:key\" (e.g., \"vault:secret/tls:ca\")",
           "type": [
             "string",
             "null"
@@ -953,7 +958,7 @@
             "enabled": false,
             "cert_file": null,
             "key_file": null,
-            "ca_file": null,
+            "ca_files": [],
             "client_auth": "none",
             "cert_secret": null,
             "key_secret": null,
@@ -1023,7 +1028,7 @@
             "enabled": false,
             "cert_file": null,
             "key_file": null,
-            "ca_file": null,
+            "ca_files": [],
             "client_auth": "none",
             "cert_secret": null,
             "key_secret": null,
@@ -1090,7 +1095,7 @@
             "enabled": false,
             "cert_file": null,
             "key_file": null,
-            "ca_file": null,
+            "ca_files": [],
             "client_auth": "none",
             "cert_secret": null,
             "key_secret": null,
@@ -1162,7 +1167,7 @@
             "enabled": false,
             "cert_file": null,
             "key_file": null,
-            "ca_file": null,
+            "ca_files": [],
             "client_auth": "none",
             "cert_secret": null,
             "key_secret": null,
@@ -1332,7 +1337,7 @@
             "enabled": false,
             "cert_file": null,
             "key_file": null,
-            "ca_file": null,
+            "ca_files": [],
             "client_auth": "none",
             "cert_secret": null,
             "key_secret": null,
@@ -1415,7 +1420,7 @@
             "enabled": false,
             "cert_file": null,
             "key_file": null,
-            "ca_file": null,
+            "ca_files": [],
             "client_auth": "none",
             "cert_secret": null,
             "key_secret": null,
@@ -1475,7 +1480,7 @@
             "enabled": false,
             "cert_file": null,
             "key_file": null,
-            "ca_file": null,
+            "ca_files": [],
             "client_auth": "none",
             "cert_secret": null,
             "key_secret": null,
@@ -1525,7 +1530,7 @@
             "enabled": false,
             "cert_file": null,
             "key_file": null,
-            "ca_file": null,
+            "ca_files": [],
             "client_auth": "none",
             "cert_secret": null,
             "key_secret": null,
@@ -1880,7 +1885,7 @@
             "enabled": false,
             "cert_file": null,
             "key_file": null,
-            "ca_file": null,
+            "ca_files": [],
             "client_auth": "none",
             "cert_secret": null,
             "key_secret": null,
@@ -2557,9 +2562,14 @@
           "$ref": "#/$defs/KafkaTlsConfig",
           "default": {
             "enabled": false,
-            "ca_file": null,
-            "cert_file": null,
-            "key_file": null
+            "profile": "strong",
+            "trust": "native",
+            "ca_paths": [],
+            "client_cert_path": null,
+            "client_key_path": null,
+            "pin_sha256": [],
+            "server_name": null,
+            "key_share": "profile"
           }
         },
         "librdkafka_overrides": {
@@ -2605,7 +2615,7 @@
       ]
     },
     "KafkaTlsConfig": {
-      "description": "Kafka TLS configuration.",
+      "description": "Kafka TLS configuration: `enabled` beside scalo's client `tls` section\n(`profile`, `trust`, `ca_paths`, `client_cert_path`, `client_key_path`).",
       "type": "object",
       "properties": {
         "enabled": {
@@ -2613,31 +2623,129 @@
           "type": "boolean",
           "default": false
         },
-        "ca_file": {
-          "description": "CA certificate file.",
+        "profile": {
+          "description": "`strong` (default), `commercial` or `cnsa2`. Per-profile settings, such\nas `allow_tls12`, live in the `tls.profiles` cascade section.",
+          "$ref": "#/$defs/CryptoProfile",
+          "default": "strong"
+        },
+        "trust": {
+          "description": "`native` (default), `platform` or `bundle`, as in [`TrustChoice`].",
+          "$ref": "#/$defs/TrustChoice",
+          "default": "native"
+        },
+        "ca_paths": {
+          "description": "CA PEM files, trusted beside the OS store under `native` and\n`platform`, and alone under `bundle`. One path or a list.",
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ],
+          "default": []
+        },
+        "client_cert_path": {
+          "description": "Client certificate PEM for mutual TLS, with `client_key_path`.",
           "type": [
             "string",
             "null"
           ],
           "default": null
         },
-        "cert_file": {
-          "description": "Client certificate file.",
+        "client_key_path": {
+          "description": "Client private key PEM for mutual TLS, with `client_cert_path`. May\nname the same file when it holds both.",
           "type": [
             "string",
             "null"
           ],
           "default": null
         },
-        "key_file": {
-          "description": "Client key file.",
+        "pin_sha256": {
+          "description": "SHA-256 pins on the server's public key, as in [`SpkiPin`]. Once the\nchain verifies, the key must match one. Empty checks no key.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SpkiPin"
+          },
+          "default": []
+        },
+        "server_name": {
+          "description": "The name checked against the server's certificate and sent as SNI.\nDefault the endpoint's host.",
           "type": [
             "string",
             "null"
           ],
           "default": null
+        },
+        "key_share": {
+          "description": "`profile` (default) sends the profile's first group, a post-quantum\none. `classical` sends a classical share first.",
+          "$ref": "#/$defs/KeyShare",
+          "default": "profile"
         }
       }
+    },
+    "CryptoProfile": {
+      "description": "A named TLS profile. `strong` is the default.",
+      "oneOf": [
+        {
+          "description": "TLS 1.3 only unless the profile sets `allow_tls12`, AES-256-GCM,\nChaCha20 and AES-128-GCM, hybrid post-quantum key exchange first.",
+          "type": "string",
+          "const": "strong"
+        },
+        {
+          "description": "TLS 1.3 and 1.2, every ECDHE AEAD suite, hybrid post-quantum key\nexchange first: the cheapest profile that is still current.",
+          "type": "string",
+          "const": "commercial"
+        },
+        {
+          "description": "TLS 1.3 only, AES-256-GCM, ML-KEM-1024 then P-384, ECDSA P-384 and\nML-DSA-87 signatures. The CNSA 2.0 shape.",
+          "type": "string",
+          "const": "cnsa2"
+        }
+      ]
+    },
+    "TrustChoice": {
+      "description": "Which certificates a client accepts a server's certificate from.\n\nEvery choice trusts the CA files given beside it, and `bundle` trusts\nnothing else.",
+      "oneOf": [
+        {
+          "description": "The OS root store, read through `rustls-native-certs` and checked by\nrustls.",
+          "type": "string",
+          "const": "native"
+        },
+        {
+          "description": "The OS verifier, through `rustls-platform-verifier`, so Windows and\nmacOS apply their own policy and revocation checks.",
+          "type": "string",
+          "const": "platform"
+        },
+        {
+          "description": "Only the CA files given: an exclusive pin, with no OS root trusted.",
+          "type": "string",
+          "const": "bundle"
+        }
+      ]
+    },
+    "SpkiPin": {
+      "description": "SHA-256 of a server certificate's SubjectPublicKeyInfo, in base64 or 64 hex digits.",
+      "type": "string",
+      "pattern": "^([0-9A-Fa-f]{64}|[A-Za-z0-9+/]{43}=)$"
+    },
+    "KeyShare": {
+      "description": "Which key share a client sends first.",
+      "oneOf": [
+        {
+          "description": "The profile's order: a post-quantum group first where it has one.",
+          "type": "string",
+          "const": "profile"
+        },
+        {
+          "description": "A classical group first, with the post-quantum groups listed but not\nshared, for a receiver behind a middlebox that drops the larger\nClientHello. A server that prefers a post-quantum group asks for it in\na second round trip.",
+          "type": "string",
+          "const": "classical"
+        }
+      ]
     },
     "LoaderConfig": {
       "description": "dfe-loader connection configuration.",

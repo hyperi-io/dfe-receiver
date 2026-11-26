@@ -144,7 +144,7 @@ server:
     enabled: true
     cert_file: "/etc/ssl/receiver.crt"
     key_file: "/etc/ssl/receiver.key"
-    ca_file: "/etc/ssl/ca.crt"
+    ca_files: ["/etc/ssl/ca.crt"]
     client_auth: required        # none, optional, required
   auth:
     mode: both                   # none, header, bearer, mtls, both

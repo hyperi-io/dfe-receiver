@@ -439,7 +439,7 @@ When auth fails:
 
 - Bearer token mismatch: the token in the sidecar sink config must exactly match one of the listener's tokens: `grpc.auth.bearer.tokens`, or its `grpc.auth.bearer.secret_source` (`server.auth.*` for HTTP).
 - TLS certificate issues: if receiver has TLS enabled, the sidecar must trust receiver's CA. Mount the CA cert and set `tls.ca_file` in the Vector sink.
-- Client certificates: set `grpc.auth.mode: mtls`, `grpc.tls.client_auth: required` and the CA in `grpc.tls.ca_file`. Set `tls.crt_file` and `tls.key_file` in the sidecar sink config.
+- Client certificates: set `grpc.auth.mode: mtls`, `grpc.tls.client_auth: required` and the CA in `grpc.tls.ca_files`. Set `tls.crt_file` and `tls.key_file` in the sidecar sink config.
 
 Receiver rejects a gRPC message larger than `grpc.max_message_size` (16 MiB by default) and an HTTP body larger than `server.max_body_size` (10 MiB by default). Large batches from Vector's `batch.max_bytes` can exceed them.
 

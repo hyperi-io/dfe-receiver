@@ -239,7 +239,10 @@ impl Pki {
             enabled: true,
             cert_file: Some(self.file("server.crt")),
             key_file: Some(self.file("server.key")),
-            ca_file: (client_auth != "none").then(|| self.file("ca.crt")),
+            ca_files: (client_auth != "none")
+                .then(|| self.file("ca.crt"))
+                .into_iter()
+                .collect(),
             client_auth: client_auth.to_string(),
             ..TlsConfig::default()
         }

@@ -178,7 +178,7 @@ pub async fn create_auth_state(config: &AuthConfig, handshake: Handshake) -> Res
         return Err(Error::Config(format!(
             "auth.mode '{}' checks a client certificate, which only the TLS handshake \
              does, and this listener's TLS does not require one (tls.enabled, \
-             tls.client_auth: required, and tls.ca_file or tls.ca_secret). A tls change \
+             tls.client_auth: required, and tls.ca_files or tls.ca_secret). A tls change \
              takes effect on a restart, not a reload",
             config.mode
         )));
