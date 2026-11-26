@@ -11,4 +11,4 @@
 
 The workload config routes lines 1 and 2 on `data_stream.dataset`, the key a deployed receiver's source rules match on, line 3 on `event.dataset`, and leaves line 4 to the default source.
 
-Copied from dfe-transform-elastic `50dcff5d`.
+Copied from dfe-transform-elastic `05294950`.
