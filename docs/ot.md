@@ -26,9 +26,9 @@ operator: equals
 value:    opcua
 ```
 
-Use one source per protocol, `opcua`, `s7comm` or `modbus`. Until an OT meta schema exists, a source needs a placeholder schema to deploy, and the record lands in `_json` and `_tags`. The address tags land in `_tags` as well as `_json`, so `_tags.address` and `_tags.unit` filter without parsing the payload.
+Use one source per protocol, `opcua`, `s7comm` or `modbus`. Each source uses the `telegraf/metric` meta schema from dfe-schemas, which types `name`, `timestamp` and `host`, and the record lands in `_json` and `_tags`. The address tags land in `_tags` as well as `_json`, so `_tags.address` and `_tags.unit` filter without parsing the payload.
 
-ClickHouse's JSON type stores each value with the type it arrived as. Telegraf writes a float with no fraction as `180`, not `180.0`, so a whole-number reading of a float signal is stored as `Int64` beside the `Float64` ones. Read a float signal with `toFloat64(_json.fields.oven_setpoint)`, never the typed subcolumn `_json.fields.oven_setpoint.:Float64`, which returns NULL for the whole-number rows.
+ClickHouse's JSON type stores each value with the type it arrived as. Telegraf writes a float with no fraction as `180`, not `180.0`, so a whole-number reading of a float signal is stored as `Int64` beside the `Float64` ones. A derived schema that types the signal as a column casts it on insert, which fixes the mix. For an untyped field, read it with `toFloat64(_json.fields.oven_setpoint)`, never the typed subcolumn `_json.fields.oven_setpoint.:Float64`, which returns NULL for the whole-number rows.
 
 `outputs.http` is the same in every config here and matches the [SNMP](snmp.md) page. Mint an ingest credential for the HTTP listener and hand Telegraf its token in `DFE_INGEST_TOKEN`. `json_transformation = "metrics[]"` sends a batch as a JSON array, which the receiver splits into one record per metric, and `json_timestamp_format` gives the loader an RFC 3339 time for `_timestamp`.
 
