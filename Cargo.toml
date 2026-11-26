@@ -22,8 +22,7 @@ doctest = false
 
 [dependencies]
 # The floor moves with `release.helm.library` in .hyperi-ci.yaml.
-# 2.14.40: the git tree carries version 0.0.0 until the release stamps it.
-scalo = { version = "0.0.0", git = "https://github.com/hyperi-io/scalo-rs", rev = "e8a3c79aeacf", features = [
+scalo = { version = ">=2.14.40, <3", features = [
     "config",
     "config-reload",
     "config-schema",
@@ -167,8 +166,7 @@ sha2 = ">=0.11.1, <0.12"
 allocation-counter = "0.8.1"
 
 # Test support: contract e2e helpers, the Vector-compat gRPC client and the shared Kafka broker.
-# 2.14.40: the git tree carries version 0.0.0 until the release stamps it.
-scalo = { version = "0.0.0", git = "https://github.com/hyperi-io/scalo-rs", rev = "e8a3c79aeacf", features = [
+scalo = { version = ">=2.14.40, <3", features = [
     "deployment-test-support",
     "transport-grpc-vector-compat",
     "transport-kafka-test-support",
