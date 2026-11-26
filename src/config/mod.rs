@@ -31,6 +31,8 @@ use std::collections::HashMap;
 use scalo::SensitiveString;
 use scalo::config;
 use scalo::config::flat_env::{self, ApplyFlatEnv, Normalize};
+use scalo::crypto::CryptoProfile;
+use scalo::tls_config::Removed;
 use scalo::transport::AcknowledgementsConfig;
 use serde::{Deserialize, Serialize};
 
@@ -1318,6 +1320,10 @@ pub struct TlsConfig {
     /// Enable TLS.
     pub enabled: bool,
 
+    /// The TLS profile: `commercial` (default) takes TLS 1.3 and 1.2 senders,
+    /// `strong` and `cnsa2` take TLS 1.3 only. See scalo's tls-profiles.md.
+    pub profile: CryptoProfile,
+
     /// Path to the PEM certificate chain, leaf first. Set this or `cert_secret`, not both.
     pub cert_file: Option<String>,
 
@@ -1346,12 +1352,19 @@ pub struct TlsConfig {
     /// A rotated certificate is served from the next handshake, with no restart. 0 turns reload off.
     /// Unset, scalo's default applies.
     pub refresh_interval_secs: Option<u64>,
+
+    /// Removed: `ca_files`.
+    #[doc(hidden)]
+    #[serde(skip_serializing, deserialize_with = "removed_listener_ca_file")]
+    #[schemars(skip)]
+    pub ca_file: Removed,
 }
 
 impl Default for TlsConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            profile: CryptoProfile::Commercial,
             cert_file: None,
             key_file: None,
             ca_files: Vec::new(),
@@ -1360,8 +1373,40 @@ impl Default for TlsConfig {
             key_secret: None,
             ca_secret: None,
             refresh_interval_secs: None,
+            ca_file: Removed,
         }
     }
+}
+
+/// The error for a TLS key the `tls` sections replaced. Any value for it fails
+/// the load, so a config written for the old shape can't run with its CA or
+/// client certificate dropped.
+fn removed<E: serde::de::Error>(old: &str, new: &str) -> E {
+    E::custom(format!("`{old}` is removed: set {new}"))
+}
+
+fn removed_listener_ca_file<'de, D: serde::Deserializer<'de>>(
+    _: D,
+) -> std::result::Result<Removed, D::Error> {
+    Err(removed("ca_file", "ca_files, a list"))
+}
+
+fn removed_kafka_ca_file<'de, D: serde::Deserializer<'de>>(
+    _: D,
+) -> std::result::Result<Removed, D::Error> {
+    Err(removed("ca_file", "ca_paths with trust: bundle"))
+}
+
+fn removed_kafka_cert_file<'de, D: serde::Deserializer<'de>>(
+    _: D,
+) -> std::result::Result<Removed, D::Error> {
+    Err(removed("cert_file", "client_cert_path"))
+}
+
+fn removed_kafka_key_file<'de, D: serde::Deserializer<'de>>(
+    _: D,
+) -> std::result::Result<Removed, D::Error> {
+    Err(removed("key_file", "client_key_path"))
 }
 
 /// Authentication configuration.
@@ -2814,6 +2859,24 @@ pub struct KafkaTlsConfig {
     /// The client TLS section. A private CA is `trust: bundle` with `ca_paths`.
     #[serde(flatten)]
     pub client: scalo::tls_config::ClientTlsConfig,
+
+    /// Removed: `ca_paths` with `trust: bundle`.
+    #[doc(hidden)]
+    #[serde(skip_serializing, deserialize_with = "removed_kafka_ca_file")]
+    #[schemars(skip)]
+    pub ca_file: Removed,
+
+    /// Removed: `client_cert_path`.
+    #[doc(hidden)]
+    #[serde(skip_serializing, deserialize_with = "removed_kafka_cert_file")]
+    #[schemars(skip)]
+    pub cert_file: Removed,
+
+    /// Removed: `client_key_path`.
+    #[doc(hidden)]
+    #[serde(skip_serializing, deserialize_with = "removed_kafka_key_file")]
+    #[schemars(skip)]
+    pub key_file: Removed,
 }
 
 /// dfe-loader connection configuration.
@@ -4976,6 +5039,48 @@ kafka:
             tls.client_key_path.as_deref(),
             Some("/etc/tls/client.key".as_ref())
         );
+    }
+
+    /// Every TLS key the `tls` sections replaced fails the load, naming the key
+    /// to set, so an old config never runs with its CA or client certificate
+    /// dropped.
+    #[test]
+    fn a_removed_tls_key_fails_the_load_naming_its_replacement() {
+        for (yaml, replacement) in [
+            (
+                "kafka:\n  tls:\n    ca_file: /ca.pem\n",
+                "ca_paths with trust: bundle",
+            ),
+            (
+                "kafka:\n  tls:\n    cert_file: /c.pem\n",
+                "client_cert_path",
+            ),
+            ("kafka:\n  tls:\n    key_file: /k.pem\n", "client_key_path"),
+            (
+                "kafka:\n  tls:\n    ca_file: null\n",
+                "ca_paths with trust: bundle",
+            ),
+            (
+                "server:\n  tls:\n    ca_file: /ca.pem\n",
+                "ca_files, a list",
+            ),
+            (
+                "syslog:\n  tls:\n    ca_file: /ca.pem\n",
+                "ca_files, a list",
+            ),
+            (
+                "lumberjack:\n  tls:\n    ca_file: /ca.pem\n",
+                "ca_files, a list",
+            ),
+            ("kafka:\n  tls:\n    ca_path: /ca.pem\n", "ca_paths"),
+        ] {
+            let error =
+                scalo::yaml::from_str::<Config>(yaml, "config.yaml", scalo::yaml::Profile::Config)
+                    .err()
+                    .unwrap_or_else(|| panic!("loaded without error: {yaml}"))
+                    .to_string();
+            assert!(error.contains(replacement), "{yaml}: {error}");
+        }
     }
 
     /// A PLAIN password never crosses a plaintext transport, whatever the

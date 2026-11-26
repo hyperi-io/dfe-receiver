@@ -98,6 +98,7 @@ server:
 
   tls:
     enabled: false
+    profile: commercial  # every listener's default: TLS 1.3 and 1.2. strong and cnsa2 take 1.3 only
     cert_file: "/etc/ssl/receiver.crt"
     key_file: "/etc/ssl/receiver.key"
     ca_files: ["/etc/ssl/ca.crt"]

@@ -37,6 +37,7 @@
         },
         "tls": {
           "enabled": false,
+          "profile": "commercial",
           "cert_file": null,
           "key_file": null,
           "ca_files": [],
@@ -70,6 +71,7 @@
         "bind_address": "0.0.0.0:6000",
         "tls": {
           "enabled": false,
+          "profile": "commercial",
           "cert_file": null,
           "key_file": null,
           "ca_files": [],
@@ -106,6 +108,7 @@
         "mode": "hyperdx",
         "tls": {
           "enabled": false,
+          "profile": "commercial",
           "cert_file": null,
           "key_file": null,
           "ca_files": [],
@@ -141,6 +144,7 @@
         "bind_address": "0.0.0.0:5044",
         "tls": {
           "enabled": false,
+          "profile": "commercial",
           "cert_file": null,
           "key_file": null,
           "ca_files": [],
@@ -177,6 +181,7 @@
         "request_timeout_ms": 30000,
         "tls": {
           "enabled": false,
+          "profile": "commercial",
           "cert_file": null,
           "key_file": null,
           "ca_files": [],
@@ -224,6 +229,7 @@
         "idle_timeout_ms": 600000,
         "tls": {
           "enabled": false,
+          "profile": "commercial",
           "cert_file": null,
           "key_file": null,
           "ca_files": [],
@@ -263,6 +269,7 @@
         "request_timeout_ms": 30000,
         "tls": {
           "enabled": false,
+          "profile": "commercial",
           "cert_file": null,
           "key_file": null,
           "ca_files": [],
@@ -297,6 +304,7 @@
         "max_message_size": 33554432,
         "tls": {
           "enabled": false,
+          "profile": "commercial",
           "cert_file": null,
           "key_file": null,
           "ca_files": [],
@@ -321,6 +329,7 @@
         "max_message_size": 1048576,
         "tls": {
           "enabled": false,
+          "profile": "commercial",
           "cert_file": null,
           "key_file": null,
           "ca_files": [],
@@ -388,6 +397,7 @@
         "request_timeout_ms": 30000,
         "tls": {
           "enabled": false,
+          "profile": "commercial",
           "cert_file": null,
           "key_file": null,
           "ca_files": [],
@@ -629,6 +639,7 @@
           "$ref": "#/$defs/TlsConfig",
           "default": {
             "enabled": false,
+            "profile": "commercial",
             "cert_file": null,
             "key_file": null,
             "ca_files": [],
@@ -764,6 +775,11 @@
           "type": "boolean",
           "default": false
         },
+        "profile": {
+          "description": "The TLS profile: `commercial` (default) takes TLS 1.3 and 1.2 senders,\n`strong` and `cnsa2` take TLS 1.3 only. See scalo's tls-profiles.md.",
+          "$ref": "#/$defs/CryptoProfile",
+          "default": "commercial"
+        },
         "cert_file": {
           "description": "Path to the PEM certificate chain, leaf first. Set this or `cert_secret`, not both.",
           "type": [
@@ -828,6 +844,26 @@
           "default": null
         }
       }
+    },
+    "CryptoProfile": {
+      "description": "A named TLS profile. `strong` is the default.",
+      "oneOf": [
+        {
+          "description": "TLS 1.3 only unless the profile sets `allow_tls12`, AES-256-GCM,\nChaCha20 and AES-128-GCM, hybrid post-quantum key exchange first.",
+          "type": "string",
+          "const": "strong"
+        },
+        {
+          "description": "TLS 1.3 and 1.2, every ECDHE AEAD suite, hybrid post-quantum key\nexchange first: the cheapest profile that is still current.",
+          "type": "string",
+          "const": "commercial"
+        },
+        {
+          "description": "TLS 1.3 only, AES-256-GCM, ML-KEM-1024 then P-384, ECDSA P-384 and\nML-DSA-87 signatures. The CNSA 2.0 shape.",
+          "type": "string",
+          "const": "cnsa2"
+        }
+      ]
     },
     "AuthConfig": {
       "description": "Authentication configuration.",
@@ -956,6 +992,7 @@
           "$ref": "#/$defs/TlsConfig",
           "default": {
             "enabled": false,
+            "profile": "commercial",
             "cert_file": null,
             "key_file": null,
             "ca_files": [],
@@ -1026,6 +1063,7 @@
           "$ref": "#/$defs/TlsConfig",
           "default": {
             "enabled": false,
+            "profile": "commercial",
             "cert_file": null,
             "key_file": null,
             "ca_files": [],
@@ -1093,6 +1131,7 @@
           "$ref": "#/$defs/TlsConfig",
           "default": {
             "enabled": false,
+            "profile": "commercial",
             "cert_file": null,
             "key_file": null,
             "ca_files": [],
@@ -1165,6 +1204,7 @@
           "$ref": "#/$defs/TlsConfig",
           "default": {
             "enabled": false,
+            "profile": "commercial",
             "cert_file": null,
             "key_file": null,
             "ca_files": [],
@@ -1335,6 +1375,7 @@
           "$ref": "#/$defs/TlsConfig",
           "default": {
             "enabled": false,
+            "profile": "commercial",
             "cert_file": null,
             "key_file": null,
             "ca_files": [],
@@ -1418,6 +1459,7 @@
           "$ref": "#/$defs/TlsConfig",
           "default": {
             "enabled": false,
+            "profile": "commercial",
             "cert_file": null,
             "key_file": null,
             "ca_files": [],
@@ -1478,6 +1520,7 @@
           "$ref": "#/$defs/TlsConfig",
           "default": {
             "enabled": false,
+            "profile": "commercial",
             "cert_file": null,
             "key_file": null,
             "ca_files": [],
@@ -1528,6 +1571,7 @@
           "$ref": "#/$defs/TlsConfig",
           "default": {
             "enabled": false,
+            "profile": "commercial",
             "cert_file": null,
             "key_file": null,
             "ca_files": [],
@@ -1883,6 +1927,7 @@
           "$ref": "#/$defs/TlsConfig",
           "default": {
             "enabled": false,
+            "profile": "commercial",
             "cert_file": null,
             "key_file": null,
             "ca_files": [],
@@ -2686,26 +2731,6 @@
           "default": "profile"
         }
       }
-    },
-    "CryptoProfile": {
-      "description": "A named TLS profile. `strong` is the default.",
-      "oneOf": [
-        {
-          "description": "TLS 1.3 only unless the profile sets `allow_tls12`, AES-256-GCM,\nChaCha20 and AES-128-GCM, hybrid post-quantum key exchange first.",
-          "type": "string",
-          "const": "strong"
-        },
-        {
-          "description": "TLS 1.3 and 1.2, every ECDHE AEAD suite, hybrid post-quantum key\nexchange first: the cheapest profile that is still current.",
-          "type": "string",
-          "const": "commercial"
-        },
-        {
-          "description": "TLS 1.3 only, AES-256-GCM, ML-KEM-1024 then P-384, ECDSA P-384 and\nML-DSA-87 signatures. The CNSA 2.0 shape.",
-          "type": "string",
-          "const": "cnsa2"
-        }
-      ]
     },
     "TrustChoice": {
       "description": "Which certificates a client accepts a server's certificate from.\n\nEvery choice trusts the CA files given beside it, and `bundle` trusts\nnothing else.",
