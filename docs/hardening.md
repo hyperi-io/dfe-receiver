@@ -67,6 +67,9 @@ config:
     actorLineColor: "#64748B"
     signalColor: "#64748B"
     signalTextColor: "#0F172A"
+    noteBkgColor: "#FFFFFF"
+    noteBorderColor: "#94A3B8"
+    noteTextColor: "#0F172A"
   themeCSS: >-
     .messageText{paint-order:stroke;stroke:#FFFFFF;stroke-width:3px;stroke-linejoin:round}
 ---
@@ -94,7 +97,7 @@ sequenceDiagram
     auth->>handler: Forward
 ```
 
-*Figure 1. L4 Detail -- HTTP request order. Solid arrows are requests, dashed arrows are answers.* Up: [L3 Components -- Receiver](architecture.md#components). Down: L4 Detail -- Ingest answers, below.
+*Figure 1. L4 Detail -- HTTP request order. The 408, 413 and 401 arrows are the refusals.* Up: [L3 Components -- Receiver](architecture.md#components). Down: L4 Detail -- Ingest answers, below.
 
 The handler answers malformed or non-object JSON with 400. A record missing a required field goes to the DLQ, or gets 400, per `validation.dlq_on_invalid`. The rest get 202 once Kafka or the DLQ holds them, and 503 when neither confirms in the hold.
 
@@ -113,6 +116,9 @@ config:
     actorLineColor: "#64748B"
     signalColor: "#64748B"
     signalTextColor: "#0F172A"
+    noteBkgColor: "#FFFFFF"
+    noteBorderColor: "#94A3B8"
+    noteTextColor: "#0F172A"
   themeCSS: >-
     .messageText{paint-order:stroke;stroke:#FFFFFF;stroke-width:3px;stroke-linejoin:round}
 ---
@@ -133,7 +139,7 @@ sequenceDiagram
     end
 ```
 
-*Figure 2. L4 Detail -- Ingest answers. Solid arrows are requests, dashed arrows are answers.* Up: [L4 Detail -- HTTP request order](#application-level-hardening).
+*Figure 2. L4 Detail -- Ingest answers. The arrows to Client are the answers.* Up: [L4 Detail -- HTTP request order](#application-level-hardening).
 
 The IP filter, the per-IP rate limit and the concurrency cap run before the timeout. A listener with client certificates and tokens both required:
 
@@ -410,6 +416,7 @@ config:
     fontSize: 15px
     lineColor: "#64748B"
     primaryTextColor: "#0F172A"
+    nodeBorder: "#334155"
     clusterBorder: "#0072B2"
     edgeLabelBackground: "#FFFFFF"
   themeCSS: >-
@@ -429,6 +436,8 @@ config:
     span.edgeLabel{display:inline-block;background:#FFFFFF!important;color:#1E293B;border:1px solid #94A3B8;border-radius:999px;padding:2px 10px;font-size:12px;font-weight:500}
     span.edgeLabel p{background:transparent!important}
     .label-icon{width:20px;height:20px;vertical-align:-4px;margin-right:6px}
+    .icon-shape path[stroke-width="0"][fill="none"]{fill:#FFFFFF;stroke:#FFFFFF;stroke-width:12px;stroke-linejoin:round}
+    .icon-shape p{background:transparent!important;color:#0F172A}
     .ingest .label-icon{color:#0E8A7D}
     .xform .label-icon{color:#7B4FB0}
     .load .label-icon{color:#0072B2}
@@ -478,7 +487,7 @@ flowchart TB
   style K8S fill:none,stroke:#0072B2,stroke-width:1.5px,stroke-dasharray:6 4
 ```
 
-*Figure 3. L4 Detail -- AWS fronting. Dashed boxes are outside DFE, and the dotted arrow is the ext_authz call.* Up: [dfe-receiver documentation](README.md).
+*Figure 3. L4 Detail -- AWS fronting. Everything but dfe-receiver is outside DFE, and the IP check is the ext_authz call.* Up: [dfe-receiver documentation](README.md).
 
 What each layer stops is in the [defence-in-depth table](#defence-in-depth-summary). The recurring charges are the flat Cloudflare plan and the NLB's hours and data, and Envoy Gateway and CrowdSec are open source. The "just use AWS" approach (ALB, AWS WAF, Shield Standard) bills ALB hours and data plus WAF per ACL, rule and request, and Bot Control costs extra. Price both against the expected traffic and the rules you enable.
 
