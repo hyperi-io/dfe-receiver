@@ -3,6 +3,35 @@
 Rendered by CI and committed back at the end of a release -- do not edit by
 hand. Release notes also appear on the GitHub Releases page, one per tag.
 
+## [1.15.72](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.71...v1.15.72) (2026-11-27)
+
+### What's Changed
+* docs(sidecar): document Fluent Bit HTTP ingest formats by @catinspace-au in https://github.com/hyperi-io/dfe-receiver/pull/296
+* fix(deps): use jiff and std for time handling by @catinspace-au in https://github.com/hyperi-io/dfe-receiver/pull/298
+* fix(tests): build a cascade per config test by @catinspace-au in https://github.com/hyperi-io/dfe-receiver/pull/300
+* fix(pgo): use the contract's shutdown timeout by @catinspace-au in https://github.com/hyperi-io/dfe-receiver/pull/301
+* fix(pgo): drop the script's profraw check by @catinspace-au in https://github.com/hyperi-io/dfe-receiver/pull/302
+* fix(deps): update redpandadata/redpanda Docker tag to v26.2.7 by @renovate[bot] in https://github.com/hyperi-io/dfe-receiver/pull/297
+* fix(deps): update Rust crate pcap-file to v3 by @renovate[bot] in https://github.com/hyperi-io/dfe-receiver/pull/299
+* fix(deps): update rust-dependencies by @renovate[bot] in https://github.com/hyperi-io/dfe-receiver/pull/272
+* docs: add the NXLog shipping guide by @catinspace-au in https://github.com/hyperi-io/dfe-receiver/pull/303
+* fix: rebuild on scalo 2.14.34 by @catinspace-au in https://github.com/hyperi-io/dfe-receiver/pull/304
+* docs(nxlog): add EE intake and fix the hidden-field note by @catinspace-au in https://github.com/hyperi-io/dfe-receiver/pull/305
+* fix: rebuild on scalo 2.14.36 by @catinspace-au in https://github.com/hyperi-io/dfe-receiver/pull/306
+* fix: rebuild on scalo 2.14.37 by @catinspace-au in https://github.com/hyperi-io/dfe-receiver/pull/307
+* fix(spool): keep running in memory when the spool won't open by @catinspace-au in https://github.com/hyperi-io/dfe-receiver/pull/308
+* fix: rebuild on scalo 2.14.39 by @catinspace-au in https://github.com/hyperi-io/dfe-receiver/pull/309
+* docs: link CEL to its language definition by @catinspace-au in https://github.com/hyperi-io/dfe-receiver/pull/311
+* docs: add Zeek and Suricata shipping pages by @catinspace-au in https://github.com/hyperi-io/dfe-receiver/pull/310
+* docs: add SNMP, gNMI and BGP over BMP collector pages by @catinspace-au in https://github.com/hyperi-io/dfe-receiver/pull/312
+* fix(fluent): keep the record timestamp, tag and source by @catinspace-au in https://github.com/hyperi-io/dfe-receiver/pull/313
+* docs: add Siemens and industrial OT page by @catinspace-au in https://github.com/hyperi-io/dfe-receiver/pull/314
+* fix(sink): reject held records for missing topics by @catinspace-au in https://github.com/hyperi-io/dfe-receiver/pull/315
+* fix(docs): name the Telegraf meta schema on the OT page by @catinspace-au in https://github.com/hyperi-io/dfe-receiver/pull/317
+* fix(tls): move TLS keys to scalo's tls section by @catinspace-au in https://github.com/hyperi-io/dfe-receiver/pull/318
+* fix(docs): cite the rewritten dfe-transform-elastic commit by @catinspace-au in https://github.com/hyperi-io/dfe-receiver/pull/319
+* fix: correct listener limits, parsing and error handling by @catinspace-au in https://github.com/hyperi-io/dfe-receiver/pull/326
+
 ## [1.15.71](https://github.com/hyperi-io/dfe-receiver/compare/v1.15.70...v1.15.71) (2026-11-23)
 
 ### What's Changed
