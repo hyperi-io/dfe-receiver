@@ -58,6 +58,19 @@ pub fn count_lossy_decode(transport: &str) {
     .increment(1);
 }
 
+/// Count `count` entries on `transport` skipped as malformed while the rest of
+/// their message is kept, for a converter that holds no [`Metrics`].
+pub fn count_parse_failures(transport: &str, count: u64) {
+    if count == 0 {
+        return;
+    }
+    metrics::counter!(
+        "receiver_parse_failures_total",
+        "transport" => transport.to_string()
+    )
+    .increment(count);
+}
+
 /// Reason for authentication failure (for metrics labels).
 #[derive(Debug, Clone, Copy)]
 pub enum AuthFailureReason {
@@ -1278,7 +1291,7 @@ const RECEIVER_SERIES: &[SeriesSpec] = &[
         "receiver_kafka_resends_total",
         MetricType::Counter,
         &[],
-        "Records answered at enqueue that librdkafka gave up on with a message timeout, queued again",
+        "Records answered at enqueue that librdkafka gave up on, for a message timeout, a topic the cluster does not serve or an authorization failure, queued again",
     ),
     (
         "receiver_source_org_id_stripped_total",

@@ -27,7 +27,7 @@ use tokio::time::Instant;
 use tokio_stream::StreamExt;
 use tokio_util::codec::{Decoder, FramedRead};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use scalo::tls::ServerTls;
 
@@ -101,7 +101,7 @@ impl TcpListenerTask {
                 result = listener.accept() => match result {
                     Ok(conn) => conn,
                     Err(e) => {
-                        error!(error = %e, "Failed to accept syslog {label} connection");
+                        accept.failed(&e).await;
                         continue;
                     }
                 },

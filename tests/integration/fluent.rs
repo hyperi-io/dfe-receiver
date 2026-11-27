@@ -84,11 +84,13 @@ async fn test_fluent_buffer_size_enforcement() {
         .await
         .expect("connect to fluent listener");
 
-    // 0xc1 is a reserved marker in msgpack — rmpv returns an error on it,
-    // which the server treats as "incomplete, wait for more data". The bytes
-    // are never consumed from `pending`, so the buffer grows unboundedly
-    // unless our size guard closes the connection.
-    let garbage_chunk = vec![0xc1_u8; 8192]; // 8 KiB of invalid markers
+    // A message whose bin32 declares 16 MiB, past the 8 MiB sent below, stays
+    // incomplete, so only the size guard ends the connection.
+    stream
+        .write_all(&[0x92, 0xa1, b't', 0xc6, 0x01, 0x00, 0x00, 0x00])
+        .await
+        .expect("write the message head");
+    let garbage_chunk = vec![0_u8; 8192];
     let mut total_sent = 0usize;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
 

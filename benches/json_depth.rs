@@ -162,8 +162,9 @@ fn ingress() -> (Validator, Router) {
     config.rules.rules = vec![RuleConfig::new(
         "by-dataset",
         "_source",
-        SetAction::from("data_stream.dataset"),
+        SetAction::lookup("datasets", "data_stream.dataset"),
     )];
+    config.rules = config.rules.lookup("datasets", [("bench.log", "bench")]);
     let router = Router::new(&config, &config.destinations).expect("the rule compiles");
     (validator, router)
 }

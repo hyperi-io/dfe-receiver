@@ -16,9 +16,8 @@
 //!   4. Memory-pressure gate (state-transition logged)
 //!
 //! On Linux, drains the socket on `AsyncFd::readable()` events to amortise
-//! readiness syscalls. True `recvmmsg` batching is deferred (see TODO below)
-//! -- per-packet `recv_from` inside the readiness loop is functionally
-//! equivalent at moderate pps and avoids `nix` API-surface fragility.
+//! readiness syscalls, one `recv_from` per datagram, with no `recvmmsg`
+//! batching (hyperi-io/dfe-receiver#288).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -167,11 +166,6 @@ impl UdpFlowListener {
     }
 
     /// Linux path: drain the socket queue on each readiness event.
-    ///
-    /// TODO: wire `nix::sys::socket::recvmmsg` for batched syscall once load
-    /// testing shows the per-packet recv_from is the bottleneck. The drain
-    /// loop already amortises wakeups, so the gain only materialises at
-    /// very high pps.
     #[cfg(target_os = "linux")]
     async fn run_linux_drain(mut self, udp: UdpSocket, shutdown: CancellationToken) -> Result<()> {
         let mut buf = vec![0u8; 65_535];
@@ -365,14 +359,8 @@ impl UdpFlowListener {
             .records_per_packet
             .observe(packet.records.len() as f64);
 
-        // Template-only / options-template packets (NetFlow v9/IPFIX) and
-        // empty sFlow datagrams decode successfully but carry zero data
-        // records. Emitting an empty `flows:[]` envelope would be pure
-        // downstream noise -- a v9 exporter refreshes templates periodically,
-        // so this would fire on every refresh. Skip emission; the zero is
-        // still recorded in `records_per_packet` above for observability.
-        // (Exploded mode already skips via its empty-ranges guard; this keeps
-        // canonical consistent with it.)
+        // A template-only packet or an empty sFlow datagram emits no envelope,
+        // since a v9 exporter sends one at every template refresh.
         if packet.records.is_empty() {
             return;
         }

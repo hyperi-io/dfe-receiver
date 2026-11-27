@@ -1,17 +1,16 @@
 // Project:   dfe-receiver
 // File:      src/sink/grpc/mod.rs
-// Purpose:   dfe-loader gRPC transport sink
+// Purpose:   gRPC destination sink
 // Language:  Rust
 //
 // License:   BUSL-1.1
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
-//! dfe-loader gRPC transport sink.
+//! gRPC destination sink.
 //!
-//! Sends messages directly to dfe-loader using the DFE native gRPC protocol
-//! (scalo `GrpcTransport`, client-only mode). Used when
-//! `loader.transport = "grpc"`, enabling receiver→loader communication
-//! without Kafka (e.g., inside dfe-docker).
+//! Pushes records to a destination's scalo Push listener, dfe-loader's among
+//! them, over the DFE native gRPC protocol (scalo `GrpcTransport`, client-only
+//! mode), with no broker between.
 
 use std::sync::atomic::AtomicU64;
 
@@ -96,7 +95,7 @@ impl GrpcSink {
     /// connection and then stops answering cannot hold a sender task forever;
     /// `None` keeps scalo's 30s default.
     ///
-    /// Uses lazy connection — does not fail until the first RPC.
+    /// Uses lazy connection -- does not fail until the first RPC.
     pub async fn new(endpoint: &str, send_timeout_ms: Option<u64>) -> Result<Self> {
         let config = client_config(endpoint, send_timeout_ms);
         let transport = GrpcTransport::new(&config)
@@ -192,16 +191,12 @@ pub(crate) fn push_outcome(result: SendResult) -> Result<()> {
 
 #[async_trait]
 impl Sink for GrpcSink {
-    /// Send a message to dfe-loader via gRPC.
-    ///
-    /// The topic is passed as the `key` to the DFE Push RPC, where dfe-loader
-    /// uses it for routing.
+    /// Push one record, `topic` as its key on the Push RPC.
     async fn send(&self, topic: &str, payload: Bytes) -> Result<()> {
         // scalo's single-record send reports an over-limit payload as backpressure.
         if let Some(reason) = self.refuses(&payload) {
             return Err(Error::Rejected(reason));
         }
-        // The clone is a refcount bump, not a payload copy.
         let result = self.transport.send(topic, payload).await;
         self.note(&result, 1);
         push_outcome(result)
@@ -257,7 +252,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_grpc_sink_lazy_connect() {
-        // Lazy connection — init succeeds even with no server at the endpoint
+        // Lazy connection -- init succeeds even with no server at the endpoint
         let sink = GrpcSink::new("http://localhost:19999", None).await.unwrap();
         assert!(sink.is_healthy());
     }
@@ -364,7 +359,7 @@ mod tests {
         let sink = GrpcSink::new("http://localhost:19998", None).await.unwrap();
         let payload = Bytes::from(r#"{"test": "data"}"#);
 
-        // Send will fail (no server) — error is expected
+        // Send will fail (no server) -- error is expected
         let result = sink.send("test-topic", payload).await;
         assert!(result.is_err());
     }

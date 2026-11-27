@@ -328,11 +328,16 @@ async fn write_handler(
         }
     }
 
-    // Convert to JSON events
+    // A series the converter refuses fails the same way on every resend, so it is a 400.
     let events = write_request_to_json(request, state.mode).map_err(|e| {
-        warn!(error = %e, "Remote Write conversion failed");
         state.metrics.inc_requests_error("prometheus_rw");
-        RwError::internal()
+        if e.is_retryable() {
+            warn!(error = %e, "Remote Write conversion failed");
+            return RwError::service_unavailable("server could not convert the request");
+        }
+        state.metrics.inc_parse_failure("prometheus_rw");
+        debug!(error = %e, "Remote Write request refused at conversion");
+        RwError::bad_request(&e.public_message())
     })?;
 
     // Remote Write senders MUST retry a 5xx and MUST NOT retry a 4xx other
@@ -384,14 +389,6 @@ impl RwError {
         Self {
             status: StatusCode::BAD_REQUEST,
             message: msg.to_string(),
-        }
-    }
-
-    /// A failure of the receiver's own; the cause is logged, not sent.
-    fn internal() -> Self {
-        Self {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: "internal error".to_string(),
         }
     }
 

@@ -1,6 +1,6 @@
 // Project:   dfe-receiver
 // File:      tests/common/mod.rs
-// Purpose:   Shared test infrastructure — dual-mode (remote/docker) config helpers
+// Purpose:   Shared test infrastructure -- dual-mode (remote/docker) config helpers
 // Language:  Rust
 //
 // License:   BUSL-1.1

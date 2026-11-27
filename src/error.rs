@@ -279,7 +279,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // HTTP response mapping — verify security-critical status codes
+    // HTTP response mapping -- verify security-critical status codes
     // ---------------------------------------------------------------------
 
     async fn response_status_and_body(err: Error) -> (StatusCode, String) {
@@ -370,7 +370,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_response_config_returns_503_without_detail() {
-        // Config errors are internal — should never expose config contents
+        // Config errors are internal -- should never expose config contents
         let (status, body) = response_status_and_body(Error::Config(
             "failed to parse DATABASE_URL=postgres://secret:pass@host/db".into(),
         ))

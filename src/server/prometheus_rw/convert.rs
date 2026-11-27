@@ -471,7 +471,7 @@ fn native_histogram_obj(
 /// OTel conversion: structured JSON matching OTLP handler output.
 fn convert_otel(request: &proto::WriteRequest, mode: PrometheusRwMode) -> Result<Vec<Bytes>> {
     // Build metadata lookup for metric type determination
-    // MetricType::COUNTER (1) → "sum", everything else → "gauge"
+    // MetricType::COUNTER (1) -> "sum", everything else -> "gauge"
     let metadata: HashMap<&str, i32> = request
         .metadata
         .iter()

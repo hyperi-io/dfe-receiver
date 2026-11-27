@@ -509,9 +509,8 @@ fn refused_client(request: &Request<Body>) -> Option<IpAddr> {
 
 /// Probe paths served without authentication.
 ///
-/// `/livez` and `/readyz` are the whole probe surface (see
-/// `server::http::build_router`), and both are registered on the same router the
-/// auth layer wraps, so the exemption has to live here.
+/// `/livez` and `/readyz` are the whole probe surface, and both are registered
+/// on the same router the auth layer wraps, so the exemption has to live here.
 pub const PROBE_PATHS: [&str; 2] = ["/livez", "/readyz"];
 
 /// Record a request refused for its credentials on `transport`.
@@ -592,6 +591,8 @@ impl TokenAuth {
 /// Header auth never runs here: a gRPC request carries metadata, not the HTTP
 /// headers `accepted_headers` names. Under `mtls` it checks nothing, as the
 /// HTTP middleware does: the handshake has verified the client certificate.
+/// Under `none`, which a reload can switch a running listener to, it checks
+/// nothing either.
 pub fn grpc_auth_interceptor(
     auth: AuthState,
     metrics: Arc<Metrics>,
@@ -607,10 +608,9 @@ pub fn grpc_auth_interceptor(
         }
 
         let current = auth.current();
-        let verdict = if AuthMode::parse(&current.config.mode) == Some(AuthMode::Mtls) {
-            Ok(Principal::Listener(transport))
-        } else {
-            validate_bearer_auth(&current, &headers)
+        let verdict = match AuthMode::parse(&current.config.mode) {
+            Some(AuthMode::Mtls | AuthMode::None) => Ok(Principal::Listener(transport)),
+            _ => validate_bearer_auth(&current, &headers),
         };
         match verdict {
             Ok(principal) => {
@@ -771,7 +771,6 @@ pub fn validate_bearer_auth(
         ));
     };
 
-    // Validate token
     match provider.principal(token) {
         Some(principal) => {
             debug!("Bearer token accepted");
@@ -853,12 +852,6 @@ pub fn validate_header_auth(
             .get(&accepted_header.name)
             .and_then(|v| v.to_str().ok())
         {
-            // If values list is empty, any non-empty value is accepted
-            if accepted_header.values.is_empty() {
-                debug!(header = %accepted_header.name, "Auth header accepted (any value)");
-                return None;
-            }
-
             // Compared as SHA-256 hashes, as bearer tokens are, so the time taken
             // says nothing about how much of a secret value matched.
             let offered = hash_token(header_value);
@@ -917,7 +910,7 @@ mod tests {
                 },
                 AcceptedHeader {
                     name: "x-custom-auth".to_string(),
-                    values: vec![], // Any value accepted
+                    values: vec![],
                 },
             ],
             bearer: BearerConfig::default(),
@@ -1062,15 +1055,21 @@ mod tests {
         assert!(validate_header_auth(&config, &headers).is_none());
     }
 
+    /// A header listed with no values accepts nothing, an empty value included.
     #[test]
-    fn test_multi_header_any_value_accepted() {
+    fn a_header_listed_with_no_values_accepts_nothing() {
         let config = multi_header_config();
 
-        // x-custom-auth accepts any value
-        let mut headers = HeaderMap::new();
-        headers.insert("x-custom-auth", "literally-anything".parse().unwrap());
-
-        assert!(validate_header_auth(&config, &headers).is_none());
+        for value in ["literally-anything", ""] {
+            let mut headers = HeaderMap::new();
+            headers.insert("x-custom-auth", value.parse().unwrap());
+            let err = validate_header_auth(&config, &headers);
+            assert_eq!(
+                err.map(|e| e.status),
+                Some(StatusCode::UNAUTHORIZED),
+                "{value:?}"
+            );
+        }
     }
 
     #[test]
@@ -1623,7 +1622,8 @@ mod tests {
     }
 
     /// The gRPC interceptor asks `bearer` for a token and `mtls` for nothing,
-    /// the handshake having checked the certificate.
+    /// the handshake having checked the certificate. A listener started on
+    /// `bearer` and reloaded to `none` asks for nothing.
     #[test]
     fn the_grpc_interceptor_checks_what_the_mode_names() {
         let mtls = AuthConfig {
@@ -1632,8 +1632,11 @@ mod tests {
         };
         let bearer = bearer_config();
         let provider = || BearerTokenProvider::new(&bearer.bearer.tokens);
+        let reloaded = AuthState::with_bearer_provider(bearer.clone(), provider());
+        reloaded.replace(&AuthState::new(AuthConfig::default()));
         let cases = [
             ("mtls, no token", AuthState::new(mtls), None, true),
+            ("reloaded to none, no token", reloaded, None, true),
             (
                 "bearer, no token",
                 AuthState::with_bearer_provider(bearer.clone(), provider()),

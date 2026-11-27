@@ -93,7 +93,7 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
 // ---------------------------------------------------------------------------
 
 /// Convert OTLP KeyValue attributes to a flat JSON object.
-/// HyperDX schema uses `Map(LowCardinality(String), String)` — all values are stringified.
+/// HyperDX schema uses `Map(LowCardinality(String), String)` -- all values are stringified.
 fn attributes_to_map(
     attrs: &[pb::common::v1::KeyValue],
 ) -> serde_json::Map<String, serde_json::Value> {
@@ -830,7 +830,6 @@ fn convert_summary_points(
         .collect()
 }
 
-/// Extract numeric value from a `NumberDataPoint`.
 /// A data point's exemplars as the metric record carries them.
 fn exemplars(exemplars: &[pb::metrics::v1::Exemplar]) -> Vec<Exemplar> {
     exemplars
@@ -864,6 +863,7 @@ fn with_exemplars(
     record
 }
 
+/// The value of a `NumberDataPoint`, as a float.
 fn number_data_point_value(dp: &pb::metrics::v1::NumberDataPoint) -> f64 {
     match dp.value {
         Some(pb::metrics::v1::number_data_point::Value::AsDouble(d)) => d,
@@ -1109,7 +1109,7 @@ mod tests {
         let dv = AnyValue {
             value: Some(Value::DoubleValue(2.5)),
         };
-        // Double → string representation (implementation-defined format)
+        // Double -> string representation (implementation-defined format)
         let s = any_value_to_string_value(&dv);
         assert!(s.as_str().unwrap().contains("2.5"));
 
@@ -1125,7 +1125,7 @@ mod tests {
             value: Some(Value::BytesValue(vec![0xde, 0xad, 0xbe, 0xef])),
         };
         let s = any_value_to_string_value(&bsv);
-        // bytes should render as hex or base64 — implementation-defined
+        // bytes should render as hex or base64 -- implementation-defined
         let text = s.as_str().unwrap();
         assert!(
             text.contains("deadbeef") || !text.is_empty(),
@@ -1249,7 +1249,7 @@ mod tests {
 
     #[test]
     fn test_convert_logs_multiple_records() {
-        // Multiple scope_logs × multiple log_records → multiple payloads
+        // Multiple scope_logs x multiple log_records -> multiple payloads
         let make_log = |body: &str| pb::logs::v1::LogRecord {
             time_unix_nano: 1_771_459_200_000_000_000,
             observed_time_unix_nano: 0,

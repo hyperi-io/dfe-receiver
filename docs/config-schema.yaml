@@ -33,6 +33,7 @@ properties:
         idle_timeout_ms: 300000
         tls_handshake_timeout_ms: 10000
         http2_keep_alive_interval_ms: 60000
+        http2_max_concurrent_streams: 200
       tls:
         enabled: false
         profile: commercial
@@ -496,15 +497,19 @@ $defs:
         minimum: 0
         default: 10485760
       request_timeout_ms:
-        description: Request timeout in milliseconds.
+        description: |-
+          How long a request may take, in milliseconds, on the HTTP and OTLP
+          HTTP listeners (408). A held answer ends inside it. Both gRPC listeners
+          add their acknowledgement hold to it, which starts once the body is
+          decoded, and answer `CANCELLED` past the sum.
         type: integer
         format: uint64
         minimum: 0
         default: 30000
       max_concurrent_requests:
         description: |-
-          Maximum concurrent in-flight requests (0 = unlimited).
-          Protects against connection exhaustion and memory pressure.
+          Most requests one HTTP listener serves at once (0 = no limit). A
+          request past it is answered 503 with `Retry-After`.
         type: integer
         format: uint
         minimum: 0
@@ -550,6 +555,7 @@ $defs:
           idle_timeout_ms: 300000
           tls_handshake_timeout_ms: 10000
           http2_keep_alive_interval_ms: 60000
+          http2_max_concurrent_streams: 200
       tls:
         description: TLS configuration.
         $ref: "#/$defs/TlsConfig"
@@ -717,6 +723,15 @@ $defs:
         format: uint64
         minimum: 0
         default: 60000
+      http2_max_concurrent_streams:
+        description: |-
+          Most streams one HTTP/2 connection may have open at once, on every
+          HTTP listener and both gRPC listeners. The client is told the cap, and
+          a stream past it is refused.
+        type: integer
+        format: uint32
+        minimum: 0
+        default: 200
   TlsConfig:
     description: TLS configuration.
     type: object
@@ -857,9 +872,7 @@ $defs:
         description: Header name (e.g., "x-hyperi-agent", "Authorization").
         type: string
       values:
-        description: |-
-          Allowed values for this header.
-          If empty, any non-empty value is accepted.
+        description: Allowed values for this header. An empty list refuses the config.
         type: array
         items:
           type: string
@@ -1587,7 +1600,7 @@ $defs:
         description: |-
           EXPERIMENTAL marker. When true (default), the handler emits a startup
           WARN log and sets `dfe_handler_experimental{handler="flow"} 1`.
-          Flipped to false in a follow-up PR after stability period.
+          hyperi-io/dfe-receiver#288 tracks turning it off by default.
         type: boolean
         default: true
       raw_capture:

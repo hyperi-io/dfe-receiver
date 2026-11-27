@@ -285,7 +285,6 @@ async fn test_full_pipeline_to_kafka() {
     // Use small batch settings for tests to send immediately
     send_immediately(&mut config);
 
-    // Create pipeline
     let pipeline = PipelineState::new(
         SharedConfig::new(config),
         tokio_util::sync::CancellationToken::new(),
@@ -461,7 +460,6 @@ async fn test_category_routing() {
         })
         .to_vec();
 
-    // Create pipeline
     let pipeline = PipelineState::new(
         SharedConfig::new(config),
         tokio_util::sync::CancellationToken::new(),
@@ -536,7 +534,6 @@ async fn test_dlq_routing() {
     config.validation.required_fields = vec!["required_field".to_string()];
     config.validation.dlq_on_invalid = true;
 
-    // Create pipeline
     let pipeline = PipelineState::new(
         SharedConfig::new(config),
         tokio_util::sync::CancellationToken::new(),

@@ -1,5 +1,5 @@
 // Project:   dfe-receiver
-// File:      tests/integration_splunk_hec.rs
+// File:      tests/integration/splunk_hec.rs
 // Purpose:   Integration tests for Splunk HEC protocol handler
 // Language:  Rust
 //
@@ -11,9 +11,9 @@
 //! Integration tests for the Splunk HEC handler.
 //!
 //! These tests start a real Splunk HEC handler and send requests via reqwest.
-//! No external binaries are needed — HEC is just HTTP.
+//! No external binaries are needed -- HEC is just HTTP.
 //!
-//! Run with: `cargo test --test integration_splunk_hec`
+//! Run with: `cargo test --test integration splunk_hec`
 
 // Allow unwrap/expect in tests - they're the idiomatic way to fail fast
 #![allow(clippy::unwrap_used)]
@@ -141,7 +141,7 @@ async fn test_hec_batch_events() {
     let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["code"], 0);
 
-    // Metric counts requests, not individual events — 1 request with 3 events
+    // Metric counts requests, not individual events -- 1 request with 3 events
     let received = events_received(&metrics);
     assert!(received >= 1, "Expected at least 1 request, got {received}");
 
@@ -237,7 +237,7 @@ async fn test_hec_raw_events() {
     let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["code"], 0);
 
-    // Metric counts requests, not individual events — 1 request with 3 lines
+    // Metric counts requests, not individual events -- 1 request with 3 lines
     let received = events_received(&metrics);
     assert!(received >= 1, "Expected at least 1 request, got {received}");
 

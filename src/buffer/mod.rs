@@ -6,18 +6,17 @@
 // License:   BUSL-1.1
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
-//! Buffer management with memory pressure detection.
-//!
-//! Provides in-memory batching with disk spillover when under pressure.
+//! The buffer in front of each destination: an in-memory queue, or a disk
+//! spool with `buffer.spillover`, holding records while the destination is
+//! failing.
 
 pub mod adapter;
 pub mod rejects;
 pub mod tiered;
 
 pub use rejects::{Disposal, Rejects};
-pub use tiered::{InMemoryBuffer, InMemoryBufferStats};
-// Re-export CircuitState from scalo for convenience
 pub use scalo::tiered_sink::CircuitState;
+pub use tiered::{InMemoryBuffer, InMemoryBufferStats};
 
 use std::sync::Arc;
 
@@ -29,7 +28,7 @@ use tracing::info;
 
 use crate::sink::Sink as ReceiverSink;
 
-/// Backend for message delivery — in-memory only or with disk spillover.
+/// Backend for message delivery -- in-memory only or with disk spillover.
 pub enum SinkBackend<S: ReceiverSink + 'static> {
     /// In-memory buffer with circuit breaker (default, no disk).
     InMemory(InMemoryBuffer<S>),
@@ -98,7 +97,7 @@ impl<S: ReceiverSink + 'static> ReceiverSink for SinkBackend<S> {
         match self {
             SinkBackend::InMemory(buf) => buf.is_healthy(),
             SinkBackend::Tiered(tiered) => {
-                // Healthy if disk is available (sync check — cannot call async from sync)
+                // Healthy if disk is available (sync check -- cannot call async from sync)
                 tiered.is_disk_available()
             }
         }
@@ -167,8 +166,6 @@ impl<S: ReceiverSink + 'static> SinkBackend<S> {
     }
 }
 
-// Re-export MemoryGuard from scalo as the memory tracker.
-// Replaces the bespoke BufferManager — same API, cgroup-aware auto-detection.
 pub use scalo::memory::{MemoryGuard, MemoryGuardConfig, MemoryPressure};
 
 #[cfg(test)]

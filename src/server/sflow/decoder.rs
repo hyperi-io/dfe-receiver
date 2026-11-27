@@ -13,8 +13,8 @@
 //! carry a `SampledHeader` record have their first 54+ bytes of raw L2/L3/L4
 //! walked by `parse_sampled_ip` to extract canonical IP/port/protocol/tcp_flags.
 //!
-//! Vendor-specific opaque blocks are preserved in `raw_json` but skipped by
-//! canonical mapping.
+//! Expanded flow and counter samples (formats 3 and 4) and vendor-specific
+//! samples emit no record.
 
 use crate::server::flow::decoder::{DecodedPacket, FlowDecoder};
 use crate::server::flow::dispatch::ProtocolKind;
@@ -185,11 +185,8 @@ impl FlowDecoder for SflowDecoder {
                     };
                     records.push(SflowRecord::Counter { generic, raw_json });
                 }
-                Sample::Opaque { .. } => {
-                    // Vendor-specific samples are preserved in the datagram but
-                    // we don't surface them as records in v1. A future pass may
-                    // emit a "raw" SflowRecord variant for downstream tooling.
-                }
+                // Expanded and vendor-specific samples emit no record.
+                Sample::Opaque { .. } => {}
             }
         }
 

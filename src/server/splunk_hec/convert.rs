@@ -25,7 +25,7 @@ use crate::server::raw_capture;
 /// The body may contain multiple of these concatenated (NDJSON).
 #[derive(Debug, Deserialize)]
 pub struct HecEvent {
-    /// Event payload — can be a JSON object, string, or number.
+    /// Event payload -- can be a JSON object, string, or number.
     pub event: serde_json::Value,
 
     /// Epoch timestamp with optional millisecond precision (e.g. 1447828325.123).

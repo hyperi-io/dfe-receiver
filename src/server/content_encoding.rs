@@ -86,8 +86,9 @@ pub fn decode<'a>(
     if !encoding.eq_ignore_ascii_case("gzip") {
         return Err(EncodingError::Unsupported(encoding.to_string()));
     }
+    // RFC 1952 lets a body hold several gzip members, and `GzDecoder` stops after the first.
     let mut decoded = Vec::new();
-    flate2::read::GzDecoder::new(body)
+    flate2::read::MultiGzDecoder::new(body)
         .take(limit as u64 + 1)
         .read_to_end(&mut decoded)
         .map_err(|e| EncodingError::Invalid(e.to_string()))?;
@@ -117,6 +118,7 @@ mod tests {
         let body = b"0123456789".repeat(100);
         let packed = gzip(&body);
         let bomb = gzip(&vec![0_u8; 1 << 20]);
+        let members = [gzip(&body), gzip(&body)].concat();
         let ok = Ok(body.len());
         let too_large = |n| Err(EncodingError::TooLarge(n));
         let unsupported = |e: &str| Err(EncodingError::Unsupported(e.into()));
@@ -133,6 +135,13 @@ mod tests {
                 too_large(body.len() - 1),
             ),
             (Some("gzip"), &bomb, 1024, too_large(1024)),
+            (Some("gzip"), &members, 1 << 20, Ok(2 * body.len())),
+            (
+                Some("gzip"),
+                &members,
+                body.len() + 1,
+                too_large(body.len() + 1),
+            ),
             (Some("zstd"), &packed, 1 << 20, unsupported("zstd")),
             (Some("gzip, br"), &packed, 1 << 20, unsupported("gzip, br")),
         ];

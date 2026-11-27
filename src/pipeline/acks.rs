@@ -127,6 +127,13 @@ impl Acks {
         self.tickets.is_some()
     }
 
+    /// The longest this listener holds an answer, counted from when the
+    /// request is admitted.
+    #[must_use]
+    pub fn max_hold(&self) -> Duration {
+        self.max_hold
+    }
+
     /// Admit a request of `bytes` whose sender allows `sender_deadline`, or
     /// `None` when this listener answers at enqueue.
     pub(crate) fn admit(

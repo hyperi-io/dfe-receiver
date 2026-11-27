@@ -1,5 +1,5 @@
 // Project:   dfe-receiver
-// File:      tests/integration_syslog.rs
+// File:      tests/integration/syslog.rs
 // Purpose:   Integration tests using logger binary (syslog protocol)
 // Language:  Rust
 //
@@ -11,10 +11,10 @@
 //! These tests start a dfe-receiver syslog handler and run `logger` as a
 //! subprocess to send syslog messages over UDP and TCP.
 //!
-//! Run with: `cargo test --test integration_syslog`
+//! Run with: `cargo test --test integration syslog`
 //!
 //! Requirements:
-//! - `logger` binary (bsdutils — Essential package on Ubuntu/Debian, built-in on macOS)
+//! - `logger` binary (bsdutils -- Essential package on Ubuntu/Debian, built-in on macOS)
 
 // Allow unwrap/expect in tests - they're the idiomatic way to fail fast
 #![allow(clippy::unwrap_used)]

@@ -24,7 +24,7 @@ use scalo::tls::{ServerTls, ServerTlsOptions};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::config::FluentConfig;
 use crate::error::{Error, Result};
@@ -259,7 +259,7 @@ async fn run_tcp(
                 let (stream, peer_addr) = match result {
                     Ok(conn) => conn,
                     Err(e) => {
-                        error!(error = %e, "Failed to accept Fluent Forward connection");
+                        accept.failed(&e).await;
                         continue;
                     }
                 };

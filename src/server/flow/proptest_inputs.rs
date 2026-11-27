@@ -39,12 +39,10 @@ prop_compose! {
     /// followed by random body. Exercises the sFlow decoder header path on
     /// garbage payloads.
     pub fn random_sflow_versioned()(
-        sub in 0u16..256,
         body in random_bytes(2000),
     ) -> Vec<u8> {
         let mut v = Vec::with_capacity(body.len() + 4);
-        v.extend_from_slice(&0u16.to_be_bytes());
-        v.extend_from_slice(&sub.to_be_bytes());
+        v.extend_from_slice(&5u32.to_be_bytes());
         v.extend_from_slice(&body);
         v
     }

@@ -12,8 +12,8 @@
 server:
   bind_address: "0.0.0.0:8080"
   max_body_size: 10485760  # 10MB
-  request_timeout_ms: 30000
-  max_concurrent_requests: 10000  # max in-flight requests; 0 = unlimited
+  request_timeout_ms: 30000       # HTTP and OTLP HTTP, and the gRPC listeners add their ack hold
+  max_concurrent_requests: 10000  # in-flight requests per HTTP listener, past it 503; 0 = unlimited
 
   # Answer a request only once every destination confirmed its records: a
   # Kafka delivery report, a gRPC destination's answer, or a DLQ write. The
@@ -87,7 +87,7 @@ server:
   ip_filter:
     mode: "disabled"         # disabled, allowlist, denylist
     cidrs: []                # e.g., ["10.0.0.0/8", "172.16.0.0/12"]
-  # Every TCP listener; the gRPC listeners take the cap and the HTTP/2 keep-alive.
+  # Every TCP listener; the gRPC listeners take the cap and the HTTP/2 settings.
   connections:
     max_per_listener: 10000             # open connections per listener; 0 = no cap
     first_byte_timeout_ms: 30000        # a connection that has sent nothing by then is closed
@@ -95,6 +95,7 @@ server:
     idle_timeout_ms: 300000             # an HTTP connection with no request in flight
     tls_handshake_timeout_ms: 10000
     http2_keep_alive_interval_ms: 60000 # ping, closed after 20s unanswered
+    http2_max_concurrent_streams: 200   # open streams per HTTP/2 connection
 
   tls:
     enabled: false
@@ -477,6 +478,9 @@ validation:
 # first matching row per field wins. A row's _org_id outside the orgs its
 # sender is bound to is replaced by the binding's default org and counted on
 # rules_clamped_total. Edits and reorders apply on the next config reload.
+# _source names the Kafka topic, so a row sets it to a value or maps a field
+# through a lookup table. A row copying a field straight into _source refuses
+# the config.
 rules:
   rules: []
   # rules:

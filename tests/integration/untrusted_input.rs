@@ -243,6 +243,116 @@ async fn silent_idle_and_surplus_connections_are_closed() {
     drop(receiver);
 }
 
+/// HTTP/2 frame types and the SETTINGS parameter the gRPC test reads.
+const H2_HEADERS: u8 = 0x1;
+const H2_RST_STREAM: u8 = 0x3;
+const H2_SETTINGS: u8 = 0x4;
+const H2_MAX_CONCURRENT_STREAMS: u16 = 0x3;
+
+/// One HTTP/2 frame: its type, flags, stream and payload.
+struct H2Frame {
+    kind: u8,
+    flags: u8,
+    stream: u32,
+    payload: Vec<u8>,
+}
+
+/// The next frame on `stream`, or `None` once `within` passes or the connection ends.
+async fn next_h2_frame(stream: &mut TcpStream, within: Duration) -> Option<H2Frame> {
+    let mut head = [0_u8; 9];
+    tokio::time::timeout(within, stream.read_exact(&mut head))
+        .await
+        .ok()?
+        .ok()?;
+    let len = (usize::from(head[0]) << 16) | (usize::from(head[1]) << 8) | usize::from(head[2]);
+    let mut payload = vec![0_u8; len];
+    tokio::time::timeout(within, stream.read_exact(&mut payload))
+        .await
+        .ok()?
+        .ok()?;
+    Some(H2Frame {
+        kind: head[3],
+        flags: head[4],
+        stream: u32::from_be_bytes([head[5], head[6], head[7], head[8]]) & 0x7fff_ffff,
+        payload,
+    })
+}
+
+/// A HEADERS frame opening stream 1 for a Vector push, with no END_STREAM, so
+/// its body never comes. HPACK literals, no Huffman coding.
+fn stalled_push_headers() -> Vec<u8> {
+    let mut block = vec![0x83, 0x86];
+    let path = b"/vector.Vector/PushEvents";
+    block.push(0x04);
+    block.push(u8::try_from(path.len()).unwrap());
+    block.extend_from_slice(path);
+    block.extend_from_slice(&[0x01, 0x01, b'r']);
+    block.extend_from_slice(&[0x0f, 0x10, 0x10]);
+    block.extend_from_slice(b"application/grpc");
+    block.extend_from_slice(&[0x00, 0x02]);
+    block.extend_from_slice(b"te");
+    block.push(0x08);
+    block.extend_from_slice(b"trailers");
+    let len = u32::try_from(block.len()).unwrap().to_be_bytes();
+    let mut frame = vec![len[1], len[2], len[3], H2_HEADERS, 0x04, 0, 0, 0, 1];
+    frame.extend_from_slice(&block);
+    frame
+}
+
+/// The gRPC listener tells a client the stream cap it is configured with, and
+/// a push whose body never arrives is answered once the request timeout and
+/// the hold inside it pass, not held open for as long as the connection lives.
+#[tokio::test]
+async fn a_grpc_connection_is_held_to_the_stream_cap_and_the_request_timeout() {
+    let sink = Sink::start().await;
+    let (receiver, grpc) = Receiver::start(&sink, || {
+        let grpc = free_addr();
+        let mut config = base_config();
+        config.grpc.enabled = true;
+        config.grpc.bind_address = grpc.to_string();
+        config.server.request_timeout_ms = 1_000;
+        config.server.connections.http2_max_concurrent_streams = 7;
+        (config, vec![grpc], grpc)
+    })
+    .await
+    .unwrap();
+
+    let mut stream = TcpStream::connect(grpc).await.unwrap();
+    stream.write_all(H2_PREFACE).await.unwrap();
+    let settings = loop {
+        let frame = next_h2_frame(&mut stream, Duration::from_secs(5))
+            .await
+            .expect("the server sent its SETTINGS");
+        if frame.kind == H2_SETTINGS && frame.flags & 0x1 == 0 {
+            break frame.payload;
+        }
+    };
+    let streams = settings.as_chunks::<6>().0.iter().find_map(|entry| {
+        (u16::from_be_bytes([entry[0], entry[1]]) == H2_MAX_CONCURRENT_STREAMS)
+            .then(|| u32::from_be_bytes([entry[2], entry[3], entry[4], entry[5]]))
+    });
+    assert_eq!(streams, Some(7), "the advertised stream cap");
+
+    stream
+        .write_all(&[0, 0, 0, H2_SETTINGS, 0x1, 0, 0, 0, 0])
+        .await
+        .unwrap();
+    stream.write_all(&stalled_push_headers()).await.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut answered = false;
+    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+        let Some(frame) = next_h2_frame(&mut stream, left).await else {
+            break;
+        };
+        if frame.stream == 1 && matches!(frame.kind, H2_HEADERS | H2_RST_STREAM) {
+            answered = true;
+            break;
+        }
+    }
+    assert!(answered, "a push with no body was never answered");
+    drop(receiver);
+}
+
 /// A raw TCP listener, how it frames one record, and the first byte of a frame.
 struct RawListener {
     name: &'static str,

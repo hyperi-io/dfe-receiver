@@ -46,10 +46,13 @@ impl TrustedProxies {
         Ok(Self(Some(Arc::new(trie))))
     }
 
+    /// Whether `ip` is a trusted proxy, an IPv4-mapped IPv6 address matching
+    /// as its IPv4 address.
     fn contains(&self, ip: IpAddr) -> bool {
-        self.0
-            .as_ref()
-            .is_some_and(|trie| trie.longest_match(&IpNet::from(ip)).is_some())
+        self.0.as_ref().is_some_and(|trie| {
+            trie.longest_match(&IpNet::from(ip.to_canonical()))
+                .is_some()
+        })
     }
 
     /// The client behind a connection from `peer`.
@@ -184,13 +187,18 @@ mod tests {
         );
     }
 
+    /// A proxy reached over a dual-stack socket, as `::ffff:10.0.0.5`, is the
+    /// IPv4 proxy the CIDR lists.
     #[test]
     fn a_trusted_proxy_names_the_client_it_appended() {
         let forwarded = headers(&[(X_FORWARDED_FOR, CLIENT)]);
-        assert_eq!(
-            proxies(&["10.0.0.0/8"]).client_ip(ip(PROXY), &forwarded),
-            ip(CLIENT)
-        );
+        for peer in [PROXY, "::ffff:10.0.0.5"] {
+            assert_eq!(
+                proxies(&["10.0.0.0/8"]).client_ip(ip(peer), &forwarded),
+                ip(CLIENT),
+                "{peer}"
+            );
+        }
     }
 
     /// The client's own entry sits left of what the proxy appended, so a

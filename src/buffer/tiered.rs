@@ -391,16 +391,27 @@ impl<S: Sink + Send + Sync + 'static> Sink for InMemoryBuffer<S> {
 
     /// Drain queued messages into the primary, then flush the primary, so the
     /// records drained last are flushed too.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Buffer`] naming the records still queued once the drain
+    /// stops, which were answered at enqueue and are lost when the process
+    /// exits: the circuit was open or the primary still refused them. Else
+    /// the primary's own flush failure.
     async fn flush(&self) -> Result<()> {
         // try_drain moves at most DRAIN_BATCH per call, so one call leaves the
         // rest of the queue behind.
         self.drain_until_idle().await;
 
-        if let Err(e) = self.primary.flush().await {
-            debug!(error = %e, "Primary flush failed");
-        }
+        let flushed = self.primary.flush().await;
 
-        Ok(())
+        let remaining = self.spill_queue.lock().messages.len();
+        if remaining > 0 {
+            return Err(Error::Buffer(format!(
+                "{remaining} queued records were not delivered"
+            )));
+        }
+        flushed
     }
 
     /// Healthy while the primary is up and the queue can still take a record.

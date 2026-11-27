@@ -1,5 +1,5 @@
 // Project:   dfe-receiver
-// File:      tests/integration_prometheus_rw.rs
+// File:      tests/integration/prometheus_rw.rs
 // Purpose:   Integration tests for Prometheus Remote Write v1 handler
 // Language:  Rust
 //
@@ -11,7 +11,7 @@
 //! These tests start a real Prometheus RW handler and send Snappy-compressed
 //! protobuf payloads via reqwest. No external binaries needed.
 //!
-//! Run with: `cargo test --test integration_prometheus_rw`
+//! Run with: `cargo test --test integration prometheus_rw`
 
 // Allow unwrap/expect in tests - they're the idiomatic way to fail fast
 #![allow(clippy::unwrap_used)]
@@ -286,7 +286,7 @@ async fn test_invalid_protobuf_returns_400() {
         .await
         .expect("request failed");
 
-    // protobuf decode may or may not fail on garbage — it depends on wire format
+    // protobuf decode may or may not fail on garbage -- it depends on wire format
     // But it shouldn't be a 500
     assert!(
         resp.status() == 204 || resp.status() == 400,
@@ -317,6 +317,45 @@ async fn test_invalid_snappy_returns_400() {
 
     shutdown.cancel();
     tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+/// A native histogram the converter refuses fails the same way on every
+/// resend, so the request is answered 400, which Remote Write senders drop,
+/// not a 5xx they retry forever.
+#[tokio::test]
+async fn a_malformed_native_histogram_is_refused_400() {
+    let (shutdown, _metrics, url) = start_rw_handler(test_config()).await;
+
+    let histogram = proto::Histogram {
+        count: Some(proto::histogram::Count::CountInt(1)),
+        schema: 0,
+        positive_spans: vec![proto::BucketSpan {
+            offset: 0,
+            length: 3,
+        }],
+        positive_deltas: vec![1],
+        timestamp: 1_709_540_000_000,
+        ..proto::Histogram::default()
+    };
+    let mut series = make_timeseries("latency", 1.0, 1_709_540_000_000);
+    series.histograms = vec![histogram];
+    let request = proto::WriteRequest {
+        timeseries: vec![series],
+        metadata: vec![],
+    };
+
+    let resp = reqwest::Client::new()
+        .post(format!("{url}/api/v1/write"))
+        .header("Content-Type", "application/x-protobuf")
+        .header("Content-Encoding", "snappy")
+        .body(encode_write_request(&request))
+        .send()
+        .await
+        .expect("request failed");
+
+    assert_eq!(resp.status(), 400, "{}", resp.text().await.unwrap());
+
+    shutdown.cancel();
 }
 
 #[tokio::test]

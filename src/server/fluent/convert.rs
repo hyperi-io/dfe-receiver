@@ -197,7 +197,7 @@ enum Compression {
 
 /// The `compressed` option of a PackedForward message `[tag, blob, options?]`.
 fn compression(arr: &[Value]) -> Compression {
-    let Some(Value::Map(options)) = arr.get(2) else {
+    let Some(options) = options(arr) else {
         return Compression::None;
     };
     let Some((_, codec)) = options
@@ -296,21 +296,19 @@ pub fn fluent_to_json(
 
     // Detect mode based on second element type
     match &arr[1] {
-        // Forward mode: second element is an array of [time, record] entries, none at all
-        // being a message of no records, not a Message-mode record.
-        Value::Array(entries) if entries.is_empty() || entries[0].is_array() => {
+        // Forward mode: second element is an array of [time, record] entries. A
+        // Message-mode time is never an array, so a bad first entry is still Forward.
+        Value::Array(entries) => {
             within_budget(tag, entries.len())?;
             let mut payloads = Vec::with_capacity(entries.len());
+            let mut skipped = 0;
             for entry in entries {
-                let entry_arr = entry.as_array().ok_or_else(|| {
-                    Error::Validation("Fluent Forward entry is not an array".into())
-                })?;
-                if entry_arr.len() < 2 {
-                    continue;
+                match entry_json(tag, entry) {
+                    Some(payload) => payloads.push(payload),
+                    None => skipped += 1,
                 }
-                let ts = extract_timestamp(&entry_arr[0]);
-                payloads.push(entry_to_json(tag, ts, &entry_arr[1])?);
             }
+            crate::metrics::count_parse_failures("fluent", skipped);
             Ok(payloads)
         }
 
@@ -329,18 +327,18 @@ pub fn fluent_to_json(
             };
             within_budget(tag, packed_entries(&packed)?)?;
             let mut payloads = Vec::new();
+            let mut skipped = 0;
             let mut cursor = &packed[..];
             while !cursor.is_empty() {
                 let entry = rmpv::decode::read_value(&mut cursor).map_err(|e| {
                     Error::Validation(format!("Fluent PackedForward decode failed: {e}"))
                 })?;
-                if let Some(entry_arr) = entry.as_array()
-                    && entry_arr.len() >= 2
-                {
-                    let ts = extract_timestamp(&entry_arr[0]);
-                    payloads.push(entry_to_json(tag, ts, &entry_arr[1])?);
+                match entry_json(tag, &entry) {
+                    Some(payload) => payloads.push(payload),
+                    None => skipped += 1,
                 }
             }
+            crate::metrics::count_parse_failures("fluent", skipped);
             Ok(payloads)
         }
 
@@ -357,6 +355,15 @@ pub fn fluent_to_json(
             Ok(vec![payload])
         }
     }
+}
+
+/// One `[time, record]` entry of a Forward or PackedForward message as JSON,
+/// `None` for an entry that is not that shape, so one bad entry costs only itself.
+fn entry_json(tag: &str, entry: &Value) -> Option<Bytes> {
+    let [time, record, ..] = entry.as_array()?.as_slice() else {
+        return None;
+    };
+    entry_to_json(tag, extract_timestamp(time), record).ok()
 }
 
 /// Refuse a message of `entries` entries past the decode budget: too many
@@ -389,11 +396,19 @@ fn packed_entries(packed: &[u8]) -> std::result::Result<usize, Refused> {
     })
 }
 
+/// A message's options map, from the slot its mode keeps it in: the fourth
+/// element in Message mode, the third in Forward and PackedForward.
+fn options(arr: &[Value]) -> Option<&Vec<(Value, Value)>> {
+    let slot = match arr.get(1)? {
+        Value::Array(_) | Value::Binary(_) | Value::String(_) => 2,
+        _ => 3,
+    };
+    arr.get(slot)?.as_map()
+}
+
 /// Extract the chunk ID from the options map (for ACK response).
 pub fn extract_chunk_id(msg: &Value) -> Option<String> {
-    let arr = msg.as_array()?;
-    let options = arr.last()?;
-    let map = options.as_map()?;
+    let map = options(msg.as_array()?)?;
     for (k, v) in map {
         if k.as_str() == Some("chunk") {
             return v.as_str().map(String::from);
@@ -709,6 +724,37 @@ mod tests {
         }
     }
 
+    /// An entry that is not `[time, record]`, or whose record is not a map,
+    /// is skipped and counted, and the good entries beside it are kept, in
+    /// Forward and PackedForward mode alike.
+    #[test]
+    fn a_bad_entry_costs_only_itself() {
+        let totals = crate::metrics::testing::CounterTotals::default();
+        let _recorder = metrics::set_default_local_recorder(&totals);
+        let good = || Value::Array(vec![Value::Integer(1.into()), make_record("k", "v")]);
+        let entries = vec![
+            Value::String("not an entry".into()),
+            good(),
+            Value::Array(vec![Value::Integer(1.into())]),
+            Value::Array(vec![
+                Value::Integer(1.into()),
+                Value::String("not a map".into()),
+            ]),
+            good(),
+        ];
+        let mut packed = Vec::new();
+        for entry in &entries {
+            rmpv::encode::write_value(&mut packed, entry).unwrap();
+        }
+        let forward = Value::Array(vec![Value::String("t".into()), Value::Array(entries)]);
+        let packed = Value::Array(vec![Value::String("t".into()), Value::Binary(packed)]);
+        for (mode, msg) in [("forward", forward), ("packed", packed)] {
+            let payloads = fluent_to_json(&msg, TEST_LIMIT).unwrap();
+            assert_eq!(payloads.len(), 2, "{mode}");
+        }
+        assert_eq!(totals.total("receiver_parse_failures_total"), 6);
+    }
+
     /// A string that is not UTF-8 keeps its other bytes, in a key or a value.
     #[test]
     fn a_string_that_is_not_utf8_is_kept_with_replacement_characters() {
@@ -990,14 +1036,55 @@ mod tests {
         assert_eq!(extract_chunk_id(&msg), Some("abc123".to_string()));
     }
 
+    /// The chunk is read from the options slot of each mode, never from a
+    /// Message-mode record that happens to carry a `chunk` key.
     #[test]
-    fn test_extract_chunk_id_missing() {
-        let msg = Value::Array(vec![
-            Value::String("tag".into()),
-            Value::Integer(0.into()),
-            make_record("k", "v"),
-        ]);
-        assert_eq!(extract_chunk_id(&msg), None);
+    fn the_chunk_is_read_from_the_options_slot_of_each_mode() {
+        let tag = || Value::String("tag".into());
+        let chunk = || make_record("chunk", "abc123");
+        let entries = || {
+            Value::Array(vec![Value::Array(vec![
+                Value::Integer(0.into()),
+                make_record("k", "v"),
+            ])])
+        };
+        let cases = [
+            (
+                "message, no options",
+                vec![tag(), Value::Integer(0.into()), make_record("k", "v")],
+                None,
+            ),
+            (
+                "message, a record keyed chunk",
+                vec![tag(), Value::Integer(0.into()), chunk()],
+                None,
+            ),
+            (
+                "message, options",
+                vec![
+                    tag(),
+                    Value::Integer(0.into()),
+                    make_record("k", "v"),
+                    chunk(),
+                ],
+                Some("abc123"),
+            ),
+            ("forward, no options", vec![tag(), entries()], None),
+            (
+                "forward, options",
+                vec![tag(), entries(), chunk()],
+                Some("abc123"),
+            ),
+            (
+                "packed, options",
+                vec![tag(), Value::Binary(vec![]), chunk()],
+                Some("abc123"),
+            ),
+        ];
+        for (case, msg, want) in cases {
+            let got = extract_chunk_id(&Value::Array(msg));
+            assert_eq!(got.as_deref(), want, "{case}");
+        }
     }
 
     // -----------------------------------------------------------------------

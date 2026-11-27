@@ -27,16 +27,16 @@ use crate::error::{Error, Result};
 /// Lumberjack protocol version 2.
 pub const PROTOCOL_VERSION: u8 = b'2';
 
-/// Window size frame — declares max unacknowledged events.
+/// Window size frame -- declares max unacknowledged events.
 pub const FRAME_WINDOW: u8 = b'W';
 
-/// JSON data frame — carries a JSON payload with sequence number.
+/// JSON data frame -- carries a JSON payload with sequence number.
 pub const FRAME_JSON_DATA: u8 = b'J';
 
-/// Compressed frame — zlib-compressed envelope of complete inner frames.
+/// Compressed frame -- zlib-compressed envelope of complete inner frames.
 pub const FRAME_COMPRESSED: u8 = b'C';
 
-/// Acknowledgement frame — sent by server to client.
+/// Acknowledgement frame -- sent by server to client.
 pub const FRAME_ACK: u8 = b'A';
 
 // ---------------------------------------------------------------------------
@@ -137,13 +137,42 @@ async fn read_json_data_frame<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Fr
         )));
     }
 
-    let mut payload = vec![0u8; payload_len as usize];
-    reader.read_exact(&mut payload).await?;
+    let payload = read_declared(reader, payload_len).await?;
 
     Ok(Frame::JsonData {
         sequence,
         payload: Bytes::from(payload),
     })
+}
+
+/// The first allocation for a frame body, so a declared length costs memory
+/// only as its bytes arrive.
+const READ_CHUNK: usize = 64 * 1024;
+
+/// Read the `len` bytes a frame header declared, growing the buffer as they
+/// arrive.
+async fn read_declared<R: AsyncRead + Unpin>(reader: &mut R, len: u32) -> std::io::Result<Vec<u8>> {
+    let mut buf = Vec::with_capacity((len as usize).min(READ_CHUNK));
+    (&mut *reader)
+        .take(u64::from(len))
+        .read_to_end(&mut buf)
+        .await?;
+    whole(buf, len)
+}
+
+/// [`read_declared`] from a decompressed block.
+fn read_declared_sync<R: std::io::Read>(reader: &mut R, len: u32) -> std::io::Result<Vec<u8>> {
+    let mut buf = Vec::with_capacity((len as usize).min(READ_CHUNK));
+    std::io::Read::read_to_end(&mut std::io::Read::take(reader, u64::from(len)), &mut buf)?;
+    whole(buf, len)
+}
+
+/// `buf` when it holds all `len` bytes, else the end of stream it stopped at.
+fn whole(buf: Vec<u8>, len: u32) -> std::io::Result<Vec<u8>> {
+    if buf.len() < len as usize {
+        return Err(std::io::ErrorKind::UnexpectedEof.into());
+    }
+    Ok(buf)
 }
 
 /// Read a compressed frame: 4-byte len + zlib-compressed data.
@@ -158,8 +187,7 @@ async fn read_compressed_frame<R: AsyncRead + Unpin>(reader: &mut R) -> Result<F
         )));
     }
 
-    let mut data = vec![0u8; compressed_len as usize];
-    reader.read_exact(&mut data).await?;
+    let data = read_declared(reader, compressed_len).await?;
 
     Ok(Frame::Compressed { data })
 }
@@ -233,8 +261,7 @@ fn parse_frame_sync<R: std::io::Read>(reader: &mut R) -> Result<Option<Frame>> {
                 )));
             }
 
-            let mut payload = vec![0u8; payload_len as usize];
-            Read::read_exact(reader, &mut payload).map_err(|e| {
+            let payload = read_declared_sync(reader, payload_len).map_err(|e| {
                 Error::Validation(format!("lumberjack: truncated JSON payload: {e}"))
             })?;
 
@@ -486,6 +513,36 @@ mod tests {
         let result = read_frame(&mut cursor).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("exceeds maximum"));
+    }
+
+    /// A header declaring the largest frame, followed by fewer bytes than it
+    /// declared, is a truncated frame on the wire and inside a compressed block.
+    #[tokio::test]
+    async fn a_frame_shorter_than_its_header_declares_is_refused() {
+        let mut short = vec![PROTOCOL_VERSION, FRAME_JSON_DATA];
+        short.extend_from_slice(&1u32.to_be_bytes());
+        short.extend_from_slice(&MAX_PAYLOAD_SIZE.to_be_bytes());
+        short.extend_from_slice(b"{}");
+        let mut cursor = Cursor::new(short.as_slice());
+        let wire = read_frame(&mut cursor).await;
+        assert!(
+            matches!(wire, Err(Error::Io(ref e)) if e.kind() == std::io::ErrorKind::UnexpectedEof),
+            "{wire:?}"
+        );
+
+        let block = parse_frames_from_buf(&short);
+        assert!(
+            block
+                .as_ref()
+                .is_err_and(|e| e.to_string().contains("truncated JSON payload")),
+            "{block:?}"
+        );
+
+        let mut compressed = vec![PROTOCOL_VERSION, FRAME_COMPRESSED];
+        compressed.extend_from_slice(&MAX_COMPRESSED_SIZE.to_be_bytes());
+        compressed.extend_from_slice(&[0; 16]);
+        let mut cursor = Cursor::new(compressed.as_slice());
+        assert!(read_frame(&mut cursor).await.is_err());
     }
 
     #[tokio::test]
