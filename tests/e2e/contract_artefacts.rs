@@ -46,7 +46,7 @@
 //! `generate_dockerfile()` produces a Dockerfile that `COPY`s the
 //! consumer app's binary into the image. The `stage_binary()` helper
 //! below copies the release-built `target/release/dfe-receiver` into the
-//! build context. The binary must be built BEFORE running this test —
+//! build context. The binary must be built BEFORE running this test --
 //! the test does NOT invoke cargo to avoid the cargo-in-cargo target-lock
 //! deadlock. Build with:
 //!
@@ -71,7 +71,7 @@ use scalo::deployment::{ContractIdentity, DeploymentContract, generate_dockerfil
 // FIXTURE -- dfe-receiver adaptation (see header diff list).
 // ============================================================================
 
-/// dfe-receiver's deployment contract — the real one used by
+/// dfe-receiver's deployment contract -- the real one used by
 /// `generate-artefacts` and shipped in CI.
 fn test_contract() -> DeploymentContract {
     dfe_receiver::deployment::contract()
@@ -91,7 +91,7 @@ fn test_identity() -> ContractIdentity {
 ///
 /// Preferred path: copy the real release-built dfe-receiver binary from
 /// `target/release/dfe-receiver` (build with `cargo build --release --bin
-/// dfe-receiver` beforehand). This gives the highest-fidelity check —
+/// dfe-receiver` beforehand). This gives the highest-fidelity check --
 /// the actual binary runs inside the produced image.
 ///
 /// CI Test stage doesn't build release before nextest (Build runs after

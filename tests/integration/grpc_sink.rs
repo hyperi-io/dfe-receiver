@@ -12,7 +12,7 @@
 //! `GrpcTransport` in server mode) that acts as a mock dfe-loader, then
 //! connect a `GrpcSink` to it and verify messages are delivered correctly.
 //!
-//! No external infrastructure required — everything runs in-process.
+//! No external infrastructure required -- everything runs in-process.
 
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
@@ -30,7 +30,7 @@ use scalo::transport::grpc::{GrpcConfig, GrpcTransport};
 /// Send with retry on transient backpressure.
 ///
 /// `GrpcSink::send` surfaces backpressure as `Err(Transport("...backpressured"))`
-/// by contract — callers are expected to retry. Under parallel CI load the
+/// by contract -- callers are expected to retry. Under parallel CI load the
 /// transport's outgoing queue can briefly fill; a bounded retry with small
 /// backoff absorbs that without masking real transport failures.
 async fn send_with_retry(sink: &GrpcSink, topic: &str, payload: Bytes) -> Result<()> {
@@ -131,7 +131,7 @@ async fn test_grpc_sink_large_payload() {
     let payload_bytes: Vec<u8> = (0..256 * 1024).map(|i| (i % 256) as u8).collect();
     let payload = Bytes::from(payload_bytes.clone());
 
-    // Retry on transient backpressure — a 256 KiB RPC on a busy ARC
+    // Retry on transient backpressure -- a 256 KiB RPC on a busy ARC
     // runner can briefly fill the transport's outgoing queue. Same
     // contract as ordered/concurrent tests.
     send_with_retry(&sink, "large_topic", payload)
@@ -146,7 +146,7 @@ async fn test_grpc_sink_large_payload() {
 
 #[tokio::test]
 async fn test_grpc_sink_fails_gracefully_when_server_unreachable() {
-    // Connect to a port with no server — connection is lazy so init succeeds
+    // Connect to a port with no server -- connection is lazy so init succeeds
     let sink = GrpcSink::new("http://127.0.0.1:1", None)
         .await
         .expect("lazy connection should succeed");
@@ -175,7 +175,7 @@ async fn test_grpc_sink_recovers_after_server_restart() {
     drop(server1);
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Send while down — should fail
+    // Send while down -- should fail
     let _ = sink
         .send("topic", Bytes::from(r#"{"phase":"during"}"#))
         .await;
@@ -227,7 +227,7 @@ async fn test_grpc_sink_concurrent_sends() {
 
     let sink = Arc::new(GrpcSink::new(&endpoint, None).await.expect("sink init"));
 
-    // Fire 50 concurrent sends. Retry on transient backpressure — the
+    // Fire 50 concurrent sends. Retry on transient backpressure -- the
     // transport queue can briefly fill under 50-way fan-out on CI runners.
     let mut handles = Vec::new();
     for i in 0..50 {

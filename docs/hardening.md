@@ -11,7 +11,7 @@ Application-level hardening, and cost-conscious fronting on Kubernetes and AWS.
 | Protection | Status | Config |
 |---|---|---|
 | Request body size limit (413) | 10 MiB (HTTP, OTLP HTTP, HEC, RW), 1 MiB (webhook). The body extractors read to the same limit | `server.max_body_size` (HTTP, OTLP HTTP), `splunk_hec.max_body_size`, `prometheus_rw.max_body_size`, `webhook.max_body_size` |
-| Request timeout (408) | 30s, every HTTP listener | `server.request_timeout_ms` (HTTP, OTLP HTTP), `splunk_hec.request_timeout_ms`, `prometheus_rw.request_timeout_ms`, `webhook.request_timeout_ms` |
+| Request timeout (408) | 30s, every HTTP listener, a held answer ending inside it. Both gRPC listeners add the acknowledgement hold, which starts once the body is decoded, and answer `CANCELLED` past the sum | `server.request_timeout_ms` (HTTP, OTLP HTTP, gRPC, OTLP gRPC), `splunk_hec.request_timeout_ms`, `prometheus_rw.request_timeout_ms`, `webhook.request_timeout_ms` |
 | Slowloris protection | 5s header_read_timeout, every HTTP listener (hyper) | `HEADER_READ_TIMEOUT` |
 | Connections closed for a limit | Counted by transport and reason (`over_limit`, `no_first_byte`, `frame_timeout`, `idle`) | `receiver_connections_closed_total` |
 | First byte timeout | 30s, every TCP listener the receiver accepts on: a connection that sends nothing by then is closed | `server.connections.first_byte_timeout_ms` |
@@ -19,8 +19,9 @@ Application-level hardening, and cost-conscious fronting on Kubernetes and AWS.
 | Connection idle timeout | 300s with no request in flight, every HTTP listener, HTTP/1 keep-alive and HTTP/2 alike (an idle HTTP/1 connection can close sooner, on the header read timeout). A peer that does not finish the graceful close is dropped. Lumberjack, Fluent Forward and GELF keep an idle connection, under the cap, since closing one under a sender loses its next line | `server.connections.idle_timeout_ms` |
 | Syslog TCP idle timeout and keepalive | Syslog TCP and TLS close a connection with no frame for 600s, a frame part way in being the frame timeout's. Keepalive probes start after 60s quiet and repeat every 60s, so a peer that has gone frees its place | `syslog.idle_timeout_ms` (0 = keep), `syslog.tcp_keepalive_secs` (0 = off) |
 | HTTP/2 keep-alive | Ping every 60s, close after 20s unanswered, every HTTP listener and both gRPC listeners | `server.connections.http2_keep_alive_interval_ms` |
+| HTTP/2 stream cap | 200 open streams per connection, every HTTP listener and both gRPC listeners. The client is told the cap, and a stream past it is refused | `server.connections.http2_max_concurrent_streams` |
 | Connection cap | 10,000 open connections per listener, every TCP listener and both gRPC listeners. One past it is closed as it is accepted | `server.connections.max_per_listener` (0 = no cap) |
-| Concurrency limit | 10,000 in-flight requests default, per HTTP listener | `server.max_concurrent_requests` |
+| Concurrency limit | 10,000 in-flight requests default, per HTTP listener. A request past it is answered 503 with `Retry-After` at once, never queued | `server.max_concurrent_requests` |
 | Per-IP rate limiting | GCRA via tower-governor, opt-in, per HTTP listener, keyed on the TCP peer (forwarding headers from `server.trusted_proxies` alone). Clients with a refilled budget are dropped from its key map every 5s | `server.rate_limit.*`, `server.trusted_proxies` |
 | Flow per-source rate limiting | Token bucket per UDP source, opt-in. The bucket map never holds more than `cache_size` (default 4096) sources: a further source past it evicts an idle bucket where one is among the first 32 looked at, else the first, counted on `flow_rate_limit_evicted_total`, so spoofed sources cannot grow it | `flow.rate_limit.*` |
 | IP filter (allowlist/denylist) | CIDR trie, connection-level reject, in every accept loop the receiver runs. The gRPC and OTLP gRPC ports have none: tonic runs their accept loops. An unknown mode, a bad CIDR or an empty allowlist stops startup | `server.ip_filter.*` |
@@ -29,7 +30,7 @@ Application-level hardening, and cost-conscious fronting on Kubernetes and AWS.
 | TLS handshake timeout | 10s, every TLS listener the receiver accepts on | `server.connections.tls_handshake_timeout_ms` |
 | mTLS client auth | Per-protocol | `*.tls.client_auth: required` |
 | Bearer token auth | Per-protocol, hot-reloadable | `*.auth.mode: bearer` |
-| Header auth | HTTP ingest, HEC and remote write, against `accepted_headers` (or the legacy `header_name`). An unknown `*.auth.mode` stops startup | `server.auth.mode: header` |
+| Header auth | HTTP ingest, HEC and remote write, against `accepted_headers` (or the legacy `header_name`). An unknown `*.auth.mode`, or an accepted header listed with no values, stops startup | `server.auth.mode: header` |
 | Credential-less listeners | Refuse to start without client certificates required or the opt-out | `*.accept_unauthenticated` |
 | JSON validation | Global, always on: a body that is not JSON is refused with a 400 | Not configurable |
 | Required field check | Global | `validation.required_fields` |

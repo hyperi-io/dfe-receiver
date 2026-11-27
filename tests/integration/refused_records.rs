@@ -274,8 +274,7 @@ fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<&str> {
 // ---------------------------------------------------------------------------
 
 /// Splunk HEC answers 503 "Server is busy" (code 9) when part of a batch was
-/// not taken, as Splunk does. It used to answer 200 "Success" once any one
-/// event landed, and the sender dropped the rest.
+/// not taken, as Splunk does, never 200 "Success" once any one event landed.
 #[tokio::test]
 async fn hec_answers_busy_when_part_of_a_batch_is_not_taken() {
     let mut config = bus_config();
@@ -311,9 +310,7 @@ async fn hec_answers_busy_when_part_of_a_batch_is_not_taken() {
 }
 
 /// A raw HEC request the receiver could not place answers in HEC's own words
-/// and nothing of the cause. It used to put the receiver's error text in the
-/// body: "Internal server error: configuration error: Kafka sink not
-/// configured".
+/// and nothing of the cause, so no receiver error text reaches the body.
 #[tokio::test]
 async fn hec_raw_refusal_carries_no_internal_detail() {
     // A DLQ directory under a plain file cannot be made, even as root, so the
@@ -356,7 +353,7 @@ async fn hec_raw_refusal_carries_no_internal_detail() {
 }
 
 /// Prometheus Remote Write answers 503 when part of a write was not taken:
-/// senders MUST retry a 5xx. It used to answer 204 once any sample landed.
+/// senders MUST retry a 5xx, so it never answers 204 once any sample landed.
 #[tokio::test]
 async fn remote_write_answers_503_when_part_of_a_write_is_not_taken() {
     let mut config = bus_config();
@@ -495,9 +492,8 @@ mod otlp {
     }
 
     /// OTLP gRPC answers UNAVAILABLE, which the specification makes retryable,
-    /// when part of an export was not taken. It used to answer OK once any
-    /// record landed, and INTERNAL -- which clients must not retry -- when
-    /// none did.
+    /// when part of an export was not taken, never OK once any record landed
+    /// or INTERNAL, which clients must not retry.
     #[tokio::test]
     async fn otlp_grpc_answers_unavailable_when_part_of_an_export_is_not_taken() {
         use pb::collector::logs::v1::logs_service_client::LogsServiceClient;
@@ -603,7 +599,7 @@ async fn grpc_listener(
 }
 
 /// The gRPC push listener answers UNAVAILABLE, which the peer retries, when
-/// part of a push was not taken. It used to answer INTERNAL for every failure.
+/// part of a push was not taken, never INTERNAL.
 #[tokio::test]
 async fn grpc_push_answers_unavailable_when_part_of_a_push_is_not_taken() {
     let config = bus_config();
@@ -626,8 +622,8 @@ async fn grpc_push_answers_unavailable_when_part_of_a_push_is_not_taken() {
 }
 
 /// The gRPC push listener answers INVALID_ARGUMENT, which the peer drops, for
-/// a record refused for good. It used to answer INTERNAL, which the peer
-/// retries, resending a record that can never land.
+/// a record refused for good, never INTERNAL, which the peer retries with a
+/// record that can never land.
 #[tokio::test]
 async fn grpc_push_answers_invalid_argument_for_a_record_refused_for_good() {
     let config = requiring_config();
@@ -651,7 +647,7 @@ fn lumberjack_frame(kind: u8) -> Vec<u8> {
 }
 
 /// Lumberjack acknowledges only the events it took, then closes, so Beats
-/// resends the rest. It used to acknowledge the whole window.
+/// resends the rest, never the whole window.
 #[tokio::test]
 async fn lumberjack_acknowledges_only_the_events_it_took() {
     let mut config = bus_config();
@@ -726,7 +722,7 @@ fn fluent_config(config: &mut Config) {
 }
 
 /// Fluent Forward withholds the ack for a chunk it could not take, and the
-/// sender resends it. It used to ack every chunk.
+/// sender resends it.
 #[tokio::test]
 async fn fluent_withholds_the_ack_for_a_chunk_it_could_not_take() {
     let mut config = bus_config();
@@ -799,7 +795,7 @@ async fn held_then_delivered(
 }
 
 /// Syslog over TCP holds a line the pipeline cannot take and delivers it once
-/// the pipeline recovers. It used to drop the line.
+/// the pipeline recovers.
 #[tokio::test]
 async fn syslog_tcp_holds_a_line_until_the_pipeline_takes_it() {
     let (endpoint, destination) = crate::common::grpc_destination().await;
@@ -838,7 +834,7 @@ async fn syslog_tcp_holds_a_line_until_the_pipeline_takes_it() {
 }
 
 /// GELF over TCP holds a message the pipeline cannot take and delivers it once
-/// the pipeline recovers. It used to drop the message.
+/// the pipeline recovers.
 #[tokio::test]
 async fn gelf_tcp_holds_a_message_until_the_pipeline_takes_it() {
     let (endpoint, destination) = crate::common::grpc_destination().await;
@@ -866,7 +862,7 @@ async fn gelf_tcp_holds_a_message_until_the_pipeline_takes_it() {
 }
 
 /// Fluent Forward without `chunk` has no ack to withhold, so it holds the
-/// message and delivers it once the pipeline recovers. It used to drop it.
+/// message and delivers it once the pipeline recovers.
 #[tokio::test]
 async fn fluent_without_chunk_holds_a_message_until_the_pipeline_takes_it() {
     let (endpoint, destination) = crate::common::grpc_destination().await;

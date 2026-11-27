@@ -33,7 +33,8 @@
           "frame_timeout_ms": 30000,
           "idle_timeout_ms": 300000,
           "tls_handshake_timeout_ms": 10000,
-          "http2_keep_alive_interval_ms": 60000
+          "http2_keep_alive_interval_ms": 60000,
+          "http2_max_concurrent_streams": 200
         },
         "tls": {
           "enabled": false,
@@ -584,14 +585,14 @@
           "default": 10485760
         },
         "request_timeout_ms": {
-          "description": "Request timeout in milliseconds.",
+          "description": "How long a request may take, in milliseconds, on the HTTP and OTLP\nHTTP listeners (408). A held answer ends inside it. Both gRPC listeners\nadd their acknowledgement hold to it, which starts once the body is\ndecoded, and answer `CANCELLED` past the sum.",
           "type": "integer",
           "format": "uint64",
           "minimum": 0,
           "default": 30000
         },
         "max_concurrent_requests": {
-          "description": "Maximum concurrent in-flight requests (0 = unlimited).\nProtects against connection exhaustion and memory pressure.",
+          "description": "Most requests one HTTP listener serves at once (0 = no limit). A\nrequest past it is answered 503 with `Retry-After`.",
           "type": "integer",
           "format": "uint",
           "minimum": 0,
@@ -631,7 +632,8 @@
             "frame_timeout_ms": 30000,
             "idle_timeout_ms": 300000,
             "tls_handshake_timeout_ms": 10000,
-            "http2_keep_alive_interval_ms": 60000
+            "http2_keep_alive_interval_ms": 60000,
+            "http2_max_concurrent_streams": 200
           }
         },
         "tls": {
@@ -763,6 +765,13 @@
           "format": "uint64",
           "minimum": 0,
           "default": 60000
+        },
+        "http2_max_concurrent_streams": {
+          "description": "Most streams one HTTP/2 connection may have open at once, on every\nHTTP listener and both gRPC listeners. The client is told the cap, and\na stream past it is refused.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0,
+          "default": 200
         }
       }
     },
@@ -917,7 +926,7 @@
           "type": "string"
         },
         "values": {
-          "description": "Allowed values for this header.\nIf empty, any non-empty value is accepted.",
+          "description": "Allowed values for this header. An empty list refuses the config.",
           "type": "array",
           "items": {
             "type": "string",
@@ -1684,7 +1693,7 @@
           ]
         },
         "experimental": {
-          "description": "EXPERIMENTAL marker. When true (default), the handler emits a startup\nWARN log and sets `dfe_handler_experimental{handler=\"flow\"} 1`.\nFlipped to false in a follow-up PR after stability period.",
+          "description": "EXPERIMENTAL marker. When true (default), the handler emits a startup\nWARN log and sets `dfe_handler_experimental{handler=\"flow\"} 1`.\nhyperi-io/dfe-receiver#288 tracks turning it off by default.",
           "type": "boolean",
           "default": true
         },

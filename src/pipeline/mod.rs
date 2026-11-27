@@ -950,9 +950,9 @@ impl PipelineState {
             .ok_or_else(|| Error::Buffer("request would pass the memory limit".into()))
     }
 
-    /// Process a message from `ingest` through the pipeline, answered at enqueue.
-    ///
-    /// This is a HOT PATH function.
+    /// Process a message from `ingest` through the pipeline, answered at
+    /// enqueue. The listeners send batches through
+    /// [`process_batch`](Self::process_batch).
     #[inline]
     pub async fn process(&self, payload: Bytes, ingest: &Ingest) -> Result<()> {
         self.count_received(1);

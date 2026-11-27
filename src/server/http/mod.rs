@@ -20,11 +20,12 @@
 //! - **TLS handshake timeout**: Prevents TLS renegotiation attacks
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use axum::body::Bytes;
+use axum::error_handling::HandleErrorLayer;
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware;
@@ -34,14 +35,16 @@ use axum::{Extension, Router};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{MissedTickBehavior, timeout};
 use tokio_util::sync::CancellationToken;
+use tower::BoxError;
 use tower::limit::GlobalConcurrencyLimitLayer;
+use tower::load_shed::LoadShedLayer;
 use tower_governor::governor::GovernorConfigBuilder;
 use tower_governor::{GovernorError, GovernorLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 use tracing::{debug, error, info};
 
-use scalo::logger::security;
+use scalo::logger::{log_debounced, security};
 use scalo::tls::{ServerTls, ServerTlsOptions};
 
 use crate::config::{AuthConfig, SharedConfig};
@@ -108,6 +111,7 @@ fn hardened_http_builder(
         .http2()
         .keep_alive_interval(limits.http2_keep_alive)
         .keep_alive_timeout(KEEP_ALIVE_PING_TIMEOUT)
+        .max_concurrent_streams(limits.http2_max_streams)
         .timer(hyper_util::rt::TokioTimer::new());
     builder
 }
@@ -551,7 +555,26 @@ impl Accept {
             self.transport,
         )
     }
+
+    /// Log a failed accept at most once a second, then pause the loop: with
+    /// the process out of file descriptors the next accept fails at once, and
+    /// retrying without a pause spins a core.
+    pub(crate) async fn failed(&self, error: &std::io::Error) {
+        if log_debounced(&ACCEPT_FAILURE_LOGGED, ACCEPT_FAILURE_LOG_INTERVAL_MS) {
+            error!(transport = self.transport, error = %error, "Failed to accept a connection");
+        }
+        tokio::time::sleep(ACCEPT_RETRY_PAUSE).await;
+    }
 }
+
+/// How long an accept loop waits after a failed accept.
+const ACCEPT_RETRY_PAUSE: Duration = Duration::from_millis(100);
+
+/// The most often a failed accept is logged, across every listener.
+const ACCEPT_FAILURE_LOG_INTERVAL_MS: u64 = 1_000;
+
+/// When a failed accept was last logged.
+static ACCEPT_FAILURE_LOGGED: AtomicU64 = AtomicU64::new(0);
 
 /// The connection limits of one listener, from `server.connections`.
 #[derive(Clone)]
@@ -562,6 +585,7 @@ pub(crate) struct ConnectionLimits {
     pub(crate) frame: Duration,
     pub(crate) idle: Duration,
     pub(crate) http2_keep_alive: Duration,
+    pub(crate) http2_max_streams: u32,
 }
 
 impl ConnectionLimits {
@@ -573,6 +597,7 @@ impl ConnectionLimits {
             frame: Duration::from_millis(config.frame_timeout_ms),
             idle: Duration::from_millis(config.idle_timeout_ms),
             http2_keep_alive: Duration::from_millis(config.http2_keep_alive_interval_ms),
+            http2_max_streams: config.http2_max_concurrent_streams,
         }
     }
 
@@ -729,11 +754,24 @@ fn limit_server(
     let proxies = TrustedProxies::parse(&server.trusted_proxies)
         .map_err(|e| Error::Config(format!("server.trusted_proxies: {e}")))?;
 
-    // Concurrency limit (0 = unlimited)
+    // Concurrency limit (0 = unlimited). A request past it is answered at once,
+    // since the limit alone queues it with no bound on the wait.
     if server.max_concurrent_requests > 0 {
-        app = app.layer(GlobalConcurrencyLimitLayer::new(
-            server.max_concurrent_requests,
-        ));
+        let shed = metrics.clone();
+        app = app.layer(
+            tower::ServiceBuilder::new()
+                .layer(HandleErrorLayer::new(move |_: BoxError| {
+                    let metrics = shed.clone();
+                    async move {
+                        metrics.record_backpressure();
+                        crate::error::unavailable_response("too many requests in flight")
+                    }
+                }))
+                .layer(LoadShedLayer::new())
+                .layer(GlobalConcurrencyLimitLayer::new(
+                    server.max_concurrent_requests,
+                )),
+        );
     }
 
     // Per-IP rate limiting via GCRA (tower-governor), keyed on the ClientIp
@@ -841,7 +879,7 @@ pub(crate) async fn run_plain_server(
                 let (stream, peer_addr) = match result {
                     Ok(conn) => conn,
                     Err(e) => {
-                        error!(error = %e, "Failed to accept connection");
+                        accept.failed(&e).await;
                         continue;
                     }
                 };
@@ -932,7 +970,7 @@ pub(crate) async fn run_tls_server(
                 let (stream, peer_addr) = match result {
                     Ok(conn) => conn,
                     Err(e) => {
-                        error!(error = %e, "Failed to accept connection");
+                        accept.failed(&e).await;
                         continue;
                     }
                 };

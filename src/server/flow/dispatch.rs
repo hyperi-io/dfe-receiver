@@ -1,7 +1,7 @@
 //! Wire-format autosense for NetFlow / sFlow datagrams.
 //!
 //! Reads bytes 0-1 of the UDP payload to determine the protocol family.
-//! Pure function, ~1-2 ns. See design spec section "Wire-format dispatch".
+//! A pure function of those two bytes.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProtocolKind {

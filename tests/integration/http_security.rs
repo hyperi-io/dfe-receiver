@@ -1586,6 +1586,58 @@ async fn test_concurrency_limit() {
     shutdown.cancel();
 }
 
+/// A request past `max_concurrent_requests` is answered 503 with
+/// `Retry-After` at once, never queued behind the requests in flight.
+#[tokio::test]
+async fn a_request_past_the_concurrency_limit_is_shed() {
+    use tokio::io::AsyncWriteExt;
+
+    let mut config = test_config(10_000, 30_000, "none");
+    config.server.max_concurrent_requests = 2;
+    let (url, shutdown) = start_test_server(config).await;
+    let addr: std::net::SocketAddr = url.trim_start_matches("http://").parse().unwrap();
+
+    // Two requests whose bodies never finish hold both places.
+    let mut held = Vec::new();
+    for _ in 0..2 {
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(
+                b"POST /ingest HTTP/1.1\r\nhost: x\r\ncontent-type: application/json\r\n\
+                  content-length: 1024\r\n\r\n{",
+            )
+            .await
+            .unwrap();
+        held.push(stream);
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .unwrap();
+    let mut shed = None;
+    for _ in 0..50 {
+        let answer = client
+            .post(format!("{url}/ingest"))
+            .header("content-type", "application/json")
+            .body(r#"{"a":1}"#)
+            .send()
+            .await;
+        if let Ok(response) = answer
+            && response.status() == 503
+        {
+            shed = Some(response);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let shed = shed.expect("a request past the limit was shed");
+    assert!(shed.headers().contains_key("retry-after"), "{shed:?}");
+
+    drop(held);
+    shutdown.cancel();
+}
+
 // =============================================================================
 // Metrics Validation Tests
 // =============================================================================

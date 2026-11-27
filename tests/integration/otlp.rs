@@ -1,5 +1,5 @@
 // Project:   dfe-receiver
-// File:      tests/integration_otlp.rs
+// File:      tests/integration/otlp.rs
 // Purpose:   Integration tests for OTLP gRPC and HTTP protocol handlers
 // Language:  Rust
 //
@@ -11,7 +11,7 @@
 //! Tests send real OTLP protobuf data over gRPC (port 4317) and HTTP (port 4318)
 //! to a running OTLP handler and verify the pipeline processes them.
 //!
-//! Run with: `cargo test --test integration_otlp`
+//! Run with: `cargo test --test integration otlp`
 
 // Only compile when otlp feature is enabled
 #![cfg(feature = "otlp")]

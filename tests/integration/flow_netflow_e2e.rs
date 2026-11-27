@@ -98,12 +98,6 @@ fn flow_kafka_config(kf: &crate::common::KafkaTestConfig, topic_suffix: &str) ->
 
     config.routing.default_source = "main".to_string();
     config.routing.topic_suffix = topic_suffix.to_string();
-    config.rules.rules = vec![scalo::rules::RuleConfig::new(
-        "own-source",
-        "_source",
-        scalo::rules::SetAction::from("_source"),
-    )];
-
     // Flow handler config -- unified mode, single port 0, NetFlow only.
     config.flow.enabled = true;
     config.flow.experimental = false; // suppress WARN log noise

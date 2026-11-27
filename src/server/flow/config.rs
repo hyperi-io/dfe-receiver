@@ -82,14 +82,8 @@ pub struct RateLimitConfig {
     pub cache_size: usize,
 }
 
-// Default is written out rather than derived, like every other struct in this
-// file. The per-field serde defaults only run when the `rate_limit:` map is
-// PRESENT and a key inside it is missing; `#[serde(default)]` on the field that
-// holds this struct calls Default::default() for an absent map, and
-// FLOW_RATE_LIMIT_ENABLED can arm the limiter without the map ever existing.
-// A derived Default made that combination a zero rate over a zero burst, which
-// PerSourceRateLimiter reads as no tokens and no refill: every flow packet
-// dropped, counted as rate-limited, nothing in the log to say the rate was 0.
+// Written out, not derived: an env override can arm the limiter with no
+// `rate_limit:` map, and a derived zero rate and burst would drop every packet.
 impl Default for RateLimitConfig {
     fn default() -> Self {
         Self {
@@ -221,7 +215,7 @@ pub struct FlowConfig {
 
     /// EXPERIMENTAL marker. When true (default), the handler emits a startup
     /// WARN log and sets `dfe_handler_experimental{handler="flow"} 1`.
-    /// Flipped to false in a follow-up PR after stability period.
+    /// hyperi-io/dfe-receiver#288 tracks turning it off by default.
     #[serde(default = "yes")]
     pub experimental: bool,
 
@@ -493,9 +487,8 @@ experimental: false
 
     #[test]
     fn removed_canonical_with_raw_fails_the_yaml_parse_loudly() {
-        // The breaking half of the flow fold: a config file still carrying the
-        // old mode must stop the receiver rather than silently downgrade to
-        // canonical and drop the raw records the operator asked for.
+        // A config file carrying the removed mode stops the receiver rather
+        // than downgrade to canonical and drop the raw records asked for.
         let yaml = "
 enabled: true
 output:

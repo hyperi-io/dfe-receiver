@@ -45,7 +45,6 @@ mod tests {
 
         let mut rx = shared.subscribe();
 
-        // Update config
         shared.update(config);
 
         // Should receive notification

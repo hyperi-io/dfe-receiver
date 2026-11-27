@@ -12,7 +12,7 @@
 #![allow(clippy::large_futures)]
 
 //! Smoke test that exercises the full startup path:
-//! config → metrics init → pipeline build → server bind → shutdown.
+//! config -> metrics init -> pipeline build -> server bind -> shutdown.
 //!
 //! This must be in its own integration test file because `MetricsManager::new()`
 //! installs a global Prometheus recorder (once per process). cargo-nextest runs
@@ -40,7 +40,7 @@ async fn test_full_startup_lifecycle() {
     config.destinations.default = "loader".into();
     config.loader.transport = "memory".to_string();
 
-    // Step 2: Create metrics with DFE groups — this installs the global recorder.
+    // Step 2: Create metrics with DFE groups -- this installs the global recorder.
     // If this panics with SetRecorderError, the bug is back.
     let (metrics_instance, metrics_manager) =
         Metrics::with_dfe_metrics(Arc::new(config.scaling.build_pressure()));

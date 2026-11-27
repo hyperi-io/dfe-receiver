@@ -23,6 +23,7 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use scalo::tls::ServerTls;
 use scalo::transport::grpc::sender_deadline;
@@ -101,7 +102,7 @@ impl Vector for VectorService {
         if !self.pipeline.is_ready() {
             debug!(
                 transport = "grpc",
-                "gRPC push_events rejected — pipeline not ready (backpressure)"
+                "gRPC push_events rejected -- pipeline not ready (backpressure)"
             );
             self.metrics.inc_requests_total("grpc");
             self.metrics.inc_requests_error("grpc");
@@ -361,14 +362,25 @@ impl CountedConnection<TcpStream> {
     }
 }
 
-/// The HTTP/2 keep-alive a tonic listener pings with, from `server.connections`.
-pub(crate) fn keep_alive(
+/// The HTTP/2 keep-alive and stream cap a tonic listener runs with, from
+/// `server.connections`, and its `request_timeout`.
+///
+/// tonic sets no stream cap of its own and passes none to hyper, which then
+/// drops its default, so without one a single connection can open any number
+/// of streams. The timeout bounds a request whose body never finishes, which
+/// no acknowledgement hold covers. It is `server.request_timeout_ms` plus the
+/// hold, which starts only once the body is decoded, so a hold whose body
+/// arrived inside `server.request_timeout_ms` answers before tonic cuts it.
+pub(crate) fn tonic_limits(
     builder: tonic::transport::Server,
     limits: &ConnectionLimits,
+    request_timeout: Duration,
 ) -> tonic::transport::Server {
     builder
         .http2_keepalive_interval(Some(limits.http2_keep_alive))
         .http2_keepalive_timeout(Some(crate::server::http::KEEP_ALIVE_PING_TIMEOUT))
+        .max_concurrent_streams(Some(limits.http2_max_streams))
+        .timeout(request_timeout)
 }
 
 /// A tonic server layer counting requests refused for their size.
@@ -531,14 +543,24 @@ async fn serve(
         .parse()
         .map_err(|e| Error::Config(format!("invalid gRPC bind address: {e}")))?;
 
-    let acks = pipeline.acks(TRANSPORT, config.grpc.acknowledgements, None);
+    let request_timeout = Duration::from_millis(config.server.request_timeout_ms);
+    let acks = pipeline.acks(
+        TRANSPORT,
+        config.grpc.acknowledgements,
+        Some(request_timeout),
+    );
+    let request_timeout = request_timeout + acks.max_hold();
     let service = VectorService::new(pipeline, metrics.clone(), acks);
 
     let tls = load_server_tls(&config.grpc.tls, &config.server.connections, grpc_options()).await?;
 
     let limits = ConnectionLimits::new(&config.server.connections);
-    let mut builder = keep_alive(tonic::transport::Server::builder(), &limits)
-        .layer(count_oversize(metrics.clone(), TRANSPORT));
+    let mut builder = tonic_limits(
+        tonic::transport::Server::builder(),
+        &limits,
+        request_timeout,
+    )
+    .layer(count_oversize(metrics.clone(), TRANSPORT));
 
     // Gzip on both directions: scalo's VectorCompatClient compresses
     // unconditionally, and a server without the encoding enabled rejects the RPC.

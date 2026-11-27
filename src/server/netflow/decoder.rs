@@ -63,14 +63,12 @@ pub enum NetflowError {
     Io(#[from] io::Error),
 }
 
-/// Distinguish "template not yet received" from a real parse error by looking
-/// at the netgauze parsing error. Template misses surface as data-set
-/// references for an ID we haven't seen a template for; netgauze reports these
-/// as inner parsing errors but the precise variant differs between v9 and IPFIX,
-/// so we keep this heuristic conservative: anything that's not "Incomplete" is
-/// treated as a hard parse error here. A follow-up task may refine this to
-/// recognise the specific "no template" inner error and return `TemplateMiss`
-/// so the listener can update the `dfe_flow_template_misses_total` counter.
+/// The receiver's error for a netgauze decode error.
+///
+/// netgauze reports a data set for a template not yet seen as an inner parsing
+/// error whose variant differs between v9 and IPFIX. So anything but
+/// `Incomplete` is a parse error, a template miss included, and
+/// `dfe_flow_template_misses_total` stays at 0 (hyperi-io/dfe-receiver#288).
 fn map_netgauze_error(err: &FlowInfoCodecDecoderError) -> NetflowError {
     match err {
         FlowInfoCodecDecoderError::IoError(s) => NetflowError::Parse(format!("io: {s}")),
@@ -286,8 +284,8 @@ impl NetflowDecoder {
     }
 
     fn ensure_exporter_slot(&mut self, source: (IpAddr, u32)) -> &mut ExporterState {
-        // Crude LRU: if we're full and `source` is new, evict the first entry
-        // we find. A proper LRU goes in with the metrics pass.
+        // At the cap a new exporter evicts whichever the map yields first, live
+        // or not, and the evicted exporter's data fails until it resends its templates.
         if !self.state.contains_key(&source)
             && self.state.len() >= self.max_exporters
             && let Some(evict) = self.state.keys().next().copied()
@@ -406,19 +404,9 @@ impl FlowDecoder for NetflowDecoder {
         record.fields.record_kind
     }
 
-    /// TODO: template_miss differentiation deferred.
-    ///
-    /// netgauze-flow-pkt does not expose a "template not yet received"
-    /// error variant distinct from generic parse errors. This method
-    /// returns true ONLY for our explicit `NetflowError::TemplateMiss` variant,
-    /// which we never produce from the netgauze decode path -- all netgauze
-    /// errors map to `Parse`. The `dfe_transport_decode_err_total{reason=
-    /// "template_miss"}` label will therefore be zero until either:
-    ///   1. netgauze upstream exposes the discriminator, OR
-    ///   2. we add a custom error classifier that inspects netgauze error
-    ///      strings (brittle, defer until needed).
-    ///
-    /// Known limitation, tracked rather than solved.
+    /// True only for `NetflowError::TemplateMiss`, which the netgauze decode
+    /// path never produces, so `dfe_transport_decode_err_total{reason=
+    /// "template_miss"}` stays at 0 (hyperi-io/dfe-receiver#288).
     fn is_template_miss(err: &Self::DecodeError) -> bool {
         matches!(err, NetflowError::TemplateMiss { .. })
     }
@@ -624,9 +612,9 @@ fn decode_v9_or_ipfix(
 
 /// Translate a slice of netgauze `ie::Field` into our canonical `NetflowFields`.
 ///
-/// Cisco PEN=9 NSEL information elements (NF_F_FW_EVENT etc.) are not exposed
-/// as named variants by netgauze 0.12 -- it lacks a Cisco sub-module -- so they
-/// arrive via `Field::Unknown { pen: 9, id, value }`. We pattern-match those
+/// Cisco PEN=9 NSEL information elements (NF_F_FW_EVENT etc.) are not named
+/// variants in netgauze, so they arrive as `Field::Unknown { pen: 9, id, value }`.
+/// We pattern-match those
 /// by IE number and decode the raw bytes inline. The IANA `firewallEvent` IE
 /// (233) is exposed as a named variant and is mapped on its own arm.
 fn map_fields_to_canonical(fields: &[Field]) -> NetflowFields {
@@ -778,8 +766,8 @@ fn map_single_field(field: &Field, out: &mut NetflowFields) {
 
         // ----- Cisco PEN=9 (NSEL) IEs via netgauze's generic escape hatch -----
         //
-        // netgauze 0.12 does not ship a Cisco vendor module, so Cisco-private
-        // NSEL fields arrive as `Field::Unknown { pen: 9, id, value }`. Decode
+        // netgauze names no Cisco-private NSEL fields, so they arrive as
+        // `Field::Unknown { pen: 9, id, value }`. Decode
         // the raw bytes inline per Cisco's "ASA NetFlow Implementation" guide.
         Field::Unknown { pen, id, value } if *pen == CISCO_PEN => {
             map_cisco_unknown(*id, value, out);

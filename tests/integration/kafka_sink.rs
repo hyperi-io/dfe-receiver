@@ -148,7 +148,7 @@ async fn test_kafka_sink_large_payload() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let sink = make_sink(&kf);
-    // 512 KiB — exercises librdkafka's internal batching/chunking
+    // 512 KiB -- exercises librdkafka's internal batching/chunking
     let payload: Vec<u8> = (0..512 * 1024).map(|i| (i % 256) as u8).collect();
     sink.send(&topic, Bytes::from(payload.clone()))
         .await

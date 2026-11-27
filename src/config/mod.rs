@@ -518,7 +518,7 @@ impl Config {
             ));
         }
 
-        connection_timeouts_are_set(&self.server.connections)?;
+        connection_limits_are_set(&self.server.connections)?;
 
         // Validate buffer config
         if self.buffer.pressure_threshold < 0.0 || self.buffer.pressure_threshold > 1.0 {
@@ -673,9 +673,10 @@ impl Config {
     }
 }
 
-/// Refuse a zero connection timeout: it would close every connection, or
-/// ping without pause.
-fn connection_timeouts_are_set(connections: &ConnectionsConfig) -> Result<()> {
+/// Refuse a zero connection timeout, which would close every connection or
+/// ping without pause, and a zero HTTP/2 stream cap, which would refuse every
+/// request.
+fn connection_limits_are_set(connections: &ConnectionsConfig) -> Result<()> {
     for (key, ms) in [
         ("first_byte_timeout_ms", connections.first_byte_timeout_ms),
         ("frame_timeout_ms", connections.frame_timeout_ms),
@@ -695,6 +696,13 @@ fn connection_timeouts_are_set(connections: &ConnectionsConfig) -> Result<()> {
                  set a time in milliseconds"
             )));
         }
+    }
+    if connections.http2_max_concurrent_streams == 0 {
+        return Err(Error::Config(
+            "server.connections.http2_max_concurrent_streams is 0, which would refuse \
+             every HTTP/2 request"
+                .into(),
+        ));
     }
     Ok(())
 }
@@ -744,8 +752,16 @@ fn header_credentials_configured(scope: &str, auth: &AuthConfig) -> Result<()> {
     if mode != "header" && mode != "both" {
         return Ok(());
     }
+    let headers = auth.effective_headers();
+    if let Some(open) = headers.iter().find(|header| header.values.is_empty()) {
+        return Err(Error::Config(format!(
+            "{scope}.auth.accepted_headers lists '{}' with no values, which would accept \
+             nothing. List the values to accept",
+            open.name
+        )));
+    }
     let has_bearer = !auth.bearer.tokens.is_empty() || auth.bearer.secret_source.is_some();
-    if has_bearer || !auth.effective_headers().is_empty() {
+    if has_bearer || !headers.is_empty() {
         return Ok(());
     }
     Err(Error::Config(format!(
@@ -836,7 +852,7 @@ fn syslog_is_accepted(accept_unauthenticated: bool) -> Result<()> {
 /// Require the TLS half of `mtls` / `both` to actually be armed.
 ///
 /// Neither mode checks a certificate in the request path: `mtls` skips it
-/// entirely (auth.rs `requires_token_auth` excludes it) and `both` runs only
+/// entirely and `both` runs only
 /// its token half there. The certificate half is the TLS handshake, so without
 /// `tls.enabled` and a REQUIRED client certificate it authenticates nobody
 /// while reading as though it does. `optional` is not enough -- it validates a
@@ -866,7 +882,7 @@ fn cert_half_is_enforced(scope: &str, auth: &AuthConfig, tls: &TlsConfig) -> Res
 
 /// Refuse `header` and `both` on a listener whose interceptor is bearer-only.
 ///
-/// `make_auth_interceptor` in server/grpc and server/otlp builds a HeaderMap
+/// `grpc_auth_interceptor` in server/auth.rs builds a HeaderMap
 /// holding one key, `authorization`, and calls `validate_bearer_auth`. It never
 /// calls `validate_header_auth`, so an `accepted_headers` list configured
 /// against those ports is never consulted.
@@ -900,10 +916,12 @@ fn no_application_auth(scope: &str, auth: &AuthConfig) -> Result<()> {
     )))
 }
 
-/// Reload configuration from the same source.
+/// Reload configuration from the same source, for hot-reload via SIGHUP or
+/// the periodic timer. The caller validates it.
 ///
-/// Re-runs the full cascade (file + env overrides + validate) using
-/// the original config path. Used for hot-reload via SIGHUP or periodic timer.
+/// Started with `--config`, the file is read again with the env overrides.
+/// Started without one, the cascade scalo built at startup is read again, so
+/// an edit to its files takes a restart.
 pub fn reload_config(current: &Config) -> Result<Config> {
     Config::load(current.config_path.as_deref())
 }
@@ -1125,11 +1143,14 @@ pub struct ServerConfig {
     /// Maximum request body size in bytes.
     pub max_body_size: usize,
 
-    /// Request timeout in milliseconds.
+    /// How long a request may take, in milliseconds, on the HTTP and OTLP
+    /// HTTP listeners (408). A held answer ends inside it. Both gRPC listeners
+    /// add their acknowledgement hold to it, which starts once the body is
+    /// decoded, and answer `CANCELLED` past the sum.
     pub request_timeout_ms: u64,
 
-    /// Maximum concurrent in-flight requests (0 = unlimited).
-    /// Protects against connection exhaustion and memory pressure.
+    /// Most requests one HTTP listener serves at once (0 = no limit). A
+    /// request past it is answered 503 with `Retry-After`.
     pub max_concurrent_requests: usize,
 
     /// Per-IP rate limiting for every HTTP listener.
@@ -1213,6 +1234,11 @@ pub struct ConnectionsConfig {
     /// How often an HTTP/2 connection is pinged to find a peer that has gone,
     /// in milliseconds.
     pub http2_keep_alive_interval_ms: u64,
+
+    /// Most streams one HTTP/2 connection may have open at once, on every
+    /// HTTP listener and both gRPC listeners. The client is told the cap, and
+    /// a stream past it is refused.
+    pub http2_max_concurrent_streams: u32,
 }
 
 impl Default for ConnectionsConfig {
@@ -1224,6 +1250,7 @@ impl Default for ConnectionsConfig {
             idle_timeout_ms: 300_000,
             tls_handshake_timeout_ms: 10_000,
             http2_keep_alive_interval_ms: 60_000,
+            http2_max_concurrent_streams: 200,
         }
     }
 }
@@ -1490,8 +1517,7 @@ pub struct AcceptedHeader {
     /// Header name (e.g., "x-hyperi-agent", "Authorization").
     pub name: String,
 
-    /// Allowed values for this header.
-    /// If empty, any non-empty value is accepted.
+    /// Allowed values for this header. An empty list refuses the config.
     #[serde(default)]
     pub values: Vec<SensitiveString>,
 }
@@ -2972,7 +2998,7 @@ pub struct BufferConfig {
 impl Default for BufferConfig {
     fn default() -> Self {
         Self {
-            memory_limit: 0, // Auto-detect
+            memory_limit: 0,
             pressure_threshold: 0.8,
             spillover: SpilloverConfig::default(),
         }
@@ -3851,6 +3877,14 @@ mod tests {
                 "{err}"
             );
         }
+
+        let mut config = auth_base();
+        config.server.connections.http2_max_concurrent_streams = 0;
+        let err = config.validate().expect_err("no streams").to_string();
+        assert!(
+            err.contains("server.connections.http2_max_concurrent_streams is 0"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -3913,6 +3947,19 @@ mod tests {
             config.validate().is_ok(),
             "the legacy header is a credential"
         );
+
+        config.server.auth.header_values.clear();
+        let err = config.validate().expect_err("must not start").to_string();
+        assert!(err.contains("'x-legacy' with no values"), "{err}");
+
+        config.server.auth.header_name.clear();
+        config.server.auth.bearer.tokens = vec!["t".into()];
+        config.server.auth.accepted_headers = vec![AcceptedHeader {
+            name: "x-api-key".to_string(),
+            values: vec![],
+        }];
+        let err = config.validate().expect_err("must not start").to_string();
+        assert!(err.contains("'x-api-key' with no values"), "{err}");
     }
 
     #[test]

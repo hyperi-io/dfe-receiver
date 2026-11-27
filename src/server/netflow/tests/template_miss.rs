@@ -8,17 +8,10 @@
 
 //! template_miss test for NetflowDecoder.
 //!
-//! Current behaviour (netgauze 0.12 limitation):
-//!   A data record referencing a never-declared template ID produces some
-//!   form of `NetflowError::Parse(...)`. The decoder does NOT distinguish
-//!   "template not yet received" from a hard parse error. `is_template_miss`
-//!   always returns false for these errors.
-//!
-//! Future behaviour (deferred follow-up):
-//!   Once netgauze exposes the discriminator (or we add a custom error
-//!   classifier), `is_template_miss` should return true for the
-//!   never-declared-template case. This test will then need to be flipped to
-//!   assert that behaviour.
+//! A data record referencing a never-declared template ID produces a
+//! `NetflowError::Parse(...)`. The decoder does not tell "template not yet
+//! received" from a hard parse error, so `is_template_miss` is false for it
+//! (hyperi-io/dfe-receiver#288).
 
 use crate::server::flow::decoder::FlowDecoder;
 use crate::server::flow::dispatch::ProtocolKind;
@@ -86,6 +79,6 @@ fn is_template_miss_returns_false_for_current_errors() {
         .unwrap_err();
     assert!(
         !NetflowDecoder::is_template_miss(&err),
-        "current netgauze 0.12 limitation -- this is expected behaviour, see decoder.rs TODO"
+        "a template miss reads as a parse error"
     );
 }

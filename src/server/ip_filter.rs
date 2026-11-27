@@ -1,15 +1,15 @@
 // Project:   dfe-receiver
 // File:      src/server/ip_filter.rs
-// Purpose:   IP allowlist/denylist middleware using CIDR trie
+// Purpose:   IP allowlist/denylist on a CIDR trie, checked as connections are accepted
 // Language:  Rust
 //
 // License:   BUSL-1.1
 // Copyright: (c) 2026 HYPERI PTY LIMITED
 
-//! IP-based request filtering middleware.
+//! IP-based connection filtering, run by each accept loop before any protocol work.
 //!
 //! Supports allowlist (only listed CIDRs pass) and denylist (listed CIDRs
-//! blocked) modes. Uses a prefix trie for O(prefix-length) lookup per request.
+//! blocked) modes. Uses a prefix trie for O(prefix-length) lookup per connection.
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -43,6 +43,9 @@ enum IpFilterInner {
 }
 
 /// Parse `cidrs` into a trie, refusing the first entry that is not a CIDR.
+///
+/// An IPv4-mapped IPv6 CIDR (`::ffff:10.0.0.0/104`) is stored as the IPv4 CIDR
+/// it maps, since a peer is looked up by its canonical address.
 pub(crate) fn parse_cidrs(cidrs: &[String]) -> Result<IpnetTrie<()>, String> {
     let mut trie = IpnetTrie::new();
     for cidr in cidrs {
@@ -50,9 +53,23 @@ pub(crate) fn parse_cidrs(cidrs: &[String]) -> Result<IpnetTrie<()>, String> {
             .trim()
             .parse::<IpNet>()
             .map_err(|e| format!("'{cidr}' is not a CIDR ({e})"))?;
-        trie.insert(net, ());
+        trie.insert(canonical(net), ());
     }
     Ok(trie)
+}
+
+/// `net` as an IPv4 CIDR when it lies wholly inside `::ffff:0:0/96`.
+fn canonical(net: IpNet) -> IpNet {
+    let IpNet::V6(v6) = net else {
+        return net;
+    };
+    match (
+        v6.network().to_ipv4_mapped(),
+        v6.prefix_len().checked_sub(96),
+    ) {
+        (Some(v4), Some(prefix)) => ipnet::Ipv4Net::new(v4, prefix).map_or(net, IpNet::V4),
+        _ => net,
+    }
 }
 
 impl IpFilter {
@@ -124,16 +141,19 @@ impl IpFilter {
     }
 
     /// Check whether a given IP is allowed through.
+    ///
+    /// An IPv4 client on a dual-stack socket arrives as `::ffff:a.b.c.d`, so it
+    /// is matched as the IPv4 address it is.
     #[inline]
     pub fn is_allowed(&self, ip: IpAddr) -> bool {
         match self.inner.as_ref() {
             IpFilterInner::Disabled => true,
             IpFilterInner::Allowlist(trie) => {
-                let net = IpNet::from(ip);
+                let net = IpNet::from(ip.to_canonical());
                 trie.longest_match(&net).is_some()
             }
             IpFilterInner::Denylist(trie) => {
-                let net = IpNet::from(ip);
+                let net = IpNet::from(ip.to_canonical());
                 trie.longest_match(&net).is_none()
             }
             IpFilterInner::DenyAll => false,
@@ -179,6 +199,27 @@ mod tests {
         assert!(!filter.is_allowed("10.0.0.1".parse().unwrap()));
         assert!(filter.is_allowed("192.168.1.1".parse().unwrap()));
         assert!(filter.is_allowed("8.8.8.8".parse().unwrap()));
+    }
+
+    /// An IPv4 peer on a dual-stack socket, `::ffff:a.b.c.d`, meets the IPv4
+    /// CIDRs, in either mode, and so does a plain IPv4 peer. A CIDR written in
+    /// its IPv4-mapped IPv6 form matches both the same way.
+    #[test]
+    fn an_ipv4_mapped_peer_is_filtered_as_ipv4() {
+        for cidr in ["10.0.0.0/8", "::ffff:10.0.0.0/104"] {
+            let deny = make_filter("denylist", &[cidr]);
+            let allow = make_filter("allowlist", &[cidr]);
+            for (peer, listed) in [
+                ("::ffff:10.0.0.1", true),
+                ("10.0.0.1", true),
+                ("::ffff:192.168.1.1", false),
+                ("192.168.1.1", false),
+            ] {
+                let peer: IpAddr = peer.parse().unwrap();
+                assert_eq!(deny.is_allowed(peer), !listed, "denylist {cidr} {peer}");
+                assert_eq!(allow.is_allowed(peer), listed, "allowlist {cidr} {peer}");
+            }
+        }
     }
 
     #[test]

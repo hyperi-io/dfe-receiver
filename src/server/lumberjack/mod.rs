@@ -23,7 +23,7 @@ use scalo::tls::ServerTlsOptions;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 /// Sampled counter for Lumberjack event processing errors (log 1 in 100).
 static LUMBERJACK_ERRORS: AtomicU64 = AtomicU64::new(0);
@@ -384,7 +384,7 @@ impl ProtocolHandler for LumberjackHandler {
                     let (stream, peer_addr) = match result {
                         Ok(conn) => conn,
                         Err(e) => {
-                            error!(error = %e, "Failed to accept Lumberjack connection");
+                            accept.failed(&e).await;
                             continue;
                         }
                     };

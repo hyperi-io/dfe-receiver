@@ -9,7 +9,7 @@
 //! Debug file sink.
 //!
 //! Writes all processed messages as NDJSON to a configurable file path.
-//! Intended for development and debugging inside dfe-docker — not for
+//! Intended for development and debugging inside dfe-docker -- not for
 //! production use. Enabled via `file_sink.enabled = true` in config.
 
 use std::fs::{File, OpenOptions};

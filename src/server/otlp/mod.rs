@@ -353,6 +353,8 @@ async fn run_grpc_server(
     let mode = OtlpMode::from_str(&config.mode);
     let pipeline_server = pipeline.config().server;
     let shared_config = pipeline.shared_config();
+    let request_timeout =
+        Duration::from_millis(pipeline_server.request_timeout_ms) + acks.max_hold();
     let service = OtlpService::new(pipeline, metrics.clone(), mode, acks);
 
     let tls = load_server_tls(&config.tls, &pipeline_server.connections, grpc_options()).await?;
@@ -382,9 +384,13 @@ async fn run_grpc_server(
     }
 
     let limits = ConnectionLimits::new(&pipeline_server.connections);
-    let mut builder = crate::server::grpc::keep_alive(tonic::transport::Server::builder(), &limits)
-        .layer(count_oversize(metrics.clone(), TRANSPORT))
-        .layer(count_unsupported_encoding(metrics.clone(), TRANSPORT));
+    let mut builder = crate::server::grpc::tonic_limits(
+        tonic::transport::Server::builder(),
+        &limits,
+        request_timeout,
+    )
+    .layer(count_oversize(metrics.clone(), TRANSPORT))
+    .layer(count_unsupported_encoding(metrics.clone(), TRANSPORT));
 
     // Register all three OTLP services on the same server, sharing one held
     // answer ceiling. tonic requires separate service instances for each trait
@@ -764,10 +770,13 @@ impl ProtocolHandler for OtlpHandler {
 
     async fn start(&self, shutdown: CancellationToken) -> Result<()> {
         let mut listeners = Listeners::default();
-        // One setting and one held-byte ceiling for both endpoints.
+        // One setting and one held-byte ceiling for both endpoints, holding no
+        // longer than the server-wide request timeout both run under.
+        let request_timeout =
+            Duration::from_millis(self.pipeline.config().server.request_timeout_ms);
         let acks = self
             .pipeline
-            .acks("otlp", self.config.acknowledgements, None);
+            .acks("otlp", self.config.acknowledgements, Some(request_timeout));
 
         let grpc_config = self.config.clone();
         let grpc_pipeline = self.pipeline.clone();

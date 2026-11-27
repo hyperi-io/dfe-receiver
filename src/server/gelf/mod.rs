@@ -23,7 +23,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio_util::codec::{Decoder, FramedRead};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::config::GelfConfig;
 use crate::error::{Error, Result};
@@ -54,6 +54,9 @@ pub struct GelfFrameDecoder {
     max_length: usize,
     discarding: bool,
     discarded: u64,
+    /// Bytes at the front of the buffer already searched for a delimiter, so
+    /// a message sent a byte at a time is searched once, not once per read.
+    scanned: usize,
 }
 
 impl GelfFrameDecoder {
@@ -62,6 +65,7 @@ impl GelfFrameDecoder {
             max_length,
             discarding: false,
             discarded: 0,
+            scanned: 0,
         }
     }
 
@@ -95,7 +99,10 @@ impl Decoder for GelfFrameDecoder {
                 self.discarding = false;
             }
 
-            match memchr::memchr(b'\0', src) {
+            let from = self.scanned.min(src.len());
+            let found = memchr::memchr(b'\0', &src[from..]).map(|at| from + at);
+            self.scanned = 0;
+            match found {
                 // An empty message between two delimiters is skipped.
                 Some(0) => src.advance(1),
                 Some(null_pos) if null_pos <= self.max_length => {
@@ -112,7 +119,10 @@ impl Decoder for GelfFrameDecoder {
                     self.discarding = true;
                     return Ok(None);
                 }
-                None => return Ok(None),
+                None => {
+                    self.scanned = src.len();
+                    return Ok(None);
+                }
             }
         }
     }
@@ -224,7 +234,7 @@ async fn run_tcp(
                 let (stream, peer_addr) = match result {
                     Ok(conn) => conn,
                     Err(e) => {
-                        error!(error = %e, "Failed to accept GELF TCP connection");
+                        accept.failed(&e).await;
                         continue;
                     }
                 };
@@ -470,6 +480,16 @@ mod tests {
                 chunks: &[b"a\0par"],
                 frames: &["a"],
                 discarded: 0,
+                mid_frame: false,
+            },
+            Case {
+                name: "a message a byte at a time, then one past the limit",
+                chunks: &[
+                    b"a", b"b", b"c", b"\0", b"0", b"1", b"2", b"3", b"4", b"5", b"6", b"7", b"8",
+                    b"9", b"x", b"\0", b"d", b"\0",
+                ],
+                frames: &["abc", "d"],
+                discarded: 1,
                 mid_frame: false,
             },
         ];

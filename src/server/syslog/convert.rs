@@ -21,6 +21,7 @@ use bytes::Bytes;
 use jiff::civil::DateTime;
 use jiff::tz::{Offset, TimeZone};
 use jiff::{Timestamp, ZonedDateTime};
+use rustc_hash::FxHashSet;
 use serde::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
 use syslog_loose::{ProcId, Protocol, StructuredElement, SyslogFacility, SyslogSeverity, Variant};
 
@@ -568,11 +569,29 @@ impl Serialize for Element<'_, '_> {
 /// An element's params as an object. A repeated name keeps its last value.
 struct Params<'r, 'a>(&'r [(&'a str, &'a str)]);
 
+/// Params up to this many are deduplicated by comparing pairs, which needs no
+/// allocation. A message carries thousands only when a sender makes it.
+const PAIRWISE_PARAMS: usize = 16;
+
 impl Serialize for Params<'_, '_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        let params = self.0;
         let mut map = serializer.serialize_map(None)?;
-        for (i, (name, value)) in self.0.iter().enumerate() {
-            if !self.0[i + 1..].iter().any(|(later, _)| later == name) {
+        if params.len() <= PAIRWISE_PARAMS {
+            for (i, (name, value)) in params.iter().enumerate() {
+                if !params[i + 1..].iter().any(|(later, _)| later == name) {
+                    map.serialize_entry(name, value)?;
+                }
+            }
+            return map.end();
+        }
+        let mut seen = FxHashSet::default();
+        let mut last = vec![false; params.len()];
+        for (i, (name, _)) in params.iter().enumerate().rev() {
+            last[i] = seen.insert(*name);
+        }
+        for ((name, value), keep) in params.iter().zip(last) {
+            if keep {
                 map.serialize_entry(name, value)?;
             }
         }
@@ -634,11 +653,29 @@ mod tests {
         assert_eq!(sd[0]["params"]["eventSource"], "Application");
     }
 
+    /// A repeated name keeps its last value, in an element of a few params and
+    /// in one past [`PAIRWISE_PARAMS`].
     #[test]
     fn a_repeated_sd_param_keeps_its_last_value() {
-        let json = json(r#"<14>1 2026-01-15T12:00:00Z h a - - [x@1 k="1" j="2" k="3"] m"#);
-        let params = &json["structured_data"][0]["params"];
+        let few = json(r#"<14>1 2026-01-15T12:00:00Z h a - - [x@1 k="1" j="2" k="3"] m"#);
+        let params = &few["structured_data"][0]["params"];
         assert_eq!(params, &serde_json::json!({"j": "2", "k": "3"}));
+
+        let many: Vec<String> = (0..PAIRWISE_PARAMS * 2)
+            .map(|i| format!(r#"p{}="{i}""#, i % PAIRWISE_PARAMS))
+            .collect();
+        let many = many.join(" ");
+        let many = json(&format!(
+            "<14>1 2026-01-15T12:00:00Z h a - - [x@1 {many}] m"
+        ));
+        let want: serde_json::Map<String, serde_json::Value> = (PAIRWISE_PARAMS
+            ..PAIRWISE_PARAMS * 2)
+            .map(|i| (format!("p{}", i % PAIRWISE_PARAMS), i.to_string().into()))
+            .collect();
+        assert_eq!(
+            many["structured_data"][0]["params"],
+            serde_json::Value::Object(want)
+        );
     }
 
     #[test]

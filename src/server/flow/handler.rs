@@ -116,8 +116,7 @@ impl FlowHandler {
         FlowListenerConfig {
             enabled: self.cfg.enabled,
             bind_address: self.cfg.bind_address,
-            // The listener.cfg.ports field is unused at runtime -- it serves
-            // as documentation. We pass through what was configured.
+            // The listener reads neither `ports` nor `channel_capacity` (hyperi-io/dfe-receiver#288).
             ports: self.cfg.ports.clone(),
             output: self.cfg.output.clone(),
             channel_capacity: self.cfg.channel_capacity,

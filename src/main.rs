@@ -19,7 +19,7 @@
 #![allow(clippy::large_futures)]
 
 // =============================================================================
-// Global Allocator — DFE policy: jemalloc only.
+// Global Allocator -- DFE policy: jemalloc only.
 // =============================================================================
 // hyperi-ci's release-track build adds `--features jemalloc` automatically on
 // every channel. For local builds, opt in with: `cargo build --features jemalloc`.
@@ -163,7 +163,11 @@ impl ServiceApp for App {
         {
             orchestrator.watch_config(config.config_path.as_deref(), config.config_reload_secs);
 
-            if config.config_reload_secs > 0 {
+            if config.config_path.is_none() {
+                info!(
+                    "Config hot-reload re-reads the startup cascade, so an edit to its files takes a restart (or start with --config)"
+                );
+            } else if config.config_reload_secs > 0 {
                 info!(
                     interval_secs = config.config_reload_secs,
                     "Config hot-reload enabled (SIGHUP + periodic + file polling)"

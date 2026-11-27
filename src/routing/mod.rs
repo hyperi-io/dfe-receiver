@@ -187,6 +187,18 @@ pub fn compile_rules(config: &Config) -> Result<RuleSet> {
             rules.targets
         )));
     }
+    // `_source` names the Kafka topic, so a sender's own text there could name any number of topics.
+    if let Some(row) = rules.rules.iter().find(|row| {
+        row.set
+            .get(SOURCE_FIELD)
+            .is_some_and(|action| action.from.is_some() && action.lookup.is_none())
+    }) {
+        return Err(Error::Config(format!(
+            "rules: row '{}' copies a record field into {SOURCE_FIELD}, which names the \
+             topic. Set a value, or map the field through a lookup table",
+            row.id
+        )));
+    }
     let options =
         CompileOptions::from_cascade().map_err(|e| Error::Config(format!("rules: {e}")))?;
     let invalid = |e: scalo::rules::RulesError| Error::Config(format!("rules: {e}"));
@@ -1088,36 +1100,48 @@ mod tests {
         assert_eq!(to.topic(), Some("node_land"));
     }
 
+    /// `_source` names the topic, so a row may not copy a sender's own text
+    /// into it, from `_source` or any other field.
     #[test]
-    fn a_row_copying_the_listener_source_routes_by_it() {
-        let copy = RuleConfig::new("own", SOURCE_FIELD, SetAction::from(SOURCE_FIELD));
-        let r = router(&config_with(vec![copy]));
-        let syslog = syslog();
-        let (route, value, _) = route(&r, &syslog, r#"{"message":"m","_source":"syslog"}"#);
-        assert_eq!(value["_source"], "syslog");
-        assert_eq!(route.topic(), Some("syslog_land"));
+    fn a_row_copying_a_field_into_source_is_refused() {
+        for from in [SOURCE_FIELD, "job"] {
+            let copy = RuleConfig::new("own", SOURCE_FIELD, SetAction::from(from));
+            let err = compile_rules(&config_with(vec![copy]))
+                .expect_err("refused")
+                .to_string();
+            assert!(err.contains("row 'own'"), "{from}: {err}");
+        }
     }
 
-    /// A row that copies a sender's number into `_source` routes by its text,
-    /// and the record carries that text as a JSON string, with the sender's
-    /// number parked like any other value it wrote there.
+    /// A row mapping a sender's field through a lookup routes by the table's
+    /// value, written as a JSON string, with the sender's own `_source`
+    /// parked. A value the table does not hold leaves the record unrouted by
+    /// the row.
     #[test]
-    fn a_row_copying_a_numeric_source_writes_it_as_a_string() {
-        let copy = RuleConfig::new("own", SOURCE_FIELD, SetAction::from(SOURCE_FIELD));
-        let r = router(&config_with(vec![copy]));
+    fn a_row_mapping_a_field_through_a_lookup_routes_by_the_table() {
+        let mut config = config_with(vec![RuleConfig::new(
+            "map",
+            SOURCE_FIELD,
+            SetAction::lookup("jobs", "job"),
+        )]);
+        config.rules = config.rules.lookup("jobs", [("n1", "node")]);
+        let r = router(&config);
         let mut tally = r.tally();
         let routed = r
             .route(
-                Bytes::from(r#"{"_source":42,"a":1}"#),
+                Bytes::from(r#"{"_source":7,"job":"n1"}"#),
                 &listener("http"),
                 NOW,
                 &mut tally,
             )
             .expect("routes");
-        assert_eq!(routed.route.topic(), Some("42_land"));
-        assert_eq!(raw_top_level(&routed.payload, SOURCE_FIELD), ["\"42\""]);
+        assert_eq!(routed.route.topic(), Some("node_land"));
+        assert_eq!(raw_top_level(&routed.payload, SOURCE_FIELD), ["\"node\""]);
         let value: serde_json::Value = serde_json::from_slice(&routed.payload).unwrap();
-        assert_eq!(value["_source_original"], 42);
+        assert_eq!(value["_source_original"], 7);
+
+        let (to, ..) = route(&r, &listener("http"), r#"{"job":"other"}"#);
+        assert_ne!(to.topic(), Some("node_land"));
     }
 
     #[test]

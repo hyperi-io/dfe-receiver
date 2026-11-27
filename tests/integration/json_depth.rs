@@ -180,8 +180,9 @@ fn a_deep_sibling_ahead_of_the_routing_field_is_refused() {
         config.rules.rules = vec![scalo::rules::RuleConfig::new(
             "by-event-type",
             "_source",
-            scalo::rules::SetAction::from("event_type"),
+            scalo::rules::SetAction::lookup("event_types", "event_type"),
         )];
+        config.rules = config.rules.lookup("event_types", [("auth", "auth")]);
         let started = start_ingest(config).await;
 
         let shallow = format!(r#"{{"sibling":{},"event_type":"auth"}}"#, nested_array(3));

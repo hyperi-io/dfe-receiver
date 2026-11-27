@@ -1,6 +1,6 @@
 // Project:   dfe-receiver
 // File:      tests/integration/protocol_kafka_roundtrip.rs
-// Purpose:   End-to-end protocol → receiver → Kafka roundtrip tests
+// Purpose:   End-to-end protocol -> receiver -> Kafka roundtrip tests
 // Language:  Rust
 //
 // License:   BUSL-1.1
@@ -10,7 +10,7 @@
 //! client (Prometheus RW, Splunk HEC) through the receiver to Kafka, using
 //! the run's shared Kafka broker.
 //!
-//! For OTLP, see `otlp.rs` (the existing tests already cover OTLP→pipeline).
+//! For OTLP, see `otlp.rs` (the existing tests already cover OTLP->pipeline).
 //! Adding Kafka to every handler test would multiply test time; instead we
 //! cover the representative cases here and rely on the unit+convert tests
 //! for protocol-specific details.
@@ -58,7 +58,7 @@ fn kafka_config(kf: &crate::common::KafkaTestConfig, topic: &str) -> Config {
 }
 
 // =========================================================================
-// Prometheus Remote Write → Kafka
+// Prometheus Remote Write -> Kafka
 // =========================================================================
 
 #[tokio::test]
@@ -156,7 +156,7 @@ async fn test_prometheus_rw_to_kafka_roundtrip() {
 }
 
 // =========================================================================
-// Splunk HEC → Kafka
+// Splunk HEC -> Kafka
 // =========================================================================
 
 #[tokio::test]
@@ -465,7 +465,7 @@ async fn test_webhook_array_with_a_bad_element_delivers_nothing() {
 }
 
 // =========================================================================
-// HTTP ingest → Kafka (validates the primary HTTP path with real Kafka)
+// HTTP ingest -> Kafka (validates the primary HTTP path with real Kafka)
 // =========================================================================
 
 #[tokio::test]
@@ -483,7 +483,7 @@ async fn test_http_to_kafka_roundtrip() {
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     // Process payload directly through the pipeline (skipping the HTTP server
-    // since we have no HTTP handler to spin up here easily — the goal is
+    // since we have no HTTP handler to spin up here easily -- the goal is
     // validating Kafka delivery, not HTTP parsing).
     let pipeline = Arc::new(
         PipelineState::new(

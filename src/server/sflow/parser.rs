@@ -38,8 +38,7 @@ pub struct SflowDatagram {
 
 /// One sample inside a datagram. Format 1 = flow_sample, 2 = counter_sample.
 /// Other formats (3 = expanded_flow_sample, 4 = expanded_counter_sample,
-/// vendor-specific) are captured as `Opaque` so callers can still surface them
-/// in raw output without losing data.
+/// vendor-specific) are parsed as `Opaque`, which the decoder emits no record for.
 #[derive(Debug, Clone)]
 pub enum Sample {
     Flow(FlowSample),
@@ -61,7 +60,7 @@ pub struct FlowSample {
 }
 
 /// Flow record inside a flow sample. Format 1 = sampled_header (raw L2/L3/L4
-/// bytes). Other formats are captured opaquely so we never drop data.
+/// bytes). Other formats are parsed as `Opaque` and add no canonical fields.
 #[derive(Debug, Clone)]
 pub enum FlowRecord {
     SampledHeader {
